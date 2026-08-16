@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minotaur"
+version = "0.1.0.dev0"
+description = "Evidence-backed software architecture maps from source code and graph data."
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "jsonschema>=4.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "mypy>=1.10",
+    "ruff>=0.12.0",
+]
+
+[project.scripts]
+minotaur = "minotaur.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+minotaur = [
+    "graph_visualizer/html/*.html",
+    "graph_visualizer/html/*.css",
+    "graph_visualizer/html/*.js",
+    "graph_visualizer/html/vendor/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+files = ["src/minotaur"]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]

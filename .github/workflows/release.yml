@@ -1,0 +1,21 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    name: "Build distribution"
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist and wheel
+        run: |
+          rm -rf .venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install build
+          python3 -m build

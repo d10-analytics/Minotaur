@@ -1,0 +1,32 @@
+name: lint
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  ruff:
+    name: "Ruff lint and format"
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ruff
+        run: |
+          rm -rf .venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install ruff==0.12.0
+
+      - name: Check lint
+        run: |
+          . .venv/bin/activate
+          ruff check src/ tests/ scripts/
+
+      - name: Check format
+        run: |
+          . .venv/bin/activate
+          ruff format --check src/ tests/ scripts/
