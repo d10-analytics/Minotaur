@@ -1,0 +1,22 @@
+{
+  "format": "minotaur-graph",
+  "format_version": "1.0.0",
+  "coordinate_encoding": "utf-8",
+  "nodes": [
+    {
+      "id": "node:sha256:261000345d389d5570bfe9a2f92bfef17675b17df6541def0aa1a8023df4b016",
+      "identity": {"basis": "source-location", "namespace": "minotaur-python"},
+      "node_class": "symbol",
+      "symbol_kind": "function",
+      "label": "checkout_order",
+      "location": {
+        "path": "src/checkout.py",
+        "range": {
+          "start": {"line": 2, "character": "four"},
+          "end": {"line": 2, "character": 18}
+        }
+      }
+    }
+  ],
+  "relationships": []
+}

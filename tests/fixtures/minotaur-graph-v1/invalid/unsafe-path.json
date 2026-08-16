@@ -1,0 +1,15 @@
+{
+  "format": "minotaur-graph",
+  "format_version": "1.0.0",
+  "coordinate_encoding": "utf-8",
+  "nodes": [
+    {
+      "id": "node:sha256:8cb81854e863a24046d95093c1fc553b92a92751eaf0d0fff4ae9a476b9188cb",
+      "identity": {"basis": "file-path", "namespace": "minotaur-python"},
+      "node_class": "file",
+      "label": "secrets.py",
+      "path": "../secrets.py"
+    }
+  ],
+  "relationships": []
+}

@@ -1,0 +1,14 @@
+{
+  "format": "minotaur-graph",
+  "format_version": "1.0.0",
+  "coordinate_encoding": "utf-8",
+  "nodes": [],
+  "relationships": [
+    {
+      "source": "node:sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "target": "node:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "kind": "calls",
+      "evidence": [{"provenance": "static-analysis"}]
+    }
+  ]
+}

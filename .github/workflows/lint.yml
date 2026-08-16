@@ -24,9 +24,9 @@ jobs:
       - name: Check lint
         run: |
           . .venv/bin/activate
-          ruff check src/ tests/ scripts/
+          ruff check .
 
       - name: Check format
         run: |
           . .venv/bin/activate
-          ruff format --check src/ tests/ scripts/
+          ruff format --check .
