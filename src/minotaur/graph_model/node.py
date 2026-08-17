@@ -29,10 +29,24 @@ from minotaur.graph_model._parsing import (
 from minotaur.graph_model.identity import NodeIdentity, is_valid_node_id_format
 from minotaur.graph_model.location import Location, is_safe_path
 from minotaur.graph_model.provenance import (
+    IdentityBasis,
     NodeClass,
     is_valid_language,
     resolve_symbol_kind,
 )
+
+# Which identity bases each node class may use. Resource nodes may carry a
+# source location, so they may also be identified by one.
+_PERMITTED_BASES: dict[NodeClass, tuple[IdentityBasis, ...]] = {
+    NodeClass.SYMBOL: (IdentityBasis.SOURCE_LOCATION, IdentityBasis.UPSTREAM_IDENTIFIER),
+    NodeClass.FILE: (IdentityBasis.FILE_PATH,),
+    NodeClass.RESOURCE: (
+        IdentityBasis.RESOURCE_KEY,
+        IdentityBasis.UPSTREAM_IDENTIFIER,
+        IdentityBasis.SOURCE_LOCATION,
+    ),
+    NodeClass.UNRESOLVED_REFERENCE: (IdentityBasis.UNRESOLVED_REFERENCE,),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,28 +96,45 @@ class Node:
 
         # Enforce conditional field requirements per node_class.
         # These match the JSON Schema's allOf/if/then rules exactly.
-        if self.node_class == NodeClass.SYMBOL:
-            if self.symbol_kind is None:
-                raise ValueError("symbol nodes require 'symbol_kind'")
-            # Validate that symbol_kind is either a core value or a valid
-            # namespaced extension. Catch invalid values early rather than
-            # letting them through to filtering/display logic.
+        if self.node_class == NodeClass.SYMBOL and self.symbol_kind is None:
+            raise ValueError("symbol nodes require 'symbol_kind'")
+        # Validate that symbol_kind, whenever present, is either a core value
+        # or a valid namespaced extension — on every node class, as the schema
+        # does. Catch invalid values early rather than letting them through
+        # to filtering/display logic.
+        if self.symbol_kind is not None:
             resolve_symbol_kind(self.symbol_kind)
 
-        if self.node_class == NodeClass.FILE:
-            if self.path is None:
-                raise ValueError("file nodes require 'path'")
-            # File paths use the same safe-path contract as location paths.
-            # An unsafe path on a file node is just as dangerous as one in
-            # a Location — it could reference files outside the repository.
-            if not is_safe_path(self.path):
-                raise ValueError(
-                    f"file node path must be a safe repository-relative path, "
-                    f"got {self.path!r}"
-                )
+        if self.node_class == NodeClass.FILE and self.path is None:
+            raise ValueError("file nodes require 'path'")
+        # Node paths use the same safe-path contract as location paths, on
+        # every node class. An unsafe path is just as dangerous on a resource
+        # or symbol node as in a Location — it could reference files outside
+        # the repository, and downstream consumers rely on never re-checking.
+        if self.path is not None and not is_safe_path(self.path):
+            raise ValueError(
+                f"node path must be a safe repository-relative path, got {self.path!r}"
+            )
 
         if self.node_class == NodeClass.UNRESOLVED_REFERENCE and not self.reference_text:
             raise ValueError("unresolved-reference nodes require a non-empty 'reference_text'")
+
+        # The identity basis must be one that makes sense for this node class.
+        # A file node whose ID claims to be derived from an upstream identifier,
+        # or a symbol identified by a resource key, is a contradiction about
+        # how the ID was formed. This mirrors the schema's node_class → basis
+        # conditionals; the digest itself is verified by the semantic validator.
+        permitted = _PERMITTED_BASES[self.node_class]
+        if self.identity.basis not in permitted:
+            raise ValueError(
+                f"{self.node_class.value} nodes do not permit identity basis "
+                f"'{self.identity.basis.value}'; permitted: "
+                f"{', '.join(b.value for b in permitted)}"
+            )
+        # A source-location identity is derived from the node's location, so
+        # the location must be present for the ID to be reconstructible.
+        if self.identity.basis == IdentityBasis.SOURCE_LOCATION and self.location is None:
+            raise ValueError("source-location identity basis requires a node 'location'")
 
         # Language validation when present.
         if self.language is not None and not is_valid_language(self.language):
