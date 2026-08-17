@@ -1,0 +1,54 @@
+{
+  "format": "minotaur-graph",
+  "format_version": "1.0.0",
+  "coordinate_encoding": "utf-8",
+  "nodes": [
+    {
+      "id": "node:sha256:0f5f42707d7d848d37012509326e30b3fb2edc6ec57da915af76fa83115512b9",
+      "identity": {"basis": "source-location", "namespace": "minotaur-python"},
+      "node_class": "symbol",
+      "symbol_kind": "function",
+      "label": "notify_customer",
+      "language": "python",
+      "location": {
+        "path": "src/notifications.py",
+        "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 19}}
+      }
+    },
+    {
+      "id": "node:sha256:57fbad9ff7e0973dbb46564734bde22f50cc845e7bc2006a55484676acd31b8f",
+      "identity": {
+        "basis": "unresolved-reference",
+        "namespace": "minotaur-python",
+        "originating_node": "node:sha256:0f5f42707d7d848d37012509326e30b3fb2edc6ec57da915af76fa83115512b9"
+      },
+      "node_class": "unresolved-reference",
+      "label": "send_receipt",
+      "reference_text": "send_receipt",
+      "language": "python",
+      "location": {
+        "path": "src/notifications.py",
+        "range": {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 26}}
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "source": "node:sha256:0f5f42707d7d848d37012509326e30b3fb2edc6ec57da915af76fa83115512b9",
+      "target": "node:sha256:57fbad9ff7e0973dbb46564734bde22f50cc845e7bc2006a55484676acd31b8f",
+      "kind": "references",
+      "evidence": [
+        {
+          "provenance": "static-analysis",
+          "producer": {"name": "minotaur-python", "version": "0.1.0"},
+          "locations": [
+            {
+              "path": "src/notifications.py",
+              "range": {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 26}}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

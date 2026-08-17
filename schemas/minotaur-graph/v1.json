@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:minotaur:schemas:minotaur-graph:1.0.0",
+  "title": "Minotaur graph 1.0.0",
+  "description": "A current-snapshot, evidence-backed software architecture graph.",
+  "type": "object",
+  "required": ["format", "format_version", "coordinate_encoding", "nodes", "relationships"],
+  "additionalProperties": false,
+  "properties": {
+    "format": {"const": "minotaur-graph"},
+    "format_version": {"const": "1.0.0"},
+    "coordinate_encoding": {"enum": ["utf-8", "utf-16", "utf-32"]},
+    "generated_by": {"$ref": "#/$defs/producer"},
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "source_control": {"$ref": "#/$defs/sourceControl"},
+    "nodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "relationships": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/relationship"}
+    },
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^node:sha256:[a-f0-9]{64}$"
+    },
+    "language": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "safePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)[^\\u0000]+$"
+    },
+    "position": {
+      "type": "object",
+      "required": ["line", "character"],
+      "additionalProperties": false,
+      "properties": {
+        "line": {"type": "integer", "minimum": 0},
+        "character": {"type": "integer", "minimum": 0}
+      }
+    },
+    "range": {
+      "type": "object",
+      "required": ["start", "end"],
+      "additionalProperties": false,
+      "properties": {
+        "start": {"$ref": "#/$defs/position"},
+        "end": {"$ref": "#/$defs/position"}
+      }
+    },
+    "location": {
+      "type": "object",
+      "required": ["path", "range"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"$ref": "#/$defs/safePath"},
+        "range": {"$ref": "#/$defs/range"}
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {"minLength": 1},
+      "additionalProperties": {"type": "object"}
+    },
+    "producer": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "version": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "version": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "sourceControl": {
+      "type": "object",
+      "required": ["system"],
+      "additionalProperties": false,
+      "properties": {
+        "system": {"const": "git"},
+        "commit": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+        "branch": {"$ref": "#/$defs/nonEmptyString"}
+      },
+      "anyOf": [
+        {"required": ["commit"]},
+        {"required": ["branch"]}
+      ]
+    },
+    "symbolKind": {
+      "oneOf": [
+        {
+          "enum": [
+            "package", "module", "namespace", "class", "interface", "protocol",
+            "struct", "enum", "enum-member", "function", "method", "constructor",
+            "property", "field", "variable", "constant", "parameter", "type-parameter",
+            "macro"
+          ]
+        },
+        {"type": "string", "pattern": "^[a-z][a-z0-9.-]*:[a-z][a-z0-9-]*$"}
+      ]
+    },
+    "relationshipKind": {
+      "oneOf": [
+        {"enum": ["contains", "imports", "references", "calls", "inherits", "implements"]},
+        {"type": "string", "pattern": "^[a-z][a-z0-9.-]*:[a-z][a-z0-9-]*$"}
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "required": ["basis", "namespace"],
+      "additionalProperties": false,
+      "properties": {
+        "basis": {
+          "enum": [
+            "source-location", "file-path", "upstream-identifier",
+            "unresolved-reference", "resource-key"
+          ]
+        },
+        "namespace": {"$ref": "#/$defs/nonEmptyString"},
+        "upstream_identifier": {"$ref": "#/$defs/nonEmptyString"},
+        "originating_node": {"$ref": "#/$defs/nodeId"},
+        "resource_key": {"$ref": "#/$defs/nonEmptyString"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"basis": {"const": "upstream-identifier"}}, "required": ["basis"]},
+          "then": {"required": ["upstream_identifier"]}
+        },
+        {
+          "if": {"properties": {"basis": {"const": "unresolved-reference"}}, "required": ["basis"]},
+          "then": {"required": ["originating_node"]}
+        },
+        {
+          "if": {"properties": {"basis": {"const": "resource-key"}}, "required": ["basis"]},
+          "then": {"required": ["resource_key"]}
+        }
+      ]
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "identity", "node_class", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/nodeId"},
+        "identity": {"$ref": "#/$defs/identity"},
+        "node_class": {"enum": ["symbol", "file", "resource", "unresolved-reference"]},
+        "label": {"$ref": "#/$defs/nonEmptyString"},
+        "symbol_kind": {"$ref": "#/$defs/symbolKind"},
+        "language": {"$ref": "#/$defs/language"},
+        "location": {"$ref": "#/$defs/location"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "reference_text": {"$ref": "#/$defs/nonEmptyString"},
+        "expected_symbol_kind": {"$ref": "#/$defs/symbolKind"},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"node_class": {"const": "symbol"}}, "required": ["node_class"]},
+          "then": {"required": ["symbol_kind"]}
+        },
+        {
+          "if": {"properties": {"node_class": {"const": "file"}}, "required": ["node_class"]},
+          "then": {"required": ["path"]}
+        },
+        {
+          "if": {"properties": {"node_class": {"const": "unresolved-reference"}}, "required": ["node_class"]},
+          "then": {"required": ["reference_text"]}
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "provenance": {"enum": ["static-analysis", "imported-graph", "curated-rule"]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "rule": {"$ref": "#/$defs/rule"},
+        "locations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/location"}
+        },
+        "extensions": {"$ref": "#/$defs/extensions"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"provenance": {"const": "curated-rule"}}, "required": ["provenance"]},
+          "then": {"required": ["rule"]},
+          "else": {"not": {"required": ["rule"]}}
+        }
+      ]
+    },
+    "relationship": {
+      "type": "object",
+      "required": ["source", "target", "kind", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"$ref": "#/$defs/nodeId"},
+        "target": {"$ref": "#/$defs/nodeId"},
+        "kind": {"$ref": "#/$defs/relationshipKind"},
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidence"}
+        },
+        "extensions": {"$ref": "#/$defs/extensions"}
+      }
+    }
+  }
+}

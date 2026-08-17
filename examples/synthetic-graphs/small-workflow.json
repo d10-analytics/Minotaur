@@ -1,0 +1,83 @@
+{
+  "format": "minotaur-graph",
+  "format_version": "1.0.0",
+  "coordinate_encoding": "utf-8",
+  "generated_by": {
+    "name": "minotaur-python",
+    "version": "0.1.0"
+  },
+  "nodes": [
+    {
+      "id": "node:sha256:261000345d389d5570bfe9a2f92bfef17675b17df6541def0aa1a8023df4b016",
+      "identity": {
+        "basis": "source-location",
+        "namespace": "minotaur-python"
+      },
+      "node_class": "symbol",
+      "symbol_kind": "function",
+      "label": "checkout_order",
+      "language": "python",
+      "location": {
+        "path": "src/checkout.py",
+        "range": {
+          "start": {"line": 2, "character": 4},
+          "end": {"line": 2, "character": 18}
+        }
+      }
+    },
+    {
+      "id": "node:sha256:f9516eaa5acc996d80f0d737632f9c80132958bef5429fb1ee40af41ed7d163d",
+      "identity": {
+        "basis": "file-path",
+        "namespace": "minotaur-python"
+      },
+      "node_class": "file",
+      "label": "checkout.py",
+      "path": "src/checkout.py",
+      "language": "python"
+    },
+    {
+      "id": "node:sha256:960a252f620af141479cb5ae5e1b74e7896ad581647aa1580b82861551f26ad6",
+      "identity": {
+        "basis": "source-location",
+        "namespace": "minotaur-python"
+      },
+      "node_class": "symbol",
+      "symbol_kind": "function",
+      "label": "calculate_tax",
+      "language": "python",
+      "location": {
+        "path": "src/tax.py",
+        "range": {
+          "start": {"line": 0, "character": 4},
+          "end": {"line": 0, "character": 17}
+        }
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "source": "node:sha256:261000345d389d5570bfe9a2f92bfef17675b17df6541def0aa1a8023df4b016",
+      "target": "node:sha256:960a252f620af141479cb5ae5e1b74e7896ad581647aa1580b82861551f26ad6",
+      "kind": "calls",
+      "evidence": [
+        {
+          "provenance": "static-analysis",
+          "producer": {
+            "name": "minotaur-python",
+            "version": "0.1.0"
+          },
+          "locations": [
+            {
+              "path": "src/checkout.py",
+              "range": {
+                "start": {"line": 4, "character": 11},
+                "end": {"line": 4, "character": 25}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
