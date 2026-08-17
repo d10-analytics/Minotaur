@@ -18,6 +18,7 @@ EXAMPLES = Path(__file__).parents[1] / "examples/synthetic-graphs"
 # Helper: build a minimal valid document dict for programmatic tests
 # ---------------------------------------------------------------------------
 
+
 def _make_node(
     suffix: str,
     *,
@@ -85,6 +86,7 @@ def _wrap_document(
 # Canonicalize: idempotency and fixture round-trips
 # ---------------------------------------------------------------------------
 
+
 def test_canonicalize_idempotent_on_all_fixtures() -> None:
     for path in sorted(EXAMPLES.glob("*.json")):
         source = json.loads(path.read_text(encoding="utf-8"))
@@ -98,6 +100,7 @@ def test_canonicalize_idempotent_on_all_fixtures() -> None:
 # ---------------------------------------------------------------------------
 # Canonicalize: node ordering
 # ---------------------------------------------------------------------------
+
 
 def test_canonicalize_sorts_nodes_by_id() -> None:
     n1 = _make_node("a", label="alpha", line=0, path="src/a.py")
@@ -115,6 +118,7 @@ def test_canonicalize_sorts_nodes_by_id() -> None:
 # ---------------------------------------------------------------------------
 # Canonicalize: relationship ordering
 # ---------------------------------------------------------------------------
+
 
 def test_canonicalize_sorts_relationships_by_tuple_key() -> None:
     n1 = _make_node("a", label="alpha", line=0, path="src/a.py")
@@ -136,6 +140,7 @@ def test_canonicalize_sorts_relationships_by_tuple_key() -> None:
 # ---------------------------------------------------------------------------
 # Canonicalize: evidence ordering
 # ---------------------------------------------------------------------------
+
 
 def test_canonicalize_sorts_evidence_by_jcs() -> None:
     n1 = _make_node("a", label="alpha", line=0, path="src/a.py")
@@ -169,6 +174,7 @@ def test_canonicalize_sorts_evidence_by_jcs() -> None:
 # Canonicalize: location ordering within evidence
 # ---------------------------------------------------------------------------
 
+
 def test_canonicalize_sorts_locations_within_evidence() -> None:
     n1 = _make_node("a", label="alpha", line=0, path="src/a.py")
     n2 = _make_node("b", label="beta", line=1, path="src/a.py")
@@ -180,11 +186,13 @@ def test_canonicalize_sorts_locations_within_evidence() -> None:
         "source": n1["id"],
         "target": n2["id"],
         "kind": "calls",
-        "evidence": [{
-            "provenance": "static-analysis",
-            "producer": {"name": "test"},
-            "locations": [loc_later, loc_earlier],
-        }],
+        "evidence": [
+            {
+                "provenance": "static-analysis",
+                "producer": {"name": "test"},
+                "locations": [loc_later, loc_earlier],
+            }
+        ],
     }
     doc = GraphDocument.from_dict(_wrap_document([n1, n2], [rel]))
     result = canonicalize(doc)
@@ -197,6 +205,7 @@ def test_canonicalize_sorts_locations_within_evidence() -> None:
 # ---------------------------------------------------------------------------
 # Canonicalize: dict key ordering
 # ---------------------------------------------------------------------------
+
 
 def test_canonicalize_sorts_dict_keys_by_utf16() -> None:
     source = json.loads((EXAMPLES / "small-workflow.json").read_text(encoding="utf-8"))
@@ -220,6 +229,7 @@ def test_canonicalize_sorts_dict_keys_by_utf16() -> None:
 # Canonicalize: no mutation
 # ---------------------------------------------------------------------------
 
+
 def test_canonicalize_does_not_mutate_document() -> None:
     source = json.loads((EXAMPLES / "provenance-demo.json").read_text(encoding="utf-8"))
     doc = GraphDocument.from_dict(source)
@@ -232,6 +242,7 @@ def test_canonicalize_does_not_mutate_document() -> None:
 # ---------------------------------------------------------------------------
 # Serialize: determinism and consistency
 # ---------------------------------------------------------------------------
+
 
 def test_serialize_deterministic_bytes() -> None:
     source = json.loads((EXAMPLES / "provenance-demo.json").read_text(encoding="utf-8"))
@@ -248,6 +259,7 @@ def test_serialize_matches_jcs_of_canonicalize() -> None:
 # ---------------------------------------------------------------------------
 # Shuffled input → canonical output
 # ---------------------------------------------------------------------------
+
 
 def test_shuffled_input_produces_canonical_output() -> None:
     n1 = _make_node("a", label="alpha", line=0, path="src/a.py")
@@ -295,6 +307,7 @@ def test_shuffled_input_produces_canonical_output() -> None:
 # ---------------------------------------------------------------------------
 # JCS extensions: bool, null, array, float rejection
 # ---------------------------------------------------------------------------
+
 
 def test_jcs_bool() -> None:
     assert _jcs_serialize(True) == b"true"
