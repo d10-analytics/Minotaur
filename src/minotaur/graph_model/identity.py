@@ -29,7 +29,7 @@ import re
 import struct
 from dataclasses import dataclass
 
-from minotaur.graph_model._parsing import reject_unknown_fields
+from minotaur.graph_model._parsing import reject_unknown_fields, reject_unpaired_surrogates
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.provenance import IdentityBasis
 
@@ -41,6 +41,17 @@ NODE_ID_RE = re.compile(r"^node:sha256:[a-f0-9]{64}$")
 def is_valid_node_id_format(node_id: str) -> bool:
     """Check whether a string has the correct node ID wire format."""
     return NODE_ID_RE.match(node_id) is not None
+
+
+# The conditional identity fields each basis is permitted (and, where listed,
+# required) to carry. Any other conditional field is rejected at construction.
+_BASIS_FIELDS: dict[IdentityBasis, frozenset[str]] = {
+    IdentityBasis.SOURCE_LOCATION: frozenset(),
+    IdentityBasis.FILE_PATH: frozenset(),
+    IdentityBasis.UPSTREAM_IDENTIFIER: frozenset({"upstream_identifier"}),
+    IdentityBasis.UNRESOLVED_REFERENCE: frozenset({"originating_node"}),
+    IdentityBasis.RESOURCE_KEY: frozenset({"resource_key"}),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,16 +100,32 @@ class NodeIdentity:
         # These are structural requirements, not semantic checks — a missing
         # upstream_identifier on an upstream-identifier basis is like a missing
         # required field, not a logical inconsistency to find later.
-        if self.basis == IdentityBasis.UPSTREAM_IDENTIFIER and not self.upstream_identifier:
+        #
+        # _BASIS_FIELDS is the single source of truth: a basis REQUIRES every
+        # conditional field it lists and FORBIDS every one it does not. An
+        # identity that carries, say, a resource_key under a source-location
+        # basis is not forward-compatible metadata to be ignored: it is a
+        # contradiction about how the node ID was derived. This mirrors the
+        # schema's per-basis `required` and `properties: {<field>: false}`.
+        allowed = _BASIS_FIELDS[self.basis]
+        for field_name in ("upstream_identifier", "originating_node", "resource_key"):
+            value = getattr(self, field_name)
+            if field_name in allowed:
+                if not value:
+                    raise ValueError(
+                        f"{self.basis.value} basis requires a non-empty '{field_name}'"
+                    )
+                reject_unpaired_surrogates(value, f"identity '{field_name}'")
+            elif value is not None:
+                raise ValueError(f"{self.basis.value} basis does not permit '{field_name}'")
+        # The schema types originating_node as a node ID; mirror that so a
+        # malformed origin is a wire error, not a later semantic finding.
+        if self.originating_node is not None and not is_valid_node_id_format(self.originating_node):
             raise ValueError(
-                "upstream-identifier basis requires a non-empty 'upstream_identifier'"
+                "'originating_node' must match 'node:sha256:<64 hex chars>', "
+                f"got {self.originating_node!r}"
             )
-        if self.basis == IdentityBasis.UNRESOLVED_REFERENCE and not self.originating_node:
-            raise ValueError(
-                "unresolved-reference basis requires a non-empty 'originating_node'"
-            )
-        if self.basis == IdentityBasis.RESOURCE_KEY and not self.resource_key:
-            raise ValueError("resource-key basis requires a non-empty 'resource_key'")
+        reject_unpaired_surrogates(self.namespace, "identity namespace")
 
     def to_dict(self) -> dict[str, str]:
         result: dict[str, str] = {

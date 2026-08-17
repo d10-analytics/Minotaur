@@ -146,16 +146,41 @@
       },
       "allOf": [
         {
+          "if": {"properties": {"basis": {"const": "source-location"}}, "required": ["basis"]},
+          "then": {
+            "properties": {
+              "upstream_identifier": false, "originating_node": false, "resource_key": false
+            }
+          }
+        },
+        {
+          "if": {"properties": {"basis": {"const": "file-path"}}, "required": ["basis"]},
+          "then": {
+            "properties": {
+              "upstream_identifier": false, "originating_node": false, "resource_key": false
+            }
+          }
+        },
+        {
           "if": {"properties": {"basis": {"const": "upstream-identifier"}}, "required": ["basis"]},
-          "then": {"required": ["upstream_identifier"]}
+          "then": {
+            "required": ["upstream_identifier"],
+            "properties": {"originating_node": false, "resource_key": false}
+          }
         },
         {
           "if": {"properties": {"basis": {"const": "unresolved-reference"}}, "required": ["basis"]},
-          "then": {"required": ["originating_node"]}
+          "then": {
+            "required": ["originating_node"],
+            "properties": {"upstream_identifier": false, "resource_key": false}
+          }
         },
         {
           "if": {"properties": {"basis": {"const": "resource-key"}}, "required": ["basis"]},
-          "then": {"required": ["resource_key"]}
+          "then": {
+            "required": ["resource_key"],
+            "properties": {"upstream_identifier": false, "originating_node": false}
+          }
         }
       ]
     },
@@ -188,6 +213,51 @@
         {
           "if": {"properties": {"node_class": {"const": "unresolved-reference"}}, "required": ["node_class"]},
           "then": {"required": ["reference_text"]}
+        },
+        {
+          "if": {"properties": {"node_class": {"const": "symbol"}}, "required": ["node_class"]},
+          "then": {
+            "properties": {
+              "identity": {
+                "properties": {"basis": {"enum": ["source-location", "upstream-identifier"]}}
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"node_class": {"const": "file"}}, "required": ["node_class"]},
+          "then": {
+            "properties": {"identity": {"properties": {"basis": {"const": "file-path"}}}}
+          }
+        },
+        {
+          "if": {"properties": {"node_class": {"const": "resource"}}, "required": ["node_class"]},
+          "then": {
+            "properties": {
+              "identity": {
+                "properties": {
+                  "basis": {"enum": ["resource-key", "upstream-identifier", "source-location"]}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"node_class": {"const": "unresolved-reference"}}, "required": ["node_class"]},
+          "then": {
+            "properties": {
+              "identity": {"properties": {"basis": {"const": "unresolved-reference"}}}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "identity": {"properties": {"basis": {"const": "source-location"}}, "required": ["basis"]}
+            },
+            "required": ["identity"]
+          },
+          "then": {"required": ["location"]}
         }
       ]
     },

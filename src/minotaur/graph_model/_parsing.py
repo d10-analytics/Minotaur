@@ -7,6 +7,35 @@ from types import MappingProxyType
 from typing import cast
 
 
+def reject_unpaired_surrogates(value: str, context: str) -> None:
+    """Reject strings that are not valid Unicode scalar sequences.
+
+    JSON text may encode a lone surrogate (``"\\ud800"``) that ``json.loads``
+    happily turns into a Python ``str``. RFC 8785 JCS has no canonical UTF-8
+    form for such a string, so it can never participate in a node identity
+    input; rejecting it at construction keeps every identity reconstructible.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{context} must not contain unpaired surrogate code points") from None
+
+
+def hashable_json(value: object) -> object:
+    """Return a hashable, equality-preserving key for a frozen JSON-like value.
+
+    Mappings become sorted ``(key, value)`` tuples and sequences become
+    tuples, recursively; scalars pass through. Two values are equal under
+    Python equality iff their keys are equal, so this can back a set or dict
+    without changing the equality semantics of the original structures.
+    """
+    if isinstance(value, Mapping):
+        return tuple(sorted((key, hashable_json(item)) for key, item in value.items()))
+    if isinstance(value, list | tuple):
+        return tuple(hashable_json(item) for item in value)
+    return value
+
+
 def reject_unknown_fields(data: dict[str, object], allowed: frozenset[str], context: str) -> None:
     """Reject fields that the v1 schema does not define for ``context``."""
     unknown = data.keys() - allowed

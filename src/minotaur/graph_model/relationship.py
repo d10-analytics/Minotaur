@@ -78,9 +78,7 @@ class Relationship:
         # evidence is an unsupported assertion — Minotaur's contract is
         # that every structural claim is traceable.
         if not self.evidence:
-            raise ValueError(
-                "relationship requires at least one evidence record"
-            )
+            raise ValueError("relationship requires at least one evidence record")
         object.__setattr__(self, "extensions", freeze_extensions(self.extensions))
 
     @property

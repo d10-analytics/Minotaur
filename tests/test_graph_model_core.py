@@ -156,9 +156,7 @@ def test_extensions_are_deeply_immutable_but_serialize_as_json() -> None:
 
     extensions["example"]["nested"]["values"].append("mutated")
 
-    assert document.to_dict()["extensions"] == {
-        "example": {"nested": {"values": ["one"]}}
-    }
+    assert document.to_dict()["extensions"] == {"example": {"nested": {"values": ["one"]}}}
     assert document.extensions is not None
     with pytest.raises(TypeError):
         document.extensions["other"] = {}

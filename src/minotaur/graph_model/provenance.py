@@ -210,9 +210,15 @@ class IdentityBasis(Enum):
 # new languages don't require a code change. The reserved set exists
 # so that documentation and tests can reference canonical spellings
 # without hardcoding strings.
-RESERVED_LANGUAGES: frozenset[str] = frozenset({
-    "python", "csharp", "javascript", "typescript", "sql",
-})
+RESERVED_LANGUAGES: frozenset[str] = frozenset(
+    {
+        "python",
+        "csharp",
+        "javascript",
+        "typescript",
+        "sql",
+    }
+)
 
 
 def resolve_symbol_kind(value: str) -> SymbolKind | str:
