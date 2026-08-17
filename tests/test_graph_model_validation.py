@@ -109,8 +109,11 @@ def test_valid_document_has_no_issues_and_report_is_iterable() -> None:
     report = validate_document(_valid_document())
 
     assert report.is_valid
-    assert len(report) == 0
+    assert report.issues == ()
     assert list(report) == []
+    # A report has no container truthiness: an empty (valid) report must not
+    # be falsy, or `if report:` would read as the inverse of is_valid.
+    assert bool(report) is True
 
 
 def test_validation_is_deterministic_and_leaves_document_unchanged() -> None:

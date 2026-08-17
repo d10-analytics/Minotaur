@@ -26,12 +26,12 @@ Design rules that every check here obeys:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
 
 from minotaur.graph_model.document import GraphDocument
-from minotaur.graph_model.evidence import Evidence
 from minotaur.graph_model.identity import verify_node_id
 from minotaur.graph_model.location import Location, Position
 from minotaur.graph_model.node import Node
@@ -47,6 +47,9 @@ from minotaur.graph_model.relationship import Relationship
 # order they would be traversed in the JSON, e.g. ("relationships", 2, "source").
 IssuePath = tuple[str | int, ...]
 
+# CRLF must be tried before CR so "\r\n" is one terminator, not two.
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+
 
 class IssueCode(str, Enum):
     """The closed vocabulary of semantic finding codes.
@@ -57,10 +60,11 @@ class IssueCode(str, Enum):
     """
 
     NODE_ID_MISMATCH = "node-id-mismatch"
-    # Defensive only: no v1 document that passes structural validation can
-    # trigger it (every basis's reconstruction preconditions are enforced at
-    # construction). It exists so an identity-module regression degrades to
-    # a finding instead of aborting the report.
+    # Emitted when the identity input cannot be reconstructed or JCS-encoded.
+    # The structural layer closes every known v1 trigger (per-basis fields,
+    # basis/class coupling, unpaired surrogates), so this is a defensive
+    # degradation path: an identity-module regression becomes a finding
+    # instead of aborting the report. It is part of the public code list.
     NODE_ID_UNVERIFIABLE = "node-id-unverifiable"
     NODE_ID_DUPLICATE = "node-id-duplicate"
     IDENTITY_ORIGIN_MISSING = "identity-origin-missing"
@@ -108,11 +112,10 @@ class ValidationReport:
     def is_valid(self) -> bool:
         return not self.issues
 
+    # Deliberately no __len__/__bool__: an empty report is the VALID case, so
+    # container truthiness would invert `is_valid` and make `if report:` a trap.
     def __iter__(self) -> Iterator[ValidationIssue]:
         return iter(self.issues)
-
-    def __len__(self) -> int:
-        return len(self.issues)
 
 
 def validate_document(
@@ -148,7 +151,9 @@ def validate_document(
     lines_by_path = _SourceLines(source_text_by_path, document.coordinate_encoding)
     issues: list[ValidationIssue] = []
 
-    declared_ids = document.node_ids
+    # One index serves endpoint membership and target-class lookup. For a
+    # duplicated ID the last node wins, which only affects the class used by
+    # the unresolved-target check; the duplicate itself is reported separately.
     node_class_by_id = {node.id: node.node_class for node in document.nodes}
 
     seen_node_ids: set[str] = set()
@@ -164,7 +169,7 @@ def validate_document(
                 )
             )
         seen_node_ids.add(node.id)
-        _check_identity_origin(node, node_path, declared_ids, issues)
+        _check_identity_origin(node, node_path, node_class_by_id, issues)
         if node.location is not None:
             _check_location(node.location, (*node_path, "location"), lines_by_path, issues)
 
@@ -172,7 +177,7 @@ def validate_document(
     for index, relationship in enumerate(document.relationships):
         rel_path: IssuePath = ("relationships", index)
         for endpoint, node_id in (("source", relationship.source), ("target", relationship.target)):
-            if node_id not in declared_ids:
+            if node_id not in node_class_by_id:
                 issues.append(
                     ValidationIssue(
                         IssueCode.RELATIONSHIP_ENDPOINT_MISSING,
@@ -201,10 +206,11 @@ def validate_document(
 
 
 def _check_node_digest(node: Node, node_path: IssuePath, issues: list[ValidationIssue]) -> None:
-    # A loaded Node always satisfies the per-basis structural rules (the
-    # model constructor mirrors the schema), so reconstruction should never
-    # raise. The catch is defensive: a future basis added to the model
-    # without a matching branch in identity._build_canonical_input must
+    # A loaded Node satisfies every structural precondition of reconstruction
+    # (per-basis fields, basis/class coupling, JCS-encodable strings), so this
+    # should not raise for a v1 document. The catch is defensive: a future
+    # basis added to the model without a matching branch in
+    # identity._build_canonical_input, or a new non-encodable input, must
     # surface as a finding, not abort the whole report.
     try:
         matches = verify_node_id(
@@ -238,7 +244,7 @@ def _check_node_digest(node: Node, node_path: IssuePath, issues: list[Validation
 def _check_identity_origin(
     node: Node,
     node_path: IssuePath,
-    declared_ids: frozenset[str],
+    declared_ids: Mapping[str, NodeClass],
     issues: list[ValidationIssue],
 ) -> None:
     identity = node.identity
@@ -292,16 +298,12 @@ def _check_evidence(
     issues: list[ValidationIssue],
 ) -> None:
     # Evidence records within one relationship are unique by their complete
-    # content EXCLUDING locations. Plain structural equality on the frozen
-    # model objects is sufficient: Producer and Rule are frozen dataclasses,
-    # and the frozen extension mappings compare by content. Two accepted v1
-    # quirks of that equality: Python treats JSON 1 and 1.0 as equal, and an
-    # explicit empty `extensions: {}` is distinct from an absent one (they
-    # serialize differently, and the validator does not normalize).
-    seen_attributions: list[tuple[object, ...]] = []
+    # content EXCLUDING locations; Evidence.attribution_key is that identity
+    # (and documents the accepted equality quirks).
+    seen_attributions: set[tuple[object, ...]] = set()
     for ev_index, evidence in enumerate(relationship.evidence):
         ev_path: IssuePath = (*rel_path, "evidence", ev_index)
-        attribution = _attribution_key(evidence)
+        attribution = evidence.attribution_key
         if attribution in seen_attributions:
             issues.append(
                 ValidationIssue(
@@ -311,7 +313,7 @@ def _check_evidence(
                     "rule, and extensions",
                 )
             )
-        seen_attributions.append(attribution)
+        seen_attributions.add(attribution)
 
         seen_locations: set[Location] = set()
         for loc_index, location in enumerate(evidence.locations):
@@ -326,10 +328,6 @@ def _check_evidence(
                     )
                 )
             seen_locations.add(location)
-
-
-def _attribution_key(evidence: Evidence) -> tuple[object, ...]:
-    return (evidence.provenance, evidence.producer, evidence.rule, evidence.extensions)
 
 
 # ---------------------------------------------------------------------------
@@ -446,24 +444,7 @@ def _split_lines(text: str) -> list[str]:
     newline therefore ends at ``(line + 1, 0)`` rather than at a character
     offset past the visible end of the previous line.
     """
-    lines: list[str] = []
-    start = 0
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if ch == "\n":
-            lines.append(text[start:i])
-            i += 1
-            start = i
-        elif ch == "\r":
-            lines.append(text[start:i])
-            i += 2 if i + 1 < n and text[i + 1] == "\n" else 1
-            start = i
-        else:
-            i += 1
-    lines.append(text[start:])
-    return lines
+    return _LINE_BREAK_RE.split(text)
 
 
 def _encoded_length(line: str, encoding: CoordinateEncoding) -> int:

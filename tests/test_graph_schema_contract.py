@@ -211,6 +211,41 @@ def test_symbol_kind_is_vocabulary_checked_on_every_node_class(node_class: str) 
 
 
 @pytest.mark.parametrize("node_class", _ALL_CLASSES)
+def test_reference_text_must_be_non_empty_on_every_node_class(node_class: str) -> None:
+    basis = sorted(_PERMITTED_BASES[node_class])[0]
+    node = _shaped_node(node_class, basis)
+    node["reference_text"] = ""
+
+    _assert_rejected_by_schema_and_model(_document_with_node(node), "reference_text")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda node: node["identity"].__setitem__("namespace", "\ud800ns"),
+        lambda node: node.__setitem__("reference_text", "\ud800.thing"),
+        lambda node: node["location"].__setitem__("path", "src/\ud800.py"),
+    ],
+    ids=["identity-namespace", "reference_text", "location-path"],
+)
+def test_unpaired_surrogates_in_identity_inputs_are_rejected_at_construction(
+    mutate: object,
+) -> None:
+    # A lone surrogate is valid JSON and passes the schema, but RFC 8785 JCS
+    # has no canonical UTF-8 form for it, so the identity input could never
+    # be hashed. The model rejects it structurally so that every loaded node
+    # is reconstructible by the semantic validator.
+    node = _shaped_node("symbol", "source-location")
+    assert callable(mutate)
+    mutate(node)
+    document = _document_with_node(node)
+
+    _validator().validate(document)  # schema cannot express this rule
+    with pytest.raises(ValueError, match="unpaired surrogate"):
+        GraphDocument.from_dict(document)
+
+
+@pytest.mark.parametrize("node_class", _ALL_CLASSES)
 def test_path_is_safety_checked_on_every_node_class(node_class: str) -> None:
     basis = sorted(_PERMITTED_BASES[node_class])[0]
     node = _shaped_node(node_class, basis)

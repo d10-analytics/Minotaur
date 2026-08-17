@@ -158,16 +158,6 @@ class GraphDocument:
                 ) from error
         object.__setattr__(self, "extensions", freeze_extensions(self.extensions))
 
-    @property
-    def node_ids(self) -> frozenset[str]:
-        """The set of all node IDs in this document.
-
-        Used by the semantic validator to check relationship endpoint
-        integrity: every relationship source and target must reference
-        a node ID that exists in this set.
-        """
-        return frozenset(node.id for node in self.nodes)
-
     def node_by_id(self, node_id: str) -> Node | None:
         """Look up a node by its ID, or None if not found.
 

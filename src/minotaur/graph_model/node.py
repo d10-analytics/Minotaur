@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from minotaur.graph_model._parsing import (
     freeze_extensions,
     reject_unknown_fields,
+    reject_unpaired_surrogates,
     serialize_extensions,
 )
 from minotaur.graph_model.identity import NodeIdentity, is_valid_node_id_format
@@ -115,9 +116,20 @@ class Node:
             raise ValueError(
                 f"node path must be a safe repository-relative path, got {self.path!r}"
             )
+        # symbol_kind and path feed the identity input; keep them JCS-encodable.
+        if self.symbol_kind is not None:
+            reject_unpaired_surrogates(self.symbol_kind, "'symbol_kind'")
+        if self.path is not None:
+            reject_unpaired_surrogates(self.path, "node path")
 
-        if self.node_class == NodeClass.UNRESOLVED_REFERENCE and not self.reference_text:
+        if self.node_class == NodeClass.UNRESOLVED_REFERENCE and self.reference_text is None:
             raise ValueError("unresolved-reference nodes require a non-empty 'reference_text'")
+        # Like symbol_kind and path, a present reference_text is checked on
+        # every node class, as the schema's unconditional nonEmptyString does.
+        if self.reference_text is not None:
+            if not self.reference_text:
+                raise ValueError("'reference_text' must be non-empty when present")
+            reject_unpaired_surrogates(self.reference_text, "'reference_text'")
 
         # The identity basis must be one that makes sense for this node class.
         # A file node whose ID claims to be derived from an upstream identifier,

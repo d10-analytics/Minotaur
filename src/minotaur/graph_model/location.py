@@ -15,7 +15,7 @@ import functools
 import re
 from dataclasses import dataclass
 
-from minotaur.graph_model._parsing import reject_unknown_fields
+from minotaur.graph_model._parsing import reject_unknown_fields, reject_unpaired_surrogates
 
 # The v1 schema requires paths that are:
 #   - non-empty
@@ -155,6 +155,8 @@ class Location:
                 f"path must be a non-empty, repository-relative, slash-separated "
                 f"path with no absolute, empty, or dot components, got {self.path!r}"
             )
+        # Location paths feed source-location identity inputs; keep them JCS-encodable.
+        reject_unpaired_surrogates(self.path, "location path")
 
     def to_dict(self) -> dict[str, object]:
         return {"path": self.path, "range": self.range.to_dict()}

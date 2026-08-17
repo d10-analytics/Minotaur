@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from minotaur.graph_model._parsing import (
     freeze_extensions,
+    hashable_json,
     reject_unknown_fields,
     serialize_extensions,
 )
@@ -172,6 +173,23 @@ class Evidence:
                 f"have a 'rule' object (rule is only for 'curated-rule')"
             )
         object.__setattr__(self, "extensions", freeze_extensions(self.extensions))
+
+    @property
+    def attribution_key(self) -> tuple[object, ...]:
+        """Hashable identity of this record's non-location content.
+
+        Within one relationship, evidence records are unique by exactly this
+        key: provenance, producer, rule, and extensions. Locations are
+        excluded because repeated observations of the same attribution are
+        represented as one record with several locations. The semantic
+        validator uses it for duplicate detection and the canonical serializer
+        can use it as the evidence identity when ordering records.
+
+        Two accepted v1 quirks of Python equality apply: JSON ``1`` and
+        ``1.0`` compare equal, and an explicit empty ``extensions: {}`` is
+        distinct from an absent one.
+        """
+        return (self.provenance, self.producer, self.rule, hashable_json(self.extensions))
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {"provenance": self.provenance.value}
