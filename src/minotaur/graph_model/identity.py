@@ -26,10 +26,13 @@ from __future__ import annotations
 
 import hashlib
 import re
-import struct
 from dataclasses import dataclass
 
-from minotaur.graph_model._parsing import reject_unknown_fields, reject_unpaired_surrogates
+from minotaur.graph_model._parsing import (
+    _jcs_serialize,
+    reject_unknown_fields,
+    reject_unpaired_surrogates,
+)
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.provenance import IdentityBasis
 
@@ -338,121 +341,3 @@ def _build_canonical_input(
         }
 
     raise ValueError(f"unhandled identity basis: {basis}")
-
-
-# ---------------------------------------------------------------------------
-# RFC 8785 JCS (JSON Canonicalization Scheme) — minimal implementation
-# ---------------------------------------------------------------------------
-#
-# JCS defines a deterministic JSON serialization by specifying:
-#   1. Object keys sorted by their UTF-16 code unit values.
-#   2. Strings with minimal escaping (only the mandatory JSON escapes).
-#   3. Numbers in their shortest representation (no leading zeros, no
-#      trailing zeros after decimal point, no positive exponent sign).
-#   4. No whitespace between tokens.
-#
-# Our identity inputs contain only strings, non-negative integers, and
-# nested objects — no floats, booleans, nulls, or arrays. This simplifies
-# the implementation significantly: we don't need IEEE 754 double
-# serialization (the hardest part of a full JCS implementation).
-#
-# We implement JCS ourselves rather than adding a dependency because:
-#   - The subset we need is ~30 lines of code.
-#   - A JCS library would be Minotaur's only non-jsonschema dependency.
-#   - Getting the serialization wrong would silently produce different
-#     node IDs, so we want the logic visible and testable in-tree.
-
-# Characters that JSON requires to be escaped. JCS uses minimal escaping:
-# only these mandatory escapes, not voluntary \uXXXX for printable chars.
-_JCS_ESCAPE_MAP: dict[str, str] = {
-    '"': '\\"',
-    "\\": "\\\\",
-    "\b": "\\b",
-    "\f": "\\f",
-    "\n": "\\n",
-    "\r": "\\r",
-    "\t": "\\t",
-}
-
-# Control characters U+0000–U+001F that don't have a named escape use \uXXXX.
-for _i in range(0x20):
-    _ch = chr(_i)
-    if _ch not in _JCS_ESCAPE_MAP:
-        _JCS_ESCAPE_MAP[_ch] = f"\\u{_i:04x}"
-
-
-def _jcs_serialize(value: object) -> bytes:
-    """Serialize a value to RFC 8785 JCS canonical form.
-
-    Returns UTF-8 bytes because SHA-256 operates on bytes, and JCS defines
-    the canonical encoding as UTF-8.
-    """
-    parts: list[str] = []
-    _jcs_encode(value, parts)
-    return "".join(parts).encode("utf-8")
-
-
-def _jcs_encode(value: object, parts: list[str]) -> None:
-    """Recursively encode a value into JCS string fragments."""
-    if isinstance(value, str):
-        # JCS strings use minimal escaping: only the mandatory JSON escapes
-        # plus \uXXXX for control characters. All other characters (including
-        # non-ASCII) are passed through literally in UTF-8.
-        parts.append('"')
-        for ch in value:
-            escaped = _JCS_ESCAPE_MAP.get(ch)
-            if escaped is not None:
-                parts.append(escaped)
-            else:
-                parts.append(ch)
-        parts.append('"')
-
-    elif isinstance(value, int) and not isinstance(value, bool):
-        # JCS integers use their shortest decimal representation.
-        # Python's str(int) already produces this for non-negative integers.
-        parts.append(str(value))
-
-    elif isinstance(value, dict):
-        # JCS objects sort keys by UTF-16 code unit values. For ASCII-only
-        # keys (which all our identity fields are), this is identical to
-        # lexicographic byte order. We use the full UTF-16 sort for
-        # correctness even though our current keys don't need it.
-        parts.append("{")
-        sorted_keys = sorted(value.keys(), key=_utf16_sort_key)
-        for i, key in enumerate(sorted_keys):
-            if i > 0:
-                parts.append(",")
-            _jcs_encode(key, parts)
-            parts.append(":")
-            _jcs_encode(value[key], parts)
-        parts.append("}")
-
-    else:
-        # Our identity inputs should never contain other types. Failing
-        # loudly here catches implementation errors early rather than
-        # silently producing a non-canonical serialization.
-        raise TypeError(
-            f"JCS serialization only supports str, int, and dict for "
-            f"identity inputs, got {type(value).__name__}"
-        )
-
-
-def _utf16_sort_key(s: str) -> list[int]:
-    """Produce a sort key based on UTF-16 code unit values.
-
-    RFC 8785 §3.2.3 specifies that object keys are sorted by comparing
-    their UTF-16 representations code unit by code unit. For BMP characters
-    this is the same as codepoint order, but supplementary characters
-    (U+10000+) are represented as surrogate pairs and sort differently
-    than their codepoint values would suggest.
-
-    In practice, all Minotaur identity field names are ASCII, so this
-    produces the same result as a simple string sort. The full UTF-16
-    implementation is here for spec compliance and to avoid a subtle bug
-    if a future namespace or path contains supplementary characters.
-    """
-    # Decode the UTF-16LE bytes into actual 16-bit code units rather than
-    # sorting by raw bytes. Raw bytes would give little-endian byte order,
-    # which disagrees with code-unit order for values above U+00FF.
-    raw = s.encode("utf-16-le")
-    return list(struct.unpack(f"<{len(raw) // 2}H", raw))
