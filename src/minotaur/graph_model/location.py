@@ -32,9 +32,7 @@ from minotaur.graph_model._parsing import reject_unknown_fields, reject_unpaired
 # The JSON Schema encodes this as "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000]+$"
 # where \\. is JSON-escaped \.  (literal dot in regex). In a Python raw
 # string the equivalent is \. without the extra backslash.
-_SAFE_PATH_RE = re.compile(
-    r"^(?!/)(?!.*//)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*\\)[^\x00]+$"
-)
+_SAFE_PATH_RE = re.compile(r"^(?!/)(?!.*//)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*\\)[^\x00]+$")
 
 
 def is_safe_path(path: str) -> bool:

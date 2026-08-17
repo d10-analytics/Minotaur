@@ -88,9 +88,7 @@ class Node:
     def __post_init__(self) -> None:
         # Wire-format check only — not digest verification.
         if not is_valid_node_id_format(self.id):
-            raise ValueError(
-                f"node id must match 'node:sha256:<64 hex chars>', got {self.id!r}"
-            )
+            raise ValueError(f"node id must match 'node:sha256:<64 hex chars>', got {self.id!r}")
 
         if not self.label:
             raise ValueError("node label must be non-empty")
@@ -150,9 +148,7 @@ class Node:
 
         # Language validation when present.
         if self.language is not None and not is_valid_language(self.language):
-            raise ValueError(
-                f"language must match '^[a-z][a-z0-9-]*$', got {self.language!r}"
-            )
+            raise ValueError(f"language must match '^[a-z][a-z0-9-]*$', got {self.language!r}")
 
         # Validate expected_symbol_kind the same way as symbol_kind.
         if self.expected_symbol_kind is not None:
@@ -205,8 +201,17 @@ class Node:
             data,
             frozenset(
                 {
-                    "id", "identity", "node_class", "label", "symbol_kind", "language",
-                    "location", "path", "reference_text", "expected_symbol_kind", "extensions",
+                    "id",
+                    "identity",
+                    "node_class",
+                    "label",
+                    "symbol_kind",
+                    "language",
+                    "location",
+                    "path",
+                    "reference_text",
+                    "expected_symbol_kind",
+                    "extensions",
                 }
             ),
             "node",

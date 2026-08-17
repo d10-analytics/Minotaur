@@ -161,9 +161,7 @@ class Evidence:
         # because a curated-rule evidence record without a rule ID is
         # structurally incomplete.
         if self.provenance == Provenance.CURATED_RULE and self.rule is None:
-            raise ValueError(
-                "evidence with 'curated-rule' provenance requires a 'rule' object"
-            )
+            raise ValueError("evidence with 'curated-rule' provenance requires a 'rule' object")
         # The schema also enforces the converse: non-curated-rule evidence
         # must NOT have a rule object. This prevents ambiguity about whether
         # a rule applies when the provenance says it shouldn't.

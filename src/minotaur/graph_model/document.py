@@ -48,9 +48,7 @@ _GIT_COMMIT_RE = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 # RFC 3339 timestamp ending in Z (UTC). The schema requires the Z suffix
 # rather than a numeric offset to ensure timestamps are directly comparable
 # without timezone arithmetic.
-_RFC3339_UTC_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
-)
+_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,9 +73,7 @@ class SourceControl:
             raise ValueError(f"v1 only supports 'git' source control, got {self.system!r}")
 
         if self.commit is None and self.branch is None:
-            raise ValueError(
-                "source_control requires at least one of 'commit' or 'branch'"
-            )
+            raise ValueError("source_control requires at least one of 'commit' or 'branch'")
 
         if self.commit is not None and not _GIT_COMMIT_RE.match(self.commit):
             raise ValueError(
@@ -217,7 +213,10 @@ class GraphDocument:
                     "coordinate_encoding",
                     "generated_by",
                     "generated_at",
-                    "source_control", "nodes", "relationships", "extensions",
+                    "source_control",
+                    "nodes",
+                    "relationships",
+                    "extensions",
                 }
             ),
             "graph document",
@@ -228,15 +227,11 @@ class GraphDocument:
         # confusing errors from mismatched field expectations.
         fmt = data.get("format")
         if fmt != FORMAT_NAME:
-            raise ValueError(
-                f"expected format '{FORMAT_NAME}', got {fmt!r}"
-            )
+            raise ValueError(f"expected format '{FORMAT_NAME}', got {fmt!r}")
 
         version = data.get("format_version")
         if version != FORMAT_VERSION:
-            raise ValueError(
-                f"expected format_version '{FORMAT_VERSION}', got {version!r}"
-            )
+            raise ValueError(f"expected format_version '{FORMAT_VERSION}', got {version!r}")
 
         encoding_str = data.get("coordinate_encoding")
         if not isinstance(encoding_str, str):
