@@ -31,7 +31,7 @@ def hashable_json(value: object) -> object:
     """
     if isinstance(value, Mapping):
         return tuple(sorted((key, hashable_json(item)) for key, item in value.items()))
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return tuple(hashable_json(item) for item in value)
     return value
 
