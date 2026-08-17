@@ -1,6 +1,6 @@
 {
   "format": "minotaur-graph",
-  "format_version": "1.0.0",
+  "format_version": "0.1.0",
   "coordinate_encoding": "utf-8",
   "generated_at": "2026-99-99T99:99:99Z",
   "nodes": [],

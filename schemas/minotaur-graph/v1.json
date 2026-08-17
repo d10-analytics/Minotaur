@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:minotaur:schemas:minotaur-graph:1.0.0",
-  "title": "Minotaur graph 1.0.0",
+  "$id": "urn:minotaur:schemas:minotaur-graph:0.1.0",
+  "title": "Minotaur graph 0.1.0",
   "description": "A current-snapshot, evidence-backed software architecture graph.",
   "type": "object",
   "required": ["format", "format_version", "coordinate_encoding", "nodes", "relationships"],
   "additionalProperties": false,
   "properties": {
     "format": {"const": "minotaur-graph"},
-    "format_version": {"const": "1.0.0"},
+    "format_version": {"const": "0.1.0"},
     "coordinate_encoding": {"enum": ["utf-8", "utf-16", "utf-32"]},
     "generated_by": {"$ref": "#/$defs/producer"},
     "generated_at": {

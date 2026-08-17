@@ -37,7 +37,7 @@ from minotaur.graph_model.relationship import Relationship
 # `const` values exactly. A document with a different format or version is
 # not a v1 Minotaur graph — the reader rejects it rather than guessing.
 FORMAT_NAME = "minotaur-graph"
-FORMAT_VERSION = "1.0.0"
+FORMAT_VERSION = "0.1.0"
 
 # Git commit IDs are full-length only: 40 hex chars (SHA-1) or 64 hex chars
 # (SHA-256, for future Git object format). Abbreviated commits are invalid
