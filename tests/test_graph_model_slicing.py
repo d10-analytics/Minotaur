@@ -69,9 +69,7 @@ def _file(path: str) -> Node:
 
 
 def _unresolved(origin: Node, text: str) -> Node:
-    identity = NodeIdentity(
-        IdentityBasis.UNRESOLVED_REFERENCE, NS, originating_node=origin.id
-    )
+    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, NS, originating_node=origin.id)
     node_id = compute_node_id(
         identity,
         node_class=NodeClass.UNRESOLVED_REFERENCE.value,
@@ -94,13 +92,16 @@ def _evidence(name: str = "test-tool") -> Evidence:
 
 
 def _rel(
-    source: Node, target: Node, kind: str = RelationshipKind.CALLS.value,
+    source: Node,
+    target: Node,
+    kind: str = RelationshipKind.CALLS.value,
 ) -> Relationship:
     return Relationship(source.id, target.id, kind, (_evidence(),))
 
 
 def _doc(
-    nodes: tuple[Node, ...], relationships: tuple[Relationship, ...] = (),
+    nodes: tuple[Node, ...],
+    relationships: tuple[Relationship, ...] = (),
 ) -> GraphDocument:
     return GraphDocument(
         coordinate_encoding=CoordinateEncoding.UTF_8,
@@ -264,14 +265,19 @@ def test_integrity_added_node_not_in_boundary() -> None:
         (seed, unresolved, far, far_neighbor),
         (
             Relationship(
-                seed.id, unresolved.id, RelationshipKind.REFERENCES.value,
+                seed.id,
+                unresolved.id,
+                RelationshipKind.REFERENCES.value,
                 (_evidence(),),
             ),
             _rel(far, far_neighbor),
         ),
     )
     result = slice_document(
-        doc, {seed.id}, max_depth=1, direction=SliceDirection.OUTGOING,
+        doc,
+        {seed.id},
+        max_depth=1,
+        direction=SliceDirection.OUTGOING,
     )
     assert far.id in _node_ids(result)
     assert far.id not in result.boundary_ids
@@ -326,7 +332,10 @@ def test_multiple_seeds() -> None:
         (_rel(a, b), _rel(b, c), _rel(d, e)),
     )
     result = slice_document(
-        doc, {a.id, d.id}, max_depth=1, direction=SliceDirection.OUTGOING,
+        doc,
+        {a.id, d.id},
+        max_depth=1,
+        direction=SliceDirection.OUTGOING,
     )
     assert _node_ids(result) == {a.id, b.id, d.id, e.id}
 
@@ -380,7 +389,10 @@ def test_unresolved_reference_pulls_in_originating_node() -> None:
     )
 
     result = slice_document(
-        doc, {bridge.id}, max_depth=1, direction=SliceDirection.OUTGOING,
+        doc,
+        {bridge.id},
+        max_depth=1,
+        direction=SliceDirection.OUTGOING,
     )
     assert unresolved.id in _node_ids(result)
     assert origin.id in _node_ids(result)
@@ -452,6 +464,4 @@ def test_sliced_document_passes_semantic_validation() -> None:
 
     result = slice_document(doc, {b.id}, max_depth=1)
     report = validate_document(result.document)
-    assert report.is_valid, [
-        (i.code.value, i.message) for i in report
-    ]
+    assert report.is_valid, [(i.code.value, i.message) for i in report]

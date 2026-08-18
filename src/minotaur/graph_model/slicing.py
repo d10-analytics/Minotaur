@@ -76,8 +76,7 @@ def slice_document(
 
     sliced_nodes = tuple(n for n in document.nodes if n.id in reached)
     sliced_rels = tuple(
-        r for r in document.relationships
-        if r.source in reached and r.target in reached
+        r for r in document.relationships if r.source in reached and r.target in reached
     )
 
     sliced_doc = GraphDocument(
