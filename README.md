@@ -18,13 +18,12 @@ Minotaur is in early development. The public repository structure and product
 boundaries are in place, and the versioned canonical graph contract exists: a
 public JSON Schema, a tested Python graph model, and a semantic validator that
 verifies node identities, relationship integrity, source ranges, and evidence
-grouping. A tested, library-level Python analyzer is also available; its
-current structural facts and limits are described in the
+grouping. A tested Python analyzer and language-neutral selected-path CLI are
+also available; current structural facts and limits are described in the
 [Python analysis guide](docs/guides/analyze-python.md).
 
-There is not yet a command-line workflow or visualizer. The first end-user
-release will pair native Python analysis with a self-contained interactive
-HTML visualizer.
+There is not yet a visualizer. The first end-user release will pair native
+Python analysis with a self-contained interactive HTML visualizer.
 
 ## What Minotaur will do
 
@@ -53,7 +52,9 @@ facts from the language they understand. Each interpreter owns its language
 semantics, resolution limits, source locations, and evidence.
 
 Python is the first implemented interpreter. C#, JavaScript, and other
-languages are future extensions, not current compatibility claims.
+languages are future extensions, not current compatibility claims. See
+[Create a language interpreter](docs/guides/create-a-language-interpreter.md)
+for the selected-file API and registration convention for new languages.
 
 ### `graph_visualizer/`
 
@@ -116,9 +117,9 @@ The current implementation includes:
 
 - a versioned canonical Minotaur graph schema;
 - graph validation, identity, provenance, and serialization primitives;
-- a bounded, library-level native Python analyzer.
+- a bounded native Python analyzer and selected-path CLI (currently `.py` only).
 
-It does not yet include a command-line workflow, a visualizer, C#,
+It does not yet include a visualizer, C#,
 JavaScript, a hosted graph service, automatic runtime tracing, or broad
 compatibility with third-party graph formats.
 

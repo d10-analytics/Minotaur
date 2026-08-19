@@ -1,0 +1,31 @@
+"""Static example_language-to-Minotaur analysis."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from minotaur.language_interpreter.contract import AnalysisResult
+from minotaur.language_interpreter.example_language.discovery import (
+    discover_example_language_files,
+)
+from minotaur.language_interpreter.workspace import Workspace
+
+
+def analyze_example_language_workspace(root: Path) -> AnalysisResult:
+    """Analyze every normally discoverable example_language file below ``root``."""
+    workspace = Workspace(root)
+    return analyze_example_language_files(workspace, discover_example_language_files(workspace))
+
+
+def analyze_example_language_files(
+    workspace: Workspace,
+    files: tuple[Path, ...],
+) -> AnalysisResult:
+    """Analyze selected example_language files rooted in ``workspace``.
+
+    Callers must provide existing regular files below the validated workspace
+    root. Replace this stub with tested language-specific static analysis
+    before registering `.example` in ``default_registry()``.
+    """
+    del workspace, files
+    raise NotImplementedError("implement tested example_language static analysis before registration")

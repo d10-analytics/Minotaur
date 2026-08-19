@@ -1,0 +1,20 @@
+"""Behavioral coverage for the example_language interpreter."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from minotaur.language_interpreter.example_language import analyze_example_language_files
+from minotaur.language_interpreter.workspace import Workspace
+
+
+def test_selected_example_language_files_produce_only_established_facts(tmp_path: Path) -> None:
+    source = tmp_path / "sample.example"
+    source.write_text("replace with representative source", encoding="utf-8")
+
+    result = analyze_example_language_files(Workspace(tmp_path), (source,))
+
+    # Replace this with assertions for graph facts, diagnostics, and evidence
+    # that would fail if the language-specific analysis were removed. The stub
+    # intentionally raises until it has been replaced with tested semantics.
+    assert result.diagnostics == ()

@@ -1,4 +1,7 @@
-"""Behavioral coverage for the bounded native Python interpreter."""
+"""Behavioral coverage for the bounded native Python interpreter.
+
+Language-specific interpreter tests live beneath ``tests/language_interpreter``.
+"""
 
 from __future__ import annotations
 
