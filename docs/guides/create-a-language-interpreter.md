@@ -24,8 +24,7 @@ Every interpreter must expose a selected-file function with this shape:
 def analyze_example_language_files(
     workspace: Workspace,
     files: tuple[Path, ...],
-) -> AnalysisResult:
-    ...
+) -> AnalysisResult: ...
 ```
 
 `workspace` is an already validated, resolved source root. `files` are
@@ -52,9 +51,7 @@ An interpreter may also expose a convenience wrapper:
 ```python
 def analyze_example_language_workspace(root: Path) -> AnalysisResult:
     workspace = Workspace(root)
-    return analyze_example_language_files(
-        workspace, discover_example_language_files(workspace)
-    )
+    return analyze_example_language_files(workspace, discover_example_language_files(workspace))
 ```
 
 Use this only for the simple library use case: analyze every normally
