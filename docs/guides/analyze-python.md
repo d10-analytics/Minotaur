@@ -1,9 +1,33 @@
 # Current Python analysis
 
-Minotaur currently provides a tested, library-level analyzer for a bounded
-subset of Python source structure. It is intended to establish inspectable
-static facts, not to provide a command-line workflow or a stable end-user
-interface.
+Minotaur provides a bounded analyzer for Python source structure. The
+language-neutral CLI selects files by registered extension; this release
+registers Python for `.py` files only.
+
+## Analyze selected paths
+
+Run the same command through the installed console script or as a module:
+
+```text
+minotaur analyze --root ROOT --output GRAPH.json [--force] TARGET [TARGET ...]
+python -m minotaur analyze --root ROOT --output GRAPH.json [--force] TARGET [TARGET ...]
+```
+
+`ROOT` must exist. Every target must be an existing file or directory inside
+that root after symlinks are resolved. Directory targets are scanned
+recursively for registered extensions; unsupported files found during that
+scan are ignored, while an explicitly named unsupported file is an error.
+Repeated and overlapping targets are analyzed once.
+
+Normal recursive scans exclude hidden directories, caches, and virtual
+environments. Explicitly selecting such a file or directory includes it.
+The output parent directory must already exist. Existing outputs require
+`--force`, and an output path may never also be a selected source file.
+
+The command writes canonical JSON atomically. It exits `0` on a clean graph,
+`1` after writing a valid partial graph with parse or source-read diagnostics,
+and `2` for argument, selection, dispatch, or output-preflight errors (with
+no output written).
 
 ## Structural facts it records
 
@@ -37,6 +61,3 @@ Its relationships are not runtime-dispatch claims, and it makes no support
 claim for relationships beyond this current subset. In particular, dynamic or
 otherwise unresolvable calls remain unresolved rather than being inferred from
 runtime behavior.
-
-This guide deliberately does not document CLI or API usage: neither is a
-supported end-user workflow yet.

@@ -77,12 +77,28 @@ def analyze_python_workspace(root: Path) -> AnalysisResult:
     facts. Other files continue to be analyzed, so one editor-in-progress file
     cannot silently erase the rest of a workspace graph.
     """
+    # Keep the original full-workspace API as a small wrapper. Existing library
+    # callers retain their behavior while the CLI can analyze a narrower set of
+    # files without duplicating Python parsing and graph-building logic.
     workspace = Workspace(root)
+    return analyze_python_files(workspace, discover_python_files(workspace))
+
+
+def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
+    """Analyze selected Python files rooted in ``workspace``.
+
+    Callers own source selection and must provide existing regular files below
+    the workspace root. Keeping that policy outside this interpreter makes it
+    reusable by all languages and avoids Python-specific path-validation rules.
+    Files are normalized into root-relative order here as a second defensive
+    layer: API callers may supply arbitrary order, but graph bytes and emitted
+    diagnostics must not change merely because argument order changed.
+    """
     diagnostics: list[Diagnostic] = []
     modules: list[_Module] = []
     nodes: list[Node] = []
 
-    for file_path in discover_python_files(workspace):
+    for file_path in sorted(files, key=lambda path: path.relative_to(workspace.root).as_posix()):
         relative = file_path.relative_to(workspace.root).as_posix()
         try:
             source = file_path.read_text(encoding="utf-8")
