@@ -1,17 +1,16 @@
 # Minotaur
 
-> A local-first toolkit for turning source code and existing graph data into
+> A local-first toolkit for turning source code into
 > evidence-backed software architecture maps.
 
 Minotaur helps engineers explore how software is structured and which
-relationships can be established from source code or existing graph data. It
-will interpret supported languages, ingest graph data produced by other tools,
-normalize those facts into one canonical graph, and create portable
+relationships can be established from source code. It will interpret supported
+languages, normalize those facts into one canonical graph, and create portable
 interactive visualizations.
 
 The project is intentionally designed around traceability: a graph should make
-clear what was established by static analysis, what came from another tool,
-what was supplied as a rule, and what remains unresolved.
+clear what was established by static analysis, what was supplied as a rule,
+and what remains unresolved.
 
 ## Status
 
@@ -19,24 +18,23 @@ Minotaur is in early development. The public repository structure and product
 boundaries are in place, and the versioned canonical graph contract exists: a
 public JSON Schema, a tested Python graph model, and a semantic validator that
 verifies node identities, relationship integrity, source ranges, and evidence
-grouping. It is not yet a runnable tool: no language interpreter, ingestion
-path, or visualizer is implemented.
+grouping. It is not yet a runnable tool: no language interpreter or visualizer
+is implemented.
 
-The first usable release will focus on native Python analysis, generic JSON
-graph ingestion, and a self-contained interactive HTML visualizer.
+The first usable release will focus on native Python analysis and a
+self-contained interactive HTML visualizer.
 
 ## What Minotaur will do
 
-Minotaur has three major extension boundaries:
+Minotaur has two major extension boundaries:
 
 ```text
-Source code                         Existing graph or index data
-     |                                         |
-     v                                         v
-language_interpreter/                    graph_ingestion/
-     \                                         /
-      \                                       /
-       v                                     v
+Source code
+     |
+     v
+language_interpreter/
+     |
+     v
               canonical Minotaur graph
                          |
                          v
@@ -54,16 +52,6 @@ semantics, resolution limits, source locations, and evidence.
 
 Python is the first planned interpreter. C#, JavaScript, and other languages
 are future extensions, not current compatibility claims.
-
-### `graph_ingestion/`
-
-Graph ingestion brings externally produced graph or index data into Minotaur's
-canonical model. It is an interoperability boundary, not a way to relabel
-upstream claims as independently established Minotaur facts.
-
-The first planned ingestion path is generic JSON. Additional formats and index
-types will be added only with an explicit mapping and provenance-preservation
-contract.
 
 ### `graph_visualizer/`
 
@@ -88,12 +76,11 @@ evidence, and unresolved state. There is deliberately no canonical confidence
 score: how a relationship was established is stated explicitly rather than
 summarized as a cross-tool probability.
 
-This distinction matters. A static source reference, a fact imported from
-another tool, and a relationship supplied by a declared rule are all useful—but
-they do not mean the same thing. Minotaur keeps those differences visible
-instead of blending them into an apparently certain diagram. Runtime
-observation and human assertion are planned as future, separately labeled
-evidence types, not current ones.
+This distinction matters. A static source reference and a relationship supplied
+by a declared rule are useful—but they do not mean the same thing. Minotaur
+keeps those differences visible instead of blending them into an apparently
+certain diagram. Runtime observation and human assertion are planned as future,
+separately labeled evidence types, not current ones.
 
 ## What a graph does not prove
 
@@ -128,7 +115,6 @@ The first implementation milestone includes:
 - a versioned canonical Minotaur graph schema;
 - graph validation, identity, provenance, and serialization primitives;
 - a native Python language interpreter;
-- generic JSON graph ingestion; and
 - a self-contained interactive HTML visualizer.
 
 It does not yet include C#, JavaScript, a hosted graph service, automatic
@@ -140,7 +126,6 @@ runtime tracing, or broad compatibility with third-party graph formats.
 src/minotaur/
   graph_model/             # Canonical graph contract and graph operations
   language_interpreter/    # Native source-language analysis; Python first
-  graph_ingestion/         # Existing graph/index data; generic JSON first
   graph_visualizer/        # Interactive HTML and future static views
 
 schemas/minotaur-graph/    # Versioned public graph schema
@@ -151,8 +136,8 @@ tests/                     # Behavioral tests and public fixtures
 
 ## Contributing
 
-Minotaur is at the foundation stage. Before adding a language interpreter,
-ingestion path, or visualization feature, its behavior and evidence model
+Minotaur is at the foundation stage. Before adding a language interpreter or
+visualization feature, its behavior and evidence model
 should be specified and tested against synthetic public fixtures. Contribution
 guidance will be added in `CONTRIBUTING.md` as the first implementation
 milestone takes shape.
