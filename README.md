@@ -18,11 +18,13 @@ Minotaur is in early development. The public repository structure and product
 boundaries are in place, and the versioned canonical graph contract exists: a
 public JSON Schema, a tested Python graph model, and a semantic validator that
 verifies node identities, relationship integrity, source ranges, and evidence
-grouping. It is not yet a runnable tool: no language interpreter or visualizer
-is implemented.
+grouping. A tested, library-level Python analyzer is also available; its
+current structural facts and limits are described in the
+[Python analysis guide](docs/guides/analyze-python.md).
 
-The first usable release will focus on native Python analysis and a
-self-contained interactive HTML visualizer.
+There is not yet a command-line workflow or visualizer. The first end-user
+release will pair native Python analysis with a self-contained interactive
+HTML visualizer.
 
 ## What Minotaur will do
 
@@ -50,8 +52,8 @@ Language interpreters examine source workspaces directly and produce graph
 facts from the language they understand. Each interpreter owns its language
 semantics, resolution limits, source locations, and evidence.
 
-Python is the first planned interpreter. C#, JavaScript, and other languages
-are future extensions, not current compatibility claims.
+Python is the first implemented interpreter. C#, JavaScript, and other
+languages are future extensions, not current compatibility claims.
 
 ### `graph_visualizer/`
 
@@ -110,15 +112,15 @@ not required to explore a graph.
 
 ## Initial scope
 
-The first implementation milestone includes:
+The current implementation includes:
 
 - a versioned canonical Minotaur graph schema;
 - graph validation, identity, provenance, and serialization primitives;
-- a native Python language interpreter;
-- a self-contained interactive HTML visualizer.
+- a bounded, library-level native Python analyzer.
 
-It does not yet include C#, JavaScript, a hosted graph service, automatic
-runtime tracing, or broad compatibility with third-party graph formats.
+It does not yet include a command-line workflow, a visualizer, C#,
+JavaScript, a hosted graph service, automatic runtime tracing, or broad
+compatibility with third-party graph formats.
 
 ## Repository layout
 
