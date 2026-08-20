@@ -4,29 +4,13 @@
 > evidence-backed software architecture maps.
 
 Minotaur helps engineers explore how software is structured and which
-relationships can be established from source code. It will interpret supported
-languages, normalize those facts into one canonical graph, and create portable
-interactive visualizations.
+relationships can be established from source code. It interprets supported
+languages, normalizes those facts into one canonical graph, and creates
+portable interactive visualizations.
 
 The project is intentionally designed around traceability: a graph should make
 clear what was established by static analysis, what was supplied as a rule,
 and what remains unresolved.
-
-## Status
-
-Minotaur is in early development. The public repository structure and product
-boundaries are in place, and the versioned canonical graph contract exists: a
-public JSON Schema, a tested Python graph model, and a semantic validator that
-verifies node identities, relationship integrity, source ranges, and evidence
-grouping. A tested Python analyzer and language-neutral selected-path CLI are
-also available; current structural facts and limits are described in the
-[Python analysis guide](docs/guides/analyze-python.md).
-
-The current release includes a self-contained interactive HTML explorer.
-It opens directly from `file://`, keeps graph strings out of HTML markup, and
-never requests a network resource. It includes source excerpts, call-site
-inspection, node and relationship filters, and non-persistent System, Light,
-Catppuccin Mocha, Nord Polar Night, and Solarized Dark themes.
 
 [![Python workflow explorer preview](docs/assets/python-workflow-demo.png)](https://d10-analytics.github.io/Minotaur/)
 
@@ -35,25 +19,30 @@ Catppuccin Mocha, Nord Polar Night, and Solarized Dark themes.
 To intentionally refresh the preview, install the `visualizer` extra and
 Chromium, then run `python3 scripts/capture_python_workflow_demo.py`.
 
-## What Minotaur will do
+## Current capabilities
 
-Minotaur has two major extension boundaries:
+Minotaur is in early development. Its current implementation includes:
 
-```text
-Source code
-     |
-     v
-language_interpreter/
-     |
-     v
-              canonical Minotaur graph
-                         |
-                         v
-                graph_visualizer/
-                         |
-                         v
-        Interactive HTML, DOT, SVG, and other views
-```
+- a versioned canonical graph schema, tested graph model, and semantic validator;
+- a bounded native Python analyzer and selected-path CLI (currently `.py` only);
+- a self-contained HTML explorer with filters, themes, source excerpts, and
+  call-site inspection.
+
+Current Python-analysis behavior and limits are described in the
+[Python analysis guide](docs/guides/analyze-python.md).
+
+## Local-first and privacy-conscious
+
+Minotaur creates portable artifacts for local analysis. Its HTML explorer is
+self-contained, opens directly from `file://`, and never requests a network
+resource. The GitHub Pages link above is a static preview of that same
+downloadable artifact.
+
+## Architecture and extension boundaries
+
+Minotaur interprets supported source files into its canonical graph, then
+renders that graph through independent visualization formats. The language
+interpreter and visualizer are the two primary extension boundaries.
 
 ### `language_interpreter/`
 
@@ -116,23 +105,9 @@ Where available, Minotaur may retain directly observable context. Interpretation
 beyond that evidence belongs in documentation or, in the future, explicitly
 labeled human-authored annotations.
 
-## Local-first and privacy-conscious
+## Quick start
 
-Minotaur is being built for local analysis and portable artifacts. Its intended
-HTML output is self-contained and usable from `file://`; a hosted service is
-not required to explore a graph.
-
-## Initial scope
-
-The current implementation includes:
-
-- a versioned canonical Minotaur graph schema;
-- graph validation, identity, provenance, and serialization primitives;
-- a bounded native Python analyzer and selected-path CLI (currently `.py` only);
-- a self-contained HTML explorer with filters, themes, source excerpts, and
-  call-site inspection.
-
-Render an existing canonical graph with:
+Render an existing canonical graph locally with:
 
 ```bash
 minotaur visualize --input graph.json --output graph.html --source-root .
@@ -147,29 +122,10 @@ omit it when the portable artifact should contain no source text. See the
 
 The checked-in [Python workflow example](examples/python-workflow/README.md)
 analyzes the `selection` module, writes a canonical JSON graph, and renders it
-into a standalone HTML explorer. Its graph begins like this:
-
-```json
-{
-  "nodes": [
-    {"id": "node:sha256:…", "node_class": "file", "path": "src/minotaur/language_interpreter/selection.py"}
-  ],
-  "relationships": [
-    {
-      "kind": "imports",
-      "evidence": [{
-        "provenance": "static-analysis",
-        "locations": [{"path": "src/minotaur/language_interpreter/selection.py", "range": {"start": "…", "end": "…"}}]
-      }]
-    }
-  ]
-}
-```
-
-Nodes describe discovered source entities, while relationships connect them.
-Each relationship retains the static-analysis evidence and source locations
-that established it; this native-Python example contains no inferred runtime
-or curated-rule evidence.
+into a standalone HTML explorer. Browse its
+[canonical JSON graph](examples/python-workflow/minotaur-graph.json) and the
+[graph format reference](docs/formats/minotaur-graph-v1.md) for the complete
+structure and evidence model.
 
 Regenerate the example from the repository root:
 
@@ -178,14 +134,11 @@ minotaur analyze --root . --output examples/python-workflow/minotaur-graph.json 
 minotaur visualize --input examples/python-workflow/minotaur-graph.json --output examples/python-workflow/minotaur-graph.html --source-root . --force
 ```
 
-Browse the complete [canonical JSON graph](examples/python-workflow/minotaur-graph.json),
-[try the live demo](https://d10-analytics.github.io/Minotaur/), or download and
-open the [standalone HTML explorer](examples/python-workflow/minotaur-graph.html).
-The HTML is an offline `file://` artifact as well as the hosted demo: open it
-locally without starting a server or requesting external resources.
+Open the generated [standalone HTML explorer](examples/python-workflow/minotaur-graph.html)
+locally with `file://`; it does not require a server or network connection.
 
-It does not yet include C#, JavaScript, a hosted graph service, automatic
-runtime tracing, or broad compatibility with third-party graph formats.
+It does not yet include C#, JavaScript, automatic runtime tracing, or broad
+compatibility with third-party graph formats.
 
 ## Repository layout
 
@@ -203,11 +156,8 @@ tests/                     # Behavioral tests and public fixtures
 
 ## Contributing
 
-Minotaur is at the foundation stage. Before adding a language interpreter or
-visualization feature, its behavior and evidence model
-should be specified and tested against synthetic public fixtures. Contribution
-guidance will be added in `CONTRIBUTING.md` as the first implementation
-milestone takes shape.
+Before adding a language interpreter or visualization feature, specify its
+behavior and evidence model and test it against synthetic public fixtures.
 
 ## License
 
