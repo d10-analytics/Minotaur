@@ -5,8 +5,12 @@ Language-specific interpreter tests live beneath ``tests/language_interpreter``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
+from minotaur import cli
+from minotaur.graph_model.loading import load_graph_file
 from minotaur.graph_model.provenance import NodeClass, RelationshipKind
 from minotaur.graph_model.validation import validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
@@ -72,6 +76,38 @@ def test_python_interpreter_establishes_containment_imports_and_direct_calls(
     )
     assert call.evidence[0].locations[0].path == "app.py"
     assert call.evidence[0].locations[0].range.start.line == 7
+
+
+def test_cli_records_file_content_hashes_and_root_relative_selection(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    _write(root, "z.py", "z = 1\n")
+    _write(root, "a.py", "a = 1\n")
+    output = tmp_path / "graph.json"
+
+    assert (
+        cli.main(
+            [
+                "analyze",
+                "--root",
+                str(root),
+                "--output",
+                str(output),
+                str(root / "z.py"),
+                str(root / "a.py"),
+            ]
+        )
+        == 0
+    )
+
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert graph["extensions"] == {"minotaur": {"selection": ["a.py", "z.py"]}}
+    for node in graph["nodes"]:
+        if node["node_class"] == "file":
+            digest = hashlib.sha256((root / node["path"]).read_bytes()).hexdigest()
+            assert node["extensions"]["minotaur-python"]["content_sha256"] == digest
+
+    loaded = load_graph_file(output)
+    assert loaded.canonical == graph
 
 
 def test_dynamic_and_missing_imports_are_explicit_unresolved_references(tmp_path: Path) -> None:
