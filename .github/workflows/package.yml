@@ -25,4 +25,5 @@ jobs:
       - name: Verify importable
         run: |
           . .venv/bin/activate
-          python3 -c "from minotaur.graph_model.loading import schema; assert schema()['$id'] == 'urn:minotaur:schemas:minotaur-graph:0.1.0'"
+          # Preserve the JSON Schema key for Python; an unescaped $id is a shell variable.
+          python3 -c "from minotaur.graph_model.loading import schema; assert schema()['\$id'] == 'urn:minotaur:schemas:minotaur-graph:0.1.0'"
