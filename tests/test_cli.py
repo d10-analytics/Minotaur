@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -157,9 +158,12 @@ def test_output_preflight_and_module_console_entry_points_match(tmp_path: Path) 
     refused = _run(root, output, root)
     collision = _run(root, source, source, force=True)
     replaced = _run(root, output, root, force=True)
+    console_script = shutil.which("minotaur")
+    if console_script is None:
+        pytest.skip("minotaur console script is not installed")
     console = subprocess.run(
         [
-            str(Path(sys.executable).with_name("minotaur")),
+            console_script,
             "analyze",
             "--root",
             str(root),
