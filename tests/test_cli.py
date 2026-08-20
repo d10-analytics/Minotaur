@@ -44,6 +44,16 @@ def _paths(output: Path) -> set[str]:
     return {node["path"] for node in graph["nodes"] if node["node_class"] == "file"}
 
 
+def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_selected_mixed_targets_are_deduplicated_and_leave_unselected_imports_unresolved(
     tmp_path: Path,
 ) -> None:
@@ -222,6 +232,37 @@ def test_analyze_skips_clean_graph_with_duplicate_targets(tmp_path: Path) -> Non
     assert repeated.returncode == 0, repeated.stderr
     assert "graph is up to date, skipping analysis" in repeated.stderr
     assert output.stat().st_mtime_ns == before
+
+
+def test_analyze_records_git_snapshot_and_omits_it_for_non_git_root(tmp_path: Path) -> None:
+    git_root = tmp_path / "git-source"
+    _write(git_root, "app.py", "def app():\n    return 1\n")
+    assert _git(git_root, "init").returncode == 0
+    assert _git(git_root, "config", "user.email", "tests@example.invalid").returncode == 0
+    assert _git(git_root, "config", "user.name", "Minotaur Tests").returncode == 0
+    assert _git(git_root, "add", "app.py").returncode == 0
+    assert _git(git_root, "commit", "-m", "initial").returncode == 0
+    expected_commit = _git(git_root, "rev-parse", "HEAD").stdout.strip()
+    expected_branch = _git(git_root, "branch", "--show-current").stdout.strip()
+
+    git_output = tmp_path / "git-graph.json"
+    git_result = _run(git_root, git_output, git_root)
+
+    non_git_root = tmp_path / "plain-source"
+    _write(non_git_root, "app.py", "def app():\n    return 1\n")
+    non_git_output = tmp_path / "plain-graph.json"
+    non_git_result = _run(non_git_root, non_git_output, non_git_root)
+
+    assert git_result.returncode == 0, git_result.stderr
+    git_graph = json.loads(git_output.read_text(encoding="utf-8"))
+    assert git_graph["source_control"] == {
+        "system": "git",
+        "commit": expected_commit,
+        "branch": expected_branch,
+    }
+    assert non_git_result.returncode == 0, non_git_result.stderr
+    non_git_graph = json.loads(non_git_output.read_text(encoding="utf-8"))
+    assert "source_control" not in non_git_graph
 
 
 def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_file(
