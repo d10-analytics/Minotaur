@@ -323,3 +323,39 @@ def test_load_argument_in_nested_call_func_is_still_a_reference(tmp_path: Path) 
     )
     assert location.range.start.line == 6
     assert location.range.start.character == 8
+
+
+def test_decorator_load_references_resolve_for_module_and_direct_method_scopes(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "decorators.py", "def handler(target):\n    return target\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import decorators as pkg\n\n"
+        "@pkg.handler\n"
+        "def decorated():\n    return 1\n\n"
+        "class Runner:\n"
+        "    @pkg.handler\n"
+        "    def run(self):\n"
+        "        return 1\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    decorated = _node_id(result, "app.decorated")
+    run = _node_id(result, "app.Runner.run")
+    handler = _node_id(result, "decorators.handler")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (decorated, handler, RelationshipKind.REFERENCES.value) in relationships
+    assert (run, handler, RelationshipKind.REFERENCES.value) in relationships
+    assert (decorated, handler, RelationshipKind.CALLS.value) not in relationships
+    assert (run, handler, RelationshipKind.CALLS.value) not in relationships
+
+    decorated_location = relationships[(decorated, handler, RelationshipKind.REFERENCES.value)]
+    assert decorated_location.evidence[0].locations[0].range.start.line == 2
+    method_location = relationships[(run, handler, RelationshipKind.REFERENCES.value)]
+    assert method_location.evidence[0].locations[0].range.start.line == 7
