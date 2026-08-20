@@ -1,0 +1,29 @@
+name: visualizer browser
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  chromium-file-artifact:
+    name: "Chromium file artifact"
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install visualizer test dependencies
+        run: |
+          rm -rf .venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python3 -m pip install --upgrade pip
+          pip install -e ".[dev,visualizer]"
+          python3 -m playwright install chromium
+
+      - name: Exercise generated file artifact
+        run: |
+          . .venv/bin/activate
+          python3 -m pytest tests/test_visualizer_browser.py -v

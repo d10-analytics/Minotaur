@@ -22,8 +22,9 @@ grouping. A tested Python analyzer and language-neutral selected-path CLI are
 also available; current structural facts and limits are described in the
 [Python analysis guide](docs/guides/analyze-python.md).
 
-There is not yet a visualizer. The first end-user release will pair native
-Python analysis with a self-contained interactive HTML visualizer.
+The current release includes a self-contained interactive HTML visualizer.
+It opens directly from `file://`, keeps graph strings out of HTML markup, and
+never requests a network resource.
 
 ## What Minotaur will do
 
@@ -63,10 +64,10 @@ experience. The first target is a single self-contained HTML file that opens
 locally without a server and supports:
 
 - zooming and panning;
-- node-kind and relationship-provenance filters;
+- node-class and relationship-kind filters;
 - symbol and label search;
-- node details, source locations, and connected relationships;
-- visual distinction between evidence types; and
+- persistent node and edge details, source locations, and connected relationships;
+- visual distinction between relationship kinds; and
 - switchable graph layout direction.
 
 Static formats such as DOT and SVG are planned alongside the interactive view.
@@ -119,9 +120,59 @@ The current implementation includes:
 - graph validation, identity, provenance, and serialization primitives;
 - a bounded native Python analyzer and selected-path CLI (currently `.py` only).
 
-It does not yet include a visualizer, C#,
-JavaScript, a hosted graph service, automatic runtime tracing, or broad
-compatibility with third-party graph formats.
+Render an existing canonical graph with:
+
+```bash
+minotaur visualize --input graph.json --output graph.html --source-root .
+```
+
+`--source-root` is optional. When supplied, the artifact embeds only the source
+spans needed for relationship evidence and never follows an escaping symlink;
+omit it when the portable artifact should contain no source text. See the
+[HTML visualization guide](docs/guides/customize-html-visualization.md).
+
+## End-to-end example
+
+The checked-in [Python workflow example](examples/python-workflow/README.md)
+analyzes the `selection` module, writes a canonical JSON graph, and renders it
+into a standalone HTML explorer. Its graph begins like this:
+
+```json
+{
+  "nodes": [
+    {"id": "node:sha256:…", "node_class": "file", "path": "src/minotaur/cli.py"}
+  ],
+  "relationships": [
+    {
+      "kind": "imports",
+      "evidence": [{
+        "provenance": "static-analysis",
+        "locations": [{"path": "src/minotaur/cli.py", "range": {"start": "…", "end": "…"}}]
+      }]
+    }
+  ]
+}
+```
+
+Nodes describe discovered source entities, while relationships connect them.
+Each relationship retains the static-analysis evidence and source locations
+that established it; this native-Python example contains no inferred runtime
+or curated-rule evidence.
+
+Regenerate the example from the repository root:
+
+```bash
+minotaur analyze --root . --output examples/python-workflow/minotaur-graph.json --force src/minotaur
+minotaur visualize --input examples/python-workflow/minotaur-graph.json --output examples/python-workflow/minotaur-graph.html --source-root . --force
+```
+
+Browse the complete [canonical JSON graph](examples/python-workflow/minotaur-graph.json)
+or download and open the [standalone HTML explorer](examples/python-workflow/minotaur-graph.html).
+The HTML is an offline `file://` artifact, not a hosted page: open it locally
+without starting a server or requesting external resources.
+
+It does not yet include C#, JavaScript, a hosted graph service, automatic
+runtime tracing, or broad compatibility with third-party graph formats.
 
 ## Repository layout
 
