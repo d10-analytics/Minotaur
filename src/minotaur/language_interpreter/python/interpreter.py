@@ -301,8 +301,21 @@ def _analyze_module(
                 declarations[f"{module.name}.{statement.name}"],
                 relationships,
                 nodes,
+                prefix_nodes=tuple(statement.decorator_list),
             )
         elif isinstance(statement, ast.ClassDef):
+            _calls(
+                [],
+                declarations,
+                aliases,
+                module.name,
+                module.path,
+                declarations[f"{module.name}.{statement.name}"],
+                relationships,
+                nodes,
+                statement.name,
+                prefix_nodes=tuple(statement.decorator_list),
+            )
             for member in statement.body:
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     _calls(
@@ -315,6 +328,7 @@ def _analyze_module(
                         relationships,
                         nodes,
                         statement.name,
+                        prefix_nodes=tuple(member.decorator_list),
                     )
 
 
@@ -407,8 +421,11 @@ def _calls(
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
     class_name: str | None = None,
+    prefix_nodes: tuple[ast.AST, ...] = (),
 ) -> None:
     visitor = _ScopeCallVisitor()
+    for node in prefix_nodes:
+        visitor.visit(node)
     for statement in statements:
         visitor.visit(statement)
     for candidate in visitor.calls:
