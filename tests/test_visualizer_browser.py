@@ -260,6 +260,13 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
         assert page.locator("#detail").bounding_box()["width"] >= starting_width + 75
         page.keyboard.press("Escape")
         assert "Select a node or edge" in page.locator("#detail-content").inner_text()
+        # Recalculate screen coordinates after the flex layout changes. This
+        # fails if Cytoscape still translates pointer input using its old canvas
+        # bounds, which is the offset-selection regression this test guards.
+        resized_edge = _click_visible_edge_and_show_details(page)
+        assert resized_edge["kind"] in page.locator("#detail-content").inner_text()
+        resized_node = _click_connected_node_and_show_details(page)
+        assert resized_node["label"] in page.locator("#detail-content").inner_text()
         page.reload()
         assert page.locator("#theme-mode").input_value() == "system"
         browser.close()
