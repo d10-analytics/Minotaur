@@ -10,7 +10,11 @@ from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
 
+from minotaur.graph_model.loading import GraphLoadError, load_graph_file
 from minotaur.graph_model.serialization import serialize
+from minotaur.graph_visualizer.html.render import render_html
+from minotaur.graph_visualizer.presentation import build_presentation
+from minotaur.graph_visualizer.source import prepare_excerpts
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
 from minotaur.language_interpreter.registry import InterpreterRegistration, default_registry
 from minotaur.language_interpreter.selection import SelectionError, select_sources
@@ -27,6 +31,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = _parser()
     arguments = parser.parse_args(argv)
+    if arguments.command == "visualize":
+        return _visualize(arguments)
     if arguments.command != "analyze":  # pragma: no cover - argparse enforces this.
         parser.error("a command is required")
 
@@ -59,7 +65,38 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument("--output", required=True, help="destination graph JSON file")
     analyze.add_argument("--force", action="store_true", help="replace an existing output file")
     analyze.add_argument("targets", nargs="+", metavar="TARGET", help="source files or directories")
+    visualize = commands.add_parser(
+        "visualize", help="render a portable interactive graph HTML file"
+    )
+    visualize.add_argument("--input", required=True, help="canonical Minotaur graph JSON file")
+    visualize.add_argument("--output", required=True, help="destination HTML file")
+    visualize.add_argument("--source-root", help="optional source root for embedded excerpts")
+    visualize.add_argument("--force", action="store_true", help="replace an existing output file")
     return parser
+
+
+def _visualize(arguments: argparse.Namespace) -> int:
+    """Load a verified graph and write a self-contained visualizer atomically.
+
+    Visualization deliberately reuses the graph-loading boundary instead of
+    accepting convenient partial JSON. A polished interactive display lends
+    input credibility, so it must never be the first consumer to relax the
+    canonical graph contract.
+    """
+    input_path = Path(arguments.input)
+    try:
+        loaded = load_graph_file(input_path)
+        output = _preflight_output(Path(arguments.output), (input_path.resolve(),), arguments.force)
+        source_root = Path(arguments.source_root) if arguments.source_root is not None else None
+        excerpts = prepare_excerpts(loaded.canonical, source_root)
+        content = render_html(build_presentation(loaded.canonical, excerpts))
+        _write_atomically(output, content)
+    except (GraphLoadError, OSError, ValueError) as error:
+        _error(str(error))
+        return 2
+    if len(content) > 10 * 1024 * 1024:
+        print("minotaur: warning: embedded visualizer exceeds 10 MiB", file=sys.stderr)
+    return 0
 
 
 def _preflight_output(output: Path, files: tuple[Path, ...], force: bool) -> Path:

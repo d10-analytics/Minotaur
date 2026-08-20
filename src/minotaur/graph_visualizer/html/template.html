@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minotaur graph</title>
+<style>/*__VIEWER_CSS__*/</style>
+</head>
+<body>
+
+<div id="controls">
+  <div class="group">
+    <input type="text" id="search" placeholder="Search symbols...">
+  </div>
+  <div class="group" id="kind-filters">
+    <span class="group-label">Nodes</span>
+  </div>
+  <div class="group" id="edge-filters">
+    <span class="group-label">Edges</span>
+  </div>
+  <div class="group">
+    <span class="group-label">Scroll Sensitivity</span>
+    <input type="range" id="zoom-speed" min="1" max="25" value="5" step="1">
+  </div>
+  <div class="group">
+    <button class="btn" id="btn-direction">TB</button>
+    <button class="btn" id="btn-fit">Reset View</button>
+  </div>
+</div>
+
+<div id="main">
+  <div id="detail">
+    <div id="detail-content"></div>
+  </div>
+  <div id="detail-resize" role="separator" aria-label="Resize details panel"
+       aria-orientation="vertical" aria-valuemin="240" tabindex="0"></div>
+  <div id="cy" aria-label="Interactive software graph"></div>
+  <div id="tooltip"></div>
+</div>
+
+<script>/*__CYTOSCAPE__*/</script>
+<script>/*__CYTOSCAPE_DAGRE__*/</script>
+<script id="minotaur-presentation" type="application/json">/*__PRESENTATION__*/</script>
+<script>/*__VIEWER_JS__*/</script>
+</body>
+</html>

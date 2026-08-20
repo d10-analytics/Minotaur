@@ -1,0 +1,293 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #f5f5f0;
+  --surface: #ffffff;
+  --text: #1a1a1a;
+  --text-muted: #666660;
+  --border: #d4d4cc;
+  --control-bg: #2b2b2b;
+  --control-text: #e0e0dc;
+  --control-muted: #9a9a94;
+  --accent: #4a7c59;
+  --detail-bg: #fafaf6;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#controls {
+  background: var(--control-bg);
+  color: var(--control-text);
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  font-size: 12px;
+  border-bottom: 1px solid #444;
+}
+
+#controls .group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#controls .group-label {
+  color: var(--control-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+#controls label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#controls input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+#kind-filters input[type="checkbox"],
+#edge-filters input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 2px solid var(--kind-border);
+  background: var(--kind-bg);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+}
+
+#kind-filters input[type="checkbox"]:checked::after,
+#edge-filters input[type="checkbox"]:checked::after {
+  content: '\2713';
+  position: absolute;
+  top: -2px;
+  left: 1px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--kind-border);
+  line-height: 1;
+}
+
+#search {
+  background: #3a3a3a;
+  border: 1px solid #555;
+  color: var(--control-text);
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  width: 180px;
+  font-family: inherit;
+}
+#search::placeholder { color: var(--control-muted); }
+#search:focus { outline: none; border-color: var(--accent); }
+
+.btn {
+  background: #3a3a3a;
+  border: 1px solid #555;
+  color: var(--control-text);
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.btn:hover { background: #4a4a4a; }
+#btn-direction { font-size: 16px; line-height: 1; }
+
+#zoom-speed {
+  width: 80px;
+  height: 4px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+#main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+
+#cy {
+  flex: 1;
+  background: var(--bg);
+  min-height: 0;
+}
+
+#detail {
+  width: 300px;
+  min-width: 240px;
+  max-width: 50vw;
+  background: var(--detail-bg);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 16px;
+  /* The panel owns a real, stable column: shrinking it with the canvas would
+     defeat the resize affordance and reintroduce popover-like text clipping. */
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+#detail-resize {
+  /* This is a full-height target rather than a corner grip so users can resize
+     from any vertical position, including beside long details. */
+  width: 8px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 1;
+}
+
+#detail-resize::after {
+  content: '';
+  display: block;
+  width: 2px;
+  height: 100%;
+  margin: 0 auto;
+  background: transparent;
+}
+
+#detail-resize:hover::after,
+#detail-resize.dragging::after,
+#detail-resize:focus-visible::after {
+  background: var(--accent);
+}
+
+#detail-resize:focus-visible { outline: none; }
+
+#detail h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  word-break: break-word;
+}
+
+#detail .empty-state {
+  color: var(--text-muted);
+}
+
+#detail .kind-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+#detail .field { margin-bottom: 8px; }
+
+#detail .field-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 1px;
+}
+
+#detail .field-value {
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+#detail a {
+  color: var(--accent);
+  text-decoration: none;
+}
+#detail a:hover { text-decoration: underline; }
+
+#detail .edges-list {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+#detail .edge-item {
+  /* Relation and target intentionally occupy separate rows. Long qualified
+     names therefore wrap within the current panel width instead of widening it. */
+  display: grid;
+  gap: 1px;
+  font-size: 12px;
+  padding: 5px 0;
+  color: var(--text-muted);
+}
+#detail .edge-item .edge-type {
+  font-weight: 600;
+  color: var(--text);
+}
+#detail .edge-item .edge-target {
+  overflow-wrap: anywhere;
+}
+
+.site-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.site-tab {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 2px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 600;
+  min-width: 28px;
+  text-align: center;
+}
+.site-tab:hover { background: var(--border); }
+.site-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+#tooltip {
+  position: absolute;
+  background: rgba(30,30,30,0.92);
+  color: #e0e0dc;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace;
+  pointer-events: none;
+  display: none;
+  max-width: 400px;
+  word-break: break-word;
+  line-height: 1.4;
+  z-index: 100;
+}
