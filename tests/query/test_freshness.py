@@ -34,9 +34,7 @@ def _analyze(root: Path, output: Path, *targets: Path) -> int:
     )
 
 
-def _query_definitions(
-    root: Path, output: Path, *, no_refresh: bool = False
-) -> int:
+def _query_definitions(root: Path, output: Path, *, no_refresh: bool = False) -> int:
     arguments = [
         "query",
         "definitions",
@@ -182,9 +180,7 @@ def test_public_query_refresh_removes_deleted_and_adds_directory_selection_files
     removed_graph = json.loads(output.read_text(encoding="utf-8"))
 
     assert removed.out == "no definitions\n"
-    assert not any(
-        node.get("path") == "pkg/deleted.py" for node in removed_graph["nodes"]
-    )
+    assert not any(node.get("path") == "pkg/deleted.py" for node in removed_graph["nodes"])
 
     _write(root, "pkg/added.py", "def foo():\n    return 2\n")
     assert _query_definitions(root, output) == 0
