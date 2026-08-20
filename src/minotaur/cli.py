@@ -22,6 +22,11 @@ from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
 from minotaur.language_interpreter.registry import InterpreterRegistration, default_registry
 from minotaur.language_interpreter.selection import SelectionError, select_sources
 from minotaur.language_interpreter.workspace import Workspace
+from minotaur.query.diff import (
+    diff as compare_graphs,
+    render_json as render_diff_json,
+    render_text as render_diff_text,
+)
 from minotaur.query.freshness import Drift, drift, recorded_selection
 from minotaur.query.impact import (
     impact,
@@ -174,6 +179,17 @@ def _query_skeleton(arguments: argparse.Namespace) -> int:
         query = _query_parser().parse_args(arguments.query_args)
     except SystemExit:
         return 2
+    if query.name == "diff":
+        try:
+            old = load_graph_file(Path(query.old)).document
+            new = load_graph_file(Path(query.new)).document
+            result = compare_graphs(old, new)
+            output = render_diff_json(result) if query.json else render_diff_text(result)
+            print(output, end="")
+            return 0
+        except (GraphLoadError, OSError, ValueError) as error:
+            _error(str(error))
+            return 2
     try:
         document, diagnostics, _ = _load_and_refresh_graph(
             Path(query.graph), Path(query.root).resolve(), query.no_refresh
@@ -249,6 +265,10 @@ def _query_parser() -> argparse.ArgumentParser:
     unreferenced_parser.add_argument("--exclude", action="append", default=[])
     unreferenced_parser.add_argument("--exclude-file", type=Path)
     unreferenced_parser.add_argument("--text-fallback", action="store_true")
+    diff_parser = commands.add_parser("diff", help="compare two analyzed graph snapshots")
+    diff_parser.add_argument("old", metavar="OLD")
+    diff_parser.add_argument("new", metavar="NEW")
+    diff_parser.add_argument("--json", action="store_true", help="emit stable JSON records")
     for command in (callers_parser, definitions_parser, impact_parser, unreferenced_parser):
         command.add_argument("--graph", required=True, help="analyzed graph JSON file")
         command.add_argument("--root", required=True, help="source root used for freshness checks")
