@@ -214,3 +214,51 @@ def test_module_callback_reference_is_resolved_without_misclassifying_calls(
     assert location.path == "app.py"
     assert location.range.start.line == 9
     assert location.range.start.character == 9
+
+
+def test_attribute_and_nested_load_references_preserve_call_and_unresolved_boundaries(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def handler():\n    return 1\n\n"
+        "class Runner:\n"
+        "    def on_click(self):\n        return 1\n\n"
+        "    def on_callback(self):\n        return 1\n\n"
+        "    def configure(self):\n"
+        "        self.on_click()\n"
+        "        callbacks = [self.on_callback, handler]\n"
+        "        def nested():\n"
+        "            return handler\n"
+        "        missing = unknown\n"
+        "        missing_attr = unknown.attr\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    configure = _node_id(result, "app.Runner.configure")
+    on_click = _node_id(result, "app.Runner.on_click")
+    on_callback = _node_id(result, "app.Runner.on_callback")
+    handler = _node_id(result, "app.handler")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (configure, on_click, RelationshipKind.CALLS.value) in relationships
+    assert (configure, on_click, RelationshipKind.REFERENCES.value) not in relationships
+    assert (configure, on_callback, RelationshipKind.REFERENCES.value) in relationships
+    assert (configure, on_callback, RelationshipKind.CALLS.value) not in relationships
+    assert (configure, handler, RelationshipKind.REFERENCES.value) in relationships
+    handler_locations = relationships[
+        (configure, handler, RelationshipKind.REFERENCES.value)
+    ].evidence[0].locations
+    assert {location.range.start.line for location in handler_locations} == {12, 14}
+
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert "unknown" not in unresolved
+    assert "unknown.attr" not in unresolved
