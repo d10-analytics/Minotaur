@@ -52,10 +52,26 @@ class _ScopeCallVisitor(ast.NodeVisitor):
 
     def __init__(self) -> None:
         self.calls: list[ast.Call] = []
+        self.references: list[ast.Name | ast.Attribute] = []
+        self._call_func_depth = 0
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
-        self.generic_visit(node)
+        # The callable expression is represented by the calls relationship;
+        # only its arguments can contribute independent references. Keep
+        # traversing the callable expression so nested calls are preserved,
+        # while suppressing loads from that expression.
+        self._call_func_depth += 1
+        self.visit(node.func)
+        self._call_func_depth -= 1
+        for argument in node.args:
+            self.visit(argument)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
+            self.references.append(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self.generic_visit(node)
@@ -72,6 +88,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 self.visit(statement)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
+            self.references.append(node)
         self.generic_visit(node)
 
 
@@ -391,6 +412,17 @@ def _calls(
             _unresolved(caller, text, location, relationships, nodes)
         else:
             _append(relationships, caller, target, RelationshipKind.CALLS.value, location)
+    for reference in visitor.references:
+        text = _expression_text(reference)
+        target = _resolve_call(text, declarations, aliases, module_name, class_name)
+        if target is not None:
+            _append(
+                relationships,
+                caller,
+                target,
+                RelationshipKind.REFERENCES.value,
+                _location(path, reference),
+            )
 
 
 def _resolve_call(
