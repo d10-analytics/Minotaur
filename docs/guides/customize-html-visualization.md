@@ -38,7 +38,9 @@ The named modes use the published [Catppuccin palette](https://catppuccin.com/pa
 [Solarized palette](https://ethanschoonover.com/solarized/) as design sources.
 
 When a source root is available, the artifact embeds only the merged evidence
-spans plus up to 50 lines of surrounding context; omit `--source-root` when
+spans plus up to 50 lines of surrounding context; `calls` edges also retain
+their call-site associations and, when known, the caller start for the
+viewer’s two context modes. Omit `--source-root` when
 the downloaded file must contain no source text. Missing, unreadable,
 non-UTF-8, and escaping-symlink paths are not embedded. The command warns,
 while still writing successfully, when the artifact exceeds 10 MiB.

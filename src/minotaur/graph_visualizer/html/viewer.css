@@ -386,6 +386,56 @@ body {
   color: #fff;
 }
 
+/* These controls live in the persistent detail pane, so they deliberately
+   inherit the active theme instead of looking like browser-default widgets. */
+#detail select {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  padding: 4px;
+}
+
+.excerpt-origin, .excerpt-unavailable {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin: 10px 0;
+}
+
+.excerpt-unavailable {
+  border-left: 3px solid var(--border);
+  padding-left: 8px;
+}
+
+/* Cap only the code region, not the details panel: readers can inspect a long
+   window without losing the selected site, provenance, or context controls. */
+.code-excerpt {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 420px;
+  overflow: auto;
+}
+
+/* Keep numbers and whitespace-aligned code on one horizontal row; overflow is
+   intentional because wrapping would change the apparent source structure. */
+.code-line { display: flex; min-width: max-content; }
+.code-number {
+  color: var(--text-muted);
+  min-width: 4.5em;
+  padding: 0 8px;
+  text-align: right;
+  user-select: none;
+}
+.code-text { padding-right: 10px; white-space: pre; }
+/* A translucent theme accent draws attention without obscuring source text. */
+.call-site-highlight { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+.code-gap { color: var(--text-muted); font-style: italic; padding: 2px 8px; }
+
 #tooltip {
   position: absolute;
   background: var(--tooltip-bg);

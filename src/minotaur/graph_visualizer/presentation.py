@@ -33,5 +33,8 @@ def build_presentation(
         "node_classes": node_classes,
         "relationship_kinds": relationship_kinds,
         "provenance": provenance,
-        "excerpts": dict(excerpts or {}),
+        # Give the self-contained viewer a stable empty shape when callers do
+        # not request source loading, avoiding a UI-only special case while
+        # keeping the canonical ``graph`` payload source-free.
+        "excerpts": dict(excerpts or {"paths": {}, "call_sites": {}}),
     }

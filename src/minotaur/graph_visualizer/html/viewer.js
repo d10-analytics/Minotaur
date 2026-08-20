@@ -2,6 +2,10 @@
   "use strict";
   var payload = JSON.parse(document.getElementById("minotaur-presentation").textContent);
   var graph = payload.graph;
+  // Excerpts are deliberately a separate presentation concern: graph JSON
+  // remains portable structural evidence even when no source root is trusted.
+  var excerptPaths = (payload.excerpts && payload.excerpts.paths) || {};
+  var callSiteAssociations = (payload.excerpts && payload.excerpts.call_sites) || {};
   var byId = new Map(graph.nodes.map(function (n) { return [n.id, n]; }));
   var layoutDir = "TB";
   var themeModeEl = document.getElementById("theme-mode");
@@ -115,7 +119,11 @@
     var colors = edgeColors(rel.kind);
     elements.push({ group: "edges", data: {
       id: "edge-" + i, source: rel.source, target: rel.target,
-      kind: rel.kind, provenance: provenance, evidence: rel.evidence, edge_color: colors.border
+      kind: rel.kind, provenance: provenance, evidence: rel.evidence,
+      // The extractor keys associations by canonical relationship index. Copy
+      // them onto the interactive edge so later rendering never has to infer
+      // call-site ownership from potentially duplicate evidence locations.
+      call_sites: callSiteAssociations[String(i)] || [], edge_color: colors.border
     }});
   });
 
@@ -362,6 +370,86 @@
     return locs;
   }
 
+  function physicalLocationKey(loc) {
+    var r = loc.range;
+    return loc.path + "|" + r.start.line + ":" + r.start.character + "-" + r.end.line + ":" + r.end.character;
+  }
+
+  function callSitesForEdge(d) {
+    // Evidence records may independently support the same physical call. The
+    // selector represents a location a reader can inspect, not each producer's
+    // record, while provenance remains visible as the reason it is supported.
+    var sites = new Map();
+    (d.call_sites || []).forEach(function (association) {
+      var key = physicalLocationKey(association.location);
+      var site = sites.get(key);
+      if (!site) {
+        site = { location: association.location, provenance: [], caller_start: association.caller_start };
+        sites.set(key, site);
+      }
+      if (site.provenance.indexOf(association.provenance) === -1) {
+        site.provenance.push(association.provenance);
+      }
+      if (site.caller_start === undefined && association.caller_start !== undefined) {
+        site.caller_start = association.caller_start;
+      }
+    });
+    return Array.from(sites.values());
+  }
+
+  function excerptLines(path, start, end) {
+    var excerpt = excerptPaths[path];
+    if (!excerpt || excerpt.status !== "available") return null;
+    var rows = [];
+    var cursor = start;
+    // The extractor merges stored spans to avoid duplicate source bytes. Build
+    // display rows from that sparse representation instead of assuming the
+    // requested window is continuous; explicit gap rows prevent false context.
+    excerpt.spans.forEach(function (span) {
+      var spanStart = span.start;
+      var spanEnd = span.start + span.lines.length;
+      var from = Math.max(start, spanStart);
+      var to = Math.min(end, spanEnd);
+      if (from >= to) return;
+      if (from > cursor) rows.push({ omitted: true, start: cursor, end: from });
+      for (var line = from; line < to; line += 1) {
+        rows.push({ line: line, text: span.lines[line - spanStart] });
+      }
+      cursor = to;
+    });
+    if (cursor < end) rows.push({ omitted: true, start: cursor, end: end });
+    return rows;
+  }
+
+  function renderCallSite(site, mode) {
+    var location = site.location;
+    var range = location.range;
+    var excerpt = excerptPaths[location.path];
+    var html = '<div class="field"><div class="field-label">Location</div><div class="field-value">' + escHtml(locationLabel(location)) + '</div></div>';
+    html += '<div class="field"><div class="field-label">Supporting provenance</div><div class="field-value">' + escHtml(site.provenance.join(", ")) + '</div></div>';
+    html += '<div class="excerpt-origin">Derived from the source root at visualization time; it may not match the graph analysis snapshot.</div>';
+    if (!excerpt || excerpt.status !== "available") {
+      html += '<div class="excerpt-unavailable">Source context unavailable: ' + escHtml(excerpt ? excerpt.reason : "no excerpt was embedded") + '</div>';
+      return html;
+    }
+    // The default is bounded in both directions. Prefix mode is only offered
+    // when extraction established a real enclosing caller boundary.
+    var start = mode === "caller" ? site.caller_start : Math.max(0, range.start.line - 50);
+    var end = mode === "caller" ? range.end.line + 1 : range.end.line + 51;
+    var rows = excerptLines(location.path, start, end);
+    html += '<div class="code-excerpt" aria-label="Source excerpt">';
+    rows.forEach(function (row) {
+      if (row.omitted) {
+        html += '<div class="code-gap">… lines ' + (row.start + 1) + '–' + row.end + ' omitted …</div>';
+      } else {
+        var highlighted = row.line >= range.start.line && row.line <= range.end.line;
+        html += '<div class="code-line' + (highlighted ? ' call-site-highlight' : '') + '"><span class="code-number">' + (row.line + 1) + '</span><span class="code-text">' + escHtml(row.text) + '</span></div>';
+      }
+    });
+    html += '</div>';
+    return html;
+  }
+
   function clearDetail() {
     selectedElement = null;
     detailContent.innerHTML = '<div class="empty-state"><h3>Details</h3><p>Select a node or edge to inspect it.</p></div>';
@@ -513,6 +601,7 @@
     var srcLabel = e.source().data("label");
     var tgtLabel = e.target().data("label");
     var locs = collectLocations(d.evidence);
+    var sites = d.kind === "calls" ? callSitesForEdge(d) : [];
 
     var html = badgeHtml(d.kind, c);
     html += '<h3>' + escHtml(srcLabel) + ' → ' + escHtml(tgtLabel) + '</h3>';
@@ -520,7 +609,16 @@
     html += '<div class="field"><div class="field-label">Provenance</div>';
     html += '<div class="field-value">' + escHtml(d.provenance) + '</div></div>';
 
-    if (locs.length === 0) {
+    if (d.kind === "calls" && sites.length > 0) {
+      html += '<div class="field"><div class="field-label">Call sites (' + sites.length + ')</div>';
+      html += '<select id="call-site-select" aria-label="Call sites">';
+      sites.forEach(function (site, i) {
+        html += '<option value="' + i + '">' + (i + 1) + '. ' + escHtml(locationLabel(site.location)) + '</option>';
+      });
+      html += '</select></div>';
+      html += '<div class="field"><div class="field-label">Context mode</div><select id="context-mode" aria-label="Context mode"></select></div>';
+      html += '<div id="call-site-detail"></div>';
+    } else if (locs.length === 0) {
       html += '<div class="field"><div class="field-label">Location</div>';
       html += '<div class="field-value">No source location available</div></div>';
     } else if (locs.length === 1) {
@@ -540,7 +638,34 @@
 
     detailContent.innerHTML = html;
 
-    if (locs.length > 1) {
+    if (sites.length > 0) {
+      var siteSelect = document.getElementById("call-site-select");
+      var modeSelect = document.getElementById("context-mode");
+      var siteDetail = document.getElementById("call-site-detail");
+      function updateSite() {
+        var site = sites[Number(siteSelect.value)];
+        modeSelect.innerHTML = '<option value="window">Call-site window</option>';
+        if (site.caller_start !== undefined) {
+          modeSelect.innerHTML += '<option value="caller">Caller start → call</option>';
+        }
+        siteDetail.innerHTML = renderCallSite(site, modeSelect.value);
+        // Wait until the new code rows have layout before scrolling; otherwise
+        // a newly selected site can remain off-screen in a long excerpt.
+        window.requestAnimationFrame(function () {
+          var highlighted = siteDetail.querySelector(".call-site-highlight");
+          if (highlighted) highlighted.scrollIntoView({ block: "center" });
+        });
+      }
+      siteSelect.addEventListener("change", updateSite);
+      modeSelect.addEventListener("change", function () {
+        siteDetail.innerHTML = renderCallSite(sites[Number(siteSelect.value)], modeSelect.value);
+        window.requestAnimationFrame(function () {
+          var highlighted = siteDetail.querySelector(".call-site-highlight");
+          if (highlighted) highlighted.scrollIntoView({ block: "center" });
+        });
+      });
+      updateSite();
+    } else if (locs.length > 1) {
       var tabContainer = document.getElementById("site-tabs");
       tabContainer.addEventListener("click", function (evt) {
         var tab = evt.target.closest(".site-tab");
