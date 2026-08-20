@@ -134,7 +134,7 @@ def test_package_relative_imports_analyze_without_crashing(tmp_path: Path) -> No
     }
 
 
-def test_calls_in_nested_functions_are_not_attributed_to_the_outer_function(tmp_path: Path) -> None:
+def test_calls_in_nested_functions_are_attributed_to_the_outer_function(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "app.py",
@@ -145,7 +145,7 @@ def test_calls_in_nested_functions_are_not_attributed_to_the_outer_function(tmp_
     outer = _node_id(result, "app.outer")
     helper = _node_id(result, "app.helper")
 
-    assert (outer, helper, RelationshipKind.CALLS.value) not in {
+    assert (outer, helper, RelationshipKind.CALLS.value) in {
         (relationship.source, relationship.target, relationship.kind)
         for relationship in result.document.relationships
     }
