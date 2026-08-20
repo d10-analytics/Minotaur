@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 from collections import defaultdict
@@ -12,7 +13,7 @@ from dataclasses import replace
 from difflib import get_close_matches
 from pathlib import Path
 
-from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import GraphLoadError, load_graph_file
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_visualizer.html.render import render_html
@@ -24,7 +25,11 @@ from minotaur.language_interpreter.selection import SelectionError, select_sourc
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.diff import (
     diff as compare_graphs,
+)
+from minotaur.query.diff import (
     render_json as render_diff_json,
+)
+from minotaur.query.diff import (
     render_text as render_diff_text,
 )
 from minotaur.query.freshness import Drift, drift, recorded_selection
@@ -126,6 +131,12 @@ def _analyze_selection(
     recorded_targets = targets if metadata_targets is None else metadata_targets
     output = _preflight_output(output_path, selection.files, force)
     result = _dispatch(workspace, selection.files)
+    source_control = _git_source_control(workspace.root)
+    if source_control is not None:
+        result = replace(
+            result,
+            document=replace(result.document, source_control=source_control),
+        )
     result = replace(
         result,
         document=replace(
@@ -139,6 +150,42 @@ def _analyze_selection(
     )
     _write_atomically(output, serialize(result.document))
     return result
+
+
+def _git_source_control(root: Path) -> SourceControl | None:
+    """Return the Git snapshot metadata for ``root``, when it is available."""
+    try:
+        work_tree = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=root,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError:
+        return None
+    if work_tree.returncode != 0 or work_tree.stdout.strip() != "true":
+        return None
+
+    commit_result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    branch_result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    commit = commit_result.stdout.strip() if commit_result.returncode == 0 else None
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+    if not commit and not branch:
+        return None
+    return SourceControl(system="git", commit=commit or None, branch=branch or None)
 
 
 def _load_and_refresh_graph(
