@@ -107,8 +107,14 @@ def definitions(index: GraphIndex, bare_name: str) -> tuple[DefinitionRecord, ..
 
 def _locations(relationship: Relationship) -> tuple[Location, ...]:
     # Kept as a tiny adapter so record construction cannot accidentally expose
-    # evidence/provenance details in a query result.
-    return tuple(location for evidence in relationship.evidence for location in evidence.locations)
+    # evidence/provenance details in a query result. Multiple independent
+    # evidence records can support the same physical site, but a query hit is
+    # intentionally one line per site because the renderers omit provenance.
+    return tuple(
+        dict.fromkeys(
+            location for evidence in relationship.evidence for location in evidence.locations
+        )
+    )
 
 
 def _caller_record(
