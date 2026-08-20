@@ -33,6 +33,22 @@ def test_callers_prints_each_call_site_and_matching_unresolved_reference(
     )
     graph = tmp_path / "graph.json"
     assert _analyze(tmp_path, graph) == 0
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    target_id = next(node["id"] for node in document["nodes"] if node["label"] == "pkg.mod.target")
+    call_edge = next(
+        relationship
+        for relationship in document["relationships"]
+        if relationship["kind"] == "calls" and relationship["target"] == target_id
+    )
+    call_site = call_edge["evidence"][0]["locations"][0]
+    call_edge["evidence"].append(
+        {
+            "provenance": "imported-graph",
+            "producer": {"name": "test-fixture"},
+            "locations": [call_site],
+        }
+    )
+    graph.write_text(json.dumps(document), encoding="utf-8")
 
     status = cli.main(
         [
@@ -48,7 +64,7 @@ def test_callers_prints_each_call_site_and_matching_unresolved_reference(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
 
     assert status == 0
-    assert "use.py:3:5  use.caller\n" in captured.out
+    assert captured.out.count("use.py:3:5  use.caller\n") == 1
     assert "use.py:4:5  use.caller\n" in captured.out
     assert "use.py:5:5  unknown.target [unresolved]\n" in captured.out
 
