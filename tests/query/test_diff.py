@@ -65,4 +65,3 @@ def test_diff_keeps_unresolved_relationship_when_origin_id_relocates(
     assert payload["relationships_added"] == []
     assert payload["relationships_removed"] == []
     assert any(item["symbol"] == "mod.caller" for item in payload["relocated"])
-
