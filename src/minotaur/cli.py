@@ -23,6 +23,11 @@ from minotaur.language_interpreter.registry import InterpreterRegistration, defa
 from minotaur.language_interpreter.selection import SelectionError, select_sources
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.freshness import Drift, drift, recorded_selection
+from minotaur.query.impact import (
+    impact,
+    render_json as render_impact_json,
+    render_text as render_impact_text,
+)
 from minotaur.query.index import GraphIndex
 from minotaur.query.render import QueryRecord, render_json, render_text
 from minotaur.query.symbols import callers, definitions
@@ -160,18 +165,33 @@ def _query_skeleton(arguments: argparse.Namespace) -> int:
             Path(query.graph), Path(query.root).resolve(), query.no_refresh
         )
         index = GraphIndex.build(document)
-        records: Sequence[QueryRecord]
-        if query.name == "callers":
+        if query.name == "impact":
             if query.symbol not in index.symbols_by_label:
                 suggestions = get_close_matches(query.symbol, index.labels(), n=5, cutoff=0.0)
                 _error(_unknown_symbol_message(query.symbol, suggestions))
                 return 2
-            records = callers(index, query.symbol)
-        else:
+            records = impact(index, query.symbol, query.depth)
+            output = render_impact_json(records) if query.json else render_impact_text(records)
+        elif query.name == "callers":
+            if query.symbol not in index.symbols_by_label:
+                suggestions = get_close_matches(query.symbol, index.labels(), n=5, cutoff=0.0)
+                _error(_unknown_symbol_message(query.symbol, suggestions))
+                return 2
+            records: Sequence[QueryRecord] = callers(index, query.symbol)
+            output = (
+                render_json(query.name, records)
+                if query.json
+                else render_text(query.name, records)
+            )
+        elif query.name == "definitions":
             records = definitions(index, query.symbol)
-        output = (
-            render_json(query.name, records) if query.json else render_text(query.name, records)
-        )
+            output = (
+                render_json(query.name, records)
+                if query.json
+                else render_text(query.name, records)
+            )
+        else:
+            raise ValueError(f"unsupported query: {query.name}")
         print(output, end="")
         return 1 if diagnostics else 0
     except (GraphLoadError, OSError, ValueError) as error:
@@ -186,7 +206,10 @@ def _query_parser() -> argparse.ArgumentParser:
     callers_parser.add_argument("symbol", metavar="QUALIFIED_NAME")
     definitions_parser = commands.add_parser("definitions", help="find definitions of a bare name")
     definitions_parser.add_argument("symbol", metavar="BARE_NAME")
-    for command in (callers_parser, definitions_parser):
+    impact_parser = commands.add_parser("impact", help="find inbound calls and imports")
+    impact_parser.add_argument("symbol", metavar="QUALIFIED_NAME")
+    impact_parser.add_argument("--depth", type=int, help="maximum inbound traversal depth")
+    for command in (callers_parser, definitions_parser, impact_parser):
         command.add_argument("--graph", required=True, help="analyzed graph JSON file")
         command.add_argument("--root", required=True, help="source root used for freshness checks")
         command.add_argument(
