@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.loading import GraphLoadError, load_graph_file
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_visualizer.html.render import render_html
@@ -20,6 +21,7 @@ from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
 from minotaur.language_interpreter.registry import InterpreterRegistration, default_registry
 from minotaur.language_interpreter.selection import SelectionError, select_sources
 from minotaur.language_interpreter.workspace import Workspace
+from minotaur.query.freshness import Drift, drift, recorded_selection
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -34,29 +36,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     if arguments.command == "visualize":
         return _visualize(arguments)
+    if arguments.command == "query":
+        return _query_skeleton(arguments)
     if arguments.command != "analyze":  # pragma: no cover - argparse enforces this.
         parser.error("a command is required")
 
+    root = Path(arguments.root).resolve()
+    targets = tuple(Path(target) for target in arguments.targets)
     try:
-        workspace, selection = select_sources(
-            Path(arguments.root),
-            tuple(Path(target) for target in arguments.targets),
-            default_registry(),
-        )
-        output = _preflight_output(Path(arguments.output), selection.files, arguments.force)
-        result = _dispatch(workspace, selection.files)
-        result = replace(
-            result,
-            document=replace(
-                result.document,
-                extensions=_with_selection_extension(
-                    result.document.extensions,
-                    workspace.root,
-                    tuple(Path(target) for target in arguments.targets),
-                ),
-            ),
-        )
-        _write_atomically(output, serialize(result.document))
+        # D-11 deliberately runs before output preflight. A graph that Minotaur
+        # can load is ours to refresh after drift, while an unrelated existing
+        # file still follows the normal refusal path below.
+        refresh_force = arguments.force
+        if Path(arguments.output).exists() and not arguments.force:
+            try:
+                existing = load_graph_file(Path(arguments.output))
+            except (GraphLoadError, OSError, ValueError):
+                existing = None
+            if existing is not None:
+                current_selection = _target_selection(root, targets)
+                if (
+                    drift(existing.document, root).is_clean
+                    and recorded_selection(existing.document) == current_selection
+                ):
+                    print("minotaur: graph is up to date, skipping analysis", file=sys.stderr)
+                    return 0
+                # A valid graph with drift was previously produced by this
+                # command, so replacement is safe after the freshness check.
+                refresh_force = True
+        result = _analyze_selection(root, targets, Path(arguments.output), refresh_force)
     except (OSError, SelectionError, ValueError) as error:
         _error(str(error))
         return 2
@@ -67,6 +75,83 @@ def main(argv: Sequence[str] | None = None) -> int:
         # facts from readable files; stderr remains the human-facing summary.
         print(_format_diagnostic(diagnostic), file=sys.stderr)
     return 1 if result.diagnostics else 0
+
+
+def _analyze_selection(
+    root: Path,
+    targets: tuple[Path, ...],
+    output_path: Path,
+    force: bool,
+    metadata_targets: tuple[Path, ...] | None = None,
+) -> AnalysisResult:
+    """Analyze and atomically write one selected source set.
+
+    Both the user-facing ``analyze`` command and query freshness refreshes use
+    this function so selection, metadata, output preflight, and diagnostics
+    cannot drift between the two write paths.
+    """
+    workspace, selection = select_sources(root, targets, default_registry())
+    recorded_targets = targets if metadata_targets is None else metadata_targets
+    output = _preflight_output(output_path, selection.files, force)
+    result = _dispatch(workspace, selection.files)
+    result = replace(
+        result,
+        document=replace(
+            result.document,
+            extensions=_with_selection_extension(
+                result.document.extensions,
+                workspace.root,
+                recorded_targets,
+            ),
+        ),
+    )
+    _write_atomically(output, serialize(result.document))
+    return result
+
+
+def _load_and_refresh_graph(
+    graph_path: Path, root: Path, no_refresh: bool
+) -> tuple[GraphDocument, tuple[Diagnostic, ...], Drift]:
+    """Load a query graph, refreshing its recorded selection when stale.
+
+    Callers use the returned drift's ``paths``/``is_clean`` value for warnings
+    and exit-code selection.
+    """
+    loaded = load_graph_file(graph_path)
+    observed = drift(loaded.document, root)
+    if observed.is_clean:
+        return loaded.document, (), observed
+    if no_refresh:
+        for path in observed.paths:
+            print(f"minotaur: stale: {path}", file=sys.stderr)
+        return loaded.document, (), observed
+
+    recorded = recorded_selection(loaded.document)
+    if not recorded:
+        raise ValueError("graph has no recorded source selection; cannot refresh")
+    all_targets = tuple(root / target for target in recorded)
+    existing_targets = tuple(target for target in all_targets if target.exists())
+    result = _analyze_selection(
+        root,
+        existing_targets,
+        graph_path,
+        True,
+        metadata_targets=all_targets,
+    )
+    return result.document, result.diagnostics, observed
+
+
+def _query_skeleton(arguments: argparse.Namespace) -> int:
+    """Reserve the query command until its fixed handlers are registered."""
+    _error("query subcommands are not available")
+    return 2
+
+
+def _target_selection(root: Path, targets: tuple[Path, ...]) -> tuple[str, ...]:
+    """Normalize command targets exactly as document selection metadata."""
+    return tuple(
+        sorted(target.resolve().relative_to(root).as_posix() for target in targets)
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -84,6 +169,8 @@ def _parser() -> argparse.ArgumentParser:
     visualize.add_argument("--output", required=True, help="destination HTML file")
     visualize.add_argument("--source-root", help="optional source root for embedded excerpts")
     visualize.add_argument("--force", action="store_true", help="replace an existing output file")
+    query = commands.add_parser("query", help="query an analyzed graph")
+    query.add_argument("query_args", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -98,6 +185,8 @@ def _visualize(arguments: argparse.Namespace) -> int:
     input_path = Path(arguments.input)
     try:
         loaded = load_graph_file(input_path)
+        # D-12: a freshness guard was considered for visualize but declined;
+        # rendering need not have a source root and remains cheap to repeat.
         output = _preflight_output(Path(arguments.output), (input_path.resolve(),), arguments.force)
         source_root = Path(arguments.source_root) if arguments.source_root is not None else None
         excerpts = prepare_excerpts(loaded.canonical, source_root)
