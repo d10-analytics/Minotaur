@@ -153,9 +153,7 @@ def _query_skeleton(arguments: argparse.Namespace) -> int:
 
 def _target_selection(root: Path, targets: tuple[Path, ...]) -> tuple[str, ...]:
     """Normalize command targets exactly as document selection metadata."""
-    return tuple(
-        sorted(target.resolve().relative_to(root).as_posix() for target in targets)
-    )
+    return tuple(sorted({target.resolve().relative_to(root).as_posix() for target in targets}))
 
 
 def _parser() -> argparse.ArgumentParser:
