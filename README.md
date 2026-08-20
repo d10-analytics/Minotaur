@@ -25,11 +25,14 @@ Minotaur is in early development. Its current implementation includes:
 
 - a versioned canonical graph schema, tested graph model, and semantic validator;
 - a bounded native Python analyzer and selected-path CLI (currently `.py` only);
+- fixed agent-facing graph queries for callers, definitions, impact,
+  unreferenced symbols, snapshot diffs, and source context;
 - a self-contained HTML explorer with filters, themes, source excerpts, and
   call-site inspection.
 
 Current Python-analysis behavior and limits are described in the
-[Python analysis guide](docs/guides/analyze-python.md).
+[Python analysis guide](docs/guides/analyze-python.md). Agent-oriented graph
+navigation is documented in the [graph query guide](docs/guides/query-for-agents.md).
 
 ## Local-first and privacy-conscious
 

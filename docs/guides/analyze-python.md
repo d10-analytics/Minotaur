@@ -21,8 +21,13 @@ Repeated and overlapping targets are analyzed once.
 
 Normal recursive scans exclude hidden directories, caches, and virtual
 environments. Explicitly selecting such a file or directory includes it.
-The output parent directory must already exist. Existing outputs require
-`--force`, and an output path may never also be a selected source file.
+The output parent directory must already exist, and an output path may never
+also be a selected source file. An existing graph can be reused when the
+recorded selection is still clean: Minotaur prints
+`graph is up to date, skipping analysis` and leaves the file unchanged. Use
+`--force` to analyze and rewrite an existing graph regardless of freshness.
+When a previously generated graph has drifted, Minotaur safely replaces it
+after validating the current selection.
 
 The command writes canonical JSON atomically. It exits `0` on a clean graph,
 `1` after writing a valid partial graph with parse or source-read diagnostics,
@@ -37,18 +42,35 @@ It also records method nodes for methods declared directly in those classes.
 
 The resulting graph records containment between these declarations, resolvable
 imports within the workspace, and direct calls whose static targets it can
-resolve. Import and call relationships include source-location evidence so a
-consumer can identify the reference site that established the relationship.
+resolve. Calls and resolvable non-call name loads found inside nested functions,
+lambdas, and comprehensions are attributed to the enclosing top-level function,
+method, or module. Nested function definitions do not become separate symbol
+nodes, and methods of nested classes remain outside this slice.
+
+The interpreter also records resolvable non-call references as `references`
+relationships. For example, passing a function as `register(handler)` or
+accessing `button.clicked.connect(self.on_click)` records the resolved target
+and the load's source location. The function of a `Call` is represented by the
+`calls` relationship instead of an extra `references` relationship. An
+unresolved non-call load is omitted; unresolved calls and imports retain their
+explicit unresolved-reference nodes. This asymmetry keeps graphs useful for
+callback discovery without creating a node for every unresolved attribute
+access.
+
+Import, call, and reference relationships include source-location evidence so
+a consumer can identify the site that established the relationship.
 
 The output uses the canonical Minotaur wire contract described in the
 [Minotaur graph format reference](../formats/minotaur-graph-v1.md).
 
-For freshness checks, each file node carries the SHA-256 digest of its exact
-source bytes in the producer extension
+For freshness checks, each file node carries the lowercase SHA-256 digest of
+its exact source bytes in the producer extension
 `extensions["minotaur-python"]["content_sha256"]`. The analyze command also
 records its sorted root-relative input targets in the document extension
 `extensions["minotaur"]["selection"]`. These extensions are metadata and do
-not affect node identity or the graph format version.
+not affect node identity or the graph format version. When the root is inside
+a Git work tree, the document may also contain the current commit and branch
+in `source_control`; this is snapshot context, not a freshness substitute.
 
 ## Diagnostics and unresolved references
 
@@ -59,7 +81,9 @@ file contributes no structural facts.
 When an import is missing from the workspace, or a call cannot be resolved
 statically, the analyzer records an explicit unresolved-reference node and a
 reference relationship with source-location evidence. It does not guess a
-relationship to a likely target.
+relationship to a likely target. A query can use those unresolved references
+to preserve recall when searching for callers; see the [agent-facing query
+guide](query-for-agents.md).
 
 ## Boundaries of the current slice
 
