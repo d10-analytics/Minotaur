@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 from collections import defaultdict
@@ -12,7 +13,7 @@ from dataclasses import replace
 from difflib import get_close_matches
 from pathlib import Path
 
-from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import GraphLoadError, load_graph_file
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_visualizer.html.render import render_html
@@ -85,9 +86,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 existing = None
             if existing is not None:
                 current_selection = _target_selection(root, targets)
+                current_source_control = _git_source_control(root)
                 if (
                     drift(existing.document, root).is_clean
                     and recorded_selection(existing.document) == current_selection
+                    and current_source_control == existing.document.source_control
                 ):
                     print("minotaur: graph is up to date, skipping analysis", file=sys.stderr)
                     return 0
@@ -124,6 +127,12 @@ def _analyze_selection(
     recorded_targets = targets if metadata_targets is None else metadata_targets
     output = _preflight_output(output_path, selection.files, force)
     result = _dispatch(workspace, selection.files)
+    source_control = _git_source_control(workspace.root)
+    if source_control is not None:
+        result = replace(
+            result,
+            document=replace(result.document, source_control=source_control),
+        )
     result = replace(
         result,
         document=replace(
@@ -137,6 +146,45 @@ def _analyze_selection(
     )
     _write_atomically(output, serialize(result.document))
     return result
+
+
+def _git_source_control(root: Path) -> SourceControl | None:
+    """Return the Git snapshot metadata for ``root``, when it is available."""
+    work_tree = _run_git(root, ("rev-parse", "--is-inside-work-tree"))
+    if work_tree is None:
+        return None
+    if work_tree.returncode != 0 or work_tree.stdout.strip() != "true":
+        return None
+
+    commit_result = _run_git(root, ("rev-parse", "HEAD"))
+    branch_result = _run_git(root, ("branch", "--show-current"))
+    commit = (
+        commit_result.stdout.strip()
+        if commit_result is not None and commit_result.returncode == 0
+        else None
+    )
+    branch = (
+        branch_result.stdout.strip()
+        if branch_result is not None and branch_result.returncode == 0
+        else None
+    )
+    if not commit and not branch:
+        return None
+    return SourceControl(system="git", commit=commit or None, branch=branch or None)
+
+
+def _run_git(root: Path, arguments: Sequence[str]) -> subprocess.CompletedProcess[str] | None:
+    """Run one Git probe, treating unavailable or failed commands as unknown."""
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _load_and_refresh_graph(
