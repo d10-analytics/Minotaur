@@ -9,7 +9,6 @@ from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
-from minotaur.graph_model.relationship import Relationship
 
 # The first item makes keys from different node classes unambiguous.  Symbol
 # keys intentionally contain exactly the two fields promised by R-09; the
@@ -103,8 +102,7 @@ def diff(old: GraphDocument, new: GraphDocument) -> DiffResult:
         new_relationships[key] for key in sorted(set(new_relationships) - set(old_relationships))
     )
     removed_relationships = tuple(
-        old_relationships[key]
-        for key in sorted(set(old_relationships) - set(new_relationships))
+        old_relationships[key] for key in sorted(set(old_relationships) - set(new_relationships))
     )
     return DiffResult(
         added=added,
@@ -155,6 +153,7 @@ def _keyed_symbols(document: GraphDocument) -> dict[NodeKey, Node]:
 def _node_keys(document: GraphDocument) -> dict[str, NodeKey]:
     result: dict[str, NodeKey] = {}
     for node in document.nodes:
+        key: NodeKey
         if node.node_class == NodeClass.SYMBOL:
             key = ("symbol", node.symbol_kind or "unknown", node.label)
         elif node.node_class == NodeClass.UNRESOLVED_REFERENCE:
