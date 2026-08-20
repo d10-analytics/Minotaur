@@ -38,12 +38,7 @@ def test_diff_matches_symbols_by_kind_and_label_and_reports_call_edge(
     output = capsys.readouterr().out  # type: ignore[attr-defined]
 
     assert status == 0
-    assert "~ mod.f (relocated)\n" in output
-    assert "+ mod.g\n" in output
-    assert "- mod.h\n" in output
-    assert "+ calls mod.f → mod.g\n" in output
-    assert "+ mod.f\n" not in output
-    assert "- mod.f\n" not in output
+    assert output == "+ mod.g\n- mod.h\n~ mod.f (relocated)\n+ calls mod.f → mod.g\n"
     assert "node:sha256:" not in output
 
 
