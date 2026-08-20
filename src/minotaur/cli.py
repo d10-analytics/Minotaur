@@ -35,6 +35,16 @@ from minotaur.query.impact import (
 from minotaur.query.index import GraphIndex
 from minotaur.query.render import QueryRecord, render_json, render_text
 from minotaur.query.symbols import callers, definitions
+from minotaur.query.unreferenced import (
+    load_exclusions,
+    unreferenced,
+)
+from minotaur.query.unreferenced import (
+    render_json as render_unreferenced_json,
+)
+from minotaur.query.unreferenced import (
+    render_text as render_unreferenced_text,
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -198,6 +208,21 @@ def _query_skeleton(arguments: argparse.Namespace) -> int:
                 if query.json
                 else render_text(query.name, definition_records)
             )
+        elif query.name == "unreferenced":
+            selected_paths = _query_source_paths(index, Path(query.root).resolve(), query.paths)
+            excluded_names = frozenset(query.exclude) | load_exclusions(query.exclude_file)
+            unreferenced_records = unreferenced(
+                index,
+                Path(query.root).resolve(),
+                selected_paths,
+                excluded_names,
+                text_fallback=query.text_fallback,
+            )
+            output = (
+                render_unreferenced_json(unreferenced_records)
+                if query.json
+                else render_unreferenced_text(unreferenced_records)
+            )
         else:
             raise ValueError(f"unsupported query: {query.name}")
         print(output, end="")
@@ -217,7 +242,14 @@ def _query_parser() -> argparse.ArgumentParser:
     impact_parser = commands.add_parser("impact", help="find inbound calls and imports")
     impact_parser.add_argument("symbol", metavar="QUALIFIED_NAME")
     impact_parser.add_argument("--depth", type=int, help="maximum inbound traversal depth")
-    for command in (callers_parser, definitions_parser, impact_parser):
+    unreferenced_parser = commands.add_parser(
+        "unreferenced", help="find symbols without inbound calls or references"
+    )
+    unreferenced_parser.add_argument("paths", nargs="*", metavar="PATH")
+    unreferenced_parser.add_argument("--exclude", action="append", default=[])
+    unreferenced_parser.add_argument("--exclude-file", type=Path)
+    unreferenced_parser.add_argument("--text-fallback", action="store_true")
+    for command in (callers_parser, definitions_parser, impact_parser, unreferenced_parser):
         command.add_argument("--graph", required=True, help="analyzed graph JSON file")
         command.add_argument("--root", required=True, help="source root used for freshness checks")
         command.add_argument(
@@ -225,6 +257,36 @@ def _query_parser() -> argparse.ArgumentParser:
         )
         command.add_argument("--json", action="store_true", help="emit stable JSON records")
     return parser
+
+
+def _query_source_paths(index: GraphIndex, root: Path, paths: Sequence[str]) -> tuple[str, ...]:
+    """Filter graph files by optional root-relative query paths."""
+    graph_paths = {node.path for node in index.nodes.values() if node.path is not None}
+    if not paths:
+        return tuple(sorted(graph_paths))
+    targets: list[Path] = []
+    for value in paths:
+        target = Path(value)
+        if not target.is_absolute():
+            target = root / target
+        resolved = target.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as error:
+            raise ValueError(f"query path escapes root: {value}") from error
+        if not resolved.exists():
+            raise ValueError(f"query path does not exist: {value}")
+        targets.append(resolved)
+
+    selected: set[str] = set()
+    for relative in graph_paths:
+        candidate = root / relative
+        if any(
+            candidate == target or target.is_dir() and target in candidate.parents
+            for target in targets
+        ):
+            selected.add(relative)
+    return tuple(sorted(selected))
 
 
 def _unknown_symbol_message(symbol: str, suggestions: Sequence[str]) -> str:
