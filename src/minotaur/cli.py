@@ -9,6 +9,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from difflib import get_close_matches
 from pathlib import Path
 
 from minotaur.graph_model.document import GraphDocument
@@ -22,6 +23,9 @@ from minotaur.language_interpreter.registry import InterpreterRegistration, defa
 from minotaur.language_interpreter.selection import SelectionError, select_sources
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.freshness import Drift, drift, recorded_selection
+from minotaur.query.index import GraphIndex
+from minotaur.query.render import QueryRecord, render_json, render_text
+from minotaur.query.symbols import callers, definitions
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -146,9 +150,56 @@ def _load_and_refresh_graph(
 
 
 def _query_skeleton(arguments: argparse.Namespace) -> int:
-    """Reserve the query command until its fixed handlers are registered."""
-    _error("query subcommands are not available")
-    return 2
+    """Dispatch a fixed query against one graph snapshot."""
+    try:
+        query = _query_parser().parse_args(arguments.query_args)
+    except SystemExit:
+        return 2
+    try:
+        document, diagnostics, _ = _load_and_refresh_graph(
+            Path(query.graph), Path(query.root).resolve(), query.no_refresh
+        )
+        index = GraphIndex.build(document)
+        records: Sequence[QueryRecord]
+        if query.name == "callers":
+            if query.symbol not in index.symbols_by_label:
+                suggestions = get_close_matches(query.symbol, index.labels(), n=5, cutoff=0.0)
+                _error(_unknown_symbol_message(query.symbol, suggestions))
+                return 2
+            records = callers(index, query.symbol)
+        else:
+            records = definitions(index, query.symbol)
+        output = (
+            render_json(query.name, records) if query.json else render_text(query.name, records)
+        )
+        print(output, end="")
+        return 1 if diagnostics else 0
+    except (GraphLoadError, OSError, ValueError) as error:
+        _error(str(error))
+        return 2
+
+
+def _query_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="minotaur query")
+    commands = parser.add_subparsers(dest="name", required=True)
+    callers_parser = commands.add_parser("callers", help="find callers of a qualified symbol")
+    callers_parser.add_argument("symbol", metavar="QUALIFIED_NAME")
+    definitions_parser = commands.add_parser("definitions", help="find definitions of a bare name")
+    definitions_parser.add_argument("symbol", metavar="BARE_NAME")
+    for command in (callers_parser, definitions_parser):
+        command.add_argument("--graph", required=True, help="analyzed graph JSON file")
+        command.add_argument("--root", required=True, help="source root used for freshness checks")
+        command.add_argument(
+            "--no-refresh", action="store_true", help="answer from the graph as-is"
+        )
+        command.add_argument("--json", action="store_true", help="emit stable JSON records")
+    return parser
+
+
+def _unknown_symbol_message(symbol: str, suggestions: Sequence[str]) -> str:
+    if not suggestions:
+        return f"unknown symbol: {symbol}"
+    return f"unknown symbol: {symbol}; nearest labels: {', '.join(suggestions)}"
 
 
 def _target_selection(root: Path, targets: tuple[Path, ...]) -> tuple[str, ...]:
