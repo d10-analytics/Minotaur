@@ -119,6 +119,7 @@ def test_recorded_hash_is_sha256_of_exact_source_bytes(tmp_path: Path) -> None:
     graph = json.loads(output.read_text(encoding="utf-8"))
     file_node = next(node for node in graph["nodes"] if node["node_class"] == "file")
 
-    assert file_node["extensions"]["minotaur-python"]["content_sha256"] == hashlib.sha256(
-        source.read_bytes()
-    ).hexdigest()
+    assert (
+        file_node["extensions"]["minotaur-python"]["content_sha256"]
+        == hashlib.sha256(source.read_bytes()).hexdigest()
+    )
