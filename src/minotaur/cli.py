@@ -26,6 +26,9 @@ from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.diff import diff as compare_graphs
 from minotaur.query.diff import render_json as render_diff_json
 from minotaur.query.diff import render_text as render_diff_text
+from minotaur.query.context import context as build_context
+from minotaur.query.context import render_json as render_context_json
+from minotaur.query.context import render_text as render_context_text
 from minotaur.query.freshness import Drift, drift, recorded_selection
 from minotaur.query.impact import (
     impact,
@@ -236,6 +239,25 @@ def _query_skeleton(arguments: argparse.Namespace) -> int:
         except (GraphLoadError, OSError, ValueError) as error:
             _error(str(error))
             return 2
+    if query.name == "context":
+        try:
+            # Context intentionally does not call _load_and_refresh_graph:
+            # agents need the current excerpt while the per-file hash check
+            # makes a changed source explicit in the result.
+            document = load_graph_file(Path(query.graph)).document
+            record = build_context(
+                document,
+                Path(query.root).resolve(),
+                query.site,
+                before=query.before,
+                after=query.after,
+            )
+            output = render_context_json(record) if query.json else render_context_text(record)
+            print(output, end="")
+            return 0
+        except (GraphLoadError, OSError, ValueError) as error:
+            _error(str(error))
+            return 2
     try:
         document, diagnostics, _ = _load_and_refresh_graph(
             Path(query.graph), Path(query.root).resolve(), query.no_refresh
@@ -315,7 +337,17 @@ def _query_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("old", metavar="OLD")
     diff_parser.add_argument("new", metavar="NEW")
     diff_parser.add_argument("--json", action="store_true", help="emit stable JSON records")
-    for command in (callers_parser, definitions_parser, impact_parser, unreferenced_parser):
+    context_parser = commands.add_parser("context", help="show source context around a line")
+    context_parser.add_argument("--site", required=True, metavar="PATH:LINE")
+    context_parser.add_argument("--before", type=int, default=3)
+    context_parser.add_argument("--after", type=int, default=3)
+    for command in (
+        callers_parser,
+        definitions_parser,
+        impact_parser,
+        unreferenced_parser,
+        context_parser,
+    ):
         command.add_argument("--graph", required=True, help="analyzed graph JSON file")
         command.add_argument("--root", required=True, help="source root used for freshness checks")
         command.add_argument(
