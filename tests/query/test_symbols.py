@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from minotaur import cli
 
 
@@ -27,9 +29,9 @@ def test_callers_prints_each_call_site_and_matching_unresolved_reference(
         "use.py",
         "from pkg.mod import target\n"
         "def caller():\n"
+        "    unknown.target()\n"
         "    target()\n"
-        "    target()\n"
-        "    unknown.target()\n",
+        "    target()\n",
     )
     graph = tmp_path / "graph.json"
     assert _analyze(tmp_path, graph) == 0
@@ -64,9 +66,11 @@ def test_callers_prints_each_call_site_and_matching_unresolved_reference(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
 
     assert status == 0
-    assert captured.out.count("use.py:3:5  use.caller\n") == 1
-    assert "use.py:4:5  use.caller\n" in captured.out
-    assert "use.py:5:5  unknown.target [unresolved]\n" in captured.out
+    assert captured.out.splitlines() == [
+        "use.py:4:5  use.caller",
+        "use.py:5:5  use.caller",
+        "use.py:3:5  unknown.target [unresolved]",
+    ]
 
 
 def test_definitions_marks_duplicate_bare_names(tmp_path: Path, capsys: object) -> None:
@@ -167,3 +171,63 @@ def test_symbol_queries_json_uses_same_records_without_graph_internals(
         }
     ]
     assert "node:sha256:" not in output
+
+
+@pytest.mark.parametrize(
+    ("query_name", "query_args"),
+    [
+        ("callers", ("callers", "mod.target")),
+        ("definitions", ("definitions", "target")),
+        ("impact", ("impact", "mod.target")),
+        ("unreferenced", ("unreferenced",)),
+        ("diff", ("diff",)),
+        ("context", ("context", "--site", "mod.py:1")),
+    ],
+)
+def test_all_query_renderers_hide_graph_internals_in_text_and_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], query_name: str, query_args: tuple[str, ...]
+) -> None:
+    """Every public query keeps opaque graph facts out of its agent output."""
+    _write(
+        tmp_path,
+        "mod.py",
+        "def target():\n    pass\n\ndef caller():\n    target()\n\ndef orphan():\n    pass\n",
+    )
+    graph = tmp_path / "graph.json"
+    old_graph = tmp_path / "old.json"
+    assert _analyze(tmp_path, graph) == 0
+    old_graph.write_bytes(graph.read_bytes())
+
+    common = ("--graph", str(graph), "--root", str(tmp_path))
+    if query_name == "diff":
+        invocation = (*query_args, str(old_graph), str(graph))
+        json_invocation = (*invocation, "--json")
+    else:
+        invocation = (*query_args, *common)
+        json_invocation = (*invocation, "--json")
+
+    assert cli.main(["query", *invocation]) == 0
+    text_output = capsys.readouterr().out
+    for internal in ("node:sha256:", "sha256", "digest", "provenance", "evidence"):
+        assert internal not in text_output
+
+    assert cli.main(["query", *json_invocation]) == 0
+    json_output = capsys.readouterr().out
+    for internal in ("node:sha256:", "sha256", "digest", "provenance", "evidence"):
+        assert internal not in json_output
+    payload = json.loads(json_output)
+    if query_name == "diff":
+        assert set(payload) == {
+            "query",
+            "added",
+            "removed",
+            "relocated",
+            "relationships_added",
+            "relationships_removed",
+        }
+        assert payload["query"] == "diff"
+        assert all(isinstance(payload[key], list) for key in payload if key != "query")
+    else:
+        assert set(payload) == {"query", "results"}
+        assert payload["query"] == query_name
+        assert isinstance(payload["results"], list)
