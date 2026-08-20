@@ -138,7 +138,11 @@ def render_json(result: DiffResult) -> str:
 def _keyed_symbols(document: GraphDocument) -> dict[NodeKey, Node]:
     result: dict[NodeKey, Node] = {}
     for node in document.nodes:
-        if node.node_class == NodeClass.SYMBOL:
+        # Module nodes and contains edges describe graph scaffolding rather
+        # than declarations an agent can act on.  Their source ranges shift
+        # when a line is inserted, which would otherwise drown out the
+        # function/class changes in a useful diff.
+        if node.node_class == NodeClass.SYMBOL and node.symbol_kind != "module":
             key = ("symbol", node.symbol_kind or "unknown", node.label)
         else:
             continue
@@ -172,6 +176,8 @@ def _keyed_relationships(document: GraphDocument) -> dict[RelationshipKey, Relat
     endpoint_keys = _node_keys(document)
     result: dict[RelationshipKey, RelationshipChange] = {}
     for relationship in document.relationships:
+        if relationship.kind == "contains":
+            continue
         source_key = endpoint_keys.get(relationship.source, ("node", relationship.source))
         target_key = endpoint_keys.get(relationship.target, ("node", relationship.target))
         key = (source_key, target_key, relationship.kind)
