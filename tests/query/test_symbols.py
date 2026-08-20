@@ -191,12 +191,28 @@ def test_all_query_renderers_hide_graph_internals_in_text_and_json(
     _write(
         tmp_path,
         "mod.py",
-        "def target():\n    pass\n\ndef caller():\n    target()\n\ndef orphan():\n    pass\n",
+        "def target():\n"
+        "    pass\n"
+        "\n"
+        "def caller():\n"
+        "    target()\n"
+        "    unknown.target()\n"
+        "\n"
+        "def orphan():\n"
+        "    pass\n",
     )
     graph = tmp_path / "graph.json"
     old_graph = tmp_path / "old.json"
     assert _analyze(tmp_path, graph) == 0
     old_graph.write_bytes(graph.read_bytes())
+    _write(
+        tmp_path,
+        "mod.py",
+        (tmp_path / "mod.py").read_text(encoding="utf-8") + "\ndef added():\n    pass\n",
+    )
+    new_graph = tmp_path / "new.json"
+    assert _analyze(tmp_path, new_graph) == 0
+    graph = new_graph
 
     common = ("--graph", str(graph), "--root", str(tmp_path))
     if query_name == "diff":
@@ -227,7 +243,41 @@ def test_all_query_renderers_hide_graph_internals_in_text_and_json(
         }
         assert payload["query"] == "diff"
         assert all(isinstance(payload[key], list) for key in payload if key != "query")
+        assert payload["added"]
+        assert all(set(item) == {"kind", "symbol"} for item in payload["added"])
+        assert all(set(item) == {"kind", "symbol"} for item in payload["removed"])
+        assert all(set(item) == {"from", "kind", "symbol", "to"} for item in payload["relocated"])
+        relationship_keys = {"kind", "source", "target"}
+        assert all(set(item) == relationship_keys for item in payload["relationships_added"])
+        assert all(set(item) == relationship_keys for item in payload["relationships_removed"])
     else:
         assert set(payload) == {"query", "results"}
         assert payload["query"] == query_name
         assert isinstance(payload["results"], list)
+        assert payload["results"]
+        if query_name == "callers":
+            for item in payload["results"]:
+                expected = {"caller", "column", "line", "path", "unresolved"}
+                if item["unresolved"]:
+                    expected.add("reference")
+                assert set(item) == expected
+        elif query_name == "definitions":
+            assert all(
+                set(item) == {"duplicate", "kind", "line", "path", "symbol"}
+                for item in payload["results"]
+            )
+        elif query_name == "impact":
+            assert all(
+                set(item) == {"boundary", "depth", "kind", "symbol"} for item in payload["results"]
+            )
+        elif query_name == "unreferenced":
+            assert all(
+                set(item) == {"kind", "line", "path", "symbol", "text_mention"}
+                for item in payload["results"]
+            )
+        else:
+            assert query_name == "context"
+            assert len(payload["results"]) == 1
+            record = payload["results"][0]
+            assert set(record) == {"hash_available", "lines", "path", "stale"}
+            assert all(set(line) == {"line", "target", "text"} for line in record["lines"])
