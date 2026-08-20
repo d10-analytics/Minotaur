@@ -48,7 +48,7 @@ class _Module:
 
 
 class _ScopeCallVisitor(ast.NodeVisitor):
-    """Collect calls that execute in one lexical scope only."""
+    """Collect calls nested within one top-level lexical scope."""
 
     def __init__(self) -> None:
         self.calls: list[ast.Call] = []
@@ -58,16 +58,21 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        """Nested definitions establish a new callable scope."""
+        self.generic_visit(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        """Nested definitions establish a new callable scope."""
+        self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        """Nested definitions establish a new class scope."""
+        # A nested class body executes while the enclosing scope is active, but
+        # methods of that class execute in their own scope and remain outside
+        # this visitor's ownership.
+        for statement in node.body:
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.visit(statement)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        """A lambda body executes only when that lambda is called."""
+        self.generic_visit(node)
 
 
 def analyze_python_workspace(root: Path) -> AnalysisResult:
@@ -244,7 +249,11 @@ def _analyze_module(
             continue
         _append(relationships, container, node_id, RelationshipKind.CONTAINS.value, None)
     _calls(
-        module.tree.body,
+        [
+            statement
+            for statement in module.tree.body
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ],
         declarations,
         aliases,
         module.name,
