@@ -459,6 +459,11 @@
     var maximum = Math.floor(window.innerWidth / 2);
     var clamped = Math.max(DETAIL_MIN_WIDTH, Math.min(maximum, width));
     detailEl.style.width = clamped + "px";
+    // Flexbox has changed the canvas element's screen position and width, but
+    // Cytoscape caches those dimensions for pointer-coordinate translation.
+    // Refresh synchronously so the next click is hit-tested against the canvas
+    // the user can see; doing it here covers both drag and keyboard resizing.
+    cy.resize();
     detailResizeEl.setAttribute("aria-valuemax", maximum);
     detailResizeEl.setAttribute("aria-valuenow", clamped);
   }
