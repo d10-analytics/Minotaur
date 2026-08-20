@@ -130,12 +130,16 @@ into a standalone HTML explorer. Browse its
 [graph format reference](docs/formats/minotaur-graph-v1.md) for the complete
 structure and evidence model.
 
-Regenerate the example from the repository root:
+Regenerate the checked-in example from the repository root:
 
 ```bash
-minotaur analyze --root . --output examples/python-workflow/minotaur-graph.json --force src/minotaur/language_interpreter/selection.py
-minotaur visualize --input examples/python-workflow/minotaur-graph.json --output examples/python-workflow/minotaur-graph.html --source-root . --force
+python3 scripts/generate_example_output.py
 ```
+
+The generator uses the public `analyze` and `visualize` commands and removes
+only volatile Git snapshot metadata from the distributable graph, so the
+checked-in JSON and HTML remain reproducible across commits. Direct CLI
+invocations retain the current Git metadata in normal analysis output.
 
 Open the generated [standalone HTML explorer](examples/python-workflow/minotaur-graph.html)
 locally with `file://`; it does not require a server or network connection.

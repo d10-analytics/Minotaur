@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Regenerate the checked-in end-to-end Python workflow artifacts.
 
-Run this script from any directory.  It deliberately invokes the same public
+Run this script from any directory. It deliberately invokes the same public
 CLI commands documented in the example rather than importing implementation
-functions, so an artifact difference catches drift in either command.
+functions, so an artifact difference catches drift in either command. The
+checked-in graph omits volatile Git snapshot metadata so regeneration remains
+byte-for-byte reproducible across commits; normal ``analyze`` output retains
+that metadata.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -44,6 +48,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--force",
         "src/minotaur/language_interpreter/selection.py",
     )
+    _remove_volatile_snapshot_metadata(graph)
     _run_cli(
         "visualize",
         "--input",
@@ -55,6 +60,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--force",
     )
     return 0
+
+
+def _remove_volatile_snapshot_metadata(graph: Path) -> None:
+    """Keep the distributable example stable while retaining normal Git output."""
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    document.pop("source_control", None)
+    graph.write_bytes(
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
 
 
 def _run_cli(*arguments: str) -> None:
