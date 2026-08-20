@@ -209,6 +209,21 @@ def test_analyze_skips_clean_graph_and_rewrites_after_content_drift(tmp_path: Pa
     assert output.stat().st_mtime_ns != before
 
 
+def test_analyze_skips_clean_graph_with_duplicate_targets(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    source = _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    first = _run(root, output, root, source, source)
+    before = output.stat().st_mtime_ns
+    repeated = _run(root, output, root, source, source)
+
+    assert first.returncode == 0, first.stderr
+    assert repeated.returncode == 0, repeated.stderr
+    assert "graph is up to date, skipping analysis" in repeated.stderr
+    assert output.stat().st_mtime_ns == before
+
+
 def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
