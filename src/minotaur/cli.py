@@ -25,7 +25,11 @@ from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.freshness import Drift, drift, recorded_selection
 from minotaur.query.impact import (
     impact,
+)
+from minotaur.query.impact import (
     render_json as render_impact_json,
+)
+from minotaur.query.impact import (
     render_text as render_impact_text,
 )
 from minotaur.query.index import GraphIndex
@@ -170,25 +174,29 @@ def _query_skeleton(arguments: argparse.Namespace) -> int:
                 suggestions = get_close_matches(query.symbol, index.labels(), n=5, cutoff=0.0)
                 _error(_unknown_symbol_message(query.symbol, suggestions))
                 return 2
-            records = impact(index, query.symbol, query.depth)
-            output = render_impact_json(records) if query.json else render_impact_text(records)
+            impact_records = impact(index, query.symbol, query.depth)
+            output = (
+                render_impact_json(impact_records)
+                if query.json
+                else render_impact_text(impact_records)
+            )
         elif query.name == "callers":
             if query.symbol not in index.symbols_by_label:
                 suggestions = get_close_matches(query.symbol, index.labels(), n=5, cutoff=0.0)
                 _error(_unknown_symbol_message(query.symbol, suggestions))
                 return 2
-            records: Sequence[QueryRecord] = callers(index, query.symbol)
+            caller_records: Sequence[QueryRecord] = callers(index, query.symbol)
             output = (
-                render_json(query.name, records)
+                render_json(query.name, caller_records)
                 if query.json
-                else render_text(query.name, records)
+                else render_text(query.name, caller_records)
             )
         elif query.name == "definitions":
-            records = definitions(index, query.symbol)
+            definition_records = definitions(index, query.symbol)
             output = (
-                render_json(query.name, records)
+                render_json(query.name, definition_records)
                 if query.json
-                else render_text(query.name, records)
+                else render_text(query.name, definition_records)
             )
         else:
             raise ValueError(f"unsupported query: {query.name}")

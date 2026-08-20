@@ -85,9 +85,7 @@ def impact(
                 boundary=True,
             )
         )
-    return tuple(
-        sorted(records, key=lambda record: (record.boundary, record.depth, record.symbol))
-    )
+    return tuple(sorted(records, key=lambda record: (record.boundary, record.depth, record.symbol)))
 
 
 def render_text(records: Sequence[ImpactRecord]) -> str:
@@ -96,8 +94,7 @@ def render_text(records: Sequence[ImpactRecord]) -> str:
     if not records:
         return "no impact\n"
     return "".join(
-        f"{'[boundary] ' if record.boundary else ''}depth {record.depth}: "
-        f"{record.symbol}\n"
+        f"{'[boundary] ' if record.boundary else ''}depth {record.depth}: {record.symbol}\n"
         for record in records
     )
 
