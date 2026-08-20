@@ -250,9 +250,9 @@ def test_attribute_and_nested_load_references_preserve_call_and_unresolved_bound
     assert (configure, on_callback, RelationshipKind.REFERENCES.value) in relationships
     assert (configure, on_callback, RelationshipKind.CALLS.value) not in relationships
     assert (configure, handler, RelationshipKind.REFERENCES.value) in relationships
-    handler_locations = relationships[
-        (configure, handler, RelationshipKind.REFERENCES.value)
-    ].evidence[0].locations
+    handler_locations = (
+        relationships[(configure, handler, RelationshipKind.REFERENCES.value)].evidence[0].locations
+    )
     assert {location.range.start.line for location in handler_locations} == {12, 14}
 
     unresolved = {
@@ -282,8 +282,8 @@ def test_load_argument_in_nested_call_func_is_still_a_reference(tmp_path: Path) 
     }
 
     assert (module, handler, RelationshipKind.REFERENCES.value) in relationships
-    location = relationships[
-        (module, handler, RelationshipKind.REFERENCES.value)
-    ].evidence[0].locations[0]
+    location = (
+        relationships[(module, handler, RelationshipKind.REFERENCES.value)].evidence[0].locations[0]
+    )
     assert location.range.start.line == 6
     assert location.range.start.character == 8
