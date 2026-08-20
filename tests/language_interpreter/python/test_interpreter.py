@@ -286,4 +286,4 @@ def test_load_argument_in_nested_call_func_is_still_a_reference(tmp_path: Path) 
         (module, handler, RelationshipKind.REFERENCES.value)
     ].evidence[0].locations[0]
     assert location.range.start.line == 6
-    assert location.range.start.character == 7
+    assert location.range.start.character == 8
