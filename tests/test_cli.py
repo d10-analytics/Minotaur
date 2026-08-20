@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -316,6 +317,22 @@ def test_analyze_ignores_git_probe_failures(
     assert calls == 3
     assert result.document.source_control is None
     assert output.exists()
+
+
+def test_analyze_force_rewrites_clean_graph(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    first = _run(root, output, root)
+    before = output.stat().st_mtime_ns
+    time.sleep(0.01)
+    forced = _run(root, output, root, force=True)
+
+    assert first.returncode == 0, first.stderr
+    assert forced.returncode == 0, forced.stderr
+    assert "graph is up to date, skipping analysis" not in forced.stderr
+    assert output.stat().st_mtime_ns != before
 
 
 def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_file(

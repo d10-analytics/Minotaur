@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,23 @@ def _analyze(root: Path, output: Path, *targets: Path) -> int:
             *(str(target) for target in targets),
         ]
     )
+
+
+def _query_definitions(
+    root: Path, output: Path, *, no_refresh: bool = False
+) -> int:
+    arguments = [
+        "query",
+        "definitions",
+        "foo",
+        "--graph",
+        str(output),
+        "--root",
+        str(root),
+    ]
+    if no_refresh:
+        arguments.append("--no-refresh")
+    return cli.main(arguments)
 
 
 def test_drift_uses_bytes_not_mtime(tmp_path: Path) -> None:
@@ -108,6 +126,74 @@ def test_query_no_refresh_keeps_graph_and_warns_with_stale_path(
     assert document == load_graph_file(output).document
     assert output.read_bytes() == before
     assert "stale: app.py" in captured.err
+
+
+def test_public_query_refreshes_changed_definition_and_no_refresh_keeps_old_answer(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    source = _write(root, "app.py", "def foo():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    assert _analyze(root, output, root) == 0
+    old_graph = json.loads(output.read_text(encoding="utf-8"))
+    old_hash = next(
+        node["extensions"]["minotaur-python"]["content_sha256"]
+        for node in old_graph["nodes"]
+        if node["node_class"] == "file"
+    )
+    source.write_text("# inserted before definition\n" + source.read_text(encoding="utf-8"))
+    before_refresh = output.stat().st_mtime_ns
+
+    assert _query_definitions(root, output) == 0
+    refreshed = capsys.readouterr()
+    refreshed_graph = json.loads(output.read_text(encoding="utf-8"))
+
+    assert "app.py:2  app.foo  function" in refreshed.out
+    assert output.stat().st_mtime_ns != before_refresh
+    assert old_hash != next(
+        node["extensions"]["minotaur-python"]["content_sha256"]
+        for node in refreshed_graph["nodes"]
+        if node["node_class"] == "file"
+    )
+
+    source.write_text("# inserted again\n" + source.read_text(encoding="utf-8"))
+    before_no_refresh = output.stat().st_mtime_ns
+    assert _query_definitions(root, output, no_refresh=True) == 0
+    stale = capsys.readouterr()
+
+    assert "app.py:2  app.foo  function" in stale.out
+    assert "app.py:3  app.foo  function" not in stale.out
+    assert "stale: app.py" in stale.err
+    assert output.stat().st_mtime_ns == before_no_refresh
+
+
+def test_public_query_refresh_removes_deleted_and_adds_directory_selection_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    package = root / "pkg"
+    deleted = _write(root, "pkg/deleted.py", "def foo():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    assert _analyze(root, output, package) == 0
+    deleted.unlink()
+    assert _query_definitions(root, output) == 0
+    removed = capsys.readouterr()
+    removed_graph = json.loads(output.read_text(encoding="utf-8"))
+
+    assert removed.out == "no definitions\n"
+    assert not any(
+        node.get("path") == "pkg/deleted.py" for node in removed_graph["nodes"]
+    )
+
+    _write(root, "pkg/added.py", "def foo():\n    return 2\n")
+    assert _query_definitions(root, output) == 0
+    added = capsys.readouterr()
+    added_graph = json.loads(output.read_text(encoding="utf-8"))
+
+    assert "pkg/added.py:1  pkg.added.foo  function" in added.out
+    assert any(node.get("path") == "pkg/added.py" for node in added_graph["nodes"])
 
 
 def test_recorded_hash_is_sha256_of_exact_source_bytes(tmp_path: Path) -> None:
