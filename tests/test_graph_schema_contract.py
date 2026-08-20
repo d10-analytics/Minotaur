@@ -10,6 +10,7 @@ import jsonschema
 import pytest
 
 from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.loading import schema
 from minotaur.graph_model.validation import IssueCode, validate_document
 
 ROOT = Path(__file__).parents[1]
@@ -29,8 +30,7 @@ def _is_valid_rfc3339_timestamp(value: object) -> bool:
 
 
 def _validator() -> jsonschema.Draft202012Validator:
-    schema = json.loads((ROOT / "schemas/minotaur-graph/v1.json").read_text(encoding="utf-8"))
-    return jsonschema.Draft202012Validator(schema, format_checker=FORMAT_CHECKER)
+    return jsonschema.Draft202012Validator(schema(), format_checker=FORMAT_CHECKER)
 
 
 @pytest.mark.parametrize(

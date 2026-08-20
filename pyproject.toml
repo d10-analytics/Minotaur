@@ -18,6 +18,9 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.16.3",
 ]
+visualizer = [
+    "playwright>=1.50",
+]
 
 [project.scripts]
 minotaur = "minotaur.cli:main"
@@ -27,6 +30,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 minotaur = [
+    "graph_model/schemas/*.json",
     "graph_visualizer/html/*.html",
     "graph_visualizer/html/*.css",
     "graph_visualizer/html/*.js",
