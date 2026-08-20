@@ -92,9 +92,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 existing = None
             if existing is not None:
                 current_selection = _target_selection(root, targets)
+                current_source_control = _git_source_control(root)
                 if (
                     drift(existing.document, root).is_clean
                     and recorded_selection(existing.document) == current_selection
+                    and current_source_control == existing.document.source_control
                 ):
                     print("minotaur: graph is up to date, skipping analysis", file=sys.stderr)
                     return 0
@@ -154,38 +156,41 @@ def _analyze_selection(
 
 def _git_source_control(root: Path) -> SourceControl | None:
     """Return the Git snapshot metadata for ``root``, when it is available."""
+    work_tree = _run_git(root, ("rev-parse", "--is-inside-work-tree"))
+    if work_tree is None:
+        return None
+    if work_tree.returncode != 0 or work_tree.stdout.strip() != "true":
+        return None
+
+    commit_result = _run_git(root, ("rev-parse", "HEAD"))
+    branch_result = _run_git(root, ("branch", "--show-current"))
+    commit = (
+        commit_result.stdout.strip()
+        if commit_result is not None and commit_result.returncode == 0
+        else None
+    )
+    branch = (
+        branch_result.stdout.strip()
+        if branch_result is not None and branch_result.returncode == 0
+        else None
+    )
+    if not commit and not branch:
+        return None
+    return SourceControl(system="git", commit=commit or None, branch=branch or None)
+
+
+def _run_git(root: Path, arguments: Sequence[str]) -> subprocess.CompletedProcess[str] | None:
+    """Run one Git probe, treating unavailable or failed commands as unknown."""
     try:
-        work_tree = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
+        return subprocess.run(
+            ["git", *arguments],
             cwd=root,
             capture_output=True,
             check=False,
             text=True,
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return None
-    if work_tree.returncode != 0 or work_tree.stdout.strip() != "true":
-        return None
-
-    commit_result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    branch_result = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=root,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    commit = commit_result.stdout.strip() if commit_result.returncode == 0 else None
-    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
-    if not commit and not branch:
-        return None
-    return SourceControl(system="git", commit=commit or None, branch=branch or None)
 
 
 def _load_and_refresh_graph(
