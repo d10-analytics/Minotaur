@@ -50,13 +50,15 @@ def test_source_excerpts_are_contained_merged_and_explicit_when_unavailable(tmp_
     escaped.symlink_to(tmp_path / "outside.py")
     (tmp_path / "outside.py").write_text("secret\n", encoding="utf-8")
     excerpts = prepare_excerpts(loaded.canonical, source_root)
-    assert excerpts["src/checkout.py"]["status"] == "available"
-    assert excerpts["src/checkout.py"]["spans"] == [
+    paths = excerpts["paths"]
+    assert paths["src/checkout.py"]["status"] == "available"
+    assert paths["src/checkout.py"]["spans"] == [
         {"start": 0, "lines": ["one", "two", "three", "four", "five"]}
     ]
+    assert excerpts["call_sites"]["0"][0]["caller_start"] == 2
 
     missing = prepare_excerpts(loaded.canonical, None)
-    assert missing["src/checkout.py"] == {
+    assert missing["paths"]["src/checkout.py"] == {
         "status": "unavailable",
         "reason": "no source root was provided",
     }
@@ -67,10 +69,35 @@ def test_source_excerpts_are_contained_merged_and_explicit_when_unavailable(tmp_
     escaped = prepare_excerpts(
         load_graph_bytes(json.dumps(escaped_graph).encode()).canonical, source_root
     )
-    assert escaped["src/escape.py"] == {
+    assert escaped["paths"]["src/escape.py"] == {
         "status": "unavailable",
         "reason": "path is missing or escapes the source root",
     }
+
+
+def test_call_site_associations_keep_all_provenance_at_one_physical_location(
+    tmp_path: Path,
+) -> None:
+    # Two producers can report the same range. Keep this at the extraction
+    # boundary so UI regressions cannot be hidden by a pre-collapsed fixture.
+    graph = _graph()
+    relationships = graph["relationships"]
+    assert isinstance(relationships, list)
+    relationship = relationships[0]
+    relationship["evidence"].append(
+        {
+            "provenance": "curated-rule",
+            "rule": {"id": "test-rule"},
+            "locations": [relationship["evidence"][0]["locations"][0]],
+        }
+    )
+    root = tmp_path / "root"
+    (root / "src").mkdir(parents=True)
+    (root / "src/checkout.py").write_text("\n".join(str(i) for i in range(80)), encoding="utf-8")
+    excerpts = prepare_excerpts(load_graph_bytes(json.dumps(graph).encode()).canonical, root)
+    sites = excerpts["call_sites"]["0"]
+    assert [site["provenance"] for site in sites] == ["static-analysis", "curated-rule"]
+    assert all(site["caller_start"] == 2 for site in sites)
 
 
 def test_renderer_is_self_contained_and_json_safe() -> None:

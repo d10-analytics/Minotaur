@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -73,10 +74,18 @@ def _click_connected_node_and_show_details(page: object) -> dict[str, object]:
 
 def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path: Path) -> None:
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(
-        (ROOT / "examples/synthetic-graphs/small-workflow.json").read_text(encoding="utf-8"),
-        encoding="utf-8",
+    graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+    # Duplicate range evidence must become one user-selectable call site while
+    # exposing both supporting provenance values in the rendered artifact.
+    relationship = graph["relationships"][0]
+    relationship["evidence"].append(
+        {
+            "provenance": "curated-rule",
+            "rule": {"id": "test-rule"},
+            "locations": [relationship["evidence"][0]["locations"][0]],
+        }
     )
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
     source_root = tmp_path / "source"
     source = source_root / "src"
     source.mkdir(parents=True)
@@ -181,6 +190,27 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
         )
         edge = _click_visible_edge_and_show_details(page)
         assert edge["kind"] in page.locator("#detail-content").inner_text()
+        assert page.locator("#call-site-select").count() == 1
+        assert (
+            page.locator("#call-site-select")
+            .locator("option")
+            .inner_text()
+            .startswith("1. src/checkout.py:5:12")
+        )
+        assert page.locator("#context-mode").locator("option").all_text_contents() == [
+            "Call-site window",
+            "Caller start → call",
+        ]
+        assert page.locator(".call-site-highlight").inner_text().endswith("line 4")
+        # A real overflow check proves the excerpt itself scrolls rather than
+        # expanding the entire detail pane beyond the viewport.
+        assert page.locator(".code-excerpt").evaluate(
+            "element => element.scrollHeight > element.clientHeight"
+        )
+        site_detail = page.locator("#call-site-detail").inner_text()
+        assert "static-analysis" in site_detail and "curated-rule" in site_detail
+        page.locator("#context-mode").select_option("caller")
+        assert page.locator(".code-line").first.inner_text().endswith("line 2")
         assert page.evaluate(
             """(edgeId) => {
                 const edge = window.minotaurVisualizer.cy.getElementById(edgeId);
@@ -250,3 +280,27 @@ def test_checked_in_python_workflow_artifact_opens_without_external_requests() -
         assert edge["kind"] in page.locator("#detail-content").inner_text()
         browser.close()
     assert all(url.startswith("file:") for url in requested)
+
+
+def test_call_site_context_is_unavailable_without_a_root_and_has_no_caller_mode(
+    tmp_path: Path,
+) -> None:
+    graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+    # A file caller has no known function/method boundary, so the alternate
+    # prefix mode must not be offered even though its call location is valid.
+    graph["relationships"][0]["source"] = graph["nodes"][1]["id"]
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    output = tmp_path / "view.html"
+    assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        _click_visible_edge_and_show_details(page)
+        assert page.locator("#context-mode").locator("option").all_text_contents() == [
+            "Call-site window"
+        ]
+        assert "no source root was provided" in page.locator("#call-site-detail").inner_text()
+        browser.close()
