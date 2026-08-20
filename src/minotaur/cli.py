@@ -7,7 +7,8 @@ import os
 import sys
 import tempfile
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from minotaur.graph_model.loading import GraphLoadError, load_graph_file
@@ -44,6 +45,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         output = _preflight_output(Path(arguments.output), selection.files, arguments.force)
         result = _dispatch(workspace, selection.files)
+        result = replace(
+            result,
+            document=replace(
+                result.document,
+                extensions=_with_selection_extension(
+                    result.document.extensions,
+                    workspace.root,
+                    tuple(Path(target) for target in arguments.targets),
+                ),
+            ),
+        )
         _write_atomically(output, serialize(result.document))
     except (OSError, SelectionError, ValueError) as error:
         _error(str(error))
@@ -117,6 +129,21 @@ def _preflight_output(output: Path, files: tuple[Path, ...], force: bool) -> Pat
     if output.exists() and not force:
         raise ValueError(f"output already exists (pass --force to replace it): {output}")
     return resolved
+
+
+def _with_selection_extension(
+    extensions: Mapping[str, Mapping[str, object]] | None,
+    root: Path,
+    targets: tuple[Path, ...],
+) -> dict[str, dict[str, object]]:
+    """Add the canonical CLI targets without changing other producer metadata."""
+    existing = {name: dict(value) for name, value in (extensions or {}).items()}
+    minotaur = dict(existing.get("minotaur", {}))
+    minotaur["selection"] = sorted(
+        {target.resolve().relative_to(root).as_posix() for target in targets}
+    )
+    existing["minotaur"] = minotaur
+    return existing
 
 
 def _dispatch(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:

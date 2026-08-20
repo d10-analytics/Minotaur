@@ -43,6 +43,13 @@ consumer can identify the reference site that established the relationship.
 The output uses the canonical Minotaur wire contract described in the
 [Minotaur graph format reference](../formats/minotaur-graph-v1.md).
 
+For freshness checks, each file node carries the SHA-256 digest of its exact
+source bytes in the producer extension
+`extensions["minotaur-python"]["content_sha256"]`. The analyze command also
+records its sorted root-relative input targets in the document extension
+`extensions["minotaur"]["selection"]`. These extensions are metadata and do
+not affect node identity or the graph format version.
+
 ## Diagnostics and unresolved references
 
 If a source file cannot be read or parsed, the analyzer reports a diagnostic

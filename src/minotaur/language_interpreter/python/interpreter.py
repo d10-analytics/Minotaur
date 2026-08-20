@@ -9,6 +9,7 @@ made and no source code is executed or imported.
 from __future__ import annotations
 
 import ast
+import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,7 +130,8 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
     for file_path in sorted(files, key=lambda path: path.relative_to(workspace.root).as_posix()):
         relative = file_path.relative_to(workspace.root).as_posix()
         try:
-            source = file_path.read_text(encoding="utf-8")
+            content = file_path.read_bytes()
+            source = content.decode("utf-8")
         except (OSError, UnicodeError) as error:
             diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
             continue
@@ -147,7 +149,9 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             continue
         module = _make_module(relative, parsed.tree, source)
         modules.append(module)
-        nodes.extend((_file_node(relative), _module_node(module)))
+        nodes.extend(
+            (_file_node(relative, hashlib.sha256(content).hexdigest()), _module_node(module))
+        )
 
     module_by_name = {module.name: module for module in modules}
     declarations: dict[str, str] = {}
@@ -205,7 +209,7 @@ def _make_module(path: str, tree: ast.Module, source: str) -> _Module:
     )
 
 
-def _file_node(path: str) -> Node:
+def _file_node(path: str, content_sha256: str) -> Node:
     identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
     return Node(
         id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=path),
@@ -214,6 +218,7 @@ def _file_node(path: str) -> Node:
         label=path,
         path=path,
         language="python",
+        extensions={"minotaur-python": {"content_sha256": content_sha256}},
     )
 
 
