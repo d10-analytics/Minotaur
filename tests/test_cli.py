@@ -99,6 +99,7 @@ def test_valid_selection_with_no_registered_files_writes_empty_canonical_graph(
         "format": "minotaur-graph",
         "format_version": "0.1.0",
         "generated_by": {"name": "minotaur-python"},
+        "extensions": {"minotaur": {"selection": ["."]}},
         "nodes": [],
         "relationships": [],
     }
