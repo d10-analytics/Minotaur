@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import struct
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -152,7 +155,8 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
             """() => {
                 const cy = window.minotaurVisualizer.cy;
                 const nodeFontSize = cy.nodes()[0].pstyle('font-size').pfValue;
-                return cy.nodes().every((node) => node.pstyle('font-size').pfValue === nodeFontSize)
+                return nodeFontSize === 14
+                    && cy.nodes().every((node) => node.pstyle('font-size').pfValue === nodeFontSize)
                     && cy.edges().every((edge) => (
                         edge.pstyle('font-size').pfValue === nodeFontSize
                         && edge.pstyle('font-weight').strValue === 'bold'
@@ -287,6 +291,25 @@ def test_checked_in_python_workflow_artifact_opens_without_external_requests() -
         assert edge["kind"] in page.locator("#detail-content").inner_text()
         browser.close()
     assert all(url.startswith("file:") for url in requested)
+
+
+def test_python_workflow_preview_generator_captures_selected_call_site(tmp_path: Path) -> None:
+    """The README preview is reproducible from the public offline artifact."""
+    preview = tmp_path / "python-workflow-demo.png"
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "capture_python_workflow_demo.py"),
+            "--output",
+            str(preview),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    png = preview.read_bytes()
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert struct.unpack(">II", png[16:24]) == (1440, 900)
+    assert len(png) > 10_000
 
 
 def test_call_site_context_is_unavailable_without_a_root_and_has_no_caller_mode(

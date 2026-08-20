@@ -12,7 +12,7 @@
   var systemColorScheme = window.matchMedia("(prefers-color-scheme: dark)");
   // One shared value prevents node and edge labels from drifting apart as the
   // graph style evolves; edge weight adds hierarchy without reducing legibility.
-  var GRAPH_LABEL_FONT_SIZE = "10px";
+  var GRAPH_LABEL_FONT_SIZE = "14px";
 
   // Themes supply semantic roles, not a raw stylesheet swap: canvas-rendered
   // Cytoscape elements need the same palette as DOM controls. Yellow is absent

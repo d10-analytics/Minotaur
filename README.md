@@ -22,10 +22,18 @@ grouping. A tested Python analyzer and language-neutral selected-path CLI are
 also available; current structural facts and limits are described in the
 [Python analysis guide](docs/guides/analyze-python.md).
 
-The current release includes a self-contained interactive HTML visualizer.
+The current release includes a self-contained interactive HTML explorer.
 It opens directly from `file://`, keeps graph strings out of HTML markup, and
-never requests a network resource. Its top navigation bar offers non-persistent
-System, Light, Catppuccin Mocha, Nord Polar Night, and Solarized Dark modes.
+never requests a network resource. It includes source excerpts, call-site
+inspection, node and relationship filters, and non-persistent System, Light,
+Catppuccin Mocha, Nord Polar Night, and Solarized Dark themes.
+
+[![Python workflow explorer preview](docs/assets/python-workflow-demo.png)](https://d10-analytics.github.io/Minotaur/)
+
+[Try the live demo](https://d10-analytics.github.io/Minotaur/) or
+[download and open the offline HTML](examples/python-workflow/minotaur-graph.html).
+To intentionally refresh the preview, install the `visualizer` extra and
+Chromium, then run `python3 scripts/capture_python_workflow_demo.py`.
 
 ## What Minotaur will do
 
@@ -61,13 +69,14 @@ for the selected-file API and registration convention for new languages.
 ### `graph_visualizer/`
 
 The visualizer turns a canonical graph into an understandable exploration
-experience. The first target is a single self-contained HTML file that opens
-locally without a server and supports:
+experience. Its implemented self-contained HTML explorer opens locally without
+a server and supports:
 
 - zooming and panning;
 - node-class and relationship-kind filters;
 - symbol and label search;
-- persistent node and edge details, source locations, and connected relationships;
+- persistent node and edge details, source locations, call-site inspection,
+  source excerpts, and connected relationships;
 - visual distinction between relationship kinds; and
 - switchable graph layout direction.
 
@@ -119,7 +128,9 @@ The current implementation includes:
 
 - a versioned canonical Minotaur graph schema;
 - graph validation, identity, provenance, and serialization primitives;
-- a bounded native Python analyzer and selected-path CLI (currently `.py` only).
+- a bounded native Python analyzer and selected-path CLI (currently `.py` only);
+- a self-contained HTML explorer with filters, themes, source excerpts, and
+  call-site inspection.
 
 Render an existing canonical graph with:
 
@@ -141,14 +152,14 @@ into a standalone HTML explorer. Its graph begins like this:
 ```json
 {
   "nodes": [
-    {"id": "node:sha256:…", "node_class": "file", "path": "src/minotaur/cli.py"}
+    {"id": "node:sha256:…", "node_class": "file", "path": "src/minotaur/language_interpreter/selection.py"}
   ],
   "relationships": [
     {
       "kind": "imports",
       "evidence": [{
         "provenance": "static-analysis",
-        "locations": [{"path": "src/minotaur/cli.py", "range": {"start": "…", "end": "…"}}]
+        "locations": [{"path": "src/minotaur/language_interpreter/selection.py", "range": {"start": "…", "end": "…"}}]
       }]
     }
   ]
@@ -163,14 +174,15 @@ or curated-rule evidence.
 Regenerate the example from the repository root:
 
 ```bash
-minotaur analyze --root . --output examples/python-workflow/minotaur-graph.json --force src/minotaur
+minotaur analyze --root . --output examples/python-workflow/minotaur-graph.json --force src/minotaur/language_interpreter/selection.py
 minotaur visualize --input examples/python-workflow/minotaur-graph.json --output examples/python-workflow/minotaur-graph.html --source-root . --force
 ```
 
-Browse the complete [canonical JSON graph](examples/python-workflow/minotaur-graph.json)
-or download and open the [standalone HTML explorer](examples/python-workflow/minotaur-graph.html).
-The HTML is an offline `file://` artifact, not a hosted page: open it locally
-without starting a server or requesting external resources.
+Browse the complete [canonical JSON graph](examples/python-workflow/minotaur-graph.json),
+[try the live demo](https://d10-analytics.github.io/Minotaur/), or download and
+open the [standalone HTML explorer](examples/python-workflow/minotaur-graph.html).
+The HTML is an offline `file://` artifact as well as the hosted demo: open it
+locally without starting a server or requesting external resources.
 
 It does not yet include C#, JavaScript, a hosted graph service, automatic
 runtime tracing, or broad compatibility with third-party graph formats.
