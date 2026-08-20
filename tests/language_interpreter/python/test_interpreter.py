@@ -178,3 +178,39 @@ def test_module_alias_and_module_level_calls_resolve_to_known_workspace_function
         for node in result.document.nodes
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
+
+
+def test_module_callback_reference_is_resolved_without_misclassifying_calls(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def handler():\n    return 1\n\n"
+        "def register(callback):\n    return callback\n\n"
+        "def helper():\n    return 1\n\n"
+        "register(handler)\n"
+        "helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    handler = _node_id(result, "app.handler")
+    register = _node_id(result, "app.register")
+    helper = _node_id(result, "app.helper")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (module, handler, RelationshipKind.REFERENCES.value) in relationships
+    assert (module, handler, RelationshipKind.CALLS.value) not in relationships
+    assert (module, register, RelationshipKind.CALLS.value) in relationships
+    assert (module, helper, RelationshipKind.CALLS.value) in relationships
+    assert (module, helper, RelationshipKind.REFERENCES.value) not in relationships
+
+    reference = relationships[(module, handler, RelationshipKind.REFERENCES.value)]
+    location = reference.evidence[0].locations[0]
+    assert location.path == "app.py"
+    assert location.range.start.line == 9
+    assert location.range.start.character == 9
