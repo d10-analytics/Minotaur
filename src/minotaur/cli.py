@@ -44,6 +44,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = Path(arguments.root).resolve()
     targets = tuple(Path(target) for target in arguments.targets)
     try:
+        # Validate the current workspace and targets before considering a
+        # clean-output skip. A deleted root or explicitly selected file must
+        # remain a command error even when an old graph happens to load.
+        select_sources(root, targets, default_registry())
         # D-11 deliberately runs before output preflight. A graph that Minotaur
         # can load is ours to refresh after drift, while an unrelated existing
         # file still follows the normal refusal path below.
