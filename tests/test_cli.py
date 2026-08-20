@@ -188,6 +188,27 @@ def test_output_preflight_and_module_console_entry_points_match(tmp_path: Path) 
     )
 
 
+def test_analyze_skips_clean_graph_and_rewrites_after_content_drift(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    first = _run(root, output, root)
+    before = output.stat().st_mtime_ns
+    clean = _run(root, output, root)
+
+    assert first.returncode == 0, first.stderr
+    assert clean.returncode == 0
+    assert "graph is up to date, skipping analysis" in clean.stderr
+    assert output.stat().st_mtime_ns == before
+
+    _write(root, "app.py", "def app():\n    return 2\n")
+    changed = _run(root, output, root)
+
+    assert changed.returncode == 0, changed.stderr
+    assert output.stat().st_mtime_ns != before
+
+
 def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
