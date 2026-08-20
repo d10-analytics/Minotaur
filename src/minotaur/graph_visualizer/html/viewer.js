@@ -4,28 +4,99 @@
   var graph = payload.graph;
   var byId = new Map(graph.nodes.map(function (n) { return [n.id, n]; }));
   var layoutDir = "TB";
+  var themeModeEl = document.getElementById("theme-mode");
+  var systemColorScheme = window.matchMedia("(prefers-color-scheme: dark)");
   // One shared value prevents node and edge labels from drifting apart as the
   // graph style evolves; edge weight adds hierarchy without reducing legibility.
   var GRAPH_LABEL_FONT_SIZE = "10px";
 
-  var CLASS_COLORS = {
-    "file":                 { bg: "#d5e8d4", border: "#82b366" },
-    "symbol":               { bg: "#dae8fc", border: "#6c8ebf" },
-    "unresolved-reference": { bg: "#eadcf2", border: "#8e5aa8" }
+  // Themes supply semantic roles, not a raw stylesheet swap: canvas-rendered
+  // Cytoscape elements need the same palette as DOM controls. Yellow is absent
+  // from every graph palette, and red remains reserved for selected edges.
+  var THEMES = {
+    "light": {
+      accent: "#4a7c59", selected: "#c62828", text: "#1a1a1a",
+      nodeClasses: {
+        "file": { bg: "#d5e8d4", border: "#82b366" },
+        "symbol": { bg: "#dae8fc", border: "#6c8ebf" },
+        "unresolved-reference": { bg: "#eadcf2", border: "#8e5aa8" }
+      },
+      edgeKinds: {
+        "contains": { bg: "#eeeeee", border: "#999999" },
+        "calls": { bg: "#dae8fc", border: "#6c8ebf" },
+        "references": { bg: "#f6dfcf", border: "#b85c2c" },
+        "imports": { bg: "#d5e8d4", border: "#82b366" },
+        "inherits": { bg: "#e1d5e7", border: "#9673a6" },
+        "implements": { bg: "#d4e8e2", border: "#5a9a82" }
+      }
+    },
+    "catppuccin-mocha": {
+      accent: "#89b4fa", selected: "#f38ba8", text: "#cdd6f4",
+      nodeClasses: {
+        "file": { bg: "#253b32", border: "#a6e3a1" },
+        "symbol": { bg: "#26344f", border: "#89b4fa" },
+        "unresolved-reference": { bg: "#392f4b", border: "#cba6f7" }
+      },
+      edgeKinds: {
+        "contains": { bg: "#45475a", border: "#bac2de" },
+        "calls": { bg: "#26344f", border: "#89b4fa" },
+        "references": { bg: "#44352e", border: "#fab387" },
+        "imports": { bg: "#253b32", border: "#a6e3a1" },
+        "inherits": { bg: "#392f4b", border: "#cba6f7" },
+        "implements": { bg: "#28413e", border: "#94e2d5" }
+      }
+    },
+    "nord-polar-night": {
+      accent: "#88c0d0", selected: "#bf616a", text: "#eceff4",
+      nodeClasses: {
+        "file": { bg: "#35433e", border: "#a3be8c" },
+        "symbol": { bg: "#334554", border: "#81a1c1" },
+        "unresolved-reference": { bg: "#423b52", border: "#b48ead" }
+      },
+      edgeKinds: {
+        "contains": { bg: "#434c5e", border: "#d8dee9" },
+        "calls": { bg: "#334554", border: "#81a1c1" },
+        "references": { bg: "#4c3b32", border: "#d08770" },
+        "imports": { bg: "#35433e", border: "#a3be8c" },
+        "inherits": { bg: "#423b52", border: "#b48ead" },
+        "implements": { bg: "#30484b", border: "#8fbcbb" }
+      }
+    },
+    "solarized-dark": {
+      accent: "#2aa198", selected: "#dc322f", text: "#fdf6e3",
+      nodeClasses: {
+        "file": { bg: "#183d38", border: "#859900" },
+        "symbol": { bg: "#123e4d", border: "#268bd2" },
+        "unresolved-reference": { bg: "#3a3148", border: "#6c71c4" }
+      },
+      edgeKinds: {
+        "contains": { bg: "#073642", border: "#93a1a1" },
+        "calls": { bg: "#123e4d", border: "#268bd2" },
+        "references": { bg: "#4a3025", border: "#cb4b16" },
+        "imports": { bg: "#183d38", border: "#859900" },
+        "inherits": { bg: "#3a3148", border: "#6c71c4" },
+        "implements": { bg: "#123e4d", border: "#2aa198" }
+      }
+    }
   };
 
-  // These border colors are also exposed on the filter controls below. Keeping
-  // one palette makes a checked category map directly to its graph edges. Red
-  // is reserved for selection and yellow is intentionally absent because it is
-  // difficult to distinguish on typical light displays.
-  var EDGE_KIND_COLORS = {
-    "contains":   { bg: "#eeeeee", border: "#999999" },
-    "calls":      { bg: "#dae8fc", border: "#6c8ebf" },
-    "references": { bg: "#f6dfcf", border: "#b85c2c" },
-    "imports":    { bg: "#d5e8d4", border: "#82b366" },
-    "inherits":   { bg: "#e1d5e7", border: "#9673a6" },
-    "implements": { bg: "#d4e8e2", border: "#5a9a82" }
-  };
+  function currentThemeName() {
+    return themeModeEl.value === "system" && systemColorScheme.matches
+      ? "catppuccin-mocha" : themeModeEl.value === "system" ? "light" : themeModeEl.value;
+  }
+
+  var activeThemeName = currentThemeName();
+  var activeTheme = THEMES[activeThemeName];
+  var CLASS_COLORS = activeTheme.nodeClasses;
+  var EDGE_KIND_COLORS = activeTheme.edgeKinds;
+
+  function nodeColors(nodeClass) {
+    return CLASS_COLORS[nodeClass] || { bg: "#666666", border: "#aaaaaa" };
+  }
+
+  function edgeColors(kind) {
+    return EDGE_KIND_COLORS[kind] || { bg: "#666666", border: "#aaaaaa" };
+  }
 
   var elements = [];
   graph.nodes.forEach(function (node) {
@@ -33,65 +104,60 @@
       id: node.id, label: node.label, node_class: node.node_class,
       symbol_kind: node.symbol_kind || "", path: node.path || (node.location ? node.location.path : ""),
       reference_text: node.reference_text || "", location: node.location || null,
-      bg: (CLASS_COLORS[node.node_class] || { bg: "#ddd" }).bg
+      bg: nodeColors(node.node_class).bg, border: nodeColors(node.node_class).border,
+      label_color: activeTheme.text
     }});
   });
   graph.relationships.forEach(function (rel, i) {
     // The compact edge style has one provenance label, but the full evidence
     // array remains on the element so inspection never loses additional facts.
     var provenance = rel.evidence.length > 0 ? rel.evidence[0].provenance : "unknown";
-    var colors = EDGE_KIND_COLORS[rel.kind] || { border: "#999999" };
+    var colors = edgeColors(rel.kind);
     elements.push({ group: "edges", data: {
       id: "edge-" + i, source: rel.source, target: rel.target,
       kind: rel.kind, provenance: provenance, evidence: rel.evidence, edge_color: colors.border
     }});
   });
 
-  var style = [
-    { selector: "node", style: {
-      "label": "data(label)", "text-wrap": "ellipsis", "text-max-width": "180px",
-      "font-size": GRAPH_LABEL_FONT_SIZE, "font-family": "system-ui, -apple-system, sans-serif",
-      "text-valign": "center", "text-halign": "center",
-      "width": "label", "height": "32px", "padding": "8px",
-      "shape": "roundrectangle", "border-width": 2,
-      "background-color": "#ddd", "border-color": "#999", "color": "#1a1a1a",
-      "text-outline-color": "data(bg)", "text-outline-width": 0,
-      "min-zoomed-font-size": 6
-    }},
-    { selector: "node.dimmed", style: { "opacity": 0.2 } },
-    { selector: "node.faded", style: { "opacity": 0.5 } },
-    { selector: "edge.faded", style: { "opacity": 0.5 } },
-    { selector: "node.highlighted", style: {
-      "border-width": 6, "border-color": "#4a7c59", "opacity": 1, "z-index": 10
-    }},
-    { selector: "node:selected", style: { "border-width": 3, "border-color": "#2d6a4f" } },
-    { selector: "edge", style: {
-      "width": 1.5, "line-color": "data(edge_color)", "target-arrow-color": "data(edge_color)",
-      "target-arrow-shape": "triangle", "arrow-scale": 0.8, "curve-style": "bezier",
-      "label": "data(kind)", "font-size": GRAPH_LABEL_FONT_SIZE, "font-weight": "bold",
-      "font-family": "system-ui, -apple-system, sans-serif", "color": "data(edge_color)",
-      "text-rotation": "autorotate", "text-margin-y": -8, "min-zoomed-font-size": 8
-    }},
-    { selector: "edge.highlighted", style: {
-      "width": 3, "line-color": "#c62828", "target-arrow-color": "#c62828",
-      "color": "#c62828", "z-index": 10
-    }},
-    { selector: "edge.dimmed", style: { "opacity": 0.12 } }
-  ];
-
-  Object.keys(CLASS_COLORS).forEach(function (cls) {
-    var c = CLASS_COLORS[cls];
-    style.push({
-      selector: 'node[node_class = "' + cls + '"]',
-      style: { "background-color": c.bg, "border-color": c.border, "text-outline-color": c.bg }
-    });
-  });
+  function graphStyle(theme) {
+    return [
+      { selector: "node", style: {
+        "label": "data(label)", "text-wrap": "ellipsis", "text-max-width": "180px",
+        "font-size": GRAPH_LABEL_FONT_SIZE, "font-family": "system-ui, -apple-system, sans-serif",
+        "text-valign": "center", "text-halign": "center",
+        "width": "label", "height": "32px", "padding": "8px",
+        "shape": "roundrectangle", "border-width": 2,
+        "background-color": "data(bg)", "border-color": "data(border)", "color": "data(label_color)",
+        "text-outline-color": "data(bg)", "text-outline-width": 0,
+        "min-zoomed-font-size": 6
+      }},
+      { selector: "node.dimmed", style: { "opacity": 0.2 } },
+      { selector: "node.faded", style: { "opacity": 0.5 } },
+      { selector: "edge.faded", style: { "opacity": 0.5 } },
+      { selector: "node.highlighted", style: {
+        "border-width": 6, "border-color": theme.accent, "opacity": 1, "z-index": 10
+      }},
+      { selector: "node:selected", style: { "border-width": 3, "border-color": theme.accent } },
+      { selector: "edge", style: {
+        "width": 1.5, "line-color": "data(edge_color)", "target-arrow-color": "data(edge_color)",
+        "target-arrow-shape": "triangle", "arrow-scale": 0.8, "curve-style": "bezier",
+        "label": "data(kind)", "font-size": GRAPH_LABEL_FONT_SIZE, "font-weight": "bold",
+        "font-family": "system-ui, -apple-system, sans-serif", "color": "data(edge_color)",
+        "text-rotation": "autorotate", "text-margin-y": -8, "min-zoomed-font-size": 8
+      }},
+      { selector: "edge.highlighted", style: {
+        "width": 3, "line-color": theme.selected, "target-arrow-color": theme.selected,
+        "color": theme.selected, "z-index": 10
+      }},
+      { selector: "edge.dimmed", style: { "opacity": 0.12 } }
+    ];
+  }
 
   cytoscape.use(cytoscapeDagre);
   var cy = cytoscape({
     container: document.getElementById("cy"),
     elements: elements,
-    style: style,
+    style: graphStyle(activeTheme),
     layout: { name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15 },
     wheelSensitivity: 1,
     minZoom: 0.1,
@@ -110,7 +176,7 @@
   });
   kinds.sort();
   kinds.forEach(function (kind) {
-    var c = CLASS_COLORS[kind] || { bg: "#ddd", border: "#999" };
+    var c = nodeColors(kind);
     var lbl = document.createElement("label");
     var cb = document.createElement("input");
     cb.type = "checkbox";
@@ -133,7 +199,7 @@
   });
   edgeKinds.sort();
   edgeKinds.forEach(function (kind) {
-    var c = EDGE_KIND_COLORS[kind] || { bg: "#ddd", border: "#999" };
+    var c = edgeColors(kind);
     var lbl = document.createElement("label");
     var cb = document.createElement("input");
     cb.type = "checkbox";
@@ -145,6 +211,50 @@
     lbl.appendChild(cb);
     lbl.appendChild(document.createTextNode(" " + kind));
     edgesEl.appendChild(lbl);
+  });
+
+  function refreshFilterSwatches() {
+    kindsEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      var colors = nodeColors(cb.dataset.kind);
+      cb.style.setProperty("--kind-bg", colors.bg);
+      cb.style.setProperty("--kind-border", colors.border);
+    });
+    edgesEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      var colors = edgeColors(cb.dataset.edgekind);
+      cb.style.setProperty("--kind-bg", colors.bg);
+      cb.style.setProperty("--kind-border", colors.border);
+    });
+  }
+
+  function applyTheme() {
+    activeThemeName = currentThemeName();
+    activeTheme = THEMES[activeThemeName];
+    CLASS_COLORS = activeTheme.nodeClasses;
+    EDGE_KIND_COLORS = activeTheme.edgeKinds;
+    if (themeModeEl.value === "system") {
+      delete document.documentElement.dataset.theme;
+    } else {
+      document.documentElement.dataset.theme = activeThemeName;
+    }
+    cy.batch(function () {
+      cy.nodes().forEach(function (node) {
+        var colors = nodeColors(node.data("node_class"));
+        node.data({ bg: colors.bg, border: colors.border, label_color: activeTheme.text });
+      });
+      cy.edges().forEach(function (edge) {
+        edge.data("edge_color", edgeColors(edge.data("kind")).border);
+      });
+    });
+    cy.style(graphStyle(activeTheme)).update();
+    refreshFilterSwatches();
+  }
+
+  // A selected mode lives only in this open document. System mode listens for
+  // an OS appearance change, but no setting is written into the downloaded file
+  // or browser storage.
+  themeModeEl.addEventListener("change", applyTheme);
+  systemColorScheme.addEventListener("change", function () {
+    if (themeModeEl.value === "system") applyTheme();
   });
 
   applyFilters();
@@ -520,5 +630,10 @@
     }
   });
 
-  window.minotaurVisualizer = { cy: cy };
+  // Kept deliberately small for browser integration tests and local artifact
+  // inspection; callers can observe the rendered graph without mutating state.
+  window.minotaurVisualizer = {
+    cy: cy,
+    activeTheme: function () { return { name: activeThemeName, selected: activeTheme.selected }; }
+  };
 }());

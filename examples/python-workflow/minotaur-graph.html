@@ -15,8 +15,107 @@
   --control-bg: #2b2b2b;
   --control-text: #e0e0dc;
   --control-muted: #9a9a94;
+  --control-border: #444444;
+  --button-bg: #3a3a3a;
+  --button-hover: #4a4a4a;
   --accent: #4a7c59;
   --detail-bg: #fafaf6;
+  --tooltip-bg: rgba(30, 30, 30, 0.92);
+  --tooltip-text: #e0e0dc;
+}
+
+/* System is the initial, non-persistent mode. Explicit selections below win
+   over this media query, so reopening an artifact never depends on storage. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #1e1e2e;
+    --surface: #313244;
+    --text: #cdd6f4;
+    --text-muted: #a6adc8;
+    --border: #45475a;
+    --control-bg: #181825;
+    --control-text: #cdd6f4;
+    --control-muted: #a6adc8;
+    --control-border: #45475a;
+    --button-bg: #313244;
+    --button-hover: #45475a;
+    --accent: #89b4fa;
+    --detail-bg: #24273a;
+    --tooltip-bg: rgba(17, 17, 27, 0.96);
+    --tooltip-text: #cdd6f4;
+  }
+}
+
+:root[data-theme="light"] {
+  --bg: #f5f5f0;
+  --surface: #ffffff;
+  --text: #1a1a1a;
+  --text-muted: #666660;
+  --border: #d4d4cc;
+  --control-bg: #2b2b2b;
+  --control-text: #e0e0dc;
+  --control-muted: #9a9a94;
+  --control-border: #444444;
+  --button-bg: #3a3a3a;
+  --button-hover: #4a4a4a;
+  --accent: #4a7c59;
+  --detail-bg: #fafaf6;
+  --tooltip-bg: rgba(30, 30, 30, 0.92);
+  --tooltip-text: #e0e0dc;
+}
+
+:root[data-theme="catppuccin-mocha"] {
+  --bg: #1e1e2e;
+  --surface: #313244;
+  --text: #cdd6f4;
+  --text-muted: #a6adc8;
+  --border: #45475a;
+  --control-bg: #181825;
+  --control-text: #cdd6f4;
+  --control-muted: #a6adc8;
+  --control-border: #45475a;
+  --button-bg: #313244;
+  --button-hover: #45475a;
+  --accent: #89b4fa;
+  --detail-bg: #24273a;
+  --tooltip-bg: rgba(17, 17, 27, 0.96);
+  --tooltip-text: #cdd6f4;
+}
+
+:root[data-theme="nord-polar-night"] {
+  --bg: #2e3440;
+  --surface: #3b4252;
+  --text: #eceff4;
+  --text-muted: #d8dee9;
+  --border: #4c566a;
+  --control-bg: #242933;
+  --control-text: #eceff4;
+  --control-muted: #d8dee9;
+  --control-border: #4c566a;
+  --button-bg: #3b4252;
+  --button-hover: #434c5e;
+  --accent: #88c0d0;
+  --detail-bg: #343b48;
+  --tooltip-bg: rgba(36, 41, 51, 0.96);
+  --tooltip-text: #eceff4;
+}
+
+:root[data-theme="solarized-dark"] {
+  --bg: #002b36;
+  --surface: #073642;
+  --text: #fdf6e3;
+  --text-muted: #93a1a1;
+  --border: #586e75;
+  --control-bg: #00212a;
+  --control-text: #fdf6e3;
+  --control-muted: #93a1a1;
+  --control-border: #586e75;
+  --button-bg: #073642;
+  --button-hover: #0b4653;
+  --accent: #2aa198;
+  --detail-bg: #04313b;
+  --tooltip-bg: rgba(0, 33, 42, 0.96);
+  --tooltip-text: #fdf6e3;
 }
 
 body {
@@ -40,7 +139,7 @@ body {
   flex-wrap: wrap;
   flex-shrink: 0;
   font-size: 12px;
-  border-bottom: 1px solid #444;
+  border-bottom: 1px solid var(--control-border);
 }
 
 #controls .group {
@@ -100,8 +199,8 @@ body {
 }
 
 #search {
-  background: #3a3a3a;
-  border: 1px solid #555;
+  background: var(--button-bg);
+  border: 1px solid var(--control-border);
   color: var(--control-text);
   padding: 4px 8px;
   border-radius: 3px;
@@ -112,9 +211,20 @@ body {
 #search::placeholder { color: var(--control-muted); }
 #search:focus { outline: none; border-color: var(--accent); }
 
+#theme-mode {
+  background: var(--button-bg);
+  border: 1px solid var(--control-border);
+  color: var(--control-text);
+  border-radius: 3px;
+  padding: 4px 22px 4px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+#theme-mode:focus { outline: none; border-color: var(--accent); }
+
 .btn {
-  background: #3a3a3a;
-  border: 1px solid #555;
+  background: var(--button-bg);
+  border: 1px solid var(--control-border);
   color: var(--control-text);
   padding: 4px 10px;
   border-radius: 3px;
@@ -123,7 +233,7 @@ body {
   font-family: inherit;
   white-space: nowrap;
 }
-.btn:hover { background: #4a4a4a; }
+.btn:hover { background: var(--button-hover); }
 #btn-direction { font-size: 16px; line-height: 1; }
 
 #zoom-speed {
@@ -284,8 +394,8 @@ body {
 
 #tooltip {
   position: absolute;
-  background: rgba(30,30,30,0.92);
-  color: #e0e0dc;
+  background: var(--tooltip-bg);
+  color: var(--tooltip-text);
   padding: 6px 10px;
   border-radius: 4px;
   font-size: 11px;
@@ -310,6 +420,16 @@ body {
   </div>
   <div class="group" id="edge-filters">
     <span class="group-label">Edges</span>
+  </div>
+  <div class="group">
+    <label class="group-label" for="theme-mode">Color Mode</label>
+    <select id="theme-mode" aria-label="Color mode">
+      <option value="system">System</option>
+      <option value="light">Light</option>
+      <option value="catppuccin-mocha">Catppuccin Mocha</option>
+      <option value="nord-polar-night">Nord Polar Night</option>
+      <option value="solarized-dark">Solarized Dark</option>
+    </select>
   </div>
   <div class="group">
     <span class="group-label">Scroll Sensitivity</span>
@@ -906,28 +1026,99 @@ var Xr=function(e){if(!(this instanceof Xr))return new Xr(e);this.id="Thenable/1
   var graph = payload.graph;
   var byId = new Map(graph.nodes.map(function (n) { return [n.id, n]; }));
   var layoutDir = "TB";
+  var themeModeEl = document.getElementById("theme-mode");
+  var systemColorScheme = window.matchMedia("(prefers-color-scheme: dark)");
   // One shared value prevents node and edge labels from drifting apart as the
   // graph style evolves; edge weight adds hierarchy without reducing legibility.
   var GRAPH_LABEL_FONT_SIZE = "10px";
 
-  var CLASS_COLORS = {
-    "file":                 { bg: "#d5e8d4", border: "#82b366" },
-    "symbol":               { bg: "#dae8fc", border: "#6c8ebf" },
-    "unresolved-reference": { bg: "#eadcf2", border: "#8e5aa8" }
+  // Themes supply semantic roles, not a raw stylesheet swap: canvas-rendered
+  // Cytoscape elements need the same palette as DOM controls. Yellow is absent
+  // from every graph palette, and red remains reserved for selected edges.
+  var THEMES = {
+    "light": {
+      accent: "#4a7c59", selected: "#c62828", text: "#1a1a1a",
+      nodeClasses: {
+        "file": { bg: "#d5e8d4", border: "#82b366" },
+        "symbol": { bg: "#dae8fc", border: "#6c8ebf" },
+        "unresolved-reference": { bg: "#eadcf2", border: "#8e5aa8" }
+      },
+      edgeKinds: {
+        "contains": { bg: "#eeeeee", border: "#999999" },
+        "calls": { bg: "#dae8fc", border: "#6c8ebf" },
+        "references": { bg: "#f6dfcf", border: "#b85c2c" },
+        "imports": { bg: "#d5e8d4", border: "#82b366" },
+        "inherits": { bg: "#e1d5e7", border: "#9673a6" },
+        "implements": { bg: "#d4e8e2", border: "#5a9a82" }
+      }
+    },
+    "catppuccin-mocha": {
+      accent: "#89b4fa", selected: "#f38ba8", text: "#cdd6f4",
+      nodeClasses: {
+        "file": { bg: "#253b32", border: "#a6e3a1" },
+        "symbol": { bg: "#26344f", border: "#89b4fa" },
+        "unresolved-reference": { bg: "#392f4b", border: "#cba6f7" }
+      },
+      edgeKinds: {
+        "contains": { bg: "#45475a", border: "#bac2de" },
+        "calls": { bg: "#26344f", border: "#89b4fa" },
+        "references": { bg: "#44352e", border: "#fab387" },
+        "imports": { bg: "#253b32", border: "#a6e3a1" },
+        "inherits": { bg: "#392f4b", border: "#cba6f7" },
+        "implements": { bg: "#28413e", border: "#94e2d5" }
+      }
+    },
+    "nord-polar-night": {
+      accent: "#88c0d0", selected: "#bf616a", text: "#eceff4",
+      nodeClasses: {
+        "file": { bg: "#35433e", border: "#a3be8c" },
+        "symbol": { bg: "#334554", border: "#81a1c1" },
+        "unresolved-reference": { bg: "#423b52", border: "#b48ead" }
+      },
+      edgeKinds: {
+        "contains": { bg: "#434c5e", border: "#d8dee9" },
+        "calls": { bg: "#334554", border: "#81a1c1" },
+        "references": { bg: "#4c3b32", border: "#d08770" },
+        "imports": { bg: "#35433e", border: "#a3be8c" },
+        "inherits": { bg: "#423b52", border: "#b48ead" },
+        "implements": { bg: "#30484b", border: "#8fbcbb" }
+      }
+    },
+    "solarized-dark": {
+      accent: "#2aa198", selected: "#dc322f", text: "#fdf6e3",
+      nodeClasses: {
+        "file": { bg: "#183d38", border: "#859900" },
+        "symbol": { bg: "#123e4d", border: "#268bd2" },
+        "unresolved-reference": { bg: "#3a3148", border: "#6c71c4" }
+      },
+      edgeKinds: {
+        "contains": { bg: "#073642", border: "#93a1a1" },
+        "calls": { bg: "#123e4d", border: "#268bd2" },
+        "references": { bg: "#4a3025", border: "#cb4b16" },
+        "imports": { bg: "#183d38", border: "#859900" },
+        "inherits": { bg: "#3a3148", border: "#6c71c4" },
+        "implements": { bg: "#123e4d", border: "#2aa198" }
+      }
+    }
   };
 
-  // These border colors are also exposed on the filter controls below. Keeping
-  // one palette makes a checked category map directly to its graph edges. Red
-  // is reserved for selection and yellow is intentionally absent because it is
-  // difficult to distinguish on typical light displays.
-  var EDGE_KIND_COLORS = {
-    "contains":   { bg: "#eeeeee", border: "#999999" },
-    "calls":      { bg: "#dae8fc", border: "#6c8ebf" },
-    "references": { bg: "#f6dfcf", border: "#b85c2c" },
-    "imports":    { bg: "#d5e8d4", border: "#82b366" },
-    "inherits":   { bg: "#e1d5e7", border: "#9673a6" },
-    "implements": { bg: "#d4e8e2", border: "#5a9a82" }
-  };
+  function currentThemeName() {
+    return themeModeEl.value === "system" && systemColorScheme.matches
+      ? "catppuccin-mocha" : themeModeEl.value === "system" ? "light" : themeModeEl.value;
+  }
+
+  var activeThemeName = currentThemeName();
+  var activeTheme = THEMES[activeThemeName];
+  var CLASS_COLORS = activeTheme.nodeClasses;
+  var EDGE_KIND_COLORS = activeTheme.edgeKinds;
+
+  function nodeColors(nodeClass) {
+    return CLASS_COLORS[nodeClass] || { bg: "#666666", border: "#aaaaaa" };
+  }
+
+  function edgeColors(kind) {
+    return EDGE_KIND_COLORS[kind] || { bg: "#666666", border: "#aaaaaa" };
+  }
 
   var elements = [];
   graph.nodes.forEach(function (node) {
@@ -935,65 +1126,60 @@ var Xr=function(e){if(!(this instanceof Xr))return new Xr(e);this.id="Thenable/1
       id: node.id, label: node.label, node_class: node.node_class,
       symbol_kind: node.symbol_kind || "", path: node.path || (node.location ? node.location.path : ""),
       reference_text: node.reference_text || "", location: node.location || null,
-      bg: (CLASS_COLORS[node.node_class] || { bg: "#ddd" }).bg
+      bg: nodeColors(node.node_class).bg, border: nodeColors(node.node_class).border,
+      label_color: activeTheme.text
     }});
   });
   graph.relationships.forEach(function (rel, i) {
     // The compact edge style has one provenance label, but the full evidence
     // array remains on the element so inspection never loses additional facts.
     var provenance = rel.evidence.length > 0 ? rel.evidence[0].provenance : "unknown";
-    var colors = EDGE_KIND_COLORS[rel.kind] || { border: "#999999" };
+    var colors = edgeColors(rel.kind);
     elements.push({ group: "edges", data: {
       id: "edge-" + i, source: rel.source, target: rel.target,
       kind: rel.kind, provenance: provenance, evidence: rel.evidence, edge_color: colors.border
     }});
   });
 
-  var style = [
-    { selector: "node", style: {
-      "label": "data(label)", "text-wrap": "ellipsis", "text-max-width": "180px",
-      "font-size": GRAPH_LABEL_FONT_SIZE, "font-family": "system-ui, -apple-system, sans-serif",
-      "text-valign": "center", "text-halign": "center",
-      "width": "label", "height": "32px", "padding": "8px",
-      "shape": "roundrectangle", "border-width": 2,
-      "background-color": "#ddd", "border-color": "#999", "color": "#1a1a1a",
-      "text-outline-color": "data(bg)", "text-outline-width": 0,
-      "min-zoomed-font-size": 6
-    }},
-    { selector: "node.dimmed", style: { "opacity": 0.2 } },
-    { selector: "node.faded", style: { "opacity": 0.5 } },
-    { selector: "edge.faded", style: { "opacity": 0.5 } },
-    { selector: "node.highlighted", style: {
-      "border-width": 6, "border-color": "#4a7c59", "opacity": 1, "z-index": 10
-    }},
-    { selector: "node:selected", style: { "border-width": 3, "border-color": "#2d6a4f" } },
-    { selector: "edge", style: {
-      "width": 1.5, "line-color": "data(edge_color)", "target-arrow-color": "data(edge_color)",
-      "target-arrow-shape": "triangle", "arrow-scale": 0.8, "curve-style": "bezier",
-      "label": "data(kind)", "font-size": GRAPH_LABEL_FONT_SIZE, "font-weight": "bold",
-      "font-family": "system-ui, -apple-system, sans-serif", "color": "data(edge_color)",
-      "text-rotation": "autorotate", "text-margin-y": -8, "min-zoomed-font-size": 8
-    }},
-    { selector: "edge.highlighted", style: {
-      "width": 3, "line-color": "#c62828", "target-arrow-color": "#c62828",
-      "color": "#c62828", "z-index": 10
-    }},
-    { selector: "edge.dimmed", style: { "opacity": 0.12 } }
-  ];
-
-  Object.keys(CLASS_COLORS).forEach(function (cls) {
-    var c = CLASS_COLORS[cls];
-    style.push({
-      selector: 'node[node_class = "' + cls + '"]',
-      style: { "background-color": c.bg, "border-color": c.border, "text-outline-color": c.bg }
-    });
-  });
+  function graphStyle(theme) {
+    return [
+      { selector: "node", style: {
+        "label": "data(label)", "text-wrap": "ellipsis", "text-max-width": "180px",
+        "font-size": GRAPH_LABEL_FONT_SIZE, "font-family": "system-ui, -apple-system, sans-serif",
+        "text-valign": "center", "text-halign": "center",
+        "width": "label", "height": "32px", "padding": "8px",
+        "shape": "roundrectangle", "border-width": 2,
+        "background-color": "data(bg)", "border-color": "data(border)", "color": "data(label_color)",
+        "text-outline-color": "data(bg)", "text-outline-width": 0,
+        "min-zoomed-font-size": 6
+      }},
+      { selector: "node.dimmed", style: { "opacity": 0.2 } },
+      { selector: "node.faded", style: { "opacity": 0.5 } },
+      { selector: "edge.faded", style: { "opacity": 0.5 } },
+      { selector: "node.highlighted", style: {
+        "border-width": 6, "border-color": theme.accent, "opacity": 1, "z-index": 10
+      }},
+      { selector: "node:selected", style: { "border-width": 3, "border-color": theme.accent } },
+      { selector: "edge", style: {
+        "width": 1.5, "line-color": "data(edge_color)", "target-arrow-color": "data(edge_color)",
+        "target-arrow-shape": "triangle", "arrow-scale": 0.8, "curve-style": "bezier",
+        "label": "data(kind)", "font-size": GRAPH_LABEL_FONT_SIZE, "font-weight": "bold",
+        "font-family": "system-ui, -apple-system, sans-serif", "color": "data(edge_color)",
+        "text-rotation": "autorotate", "text-margin-y": -8, "min-zoomed-font-size": 8
+      }},
+      { selector: "edge.highlighted", style: {
+        "width": 3, "line-color": theme.selected, "target-arrow-color": theme.selected,
+        "color": theme.selected, "z-index": 10
+      }},
+      { selector: "edge.dimmed", style: { "opacity": 0.12 } }
+    ];
+  }
 
   cytoscape.use(cytoscapeDagre);
   var cy = cytoscape({
     container: document.getElementById("cy"),
     elements: elements,
-    style: style,
+    style: graphStyle(activeTheme),
     layout: { name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15 },
     wheelSensitivity: 1,
     minZoom: 0.1,
@@ -1012,7 +1198,7 @@ var Xr=function(e){if(!(this instanceof Xr))return new Xr(e);this.id="Thenable/1
   });
   kinds.sort();
   kinds.forEach(function (kind) {
-    var c = CLASS_COLORS[kind] || { bg: "#ddd", border: "#999" };
+    var c = nodeColors(kind);
     var lbl = document.createElement("label");
     var cb = document.createElement("input");
     cb.type = "checkbox";
@@ -1035,7 +1221,7 @@ var Xr=function(e){if(!(this instanceof Xr))return new Xr(e);this.id="Thenable/1
   });
   edgeKinds.sort();
   edgeKinds.forEach(function (kind) {
-    var c = EDGE_KIND_COLORS[kind] || { bg: "#ddd", border: "#999" };
+    var c = edgeColors(kind);
     var lbl = document.createElement("label");
     var cb = document.createElement("input");
     cb.type = "checkbox";
@@ -1047,6 +1233,50 @@ var Xr=function(e){if(!(this instanceof Xr))return new Xr(e);this.id="Thenable/1
     lbl.appendChild(cb);
     lbl.appendChild(document.createTextNode(" " + kind));
     edgesEl.appendChild(lbl);
+  });
+
+  function refreshFilterSwatches() {
+    kindsEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      var colors = nodeColors(cb.dataset.kind);
+      cb.style.setProperty("--kind-bg", colors.bg);
+      cb.style.setProperty("--kind-border", colors.border);
+    });
+    edgesEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      var colors = edgeColors(cb.dataset.edgekind);
+      cb.style.setProperty("--kind-bg", colors.bg);
+      cb.style.setProperty("--kind-border", colors.border);
+    });
+  }
+
+  function applyTheme() {
+    activeThemeName = currentThemeName();
+    activeTheme = THEMES[activeThemeName];
+    CLASS_COLORS = activeTheme.nodeClasses;
+    EDGE_KIND_COLORS = activeTheme.edgeKinds;
+    if (themeModeEl.value === "system") {
+      delete document.documentElement.dataset.theme;
+    } else {
+      document.documentElement.dataset.theme = activeThemeName;
+    }
+    cy.batch(function () {
+      cy.nodes().forEach(function (node) {
+        var colors = nodeColors(node.data("node_class"));
+        node.data({ bg: colors.bg, border: colors.border, label_color: activeTheme.text });
+      });
+      cy.edges().forEach(function (edge) {
+        edge.data("edge_color", edgeColors(edge.data("kind")).border);
+      });
+    });
+    cy.style(graphStyle(activeTheme)).update();
+    refreshFilterSwatches();
+  }
+
+  // A selected mode lives only in this open document. System mode listens for
+  // an OS appearance change, but no setting is written into the downloaded file
+  // or browser storage.
+  themeModeEl.addEventListener("change", applyTheme);
+  systemColorScheme.addEventListener("change", function () {
+    if (themeModeEl.value === "system") applyTheme();
   });
 
   applyFilters();
@@ -1422,7 +1652,12 @@ var Xr=function(e){if(!(this instanceof Xr))return new Xr(e);this.id="Thenable/1
     }
   });
 
-  window.minotaurVisualizer = { cy: cy };
+  // Kept deliberately small for browser integration tests and local artifact
+  // inspection; callers can observe the rendered graph without mutating state.
+  window.minotaurVisualizer = {
+    cy: cy,
+    activeTheme: function () { return { name: activeThemeName, selected: activeTheme.selected }; }
+  };
 }());
 </script>
 </body>

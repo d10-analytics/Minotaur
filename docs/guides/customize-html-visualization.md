@@ -24,6 +24,19 @@ full-height right-hand divider, or use its arrow/Home/End keys, to adjust its
 width. Node connections use separate relationship and target rows so long
 qualified names wrap within the chosen width.
 
+## Color modes
+
+The top navigation bar provides System, Light, Catppuccin Mocha, Nord Polar
+Night, and Solarized Dark modes. System follows the operating system's current
+light/dark preference; the selector changes only the open artifact and stores
+no setting. Every mode updates both the surrounding interface and the rendered
+graph, so filter swatches remain equal to their edge colors. Selected edges are
+always red, and yellow is intentionally excluded from node and edge colors.
+
+The named modes use the published [Catppuccin palette](https://catppuccin.com/palette/),
+[Nord palette](https://www.nordtheme.com/docs/colors-and-palettes/), and
+[Solarized palette](https://ethanschoonover.com/solarized/) as design sources.
+
 When a source root is available, the artifact embeds only the merged evidence
 spans plus up to 50 lines of surrounding context; omit `--source-root` when
 the downloaded file must contain no source text. Missing, unreadable,

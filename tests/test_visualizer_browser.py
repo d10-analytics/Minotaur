@@ -106,6 +106,39 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
         page = browser.new_page()
         page.on("request", lambda request: requested.append(request.url))
         page.goto(output.as_uri())
+        assert page.locator("#theme-mode").input_value() == "system"
+        for mode, expected_background in {
+            "light": "rgb(245, 245, 240)",
+            "catppuccin-mocha": "rgb(30, 30, 46)",
+            "nord-polar-night": "rgb(46, 52, 64)",
+            "solarized-dark": "rgb(0, 43, 54)",
+        }.items():
+            page.locator("#theme-mode").select_option(mode)
+            background = page.locator("#cy").evaluate(
+                "element => getComputedStyle(element).backgroundColor"
+            )
+            assert background == expected_background
+            assert page.evaluate(
+                """() => {
+                    const isYellow = (color) => color[0] > 120 && color[1] > 120
+                        && color[2] * 1.4 < color[0] && color[2] * 1.4 < color[1]
+                        && Math.abs(color[0] - color[1]) < 110;
+                    return window.minotaurVisualizer.cy.edges().every((edge) => {
+                        const checkbox = document.querySelector(
+                            `input[data-edgekind="${edge.data('kind')}"]`
+                        );
+                        const hex = getComputedStyle(checkbox)
+                            .getPropertyValue('--kind-border').trim();
+                        const value = Number.parseInt(hex.slice(1), 16);
+                        const expected = [value >> 16, (value >> 8) & 255, value & 255];
+                        const line = edge.pstyle('line-color').value;
+                        const arrow = edge.pstyle('target-arrow-color').value;
+                        return !isYellow(line)
+                            && line.every((channel, index) => channel === expected[index])
+                            && arrow.every((channel, index) => channel === expected[index]);
+                    });
+                }"""
+            )
         assert page.evaluate(
             """() => {
                 const cy = window.minotaurVisualizer.cy;
@@ -151,7 +184,13 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
         assert page.evaluate(
             """(edgeId) => {
                 const edge = window.minotaurVisualizer.cy.getElementById(edgeId);
-                const selectedRed = [198, 40, 40];
+                const selectedHex = window.minotaurVisualizer.activeTheme().selected;
+                const selectedValue = Number.parseInt(selectedHex.slice(1), 16);
+                const selectedRed = [
+                    selectedValue >> 16,
+                    (selectedValue >> 8) & 255,
+                    selectedValue & 255,
+                ];
                 return edge.hasClass('highlighted')
                     && edge.pstyle('line-color').value.every(
                         (channel, index) => channel === selectedRed[index]
@@ -191,6 +230,8 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
         assert page.locator("#detail").bounding_box()["width"] >= starting_width + 75
         page.keyboard.press("Escape")
         assert "Select a node or edge" in page.locator("#detail-content").inner_text()
+        page.reload()
+        assert page.locator("#theme-mode").input_value() == "system"
         browser.close()
     assert all(url.startswith("file:") for url in requested)
 

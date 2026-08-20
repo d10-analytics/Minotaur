@@ -9,8 +9,107 @@
   --control-bg: #2b2b2b;
   --control-text: #e0e0dc;
   --control-muted: #9a9a94;
+  --control-border: #444444;
+  --button-bg: #3a3a3a;
+  --button-hover: #4a4a4a;
   --accent: #4a7c59;
   --detail-bg: #fafaf6;
+  --tooltip-bg: rgba(30, 30, 30, 0.92);
+  --tooltip-text: #e0e0dc;
+}
+
+/* System is the initial, non-persistent mode. Explicit selections below win
+   over this media query, so reopening an artifact never depends on storage. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #1e1e2e;
+    --surface: #313244;
+    --text: #cdd6f4;
+    --text-muted: #a6adc8;
+    --border: #45475a;
+    --control-bg: #181825;
+    --control-text: #cdd6f4;
+    --control-muted: #a6adc8;
+    --control-border: #45475a;
+    --button-bg: #313244;
+    --button-hover: #45475a;
+    --accent: #89b4fa;
+    --detail-bg: #24273a;
+    --tooltip-bg: rgba(17, 17, 27, 0.96);
+    --tooltip-text: #cdd6f4;
+  }
+}
+
+:root[data-theme="light"] {
+  --bg: #f5f5f0;
+  --surface: #ffffff;
+  --text: #1a1a1a;
+  --text-muted: #666660;
+  --border: #d4d4cc;
+  --control-bg: #2b2b2b;
+  --control-text: #e0e0dc;
+  --control-muted: #9a9a94;
+  --control-border: #444444;
+  --button-bg: #3a3a3a;
+  --button-hover: #4a4a4a;
+  --accent: #4a7c59;
+  --detail-bg: #fafaf6;
+  --tooltip-bg: rgba(30, 30, 30, 0.92);
+  --tooltip-text: #e0e0dc;
+}
+
+:root[data-theme="catppuccin-mocha"] {
+  --bg: #1e1e2e;
+  --surface: #313244;
+  --text: #cdd6f4;
+  --text-muted: #a6adc8;
+  --border: #45475a;
+  --control-bg: #181825;
+  --control-text: #cdd6f4;
+  --control-muted: #a6adc8;
+  --control-border: #45475a;
+  --button-bg: #313244;
+  --button-hover: #45475a;
+  --accent: #89b4fa;
+  --detail-bg: #24273a;
+  --tooltip-bg: rgba(17, 17, 27, 0.96);
+  --tooltip-text: #cdd6f4;
+}
+
+:root[data-theme="nord-polar-night"] {
+  --bg: #2e3440;
+  --surface: #3b4252;
+  --text: #eceff4;
+  --text-muted: #d8dee9;
+  --border: #4c566a;
+  --control-bg: #242933;
+  --control-text: #eceff4;
+  --control-muted: #d8dee9;
+  --control-border: #4c566a;
+  --button-bg: #3b4252;
+  --button-hover: #434c5e;
+  --accent: #88c0d0;
+  --detail-bg: #343b48;
+  --tooltip-bg: rgba(36, 41, 51, 0.96);
+  --tooltip-text: #eceff4;
+}
+
+:root[data-theme="solarized-dark"] {
+  --bg: #002b36;
+  --surface: #073642;
+  --text: #fdf6e3;
+  --text-muted: #93a1a1;
+  --border: #586e75;
+  --control-bg: #00212a;
+  --control-text: #fdf6e3;
+  --control-muted: #93a1a1;
+  --control-border: #586e75;
+  --button-bg: #073642;
+  --button-hover: #0b4653;
+  --accent: #2aa198;
+  --detail-bg: #04313b;
+  --tooltip-bg: rgba(0, 33, 42, 0.96);
+  --tooltip-text: #fdf6e3;
 }
 
 body {
@@ -34,7 +133,7 @@ body {
   flex-wrap: wrap;
   flex-shrink: 0;
   font-size: 12px;
-  border-bottom: 1px solid #444;
+  border-bottom: 1px solid var(--control-border);
 }
 
 #controls .group {
@@ -94,8 +193,8 @@ body {
 }
 
 #search {
-  background: #3a3a3a;
-  border: 1px solid #555;
+  background: var(--button-bg);
+  border: 1px solid var(--control-border);
   color: var(--control-text);
   padding: 4px 8px;
   border-radius: 3px;
@@ -106,9 +205,20 @@ body {
 #search::placeholder { color: var(--control-muted); }
 #search:focus { outline: none; border-color: var(--accent); }
 
+#theme-mode {
+  background: var(--button-bg);
+  border: 1px solid var(--control-border);
+  color: var(--control-text);
+  border-radius: 3px;
+  padding: 4px 22px 4px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+#theme-mode:focus { outline: none; border-color: var(--accent); }
+
 .btn {
-  background: #3a3a3a;
-  border: 1px solid #555;
+  background: var(--button-bg);
+  border: 1px solid var(--control-border);
   color: var(--control-text);
   padding: 4px 10px;
   border-radius: 3px;
@@ -117,7 +227,7 @@ body {
   font-family: inherit;
   white-space: nowrap;
 }
-.btn:hover { background: #4a4a4a; }
+.btn:hover { background: var(--button-hover); }
 #btn-direction { font-size: 16px; line-height: 1; }
 
 #zoom-speed {
@@ -278,8 +388,8 @@ body {
 
 #tooltip {
   position: absolute;
-  background: rgba(30,30,30,0.92);
-  color: #e0e0dc;
+  background: var(--tooltip-bg);
+  color: var(--tooltip-text);
   padding: 6px 10px;
   border-radius: 4px;
   font-size: 11px;

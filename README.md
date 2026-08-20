@@ -24,7 +24,8 @@ also available; current structural facts and limits are described in the
 
 The current release includes a self-contained interactive HTML visualizer.
 It opens directly from `file://`, keeps graph strings out of HTML markup, and
-never requests a network resource.
+never requests a network resource. Its top navigation bar offers non-persistent
+System, Light, Catppuccin Mocha, Nord Polar Night, and Solarized Dark modes.
 
 ## What Minotaur will do
 
