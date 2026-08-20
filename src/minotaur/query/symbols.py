@@ -56,15 +56,16 @@ def callers(index: GraphIndex, qualified_name: str) -> tuple[CallerRecord, ...]:
     if len(target) != 1:
         return ()
     target_id = target[0].id
-    records: list[CallerRecord] = []
+    resolved_records: list[CallerRecord] = []
     for relationship in index.incoming(RelationshipKind.CALLS.value, target_id):
         caller = index.nodes.get(relationship.source)
         if caller is None:
             continue
         for location in _locations(relationship):
-            records.append(_caller_record(location, caller.label))
+            resolved_records.append(_caller_record(location, caller.label))
 
     bare_name = qualified_name.rsplit(".", 1)[-1]
+    unresolved_records: list[CallerRecord] = []
     for unresolved in index.unresolved_nodes:
         reference = unresolved.reference_text or unresolved.label
         if reference != bare_name and not reference.endswith(f".{bare_name}"):
@@ -74,10 +75,16 @@ def callers(index: GraphIndex, qualified_name: str) -> tuple[CallerRecord, ...]:
             if caller is None:
                 continue
             for location in _locations(relationship):
-                records.append(
+                unresolved_records.append(
                     _caller_record(location, caller.label, unresolved=True, reference=reference)
                 )
-    return tuple(sorted(records, key=_caller_sort_key))
+    # Keep the high-confidence resolved hits together. Unresolved matches are
+    # a recall tail, even when their source location sorts before a resolved
+    # call site; this makes the confidence distinction visible in text output.
+    return tuple(
+        sorted(resolved_records, key=_caller_sort_key)
+        + sorted(unresolved_records, key=_caller_sort_key)
+    )
 
 
 def definitions(index: GraphIndex, bare_name: str) -> tuple[DefinitionRecord, ...]:
