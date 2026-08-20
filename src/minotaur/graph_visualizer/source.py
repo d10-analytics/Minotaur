@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from minotaur.source import merge_spans, read_source_path
+from minotaur.source import read_source_path
 
 _MAX_CONTEXT = 50
 

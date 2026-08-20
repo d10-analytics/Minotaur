@@ -6,9 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 
-def read_source_path(
-    root: Path, wire_path: str, spans: list[tuple[int, int]]
-) -> dict[str, object]:
+def read_source_path(root: Path, wire_path: str, spans: list[tuple[int, int]]) -> dict[str, object]:
     """Read bounded line spans while keeping a graph path inside ``root``.
 
     ``wire_path`` is a repository-relative, slash-separated graph path and

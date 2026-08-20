@@ -23,12 +23,12 @@ from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
 from minotaur.language_interpreter.registry import InterpreterRegistration, default_registry
 from minotaur.language_interpreter.selection import SelectionError, select_sources
 from minotaur.language_interpreter.workspace import Workspace
-from minotaur.query.diff import diff as compare_graphs
-from minotaur.query.diff import render_json as render_diff_json
-from minotaur.query.diff import render_text as render_diff_text
 from minotaur.query.context import context as build_context
 from minotaur.query.context import render_json as render_context_json
 from minotaur.query.context import render_text as render_context_text
+from minotaur.query.diff import diff as compare_graphs
+from minotaur.query.diff import render_json as render_diff_json
+from minotaur.query.diff import render_text as render_diff_text
 from minotaur.query.freshness import Drift, drift, recorded_selection
 from minotaur.query.impact import (
     impact,
