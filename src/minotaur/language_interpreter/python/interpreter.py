@@ -61,13 +61,15 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # only its arguments can contribute independent references. Keep
         # traversing the callable expression so nested calls are preserved,
         # while suppressing loads from that expression.
+        enclosing_func_depth = self._call_func_depth
         self._call_func_depth += 1
         self.visit(node.func)
-        self._call_func_depth -= 1
+        self._call_func_depth = 0
         for argument in node.args:
             self.visit(argument)
         for keyword in node.keywords:
             self.visit(keyword.value)
+        self._call_func_depth = enclosing_func_depth
 
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
