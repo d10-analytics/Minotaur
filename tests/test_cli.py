@@ -265,6 +265,59 @@ def test_analyze_records_git_snapshot_and_omits_it_for_non_git_root(tmp_path: Pa
     assert "source_control" not in non_git_graph
 
 
+def test_analyze_refreshes_git_snapshot_after_unselected_commit(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    selected = _write(root, "selected.py", "value = 1\n")
+    unselected = _write(root, "unselected.py", "value = 1\n")
+    assert _git(root, "init").returncode == 0
+    assert _git(root, "config", "user.email", "tests@example.invalid").returncode == 0
+    assert _git(root, "config", "user.name", "Minotaur Tests").returncode == 0
+    assert _git(root, "add", "selected.py", "unselected.py").returncode == 0
+    assert _git(root, "commit", "-m", "initial").returncode == 0
+
+    output = tmp_path / "graph.json"
+    first = _run(root, output, selected)
+    first_graph = json.loads(output.read_text(encoding="utf-8"))
+    first_commit = first_graph["source_control"]["commit"]
+
+    unselected.write_text("value = 2\n", encoding="utf-8")
+    assert _git(root, "add", "unselected.py").returncode == 0
+    assert _git(root, "commit", "-m", "unselected change").returncode == 0
+    expected_commit = _git(root, "rev-parse", "HEAD").stdout.strip()
+    second = _run(root, output, selected)
+    second_graph = json.loads(output.read_text(encoding="utf-8"))
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first_commit != expected_commit
+    assert second_graph["source_control"]["commit"] == expected_commit
+    assert "graph is up to date, skipping analysis" not in second.stderr
+
+
+def test_analyze_ignores_git_probe_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "value = 1\n")
+    output = tmp_path / "graph.json"
+
+    calls = 0
+
+    def fail_git(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr(cli.subprocess, "run", fail_git)
+    result = cli._analyze_selection(root, (root,), output, False)
+
+    assert calls == 3
+    assert result.document.source_control is None
+    assert output.exists()
+
+
 def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
