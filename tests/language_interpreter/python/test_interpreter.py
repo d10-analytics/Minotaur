@@ -262,3 +262,28 @@ def test_attribute_and_nested_load_references_preserve_call_and_unresolved_bound
     }
     assert "unknown" not in unresolved
     assert "unknown.attr" not in unresolved
+
+
+def test_load_argument_in_nested_call_func_is_still_a_reference(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def handler():\n    return 1\n\n"
+        "def factory(callback):\n    return callback\n\n"
+        "factory(handler)()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    handler = _node_id(result, "app.handler")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (module, handler, RelationshipKind.REFERENCES.value) in relationships
+    location = relationships[
+        (module, handler, RelationshipKind.REFERENCES.value)
+    ].evidence[0].locations[0]
+    assert location.range.start.line == 6
+    assert location.range.start.character == 7
