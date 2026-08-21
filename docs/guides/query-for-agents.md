@@ -44,16 +44,16 @@ query wants:
 
 ```console
 $ minotaur query definitions select_sources \
-    --graph examples/python-workflow/minotaur-graph.json --root . --no-refresh
-src/minotaur/language_interpreter/selection.py:36  src.minotaur.language_interpreter.selection.select_sources  function
+    --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
+minotaur/language_interpreter/selection.py:36  minotaur.language_interpreter.selection.select_sources  function
 ```
 
 Ask who calls a symbol. `select_sources` is this selection's entry point, so
 nothing inside the analyzed file calls it — an empty result, not an error:
 
 ```console
-$ minotaur query callers src.minotaur.language_interpreter.selection.select_sources \
-    --graph examples/python-workflow/minotaur-graph.json --root . --no-refresh
+$ minotaur query callers minotaur.language_interpreter.selection.select_sources \
+    --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
 no callers
 ```
 
@@ -63,26 +63,26 @@ repository: the graph contains one file, so its callers elsewhere in
 answer. A symbol with an in-selection caller reports the exact call site:
 
 ```console
-$ minotaur query callers src.minotaur.language_interpreter.selection._resolve_target \
-    --graph examples/python-workflow/minotaur-graph.json --root . --no-refresh
-src/minotaur/language_interpreter/selection.py:48:20  src.minotaur.language_interpreter.selection.select_sources
+$ minotaur query callers minotaur.language_interpreter.selection._resolve_target \
+    --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
+minotaur/language_interpreter/selection.py:48:20  minotaur.language_interpreter.selection.select_sources
 ```
 
 Trace what a change would reach, one hop out:
 
 ```console
-$ minotaur query impact src.minotaur.language_interpreter.selection._resolve_target \
-    --depth 1 --graph examples/python-workflow/minotaur-graph.json --root . --no-refresh
-depth 0: src.minotaur.language_interpreter.selection._resolve_target
-depth 1: src.minotaur.language_interpreter.selection.select_sources
+$ minotaur query impact minotaur.language_interpreter.selection._resolve_target \
+    --depth 1 --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
+depth 0: minotaur.language_interpreter.selection._resolve_target
+depth 1: minotaur.language_interpreter.selection.select_sources
 ```
 
 List symbols nothing in the graph references, narrowed to one path:
 
 ```console
-$ minotaur query unreferenced src/minotaur/language_interpreter/selection.py \
-    --graph examples/python-workflow/minotaur-graph.json --root . --no-refresh
-src/minotaur/language_interpreter/selection.py:36  src.minotaur.language_interpreter.selection.select_sources  function
+$ minotaur query unreferenced minotaur/language_interpreter/selection.py \
+    --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
+minotaur/language_interpreter/selection.py:36  minotaur.language_interpreter.selection.select_sources  function
 ```
 
 The same boundary applies: `select_sources` is unreferenced *within this
@@ -93,9 +93,9 @@ selection* because its callers live in files that were not analyzed. Treat
 Read the source around a reported site without leaving the tool:
 
 ```console
-$ minotaur query context --site src/minotaur/language_interpreter/selection.py:48 \
-    --before 1 --after 1 --graph examples/python-workflow/minotaur-graph.json --root .
-src/minotaur/language_interpreter/selection.py:47-49
+$ minotaur query context --site minotaur/language_interpreter/selection.py:48 \
+    --before 1 --after 1 --graph examples/python-workflow/minotaur-graph.json --root src
+minotaur/language_interpreter/selection.py:47-49
   47:     for target in targets:
 > 48:         resolved = _resolve_target(target, workspace.root)
   49:         if resolved.is_file():
@@ -105,7 +105,7 @@ Finally, compare the checked-in snapshot against a fresh analysis written to a
 scratch file, which leaves the example untouched:
 
 ```console
-$ minotaur analyze --root . --output /tmp/current.json --force \
+$ minotaur analyze --root src --output /tmp/current.json --force \
     src/minotaur/language_interpreter/selection.py
 $ minotaur query diff examples/python-workflow/minotaur-graph.json /tmp/current.json
 no changes
@@ -119,9 +119,9 @@ Add `--json` to any of these for the machine-readable form, which also reports
 the freshness of the answer:
 
 ```console
-$ minotaur query callers src.minotaur.language_interpreter.selection._resolve_target \
-    --graph examples/python-workflow/minotaur-graph.json --root . --no-refresh --json
-{"query":"callers","refreshed":false,"results":[{"caller":"src.minotaur.language_interpreter.selection.select_sources","column":20,"line":48,"path":"src/minotaur/language_interpreter/selection.py","unresolved":false}],"stale":[]}
+$ minotaur query callers minotaur.language_interpreter.selection._resolve_target \
+    --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh --json
+{"query":"callers","refreshed":false,"results":[{"caller":"minotaur.language_interpreter.selection.select_sources","column":20,"line":48,"path":"minotaur/language_interpreter/selection.py","unresolved":false}],"stale":[]}
 ```
 
 ## Common freshness behavior
