@@ -211,9 +211,13 @@ changes:
 ```text
 + package.api.new_handler
 - package.api.old_handler
-~ package.api.handle (relocated)
+~ package.api.handle (relocated package/api.py:12→18)
 + calls package.routes.dispatch → package.api.handle
 ```
+
+The relocation suffix carries the same `from`/`to` locations as JSON, using
+1-based start lines; a relocated symbol whose old or new location is unknown
+falls back to the bare `~ symbol (relocated)` form.
 
 The JSON object has `added`, `removed`, `relocated`,
 `relationships_added`, and `relationships_removed` arrays. A relocation entry

@@ -119,7 +119,7 @@ def render_text(result: DiffResult) -> str:
     lines: list[str] = []
     lines.extend(f"+ {item.symbol}\n" for item in result.added)
     lines.extend(f"- {item.symbol}\n" for item in result.removed)
-    lines.extend(f"~ {item.symbol} (relocated)\n" for item in result.relocated)
+    lines.extend(_relocation_text(item) for item in result.relocated)
     lines.extend(
         f"+ {item.kind} {item.source} → {item.target}\n" for item in result.relationships_added
     )
@@ -127,6 +127,24 @@ def render_text(result: DiffResult) -> str:
         f"- {item.kind} {item.source} → {item.target}\n" for item in result.relationships_removed
     )
     return "".join(lines) if lines else "no changes\n"
+
+
+def _relocation_text(item: Relocation) -> str:
+    # Text output is what agents read by default; the from/to line move is
+    # otherwise only visible in JSON. Falls back to the bare "(relocated)"
+    # form when either endpoint has no location -- e.g. a symbol whose
+    # location became unknown across snapshots -- rather than guessing.
+    old_location = item.old_location
+    new_location = item.new_location
+    if old_location is None or new_location is None:
+        return f"~ {item.symbol} (relocated)\n"
+    old_line = old_location.range.start.line + 1
+    new_line = new_location.range.start.line + 1
+    if old_location.path == new_location.path:
+        move = f"{old_location.path}:{old_line}→{new_line}"
+    else:
+        move = f"{old_location.path}:{old_line}→{new_location.path}:{new_line}"
+    return f"~ {item.symbol} (relocated {move})\n"
 
 
 def render_json(result: DiffResult) -> str:
