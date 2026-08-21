@@ -308,7 +308,7 @@ def _analyze_module(
                 declarations[f"{module.name}.{statement.name}"],
                 relationships,
                 nodes,
-                prefix_nodes=tuple(statement.decorator_list),
+                prefix_nodes=_signature_nodes(statement),
             )
         elif isinstance(statement, ast.ClassDef):
             # A class body executes at definition time in the class scope, so
@@ -346,8 +346,46 @@ def _analyze_module(
                         relationships,
                         nodes,
                         statement.name,
-                        prefix_nodes=tuple(member.decorator_list),
+                        prefix_nodes=_signature_nodes(member),
                     )
+
+
+def _signature_nodes(
+    statement: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[ast.AST, ...]:
+    """Return the decorator and signature expressions of one definition.
+
+    A function's decorators, default arguments, and annotations are all
+    expressions evaluated outside its body, so a visitor given only
+    ``statement.body`` never sees them. Nested definitions do get them, because
+    ``_ScopeCallVisitor`` reaches a nested ``FunctionDef`` through
+    ``generic_visit`` and therefore traverses its whole signature; collecting
+    them here keeps top-level functions and methods consistent with nested ones
+    instead of making attribution depend on nesting depth.
+
+    Annotations count as references for the same reason calls do:
+    ``def f(x: Handler)`` is a real dependency on ``Handler``, and an agent
+    asking whether a symbol is still used must be told about it before
+    deleting the symbol.
+    ``from __future__ import annotations`` does not change this — the annotation
+    is still parsed into the expression recorded here.
+    """
+    arguments = statement.args
+    signature: list[ast.AST] = list(statement.decorator_list)
+    signature.extend(arguments.defaults)
+    signature.extend(default for default in arguments.kw_defaults if default is not None)
+    declared = (
+        *arguments.posonlyargs,
+        *arguments.args,
+        *arguments.kwonlyargs,
+        *(argument for argument in (arguments.vararg, arguments.kwarg) if argument is not None),
+    )
+    signature.extend(
+        argument.annotation for argument in declared if argument.annotation is not None
+    )
+    if statement.returns is not None:
+        signature.append(statement.returns)
+    return tuple(signature)
 
 
 def _imports(

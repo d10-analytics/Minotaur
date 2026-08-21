@@ -50,9 +50,13 @@ lambdas, and comprehensions are attributed to the enclosing top-level function,
 method, or module. A class body executes at definition time, so calls and loads
 in its non-method statements — a dataclass `field(default_factory=make_config)`,
 `handler = staticmethod(helper)`, a class-level signal or callback table — are
-attributed to the class itself; methods keep their own scope. Nested function
-definitions do not become separate symbol nodes, and methods of nested classes
-remain outside this slice.
+attributed to the class itself; methods keep their own scope. A definition's
+decorators, default arguments, and annotations are evaluated outside its body
+but are attributed to the function or method they belong to, at every nesting
+level. Annotations count because `def f(x: Handler)` is a real dependency on
+`Handler`: an agent asking whether a symbol is still used must see it before
+deleting that symbol. Nested function definitions do not become separate symbol
+nodes, and methods of nested classes remain outside this slice.
 
 The interpreter also records resolvable non-call references as `references`
 relationships. For example, passing a function as `register(handler)` or
