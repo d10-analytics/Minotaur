@@ -207,7 +207,7 @@ Re-run against a single definition once the duplicate is resolved, or use
 JSON uses the same records:
 
 ```json
-{"query":"callers","results":[{"caller":"use.caller","column":5,"line":3,"path":"use.py","unresolved":false}]}
+{"query":"callers","refreshed":false,"results":[{"caller":"use.caller","column":5,"line":3,"path":"use.py","unresolved":false}],"stale":[]}
 ```
 
 Unresolved records additionally contain a `reference` field.
