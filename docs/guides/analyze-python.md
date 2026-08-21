@@ -13,8 +13,27 @@ minotaur analyze --root ROOT --output GRAPH.json [--force] TARGET [TARGET ...]
 python -m minotaur analyze --root ROOT --output GRAPH.json [--force] TARGET [TARGET ...]
 ```
 
-`ROOT` must exist. Every target must be an existing file or directory inside
-that root after symlinks are resolved. Directory targets are scanned
+`ROOT` must exist, and it determines module names: a file is named by its path
+relative to the root, so `src/pkg/mod.py` becomes `src.pkg.mod` under
+`--root .` but `pkg.mod` under `--root src`. Choose the directory that imports
+are resolved from (the directory you would put on `PYTHONPATH`, usually `src`
+for a `src/` layout). With the wrong root, `import pkg.mod` cannot be matched
+to `src.pkg.mod`, every cross-module call becomes an unresolved reference, and
+queries such as `callers` and `impact` silently lose most of their answers.
+When at least 5% of the imports in a selection would resolve under a different
+root, `analyze` prints a warning naming that root:
+
+```text
+minotaur: warning: 52% of imports (161 of 310) only resolve with a different root; pass --root /repo/src so module names match import names
+```
+
+Third-party imports and imports of files outside the selection are unresolved
+too, but they do not trigger this warning.
+
+Targets are resolved from the current working directory, like most command-line
+tools, not from `--root`: run `minotaur analyze --root src src/minotaur` from
+the repository root, not `--root src minotaur`. Every target must be an
+existing file or directory inside the root after symlinks are resolved. Directory targets are scanned
 recursively for registered extensions; unsupported files found during that
 scan are ignored, while an explicitly named unsupported file is an error.
 Repeated and overlapping targets are analyzed once.
@@ -82,7 +101,11 @@ For freshness checks, each file node carries the lowercase SHA-256 digest of
 its exact source bytes in the producer extension
 `extensions["minotaur-python"]["content_sha256"]`. The analyze command also
 records its sorted root-relative input targets in the document extension
-`extensions["minotaur"]["selection"]`. These extensions are metadata and do
+`extensions["minotaur"]["selection"]`. The analyzer records import resolution
+counts in the document extension `extensions["minotaur-python"]`:
+`imports_resolved`, `imports_unresolved`, `imports_root_mismatched` (imports
+that would resolve under a different root), and, when mismatches exist,
+`import_root_hint` (the root-relative directory that would resolve them). These extensions are metadata and do
 not affect node identity or the graph format version. When the root is inside
 a Git work tree, the document may also contain the current commit and branch
 in `source_control`; this is snapshot context, not a freshness substitute.

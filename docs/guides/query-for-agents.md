@@ -15,6 +15,14 @@ The analyzer records the selected root-relative targets and a SHA-256 digest
 for every selected file. Query commands that take `--root` use those values
 to detect drift before answering.
 
+Pick `ROOT` as the directory imports resolve from (usually `src` for a
+`src/` layout), and pass the same root to every query. Module labels are
+derived from it, and with the wrong root cross-module calls stay unresolved,
+so `callers`, `impact`, and `unreferenced` answer from a graph that is mostly
+edges to `[unresolved]` placeholders. `analyze` warns when at least 5% of the
+imports would resolve under a different root; see the
+[Python analysis guide](analyze-python.md) for details.
+
 ## Try it on the bundled example
 
 The repository ships an analyzed graph of one real module,
@@ -267,12 +275,18 @@ source paths:
 ```bash
 minotaur query unreferenced src/package tests \
   --exclude generated_helper --exclude-file exclusions.json \
+  --exclude-pattern '\.Test\w*(\.|$)' --exclude-pattern 'Event$' \
   --graph GRAPH.json --root ROOT
 ```
 
 The query excludes dunder names and `test_*` names. `--exclude` may be
 repeated; `--exclude-file` accepts a JSON list/object of names or one name per
-line. By default only graph relationships count: a symbol is reported when the
+line. Both match a symbol's bare name exactly. `--exclude-pattern` takes a
+regular expression searched against the qualified label and may be repeated;
+an invalid expression exits `2`. Patterns are how a caller encodes framework
+conventions Minotaur does not know about — pytest's `Test*` classes, Qt or
+other overrides that are called by a framework rather than by analyzed code,
+generated modules — without Minotaur hard-coding any language or framework. By default only graph relationships count: a symbol is reported when the
 only inbound call or reference comes from the symbol itself (its own decorators
 or a recursive call). Use recorded anywhere else keeps it out of the result,
 including module-scope use such as `app = create_app()` or `register(handler)`,
