@@ -65,6 +65,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         enclosing_func_depth = self._call_func_depth
         self._call_func_depth += 1
         self.visit(node.func)
+        # Reset to 0 (rather than leaving the incremented depth in place)
+        # before visiting arguments: a call's arguments are never part of
+        # a callee expression, even when this call itself sits inside an
+        # enclosing call's callee expression. For `f(g)(h)`, the outer
+        # visit_Call increments depth while visiting `f(g)` as its callee,
+        # but `g` is an argument of the inner call and must still be
+        # recorded as a reference despite the outer suppression.
         self._call_func_depth = 0
         for argument in node.args:
             self.visit(argument)
