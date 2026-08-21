@@ -25,6 +25,7 @@ from minotaur.graph_model.provenance import (
 from minotaur.graph_model.relationship import Relationship
 
 EXAMPLES = Path(__file__).parents[1] / "examples/synthetic-graphs"
+PYTHON_WORKFLOW = Path(__file__).parents[1] / "examples/python-workflow"
 
 
 def test_synthetic_documents_round_trip_and_verify_every_node_id() -> None:
@@ -145,6 +146,143 @@ def test_relationship_tuple_key_keeps_distinct_evidence_on_one_edge() -> None:
 
     assert relationship.tuple_key == (source, target, "calls")
     assert len(relationship.to_dict()["evidence"]) == 2
+
+
+def test_from_dict_round_trip_equality_with_memo(
+    # AC-14: round-trip equality over all example JSON files.
+) -> None:
+    """GraphDocument.from_dict produces identical round-trip dicts and equal
+    documents for every example graph, proving the memo is invisible."""
+    example_paths = sorted(EXAMPLES.glob("*.json")) + [
+        PYTHON_WORKFLOW / "minotaur-graph.json",
+    ]
+    assert len(example_paths) >= 4, "expected at least 4 example files"
+    for path in example_paths:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        doc1 = GraphDocument.from_dict(raw)
+        doc2 = GraphDocument.from_dict(raw)
+        assert doc1.to_dict() == raw, f"round-trip failed for {path.name}"
+        assert doc1 == doc2, f"double-parse equality failed for {path.name}"
+
+
+def _make_guard_test_document(
+    valid_location: dict[str, object],
+    malformed_location: dict[str, object],
+) -> dict[str, object]:
+    """Build a minimal document where the FIRST relationship evidence has
+    the valid location (populating the memo) and the SECOND relationship
+    evidence has the malformed location."""
+    source_id = "node:sha256:" + "a" * 64
+    target_id = "node:sha256:" + "b" * 64
+    return {
+        "format": "minotaur-graph",
+        "format_version": "0.1.0",
+        "coordinate_encoding": "utf-8",
+        "nodes": [
+            {
+                "id": source_id,
+                "identity": {"basis": "file-path", "namespace": "test"},
+                "node_class": "file",
+                "label": "a.py",
+                "path": "a.py",
+            },
+            {
+                "id": target_id,
+                "identity": {"basis": "file-path", "namespace": "test"},
+                "node_class": "file",
+                "label": "b.py",
+                "path": "b.py",
+            },
+        ],
+        "relationships": [
+            {
+                "source": source_id,
+                "target": target_id,
+                "kind": "calls",
+                "evidence": [
+                    {
+                        "provenance": "static-analysis",
+                        "locations": [valid_location],
+                    },
+                ],
+            },
+            {
+                "source": source_id,
+                "target": target_id,
+                "kind": "imports",
+                "evidence": [
+                    {
+                        "provenance": "static-analysis",
+                        "locations": [malformed_location],
+                    },
+                ],
+            },
+        ],
+    }
+
+
+_VALID_LOCATION: dict[str, object] = {
+    "path": "a.py",
+    "range": {
+        "start": {"line": 1, "character": 0},
+        "end": {"line": 1, "character": 5},
+    },
+}
+
+
+def test_memo_guard_rejects_bool_position_value() -> None:
+    """AC-17(a): {"line": true} where the memo has {"line": 1} must still
+    raise ValueError, not return the cached Location."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": True, "character": 0},
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="must be an integer"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_extra_field_in_location() -> None:
+    """AC-17(b): a location with an extra field whose path/range match a
+    memoized location must still raise ValueError from reject_unknown_fields."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": 1, "character": 0},
+            "end": {"line": 1, "character": 5},
+        },
+        "x": 1,
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="unsupported field"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_non_dict_range() -> None:
+    """AC-17(c): range is not a dict -- must raise today's ValueError
+    ('location requires a range object'), not AttributeError."""
+    malformed = {"path": "a.py", "range": 4}
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="location requires a 'range' object"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_non_dict_start() -> None:
+    """AC-17(c): range.start is not a dict -- must raise today's ValueError
+    ('range requires a start object'), not AttributeError."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": "not-a-dict",
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="range requires a 'start' object"):
+        GraphDocument.from_dict(doc_data)
 
 
 def test_extensions_are_deeply_immutable_but_serialize_as_json() -> None:
