@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from minotaur.graph_model.document import GraphDocument, SourceControl
-from minotaur.graph_model.loading import GraphLoadError, graph_digest, load_graph_file, stamp_path
+from minotaur.graph_model.loading import (
+    GraphLoadError,
+    LoadedGraph,
+    graph_digest,
+    load_graph_file,
+    stamp_path,
+)
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import build_presentation
@@ -253,6 +259,7 @@ def _load_and_refresh_graph(
     and exit-code selection.
     """
     loaded = load_graph_file(graph_path, validate=validate)
+    _stamp_if_validated(graph_path, loaded)
     observed = drift(loaded.document, root)
     if observed.is_clean:
         return _QueryGraph(loaded.document, (), observed, False)
@@ -357,16 +364,21 @@ def _run_unreferenced(
 
 def _run_diff(query: argparse.Namespace) -> str:
     validate: bool = query.validate
-    old = load_graph_file(Path(query.old), validate=validate).document
-    new = load_graph_file(Path(query.new), validate=validate).document
-    result = diff_query.diff(old, new)
+    old_path, new_path = Path(query.old), Path(query.new)
+    old_loaded = load_graph_file(old_path, validate=validate)
+    _stamp_if_validated(old_path, old_loaded)
+    new_loaded = load_graph_file(new_path, validate=validate)
+    _stamp_if_validated(new_path, new_loaded)
+    result = diff_query.diff(old_loaded.document, new_loaded.document)
     return diff_query.render_json(result) if query.json else diff_query.render_text(result)
 
 
 def _run_context(query: argparse.Namespace) -> str:
-    document = load_graph_file(Path(query.graph), validate=query.validate).document
+    graph_path = Path(query.graph)
+    loaded = load_graph_file(graph_path, validate=query.validate)
+    _stamp_if_validated(graph_path, loaded)
     record = context_query.context(
-        document,
+        loaded.document,
         Path(query.root).resolve(),
         query.site,
         before=query.before,
@@ -610,6 +622,7 @@ def _visualize(arguments: argparse.Namespace) -> int:
     input_path = Path(arguments.input)
     try:
         loaded = load_graph_file(input_path, validate=arguments.validate)
+        _stamp_if_validated(input_path, loaded)
         # D-12: a freshness guard was considered for visualize but declined;
         # rendering need not have a source root and remains cheap to repeat.
         output = _preflight_output(Path(arguments.output), (input_path.resolve(),), arguments.force)
@@ -696,6 +709,25 @@ def _dispatch(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
         raise ValueError("selected files require unsupported multi-interpreter graph composition")
     registration, interpreter_files = next(iter(grouped.items()))
     return registration.analyze_files(workspace, tuple(interpreter_files))
+
+
+def _stamp_if_validated(path: Path, loaded: LoadedGraph) -> None:
+    """Write the sidecar stamp when *loaded* was fully validated.
+
+    The helper writes ``loaded.digest`` — the digest of the exact bytes this
+    process parsed — and never re-reads *path*.  A concurrent writer that
+    replaces the file between the load and this call therefore cannot trick
+    this process into stamping bytes it never validated (D-14, AR-03).
+
+    Writing is best-effort: a read-only filesystem or a permission failure
+    must not turn a successful query into a command error.
+    """
+    if not loaded.validated:
+        return
+    try:
+        _write_atomically(stamp_path(path), f"{loaded.digest}\n".encode("ascii"))
+    except OSError:
+        return
 
 
 def _write_atomically(output: Path, content: bytes) -> None:
