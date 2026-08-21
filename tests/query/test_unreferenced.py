@@ -455,3 +455,87 @@ def test_unreferenced_text_fallback_tags_every_symbol_sharing_a_mentioned_name(
         "views.py:5  views.B  class\n"
         "views.py:6  views.B.render  method [text-mention]\n"
     )
+
+
+def test_unreferenced_exclude_file_reads_json_list_and_line_per_name_formats(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every documented exclude-file shape must suppress the same names.
+
+    A JSON mapping may hold either a single name or a list per key, and the
+    line format is the fallback taken when the file is not JSON at all -- so it
+    is exercised with a file that fails ``json.loads`` outright rather than
+    with a JSON string list.
+    """
+    _write(tmp_path, "one.py", "def orphan():\n    pass\n\n\ndef other_orphan():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    for document in (["orphan"], {"reason": "orphan"}):
+        listed = tmp_path / "exclude-list.json"
+        listed.write_text(json.dumps(document), encoding="utf-8")
+        assert (
+            cli.main(
+                [
+                    "query",
+                    "unreferenced",
+                    "--exclude-file",
+                    str(listed),
+                    "--graph",
+                    str(graph),
+                    "--root",
+                    str(tmp_path),
+                ]
+            )
+            == 0
+        )
+        assert capsys.readouterr().out == "one.py:5  one.other_orphan  function\n"
+
+    lines = tmp_path / "exclude.txt"
+    lines.write_text("orphan\n\n  other_orphan  \n", encoding="utf-8")
+    assert (
+        cli.main(
+            [
+                "query",
+                "unreferenced",
+                "--exclude-file",
+                str(lines),
+                "--graph",
+                str(graph),
+                "--root",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out == "no unreferenced symbols\n"
+
+
+def test_unreferenced_exclude_file_rejects_a_json_document_that_is_not_a_list_or_object(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "one.py", "def orphan():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    scalar = tmp_path / "exclude.json"
+    # Valid JSON, so the line fallback does not apply and the shape is an error
+    # rather than a file silently read as one long name.
+    scalar.write_text("3\n", encoding="utf-8")
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--exclude-file",
+            str(scalar),
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert captured.out == ""
+    assert "exclude file must contain a JSON list or object of names" in captured.err

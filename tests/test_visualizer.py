@@ -220,3 +220,53 @@ def test_checked_in_python_workflow_artifacts_match_fresh_cli_output(tmp_path: P
     } == {"static-analysis"}
     assert generated_graph.read_bytes() == checked_in_graph.read_bytes()
     assert generated_html.read_bytes() == checked_in_html.read_bytes()
+
+
+def test_renderer_keeps_resolved_reference_edges_from_analyzed_source(tmp_path: Path) -> None:
+    """A callback passed by name must still render as a ``references`` edge.
+
+    The checked-in visualizer fixtures predate resolved reference edges, so the
+    graph here is analyzed from source instead of hand-written: that keeps the
+    renderer contract tied to what the analyzer actually emits for
+    ``register(handler)`` rather than to a fixture that could drift from it.
+    """
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "fixture.py").write_text(
+        "def handler():\n"
+        "    return 1\n\n\n"
+        "def register(callback):\n"
+        "    return callback\n\n\n"
+        "register(handler)\n",
+        encoding="utf-8",
+    )
+    graph_path = tmp_path / "graph.json"
+    assert (
+        cli.main(["analyze", "--root", str(tmp_path), "--output", str(graph_path), str(source)])
+        == 0
+    )
+
+    loaded = load_graph_bytes(graph_path.read_bytes())
+    labels = {node.id: node.label for node in loaded.document.nodes}
+    assert [
+        (labels[relationship.source], labels[relationship.target])
+        for relationship in loaded.document.relationships
+        if relationship.kind == "references"
+    ] == [("src.fixture", "src.fixture.handler")]
+
+    presentation = build_presentation(
+        loaded.canonical, prepare_excerpts(loaded.canonical, tmp_path)
+    )
+    assert "references" in presentation["relationship_kinds"]
+    html = render_html(presentation).decode("utf-8")
+    assert html.startswith("<!doctype html>")
+
+    prefix = '<script id="minotaur-presentation" type="application/json">'
+    payload = json.loads(html.split(prefix, 1)[1].split("</script>", 1)[0])
+    graph = payload["graph"]
+    embedded_labels = {node["id"]: node["label"] for node in graph["nodes"]}
+    assert [
+        (embedded_labels[relationship["source"]], embedded_labels[relationship["target"]])
+        for relationship in graph["relationships"]
+        if relationship["kind"] == "references"
+    ] == [("src.fixture", "src.fixture.handler")]

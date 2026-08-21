@@ -308,3 +308,46 @@ def test_query_json_reports_refreshed_state_and_drifted_paths(
         ],
         "stale": ["app.py"],
     }
+
+
+def test_public_query_refresh_rewrites_an_empty_graph_when_every_target_is_deleted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Deleting the whole selection yields an empty graph, not a stale answer.
+
+    The refresh re-analyzes what is on disk, and nothing is: the graph is
+    rewritten with zero nodes and the query reports an empty result at exit 0.
+    That is the policy an agent must be able to rely on -- an empty answer
+    preceded by the refresh notice, rather than the previous snapshot answered
+    as if it were current. The recorded selection is kept so the paths are
+    picked up again if the files come back.
+    """
+    root = tmp_path / "source"
+    source = _write(root, "app.py", "def foo():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    assert _analyze(root, output, source) == 0
+    source.unlink()
+
+    assert _query_definitions(root, output) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "no definitions\n"
+    assert captured.err.splitlines() == [
+        "minotaur: refreshed graph (1 drifted paths)",
+        "minotaur: stale: app.py",
+    ]
+
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert document["nodes"] == []
+    assert document["relationships"] == []
+    assert document["extensions"]["minotaur"]["selection"] == ["app.py"]
+
+    # The emptied graph is now clean: a second query neither refreshes again
+    # nor repeats the notice.
+    assert _query_definitions_json(root, output) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "query": "definitions",
+        "refreshed": False,
+        "results": [],
+        "stale": [],
+    }

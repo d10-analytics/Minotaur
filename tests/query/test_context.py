@@ -116,3 +116,144 @@ def test_context_rejects_unknown_or_out_of_range_sites(
         == 2
     )
     assert "outside source file" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("site", "message"),
+    [
+        ("app.py", "site must have the form path:line"),
+        (":1", "site must have the form path:line"),
+        ("app.py:0", "site line must be a positive integer"),
+        ("app.py:-1", "site line must be a positive integer"),
+        ("app.py:twelve", "site line must be a positive integer"),
+        ("../app.py:1", "site path must be a repository-relative path"),
+    ],
+)
+def test_context_rejects_each_malformed_site_individually(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], site: str, message: str
+) -> None:
+    """Every site rejection is asserted separately, message and exit code.
+
+    A single combined case would let one branch mask another: a missing colon
+    and a non-integer line reach different raises but the same exit status.
+    """
+    root = tmp_path / "source"
+    _write(root, "app.py", "value = 1\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+
+    status = cli.main(
+        ["query", "context", "--graph", str(graph), "--root", str(root), "--site", site]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert captured.out == ""
+    assert message in captured.err
+
+
+def test_context_rejects_negative_window_sizes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "value = 1\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "context",
+            "--graph",
+            str(graph),
+            "--root",
+            str(root),
+            "--site",
+            "app.py:1",
+            "--before",
+            "-1",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "before and after must be non-negative" in captured.err
+
+
+def test_context_labels_an_excerpt_whose_graph_records_no_content_hash(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without a recorded hash the excerpt is labeled, not silently trusted.
+
+    Graphs produced before content hashes were recorded (or by a producer that
+    omits them) still answer ``context``; the marker tells an agent the
+    staleness question was not answered rather than answered "fresh".
+    """
+    root = tmp_path / "source"
+    _write(root, "app.py", "value = 1\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    for node in document["nodes"]:
+        node.get("extensions", {}).get("minotaur-python", {}).pop("content_sha256", None)
+    graph.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+
+    status = cli.main(
+        [
+            "query",
+            "context",
+            "--graph",
+            str(graph),
+            "--root",
+            str(root),
+            "--site",
+            "app.py:1",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert status == 0
+    assert payload["results"][0]["hash_available"] is False
+    assert payload["results"][0]["stale"] is False
+
+    assert (
+        cli.main(
+            ["query", "context", "--graph", str(graph), "--root", str(root), "--site", "app.py:1"]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.startswith("[file hash unavailable]\n")
+
+
+def test_context_rejects_sites_that_left_the_source_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A path recorded in the graph is still re-checked against the tree.
+
+    The graph is not the authority on what may be read: between analysis and
+    the query the file can be deleted, replaced by a symlink pointing outside
+    the root, or replaced by a directory, and each case must be refused rather
+    than served from wherever the path now leads.
+    """
+    root = tmp_path / "source"
+    source = _write(root, "app.py", "value = 1\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+    site = ["query", "context", "--graph", str(graph), "--root", str(root), "--site", "app.py:1"]
+
+    source.unlink()
+    assert cli.main(site) == 2
+    assert "site path is missing or escapes the source root: app.py" in capsys.readouterr().err
+
+    (tmp_path / "outside.py").write_text("secret = 1\n", encoding="utf-8")
+    source.symlink_to(tmp_path / "outside.py")
+    assert cli.main(site) == 2
+    captured = capsys.readouterr()
+    assert "site path is missing or escapes the source root: app.py" in captured.err
+    assert "secret" not in captured.out
+
+    source.unlink()
+    source.mkdir()
+    assert cli.main(site) == 2
+    assert "site path is not a file: app.py" in capsys.readouterr().err
