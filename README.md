@@ -30,6 +30,19 @@ Minotaur is in early development. Its current implementation includes:
 - a self-contained HTML explorer with filters, themes, source excerpts, and
   call-site inspection.
 
+Queries run against any analyzed graph, including the checked-in example:
+
+```console
+$ minotaur query callers src.minotaur.language_interpreter.selection._resolve_target \
+    --graph examples/python-workflow/minotaur-graph.json --root . --no-refresh
+src/minotaur/language_interpreter/selection.py:48:20  src.minotaur.language_interpreter.selection.select_sources
+```
+
+`--no-refresh` answers from the graph as checked in instead of re-analyzing
+drifted files and rewriting it. The
+[graph query guide](docs/guides/query-for-agents.md) walks the remaining
+commands through the same example.
+
 Current Python-analysis behavior and limits are described in the
 [Python analysis guide](docs/guides/analyze-python.md). Agent-oriented graph
 navigation is documented in the [graph query guide](docs/guides/query-for-agents.md).
