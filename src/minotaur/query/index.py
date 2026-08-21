@@ -63,6 +63,7 @@ class GraphIndex:
     symbols_by_label: Mapping[str, tuple[Node, ...]]
     relationships_by_target: Mapping[tuple[str, str], tuple[Relationship, ...]]
     relationships_by_source: Mapping[tuple[str, str], tuple[Relationship, ...]]
+    relationships_by_kind: Mapping[str, tuple[Relationship, ...]]
     unresolved_nodes: tuple[Node, ...]
 
     @classmethod
@@ -78,15 +79,18 @@ class GraphIndex:
 
         incoming: dict[tuple[str, str], list[Relationship]] = defaultdict(list)
         outgoing: dict[tuple[str, str], list[Relationship]] = defaultdict(list)
+        by_kind: dict[str, list[Relationship]] = defaultdict(list)
         for relationship in document.relationships:
             incoming[(relationship.kind, relationship.target)].append(relationship)
             outgoing[(relationship.kind, relationship.source)].append(relationship)
+            by_kind[relationship.kind].append(relationship)
 
         return cls(
             nodes=nodes,
             symbols_by_label={label: tuple(items) for label, items in labels.items()},
             relationships_by_target={key: tuple(items) for key, items in incoming.items()},
             relationships_by_source={key: tuple(items) for key, items in outgoing.items()},
+            relationships_by_kind={key: tuple(items) for key, items in by_kind.items()},
             unresolved_nodes=tuple(unresolved),
         )
 
@@ -124,12 +128,7 @@ class GraphIndex:
         return self.relationships_by_source.get((kind, node_id), ())
 
     def relationships(self, kind: str) -> Iterable[Relationship]:
-        return (
-            relationship
-            for (relationship_kind, _), values in self.relationships_by_target.items()
-            if relationship_kind == kind
-            for relationship in values
-        )
+        return self.relationships_by_kind.get(kind, ())
 
 
 def _candidate_sort_key(node: Node) -> tuple[str, int]:
