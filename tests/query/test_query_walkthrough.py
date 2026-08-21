@@ -100,9 +100,7 @@ def test_walkthrough_command_matches_pasted_output(
     replacements: dict[str, str] = {}
     combined_stream = SCRATCH_GRAPH in arguments
     if combined_stream:
-        replacements = _prepare_scratch_freshness(
-            tmp_path, second_edit="--no-refresh" in arguments
-        )
+        replacements = _prepare_scratch_freshness(tmp_path, second_edit="--no-refresh" in arguments)
     arguments = _replace_scratch_paths(arguments[1:], replacements, tmp_path)
 
     if "diff" in arguments:

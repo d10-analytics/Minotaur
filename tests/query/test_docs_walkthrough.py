@@ -22,9 +22,7 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 EXAMPLE_GRAPH = ROOT / "examples" / "python-workflow" / "minotaur-graph.json"
-DOCUMENTS = (
-    ROOT / "README.md",
-)
+DOCUMENTS = (ROOT / "README.md",)
 CONSOLE_BLOCK = re.compile(r"^```console\n(.*?)^```$", re.DOTALL | re.MULTILINE)
 
 # The diff walkthrough writes a fresh analysis to a scratch path. Tests must
