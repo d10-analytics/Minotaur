@@ -76,6 +76,23 @@ compares the requested file's recorded hash and labels the excerpt when the
 file changed. `diff` compares two graph files and therefore has no source-root
 freshness check.
 
+### First-read validation cost
+
+The first command that reads a graph Minotaur did not just write — a graph
+produced before sidecar stamping was introduced, a graph from another tool, or
+one whose sidecar was removed — performs a full JSON Schema validation and
+stamps the result. This validation happens once: subsequent reads of the same
+graph file find the stamp and skip schema validation, so they are fast. No
+manual step is required; the first reader handles it automatically.
+
+### `--validate` flag
+
+`callers`, `definitions`, `impact`, `unreferenced`, `context`, `diff`, and
+`visualize` accept `--validate`. When set, the command forces a full JSON
+Schema validation regardless of sidecar state. This is useful for verifying
+graph integrity after external edits or transfers. Without the flag, a matching
+sidecar is sufficient and schema validation is skipped.
+
 ## Query commands
 
 ### Find callers

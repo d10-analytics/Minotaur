@@ -110,6 +110,13 @@ not affect node identity or the graph format version. When the root is inside
 a Git work tree, the document may also contain the current commit and branch
 in `source_control`; this is snapshot context, not a freshness substitute.
 
+After writing the graph, `analyze` also writes a sidecar digest file beside it
+(see the [format reference](../formats/minotaur-graph-v1.md#sidecar-digest-file)).
+A graph produced before this sidecar mechanism existed, or any graph Minotaur
+did not just write, is fully validated once by the first Minotaur command that
+reads it and stamped then, so later reads are fast. No manual migration or
+conversion step is needed.
+
 ## Diagnostics and unresolved references
 
 If a source file cannot be read or parsed, the analyzer reports a diagnostic
