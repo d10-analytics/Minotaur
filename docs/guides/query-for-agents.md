@@ -39,6 +39,11 @@ minotaur: stale: src/example.py
 minotaur: stale: src/removed.py
 ```
 
+If every recorded target has been deleted, the refresh still runs and rewrites
+`GRAPH` as an empty graph, so queries report an empty result at exit `0` rather
+than answering from the prior snapshot; the recorded selection is kept so the
+paths are picked up again if the files return.
+
 `--no-refresh` answers from the existing graph and prints the same one warning
 per drifted path, without the `refreshed graph` line:
 
