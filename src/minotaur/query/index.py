@@ -102,9 +102,13 @@ class GraphIndex:
         """
         matches = self.symbols_by_label.get(label, ())
         if not matches:
-            # cutoff 0.0 keeps a suggestion list even for a wholly unrelated
-            # name; an agent gets the vocabulary of the graph either way.
-            raise UnknownSymbol(label, get_close_matches(label, self.labels(), n=5, cutoff=0.0))
+            # The default cutoff (0.6) is intentional: a lower cutoff, or 0.0,
+            # always returns ``n`` labels regardless of similarity, so an
+            # unrelated name like ``nope`` would suggest an unrelated label
+            # like ``pkg`` as if it were a plausible near-miss. Suggestions
+            # should only appear when they are plausible; ``UnknownSymbol``
+            # already omits the "nearest labels" clause when none qualify.
+            raise UnknownSymbol(label, get_close_matches(label, self.labels(), n=5))
         if len(matches) > 1:
             ordered = sorted(matches, key=_candidate_sort_key)
             raise AmbiguousSymbol(label, tuple(_candidate(node) for node in ordered))

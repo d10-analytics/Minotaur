@@ -83,8 +83,9 @@ included after resolved calls and marked explicitly:
 use.py:5:5  unknown.target [unresolved]
 ```
 
-An unknown qualified name exits `2` and lists up to five nearest graph labels;
-zero callers is a successful result and prints `no callers`.
+An unknown qualified name exits `2` and lists up to five nearest graph labels
+when close matches exist; zero callers is a successful result and prints
+`no callers`.
 
 A name that matches more than one symbol — a function defined twice in one
 module, for example — is ambiguous rather than empty. The query refuses to pick

@@ -34,6 +34,20 @@ def test_resolve_reports_unknown_labels_with_suggestions(tmp_path: Path) -> None
     assert str(excinfo.value).startswith("unknown symbol: mod.targte; nearest labels: mod.target")
 
 
+def test_resolve_omits_suggestions_for_a_wildly_different_name(tmp_path: Path) -> None:
+    """The default difflib cutoff suppresses implausible suggestions.
+
+    ``get_close_matches`` with ``cutoff=0.0`` would return the closest of the
+    available labels regardless of how dissimilar it actually is; the
+    default cutoff (0.6) only offers a suggestion when one is plausible.
+    """
+    index = _index(tmp_path, {"pkg.py": "def target():\n    pass\n"})
+    with pytest.raises(UnknownSymbol) as excinfo:
+        index.resolve("nope")
+    assert excinfo.value.suggestions == ()
+    assert str(excinfo.value) == "unknown symbol: nope"
+
+
 def test_resolve_reports_every_candidate_site_for_a_duplicate_label(tmp_path: Path) -> None:
     """Candidates are ordered by file then line, so the list is reproducible."""
     index = _index(
