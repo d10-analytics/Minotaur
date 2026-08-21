@@ -361,6 +361,36 @@ def test_decorator_load_references_resolve_for_module_and_direct_method_scopes(
     assert method_location.evidence[0].locations[0].range.start.line == 7
 
 
+def test_class_bases_and_keywords_are_references_at_every_nesting_level(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Base:\n    pass\n\n"
+        "class Meta(type):\n    pass\n\n"
+        "class Sub(Base, metaclass=Meta):\n    pass\n\n"
+        "def factory():\n"
+        "    class Local(Base):\n        pass\n"
+        "    return Local\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    base = _node_id(result, "app.Base")
+    meta = _node_id(result, "app.Meta")
+    sub = _node_id(result, "app.Sub")
+    factory = _node_id(result, "app.factory")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    assert (sub, base, RelationshipKind.REFERENCES.value) in relationships
+    assert (sub, meta, RelationshipKind.REFERENCES.value) in relationships
+    # A nested class header is evaluated in the enclosing function's scope.
+    assert (factory, base, RelationshipKind.REFERENCES.value) in relationships
+
+
 def test_class_body_statements_are_attributed_to_the_class_not_dropped(
     tmp_path: Path,
 ) -> None:
