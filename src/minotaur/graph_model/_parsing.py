@@ -54,7 +54,10 @@ def validate_extensions(
     for name, value in extensions.items():
         if not isinstance(name, str) or not name:
             raise ValueError("extension names must be non-empty strings")
-        if not isinstance(value, dict):
+        # Accept any mapping, not only dict: dataclasses.replace() re-runs
+        # __post_init__ on a model object whose extensions were already
+        # frozen into MappingProxyType values, and that must stay valid.
+        if not isinstance(value, Mapping):
             raise ValueError(f"extension {name!r} must be an object")
 
 
@@ -89,9 +92,9 @@ def serialize_extensions(
 
 
 def _freeze_json(value: object) -> object:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
-    if isinstance(value, list):
+    if isinstance(value, list | tuple):
         return tuple(_freeze_json(item) for item in value)
     return value
 
