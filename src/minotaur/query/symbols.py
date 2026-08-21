@@ -1,0 +1,175 @@
+"""Typed result records for symbol-oriented queries."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from minotaur.graph_model.location import Location
+from minotaur.graph_model.provenance import RelationshipKind
+from minotaur.graph_model.relationship import Relationship
+from minotaur.query.index import GraphIndex
+
+
+@dataclass(frozen=True, slots=True)
+class CallerRecord:
+    path: str
+    line: int
+    column: int
+    caller: str
+    unresolved: bool = False
+    reference: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "caller": self.caller,
+            "column": self.column,
+            "line": self.line,
+            "path": self.path,
+            "unresolved": self.unresolved,
+        }
+        if self.reference is not None:
+            result["reference"] = self.reference
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class DefinitionRecord:
+    path: str
+    line: int
+    symbol: str
+    kind: str
+    duplicate: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "duplicate": self.duplicate,
+            "kind": self.kind,
+            "line": self.line,
+            "path": self.path,
+            "symbol": self.symbol,
+        }
+
+
+def callers(index: GraphIndex, qualified_name: str) -> tuple[CallerRecord, ...]:
+    """Return resolved call sites and matching unresolved references.
+
+    Resolution failures propagate as ``SymbolResolutionError``: an unknown or
+    ambiguous name must reach the caller as an error, never as an empty tuple
+    that renders as a confident ``no callers``.
+    """
+    target_id = index.resolve(qualified_name).id
+    resolved_records: list[CallerRecord] = []
+    for relationship in index.incoming(RelationshipKind.CALLS.value, target_id):
+        caller = index.nodes.get(relationship.source)
+        if caller is None:
+            continue
+        for location in _locations(relationship):
+            resolved_records.append(_caller_record(location, caller.label))
+
+    bare_name = qualified_name.rsplit(".", 1)[-1]
+    unresolved_records: list[CallerRecord] = []
+    for unresolved in index.unresolved_nodes:
+        reference = unresolved.reference_text or unresolved.label
+        if reference != bare_name and not reference.endswith(f".{bare_name}"):
+            continue
+        for relationship in index.incoming(RelationshipKind.REFERENCES.value, unresolved.id):
+            caller = index.nodes.get(relationship.source)
+            if caller is None:
+                continue
+            for location in _locations(relationship):
+                unresolved_records.append(
+                    _caller_record(location, caller.label, unresolved=True, reference=reference)
+                )
+    # Keep the high-confidence resolved hits together. Unresolved matches are
+    # a recall tail, even when their source location sorts before a resolved
+    # call site; this makes the confidence distinction visible in text output.
+    return tuple(
+        sorted(resolved_records, key=_caller_sort_key)
+        + sorted(unresolved_records, key=_caller_sort_key)
+    )
+
+
+def definitions(index: GraphIndex, bare_name: str) -> tuple[DefinitionRecord, ...]:
+    """Return symbols whose final qualified-name segment matches ``bare_name``."""
+    matches = [
+        node
+        for node in index.symbols()
+        if node.label.rsplit(".", 1)[-1] == bare_name and node.location is not None
+    ]
+    duplicate = len(matches) > 1
+    records: list[DefinitionRecord] = []
+    for node in matches:
+        location = node.location
+        if location is None:  # narrowed by the selection above; defensive for callers
+            continue
+        records.append(
+            DefinitionRecord(
+                path=location.path,
+                line=location.range.start.line + 1,
+                symbol=node.label,
+                kind=node.symbol_kind or "unknown",
+                duplicate=duplicate,
+            )
+        )
+    return tuple(sorted(records, key=lambda record: (record.path, record.line, record.symbol)))
+
+
+def _locations(relationship: Relationship) -> tuple[Location, ...]:
+    # Kept as a tiny adapter so record construction cannot accidentally expose
+    # evidence/provenance details in a query result. Multiple independent
+    # evidence records can support the same physical site, but a query hit is
+    # intentionally one line per site because the renderers omit provenance.
+    return tuple(
+        dict.fromkeys(
+            location for evidence in relationship.evidence for location in evidence.locations
+        )
+    )
+
+
+def _caller_record(
+    location: Location,
+    caller: str,
+    *,
+    unresolved: bool = False,
+    reference: str | None = None,
+) -> CallerRecord:
+    return CallerRecord(
+        path=location.path,
+        line=location.range.start.line + 1,
+        column=location.range.start.character + 1,
+        caller=caller,
+        unresolved=unresolved,
+        reference=reference,
+    )
+
+
+def _caller_sort_key(record: CallerRecord) -> tuple[object, ...]:
+    return (record.path, record.line, record.column, record.caller, record.reference or "")
+
+
+def render_callers_text(records: Sequence[CallerRecord]) -> str:
+    """Render one line per call site, marking unresolved recall matches."""
+    if not records:
+        return "no callers\n"
+    return "".join(_caller_text(record) for record in records)
+
+
+def render_definitions_text(records: Sequence[DefinitionRecord]) -> str:
+    """Render one line per definition, marking shared bare names."""
+    if not records:
+        return "no definitions\n"
+    return "".join(_definition_text(record) for record in records)
+
+
+def _caller_text(record: CallerRecord) -> str:
+    suffix = " [unresolved]" if record.unresolved else ""
+    label = (
+        record.reference if record.unresolved and record.reference is not None else record.caller
+    )
+    return f"{record.path}:{record.line}:{record.column}  {label}{suffix}\n"
+
+
+def _definition_text(record: DefinitionRecord) -> str:
+    suffix = " [duplicate-name]" if record.duplicate else ""
+    return f"{record.path}:{record.line}  {record.symbol}  {record.kind}{suffix}\n"

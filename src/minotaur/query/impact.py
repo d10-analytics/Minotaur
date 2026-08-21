@@ -1,0 +1,104 @@
+"""Inbound dependency impact query and its stable output records."""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from minotaur.graph_model.provenance import NodeClass, RelationshipKind
+from minotaur.graph_model.slicing import bfs
+from minotaur.query.index import GraphIndex
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactRecord:
+    """One symbol reached at a BFS depth, or just beyond a depth cut."""
+
+    depth: int
+    symbol: str
+    kind: str
+    boundary: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "boundary": self.boundary,
+            "depth": self.depth,
+            "kind": self.kind,
+            "symbol": self.symbol,
+        }
+
+
+def impact(
+    index: GraphIndex,
+    qualified_name: str,
+    max_depth: int | None = None,
+) -> tuple[ImpactRecord, ...]:
+    """Return inbound ``calls``/``imports`` impact records by shortest depth.
+
+    Like ``callers``, an unresolvable name raises ``SymbolResolutionError``
+    rather than returning an empty result: ``no impact`` would read as "safe
+    to change" for a symbol the query never actually looked at.
+    """
+
+    if max_depth is not None and max_depth < 0:
+        raise ValueError(f"depth must be non-negative, got {max_depth}")
+    target_id = index.resolve(qualified_name).id
+    adjacency: dict[str, set[str]] = defaultdict(set)
+    for kind in (RelationshipKind.CALLS.value, RelationshipKind.IMPORTS.value):
+        for relationship in index.relationships(kind):
+            # Inverting source -> target makes the BFS from the queried symbol
+            # walk inbound dependencies while retaining the selected kinds.
+            adjacency[relationship.target].add(relationship.source)
+
+    depths = bfs(frozenset({target_id}), adjacency, max_depth)
+    boundary_depths: dict[str, int] = {}
+    if max_depth is not None:
+        for node_id, depth in depths.items():
+            if depth != max_depth:
+                continue
+            for neighbor in adjacency.get(node_id, ()):
+                if neighbor not in depths:
+                    boundary_depths.setdefault(neighbor, max_depth + 1)
+
+    records: list[ImpactRecord] = []
+    for node_id, depth in depths.items():
+        node = index.nodes.get(node_id)
+        if node is None or node.node_class != NodeClass.SYMBOL:
+            continue
+        # Module symbols are kept here, unlike diff._keyed_symbols(), which
+        # drops them as scaffolding. A call made at module scope has a real
+        # inbound dependant (the importing module runs it on import), so
+        # impact must report it; diff excludes the same node class only
+        # because its source range shifts on every unrelated edit.
+        records.append(
+            ImpactRecord(
+                depth=depth,
+                symbol=node.label,
+                kind=node.symbol_kind or "unknown",
+            )
+        )
+    for node_id, depth in boundary_depths.items():
+        node = index.nodes.get(node_id)
+        if node is None or node.node_class != NodeClass.SYMBOL:
+            continue
+        records.append(
+            ImpactRecord(
+                depth=depth,
+                symbol=node.label,
+                kind=node.symbol_kind or "unknown",
+                boundary=True,
+            )
+        )
+    return tuple(sorted(records, key=lambda record: (record.boundary, record.depth, record.symbol)))
+
+
+def render_text(records: Sequence[ImpactRecord]) -> str:
+    """Render one compact line per symbol, grouped by depth."""
+
+    if not records:
+        return "no impact\n"
+    return "".join(
+        f"{'[boundary] ' if record.boundary else ''}depth {record.depth}: {record.symbol}\n"
+        for record in records
+    )

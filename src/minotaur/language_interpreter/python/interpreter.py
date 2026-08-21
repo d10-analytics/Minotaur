@@ -9,8 +9,10 @@ made and no source code is executed or imported.
 from __future__ import annotations
 
 import ast
+import hashlib
 from collections import defaultdict
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from minotaur.graph_model.document import GraphDocument
@@ -47,27 +49,115 @@ class _Module:
     module_id: str
 
 
+@dataclass
+class _ImportTally:
+    """Counts of import statements that did or did not resolve in the workspace.
+
+    ``root_mismatched`` counts unresolved imports whose dotted name is a
+    strict suffix of an analyzed module name (``import minotaur.cli`` while
+    the graph knows ``src.minotaur.cli``). That is the signature of a
+    ``--root`` that does not match the package layout, which silently turns
+    every cross-module call into an unresolved reference; the CLI warns from
+    these counts. Third-party and out-of-selection imports are unresolved but
+    not mismatched, so they never trigger the warning.
+    """
+
+    resolved: int = 0
+    unresolved: int = 0
+    root_mismatched: int = 0
+    prefixes: dict[str, int] = field(default_factory=dict)
+    _suffixes: dict[str, str] | None = None
+
+    def note_unresolved(self, name: str, modules: Mapping[str, object]) -> None:
+        self.unresolved += 1
+        if self._suffixes is None:
+            self._suffixes = _module_suffixes(modules)
+        prefix = self._suffixes.get(name)
+        if prefix is None and "." in name:
+            # ``from pkg.mod import symbol``: the module part is what must match.
+            prefix = self._suffixes.get(name.rsplit(".", 1)[0])
+        if prefix is not None:
+            self.root_mismatched += 1
+            self.prefixes[prefix] = self.prefixes.get(prefix, 0) + 1
+
+    @property
+    def root_hint(self) -> str | None:
+        """The most common missing prefix as a root-relative directory."""
+        if not self.prefixes:
+            return None
+        prefix = max(sorted(self.prefixes), key=self.prefixes.__getitem__)
+        return prefix.replace(".", "/")
+
+
+def _module_suffixes(modules: Mapping[str, object]) -> dict[str, str]:
+    suffixes: dict[str, str] = {}
+    for name in modules:
+        parts = name.split(".")
+        for index in range(1, len(parts)):
+            suffixes.setdefault(".".join(parts[index:]), ".".join(parts[:index]))
+    return suffixes
+
+
 class _ScopeCallVisitor(ast.NodeVisitor):
-    """Collect calls that execute in one lexical scope only."""
+    """Collect calls nested within one top-level lexical scope."""
 
     def __init__(self) -> None:
         self.calls: list[ast.Call] = []
+        self.references: list[ast.Name | ast.Attribute] = []
+        self._call_func_depth = 0
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
-        self.generic_visit(node)
+        # The callable expression is represented by the calls relationship;
+        # only its arguments can contribute independent references. Keep
+        # traversing the callable expression so nested calls are preserved,
+        # while suppressing loads from that expression.
+        enclosing_func_depth = self._call_func_depth
+        self._call_func_depth += 1
+        self.visit(node.func)
+        # Reset to 0 (rather than leaving the incremented depth in place)
+        # before visiting arguments: a call's arguments are never part of
+        # a callee expression, even when this call itself sits inside an
+        # enclosing call's callee expression. For `f(g)(h)`, the outer
+        # visit_Call increments depth while visiting `f(g)` as its callee,
+        # but `g` is an argument of the inner call and must still be
+        # recorded as a reference despite the outer suppression.
+        self._call_func_depth = 0
+        for argument in node.args:
+            self.visit(argument)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        self._call_func_depth = enclosing_func_depth
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
+            self.references.append(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        """Nested definitions establish a new callable scope."""
+        self.generic_visit(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        """Nested definitions establish a new callable scope."""
+        self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        """Nested definitions establish a new class scope."""
+        # A nested class body executes while the enclosing scope is active, but
+        # methods of that class execute in their own scope and remain outside
+        # this visitor's ownership. The class header (decorators, bases, and
+        # keywords such as ``metaclass=``) is evaluated in the enclosing scope
+        # as well, so a base class is a real dependency of that scope.
+        for header in _class_header_nodes(node):
+            self.visit(header)
+        for statement in node.body:
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.visit(statement)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        """A lambda body executes only when that lambda is called."""
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
+            self.references.append(node)
+        self.generic_visit(node)
 
 
 def analyze_python_workspace(root: Path) -> AnalysisResult:
@@ -101,7 +191,8 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
     for file_path in sorted(files, key=lambda path: path.relative_to(workspace.root).as_posix()):
         relative = file_path.relative_to(workspace.root).as_posix()
         try:
-            source = file_path.read_text(encoding="utf-8")
+            content = file_path.read_bytes()
+            source = content.decode("utf-8")
         except (OSError, UnicodeError) as error:
             diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
             continue
@@ -119,7 +210,9 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             continue
         module = _make_module(relative, parsed.tree, source)
         modules.append(module)
-        nodes.extend((_file_node(relative), _module_node(module)))
+        nodes.extend(
+            (_file_node(relative, hashlib.sha256(content).hexdigest()), _module_node(module))
+        )
 
     module_by_name = {module.name: module for module in modules}
     declarations: dict[str, str] = {}
@@ -133,6 +226,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         nodes.extend(declared_nodes)
 
     relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
+    tally = _ImportTally()
     for module in modules:
         _append(
             relationships, module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
@@ -145,6 +239,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             containers,
             relationships,
             nodes,
+            tally,
         )
 
     return AnalysisResult(
@@ -155,6 +250,15 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
                 _relationship(key, locations) for key, locations in relationships.items()
             ),
             generated_by=_PRODUCER,
+            # Flat keys: extension namespaces hold scalar-valued objects.
+            extensions={
+                "minotaur-python": {
+                    "imports_resolved": tally.resolved,
+                    "imports_unresolved": tally.unresolved,
+                    "imports_root_mismatched": tally.root_mismatched,
+                    **({"import_root_hint": tally.root_hint} if tally.root_hint else {}),
+                }
+            },
         ),
         tuple(diagnostics),
     )
@@ -177,7 +281,7 @@ def _make_module(path: str, tree: ast.Module, source: str) -> _Module:
     )
 
 
-def _file_node(path: str) -> Node:
+def _file_node(path: str, content_sha256: str) -> Node:
     identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
     return Node(
         id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=path),
@@ -186,6 +290,7 @@ def _file_node(path: str) -> Node:
         label=path,
         path=path,
         language="python",
+        extensions={"minotaur-python": {"content_sha256": content_sha256}},
     )
 
 
@@ -236,15 +341,20 @@ def _analyze_module(
     containers: dict[str, str],
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
+    tally: _ImportTally,
 ) -> None:
-    aliases = _imports(module, modules, relationships, nodes)
+    aliases = _imports(module, modules, relationships, nodes, tally)
     for qualified, node_id in local_declarations.items():
         container = containers.get(qualified)
         if container is None:
             continue
         _append(relationships, container, node_id, RelationshipKind.CONTAINS.value, None)
     _calls(
-        module.tree.body,
+        [
+            statement
+            for statement in module.tree.body
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ],
         declarations,
         aliases,
         module.name,
@@ -264,8 +374,32 @@ def _analyze_module(
                 declarations[f"{module.name}.{statement.name}"],
                 relationships,
                 nodes,
+                prefix_nodes=_signature_nodes(statement),
             )
         elif isinstance(statement, ast.ClassDef):
+            # A class body executes at definition time in the class scope, so
+            # its non-method statements (dataclass field defaults, aliases such
+            # as `handler = staticmethod(helper)`, descriptor construction) are
+            # real calls and references and are attributed to the class node.
+            # Methods are excluded here and analyzed below in their own scope,
+            # matching how _ScopeCallVisitor.visit_ClassDef treats a nested
+            # class body inside a function.
+            _calls(
+                [
+                    member
+                    for member in statement.body
+                    if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                ],
+                declarations,
+                aliases,
+                module.name,
+                module.path,
+                declarations[f"{module.name}.{statement.name}"],
+                relationships,
+                nodes,
+                statement.name,
+                prefix_nodes=_class_header_nodes(statement),
+            )
             for member in statement.body:
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     _calls(
@@ -278,7 +412,61 @@ def _analyze_module(
                         relationships,
                         nodes,
                         statement.name,
+                        prefix_nodes=_signature_nodes(member),
                     )
+
+
+def _class_header_nodes(node: ast.ClassDef) -> tuple[ast.AST, ...]:
+    """Return the expressions evaluated by a class statement's header.
+
+    ``class Sub(Base, metaclass=Meta)`` depends on ``Base`` and ``Meta`` just
+    as a decorator depends on its callable. Without these, every base class is
+    reported as unreferenced by ``query unreferenced`` whenever subclassing is
+    its only use.
+    """
+    return (
+        *node.decorator_list,
+        *node.bases,
+        *(keyword.value for keyword in node.keywords),
+    )
+
+
+def _signature_nodes(
+    statement: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[ast.AST, ...]:
+    """Return the decorator and signature expressions of one definition.
+
+    A function's decorators, default arguments, and annotations are all
+    expressions evaluated outside its body, so a visitor given only
+    ``statement.body`` never sees them. Nested definitions do get them, because
+    ``_ScopeCallVisitor`` reaches a nested ``FunctionDef`` through
+    ``generic_visit`` and therefore traverses its whole signature; collecting
+    them here keeps top-level functions and methods consistent with nested ones
+    instead of making attribution depend on nesting depth.
+
+    Annotations count as references for the same reason calls do:
+    ``def f(x: Handler)`` is a real dependency on ``Handler``, and an agent
+    asking whether a symbol is still used must be told about it before
+    deleting the symbol.
+    ``from __future__ import annotations`` does not change this — the annotation
+    is still parsed into the expression recorded here.
+    """
+    arguments = statement.args
+    signature: list[ast.AST] = list(statement.decorator_list)
+    signature.extend(arguments.defaults)
+    signature.extend(default for default in arguments.kw_defaults if default is not None)
+    declared = (
+        *arguments.posonlyargs,
+        *arguments.args,
+        *arguments.kwonlyargs,
+        *(argument for argument in (arguments.vararg, arguments.kwarg) if argument is not None),
+    )
+    signature.extend(
+        argument.annotation for argument in declared if argument.annotation is not None
+    )
+    if statement.returns is not None:
+        signature.append(statement.returns)
+    return tuple(signature)
 
 
 def _imports(
@@ -286,6 +474,7 @@ def _imports(
     modules: dict[str, _Module],
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
+    tally: _ImportTally,
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for statement in module.tree.body:
@@ -293,6 +482,7 @@ def _imports(
             for alias in statement.names:
                 target = modules.get(alias.name)
                 if target is None:
+                    tally.note_unresolved(alias.name, modules)
                     _unresolved(
                         module.module_id,
                         alias.name,
@@ -301,6 +491,7 @@ def _imports(
                         nodes,
                     )
                 else:
+                    tally.resolved += 1
                     _append(
                         relationships,
                         module.module_id,
@@ -318,6 +509,7 @@ def _imports(
                 reference = f"{base}.{alias.name}" if base else alias.name
                 resolved_target = declarations_for_module(modules, reference)
                 if resolved_target is None:
+                    tally.note_unresolved(reference, modules)
                     _unresolved(
                         module.module_id,
                         reference,
@@ -326,6 +518,7 @@ def _imports(
                         nodes,
                     )
                 else:
+                    tally.resolved += 1
                     _append(
                         relationships,
                         module.module_id,
@@ -370,8 +563,11 @@ def _calls(
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
     class_name: str | None = None,
+    prefix_nodes: tuple[ast.AST, ...] = (),
 ) -> None:
     visitor = _ScopeCallVisitor()
+    for node in prefix_nodes:
+        visitor.visit(node)
     for statement in statements:
         visitor.visit(statement)
     for candidate in visitor.calls:
@@ -382,6 +578,17 @@ def _calls(
             _unresolved(caller, text, location, relationships, nodes)
         else:
             _append(relationships, caller, target, RelationshipKind.CALLS.value, location)
+    for reference in visitor.references:
+        text = _expression_text(reference)
+        target = _resolve_call(text, declarations, aliases, module_name, class_name)
+        if target is not None:
+            _append(
+                relationships,
+                caller,
+                target,
+                RelationshipKind.REFERENCES.value,
+                _location(path, reference),
+            )
 
 
 def _resolve_call(

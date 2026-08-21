@@ -5,8 +5,12 @@ Language-specific interpreter tests live beneath ``tests/language_interpreter``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
+from minotaur import cli
+from minotaur.graph_model.loading import load_graph_file
 from minotaur.graph_model.provenance import NodeClass, RelationshipKind
 from minotaur.graph_model.validation import validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
@@ -74,6 +78,45 @@ def test_python_interpreter_establishes_containment_imports_and_direct_calls(
     assert call.evidence[0].locations[0].range.start.line == 7
 
 
+def test_cli_records_file_content_hashes_and_root_relative_selection(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    _write(root, "z.py", "z = 1\n")
+    _write(root, "a.py", "a = 1\n")
+    output = tmp_path / "graph.json"
+
+    assert (
+        cli.main(
+            [
+                "analyze",
+                "--root",
+                str(root),
+                "--output",
+                str(output),
+                str(root / "z.py"),
+                str(root / "a.py"),
+            ]
+        )
+        == 0
+    )
+
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert graph["extensions"] == {
+        "minotaur": {"selection": ["a.py", "z.py"]},
+        "minotaur-python": {
+            "imports_resolved": 0,
+            "imports_root_mismatched": 0,
+            "imports_unresolved": 0,
+        },
+    }
+    for node in graph["nodes"]:
+        if node["node_class"] == "file":
+            digest = hashlib.sha256((root / node["path"]).read_bytes()).hexdigest()
+            assert node["extensions"]["minotaur-python"]["content_sha256"] == digest
+
+    loaded = load_graph_file(output)
+    assert loaded.canonical == graph
+
+
 def test_dynamic_and_missing_imports_are_explicit_unresolved_references(tmp_path: Path) -> None:
     _write(
         tmp_path,
@@ -134,7 +177,7 @@ def test_package_relative_imports_analyze_without_crashing(tmp_path: Path) -> No
     }
 
 
-def test_calls_in_nested_functions_are_not_attributed_to_the_outer_function(tmp_path: Path) -> None:
+def test_calls_in_nested_functions_are_attributed_to_the_outer_function(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "app.py",
@@ -145,7 +188,7 @@ def test_calls_in_nested_functions_are_not_attributed_to_the_outer_function(tmp_
     outer = _node_id(result, "app.outer")
     helper = _node_id(result, "app.helper")
 
-    assert (outer, helper, RelationshipKind.CALLS.value) not in {
+    assert (outer, helper, RelationshipKind.CALLS.value) in {
         (relationship.source, relationship.target, relationship.kind)
         for relationship in result.document.relationships
     }
@@ -178,3 +221,289 @@ def test_module_alias_and_module_level_calls_resolve_to_known_workspace_function
         for node in result.document.nodes
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
+
+
+def test_module_callback_reference_is_resolved_without_misclassifying_calls(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def handler():\n    return 1\n\n"
+        "def register(callback):\n    return callback\n\n"
+        "def helper():\n    return 1\n\n"
+        "register(handler)\n"
+        "helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    handler = _node_id(result, "app.handler")
+    register = _node_id(result, "app.register")
+    helper = _node_id(result, "app.helper")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (module, handler, RelationshipKind.REFERENCES.value) in relationships
+    assert (module, handler, RelationshipKind.CALLS.value) not in relationships
+    assert (module, register, RelationshipKind.CALLS.value) in relationships
+    assert (module, helper, RelationshipKind.CALLS.value) in relationships
+    assert (module, helper, RelationshipKind.REFERENCES.value) not in relationships
+
+    reference = relationships[(module, handler, RelationshipKind.REFERENCES.value)]
+    location = reference.evidence[0].locations[0]
+    assert location.path == "app.py"
+    assert location.range.start.line == 9
+    assert location.range.start.character == 9
+
+
+def test_attribute_and_nested_load_references_preserve_call_and_unresolved_boundaries(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def handler():\n    return 1\n\n"
+        "class Runner:\n"
+        "    def on_click(self):\n        return 1\n\n"
+        "    def on_callback(self):\n        return 1\n\n"
+        "    def configure(self):\n"
+        "        self.on_click()\n"
+        "        callbacks = [self.on_callback, handler]\n"
+        "        def nested():\n"
+        "            return handler\n"
+        "        missing = unknown\n"
+        "        missing_attr = unknown.attr\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    configure = _node_id(result, "app.Runner.configure")
+    on_click = _node_id(result, "app.Runner.on_click")
+    on_callback = _node_id(result, "app.Runner.on_callback")
+    handler = _node_id(result, "app.handler")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (configure, on_click, RelationshipKind.CALLS.value) in relationships
+    assert (configure, on_click, RelationshipKind.REFERENCES.value) not in relationships
+    assert (configure, on_callback, RelationshipKind.REFERENCES.value) in relationships
+    assert (configure, on_callback, RelationshipKind.CALLS.value) not in relationships
+    assert (configure, handler, RelationshipKind.REFERENCES.value) in relationships
+    handler_locations = (
+        relationships[(configure, handler, RelationshipKind.REFERENCES.value)].evidence[0].locations
+    )
+    assert {location.range.start.line for location in handler_locations} == {12, 14}
+
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert "unknown" not in unresolved
+    assert "unknown.attr" not in unresolved
+
+
+def test_load_argument_in_nested_call_func_is_still_a_reference(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def handler():\n    return 1\n\n"
+        "def factory(callback):\n    return callback\n\n"
+        "factory(handler)()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    handler = _node_id(result, "app.handler")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (module, handler, RelationshipKind.REFERENCES.value) in relationships
+    location = (
+        relationships[(module, handler, RelationshipKind.REFERENCES.value)].evidence[0].locations[0]
+    )
+    assert location.range.start.line == 6
+    assert location.range.start.character == 8
+
+
+def test_decorator_load_references_resolve_for_module_and_direct_method_scopes(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "decorators.py", "def handler(target):\n    return target\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import decorators as pkg\n\n"
+        "@pkg.handler\n"
+        "def decorated():\n    return 1\n\n"
+        "class Runner:\n"
+        "    @pkg.handler\n"
+        "    def run(self):\n"
+        "        return 1\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    decorated = _node_id(result, "app.decorated")
+    run = _node_id(result, "app.Runner.run")
+    handler = _node_id(result, "decorators.handler")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (decorated, handler, RelationshipKind.REFERENCES.value) in relationships
+    assert (run, handler, RelationshipKind.REFERENCES.value) in relationships
+    assert (decorated, handler, RelationshipKind.CALLS.value) not in relationships
+    assert (run, handler, RelationshipKind.CALLS.value) not in relationships
+
+    decorated_location = relationships[(decorated, handler, RelationshipKind.REFERENCES.value)]
+    assert decorated_location.evidence[0].locations[0].range.start.line == 2
+    method_location = relationships[(run, handler, RelationshipKind.REFERENCES.value)]
+    assert method_location.evidence[0].locations[0].range.start.line == 7
+
+
+def test_class_bases_and_keywords_are_references_at_every_nesting_level(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Base:\n    pass\n\n"
+        "class Meta(type):\n    pass\n\n"
+        "class Sub(Base, metaclass=Meta):\n    pass\n\n"
+        "def factory():\n"
+        "    class Local(Base):\n        pass\n"
+        "    return Local\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    base = _node_id(result, "app.Base")
+    meta = _node_id(result, "app.Meta")
+    sub = _node_id(result, "app.Sub")
+    factory = _node_id(result, "app.factory")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    assert (sub, base, RelationshipKind.REFERENCES.value) in relationships
+    assert (sub, meta, RelationshipKind.REFERENCES.value) in relationships
+    # A nested class header is evaluated in the enclosing function's scope.
+    assert (factory, base, RelationshipKind.REFERENCES.value) in relationships
+
+
+def test_class_body_statements_are_attributed_to_the_class_not_dropped(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "from dataclasses import dataclass, field\n\n"
+        "def make_config():\n    return {}\n\n"
+        "def helper():\n    return 1\n\n"
+        "def inner():\n    return 2\n\n"
+        "@dataclass\n"
+        "class Cfg:\n"
+        "    defaults = make_config()\n"
+        "    data: dict = field(default_factory=make_config)\n"
+        "    handler = staticmethod(helper)\n\n"
+        "    def method(self):\n        return inner()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    cfg = _node_id(result, "app.Cfg")
+    method = _node_id(result, "app.Cfg.method")
+    make_config = _node_id(result, "app.make_config")
+    helper = _node_id(result, "app.helper")
+    inner = _node_id(result, "app.inner")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    assert (cfg, make_config, RelationshipKind.CALLS.value) in relationships
+    assert (cfg, make_config, RelationshipKind.REFERENCES.value) in relationships
+    assert (cfg, helper, RelationshipKind.REFERENCES.value) in relationships
+    assert (cfg, helper, RelationshipKind.CALLS.value) not in relationships
+    # Methods keep their own scope: a call in a method body is not hoisted to
+    # the class merely because the class body is now visited.
+    assert (method, inner, RelationshipKind.CALLS.value) in relationships
+    assert (cfg, inner, RelationshipKind.CALLS.value) not in relationships
+
+
+def test_function_signature_defaults_and_annotations_are_attributed_to_the_function(
+    tmp_path: Path,
+) -> None:
+    # Defaults and annotations are evaluated outside the body, so a visitor
+    # given only `statement.body` misses them; nested definitions already saw
+    # them through generic_visit. Both nesting levels must agree.
+    _write(
+        tmp_path,
+        "app.py",
+        "def default_cb():\n    return 0\n\n"
+        "def kw_default():\n    return 1\n\n"
+        "class Handler:\n    pass\n\n"
+        "class Result:\n    pass\n\n"
+        "def top(cb=default_cb, *, hook=kw_default) -> Result:\n"
+        "    return cb()\n\n"
+        "class Runner:\n"
+        "    def run(self, handler: Handler = default_cb):\n"
+        "        return handler\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    top = _node_id(result, "app.top")
+    run = _node_id(result, "app.Runner.run")
+    default_cb = _node_id(result, "app.default_cb")
+    kw_default = _node_id(result, "app.kw_default")
+    handler = _node_id(result, "app.Handler")
+    result_class = _node_id(result, "app.Result")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    assert (top, default_cb, RelationshipKind.REFERENCES.value) in relationships
+    assert (top, kw_default, RelationshipKind.REFERENCES.value) in relationships
+    assert (top, result_class, RelationshipKind.REFERENCES.value) in relationships
+    assert (run, handler, RelationshipKind.REFERENCES.value) in relationships
+    assert (run, default_cb, RelationshipKind.REFERENCES.value) in relationships
+    # A default is a reference to the callable, never a call of it.
+    assert (top, default_cb, RelationshipKind.CALLS.value) not in relationships
+
+
+def test_signature_references_match_between_nested_and_top_level_definitions(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def default_cb():\n    return 0\n\n"
+        "class Handler:\n    pass\n\n"
+        "def outer():\n"
+        "    def inner(cb=default_cb, handler: Handler = None):\n"
+        "        return cb\n\n"
+        "    return inner\n\n"
+        "def peer(cb=default_cb, handler: Handler = None):\n"
+        "    return cb\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    peer = _node_id(result, "app.peer")
+    default_cb = _node_id(result, "app.default_cb")
+    handler = _node_id(result, "app.Handler")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    for target in (default_cb, handler):
+        assert (outer, target, RelationshipKind.REFERENCES.value) in relationships
+        assert (peer, target, RelationshipKind.REFERENCES.value) in relationships

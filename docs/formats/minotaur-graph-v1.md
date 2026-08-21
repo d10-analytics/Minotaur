@@ -155,6 +155,17 @@ namespace and whose values are objects. The detailed extension-key grammar is
 intentionally deferred; consumers must not treat extension data as a core
 fact.
 
+The Python analyzer currently emits these producer extensions. On each `file`
+node, `extensions["minotaur-python"]["content_sha256"]` is the lowercase
+SHA-256 digest of the file's exact bytes. On an analyzed document,
+`extensions["minotaur-python"]` carries integer import-resolution counts
+(`imports_resolved`, `imports_unresolved`, `imports_root_mismatched`) and an
+optional `import_root_hint` string, and the CLI stores
+`extensions["minotaur"]["selection"]` as the sorted root-relative targets
+supplied to the command (with `.` representing the root). These values are
+freshness and diagnostic metadata, not identity inputs or core graph facts.
+Extension values are flat objects of scalars and arrays.
+
 Array order does not change graph meaning. A canonical serializer sorts nodes
 by ID, relationships by `(source, target, kind)`, locations by path and range,
 and evidence by its JCS representation after locations are normalized.

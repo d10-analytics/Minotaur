@@ -70,7 +70,7 @@ def slice_document(
         )
 
     adjacency = _build_adjacency(document, direction)
-    reached = _bfs(frozen_seeds, adjacency, max_depth)
+    reached = bfs(frozen_seeds, adjacency, max_depth)
     integrity_added = _ensure_unresolved_reference_integrity(document, reached)
     boundary = _compute_boundary(reached, adjacency, max_depth, integrity_added)
 
@@ -110,11 +110,16 @@ def _build_adjacency(
     return adj
 
 
-def _bfs(
+def bfs(
     seeds: frozenset[str],
     adjacency: dict[str, set[str]],
     max_depth: int | None,
 ) -> dict[str, int]:
+    """Return the shortest depth for every node reached from ``seeds``.
+
+    The traversal is deliberately independent of graph-document concerns so
+    callers can construct a filtered adjacency map for a specific query.
+    """
     reached: dict[str, int] = {}
     queue: deque[tuple[str, int]] = deque()
 
