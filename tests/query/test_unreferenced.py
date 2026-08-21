@@ -380,3 +380,78 @@ def test_unreferenced_counts_a_call_from_a_sibling_method(
     assert captured.out == (
         "service.py:1  service.Service  class\nservice.py:2  service.Service.outer  method\n"
     )
+
+
+def test_unreferenced_text_fallback_ignores_same_name_definitions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Each definition of a name puts that name in the text once, so two
+    # unreferenced methods named `render` used to vouch for each other and both
+    # were tagged `[text-mention]`, hiding them from a hygiene pass.
+    _write(
+        tmp_path,
+        "views.py",
+        "class A:\n    def render(self):\n        return 1\n\n"
+        "class B:\n    def render(self):\n        return 2\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--text-fallback",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == (
+        "views.py:1  views.A  class\n"
+        "views.py:2  views.A.render  method\n"
+        "views.py:5  views.B  class\n"
+        "views.py:6  views.B.render  method\n"
+    )
+
+
+def test_unreferenced_text_fallback_tags_every_symbol_sharing_a_mentioned_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The fallback is keyed by bare name, not by symbol: one extra occurrence
+    # of `render` beyond the two definitions tags both `A.render` and
+    # `B.render`, because the text scan cannot say which class it meant.
+    _write(
+        tmp_path,
+        "views.py",
+        "class A:\n    def render(self):\n        return 1\n\n"
+        "class B:\n    def render(self):\n        return 2\n\n"
+        "DISPATCH = 'render'\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--text-fallback",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == (
+        "views.py:1  views.A  class\n"
+        "views.py:2  views.A.render  method [text-mention]\n"
+        "views.py:5  views.B  class\n"
+        "views.py:6  views.B.render  method [text-mention]\n"
+    )
