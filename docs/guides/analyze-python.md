@@ -121,7 +121,7 @@ statically, the analyzer records an explicit unresolved-reference node and a
 reference relationship with source-location evidence. It does not guess a
 relationship to a likely target. A query can use those unresolved references
 to preserve recall when searching for callers; see the [agent-facing query
-guide](query-for-agents.md).
+guide](query-reference.md).
 
 ## Boundaries of the current slice
 
