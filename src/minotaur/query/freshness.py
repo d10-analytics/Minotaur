@@ -70,7 +70,7 @@ def drift(document: GraphDocument, root: Path) -> Drift:
         if not source.is_file():
             missing.append(relative)
             continue
-        expected = _content_hash(node)
+        expected = content_sha256(node)
         try:
             actual = hashlib.sha256(source.read_bytes()).hexdigest()
         except OSError:
@@ -92,7 +92,13 @@ def _file_nodes(document: GraphDocument) -> dict[str, Node]:
     }
 
 
-def _content_hash(node: Node) -> str | None:
+def content_sha256(node: Node) -> str | None:
+    """Return the recorded ``minotaur-python`` content hash, if any.
+
+    Shared by ``drift`` and ``query.context``, which both need the same
+    recorded-hash lookup: one to compare against the current workspace, the
+    other to decide whether a comparison is possible at all.
+    """
     extensions = node.extensions or {}
     language = extensions.get("minotaur-python", {})
     digest = language.get("content_sha256")

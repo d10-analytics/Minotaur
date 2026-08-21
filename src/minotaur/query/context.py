@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import is_safe_path
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
+from minotaur.query.freshness import content_sha256
 from minotaur.query.render import dump_json
 from minotaur.source import read_source_path
 
@@ -79,7 +79,8 @@ def context(
     if not resolved.is_file():
         raise ValueError(f"site path is not a file: {path}")
 
-    expected_hash, hash_available = _recorded_hash(file_node)
+    expected_hash = content_sha256(file_node)
+    hash_available = expected_hash is not None
     try:
         actual_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
     except OSError as error:
@@ -155,12 +156,3 @@ def _file_node(document: GraphDocument, path: str) -> Node:
         if node.node_class == NodeClass.FILE and node.path == path:
             return node
     raise ValueError(f"site path is not present in graph: {path}")
-
-
-def _recorded_hash(node: Node) -> tuple[str | None, bool]:
-    extensions: Mapping[str, Mapping[str, object]] = node.extensions or {}
-    language = extensions.get("minotaur-python", {})
-    digest = language.get("content_sha256")
-    if isinstance(digest, str):
-        return digest, True
-    return None, False
