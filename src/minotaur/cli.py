@@ -67,7 +67,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "visualize":
         return _visualize(arguments)
     if arguments.command == "query":
-        return _query_skeleton(arguments)
+        return _query(arguments)
     if arguments.command != "analyze":  # pragma: no cover - argparse enforces this.
         parser.error("a command is required")
 
@@ -222,7 +222,7 @@ def _load_and_refresh_graph(
     return result.document, result.diagnostics, observed
 
 
-def _query_skeleton(arguments: argparse.Namespace) -> int:
+def _query(arguments: argparse.Namespace) -> int:
     """Dispatch a fixed query against one graph snapshot."""
     try:
         query = _query_parser().parse_args(arguments.query_args)
