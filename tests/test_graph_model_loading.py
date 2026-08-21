@@ -429,3 +429,122 @@ class TestSidecarFallback:
         assert seam_called
         assert loaded.validated is True
         assert loaded.digest == graph_digest(data)
+
+
+# ---------------------------------------------------------------------------
+# Adversarial reviewer tests (T01)
+# ---------------------------------------------------------------------------
+
+
+class TestStampTrustBoundaryAdversarial:
+    """Adversarial challenges to the stamp trust boundary (reviewer T01)."""
+
+    def test_load_graph_file_is_read_only(self, tmp_path: Path) -> None:
+        """D-14: load_graph_file never writes any file, including the sidecar.
+
+        A valid graph loaded without a sidecar must not create the sidecar
+        as a side effect.  A valid graph loaded WITH a matching sidecar must
+        not modify the sidecar.
+        """
+        data = _EXAMPLE_GRAPH.read_bytes()
+        graph_path = tmp_path / "graph.json"
+        graph_path.write_bytes(data)
+
+        before_files = set(tmp_path.iterdir())
+        load_graph_file(graph_path)
+        after_files = set(tmp_path.iterdir())
+        assert before_files == after_files, "load_graph_file created a file"
+
+        # Now add a sidecar and verify it is not modified.
+        sidecar = stamp_path(graph_path)
+        sidecar_content = graph_digest(data) + "\n"
+        sidecar.write_text(sidecar_content, encoding="utf-8")
+        sidecar_mtime = sidecar.stat().st_mtime_ns
+        load_graph_file(graph_path)
+        assert sidecar.read_text(encoding="utf-8") == sidecar_content
+        assert sidecar.stat().st_mtime_ns == sidecar_mtime
+
+    def test_sidecar_digest_split_at_4k_boundary(self, tmp_path: Path) -> None:
+        """A sidecar where the correct digest straddles the 4096-byte read
+        boundary must NOT match.  The reader reads at most 4096 bytes, so
+        if the digest starts at byte 4090, only 6 of its 64 hex chars are
+        read, and the stripped result cannot equal the full digest.
+        """
+        data = _EXAMPLE_GRAPH.read_bytes()
+        graph_path = tmp_path / "graph.json"
+        graph_path.write_bytes(data)
+        digest = graph_digest(data)
+
+        # Place whitespace padding so the digest starts at byte 4090.
+        padding = " " * 4090
+        stamp_path(graph_path).write_text(padding + digest + "\n", encoding="utf-8")
+
+        seam_called = False
+        original = _validate_wire_shape
+
+        def tracking_seam(raw: dict[str, object]) -> None:
+            nonlocal seam_called
+            seam_called = True
+            original(raw)
+
+        with patch(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            side_effect=tracking_seam,
+        ):
+            loaded = load_graph_file(graph_path)
+
+        assert seam_called, "digest straddling 4K boundary must not skip schema"
+        assert loaded.validated is True
+
+    def test_sidecar_correct_digest_within_4k_with_whitespace_padding(self, tmp_path: Path) -> None:
+        """A sidecar with the correct digest followed by whitespace that
+        fits within 4096 bytes matches after .strip() -- this is the
+        expected behavior per D-12 (strip + exact equality).  Verify the
+        trust path activates.
+        """
+        data = _EXAMPLE_GRAPH.read_bytes()
+        graph_path = tmp_path / "graph.json"
+        graph_path.write_bytes(data)
+        digest = graph_digest(data)
+
+        # 64 hex chars + enough spaces + newline, all within 4096 bytes.
+        padding = " " * (4096 - 64 - 1)
+        stamp_path(graph_path).write_text(digest + padding + "\n", encoding="utf-8")
+
+        with patch(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            side_effect=AssertionError("schema seam must not be called"),
+        ):
+            loaded = load_graph_file(graph_path)
+
+        assert loaded.validated is False
+        assert loaded.digest == digest
+
+    def test_sidecar_with_embedded_null_byte(self, tmp_path: Path) -> None:
+        """A sidecar containing the correct digest followed by a NUL byte
+        must NOT match.  str.strip() does not remove NUL bytes, so the
+        stripped content is ``digest + chr(0)`` which differs from ``digest``.
+        """
+        data = _EXAMPLE_GRAPH.read_bytes()
+        graph_path = tmp_path / "graph.json"
+        graph_path.write_bytes(data)
+        digest = graph_digest(data)
+
+        stamp_path(graph_path).write_bytes((digest + "\x00\n").encode("utf-8"))
+
+        seam_called = False
+        original = _validate_wire_shape
+
+        def tracking_seam(raw: dict[str, object]) -> None:
+            nonlocal seam_called
+            seam_called = True
+            original(raw)
+
+        with patch(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            side_effect=tracking_seam,
+        ):
+            loaded = load_graph_file(graph_path)
+
+        assert seam_called, "embedded NUL byte must cause fallback to full validation"
+        assert loaded.validated is True
