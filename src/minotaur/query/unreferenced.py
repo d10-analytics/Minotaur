@@ -42,6 +42,7 @@ def unreferenced(
     source_paths: Iterable[str],
     excluded_names: frozenset[str] = frozenset(),
     *,
+    excluded_patterns: tuple[re.Pattern[str], ...] = (),
     text_fallback: bool = False,
 ) -> tuple[UnreferencedRecord, ...]:
     """Return selected function, method, and class symbols without inbound use.
@@ -62,7 +63,7 @@ def unreferenced(
     suspects = [
         node
         for node in candidates
-        if _eligible(node, excluded_names) and _is_unreferenced(index, node)
+        if _eligible(node, excluded_names, excluded_patterns) and _is_unreferenced(index, node)
     ]
 
     mentions: frozenset[str] = frozenset()
@@ -121,9 +122,30 @@ def load_exclusions(path: Path | None) -> frozenset[str]:
     return frozenset(values)
 
 
-def _eligible(node: Node, excluded_names: frozenset[str]) -> bool:
+def compile_patterns(values: Iterable[str]) -> tuple[re.Pattern[str], ...]:
+    """Compile ``--exclude-pattern`` regexes, reporting a bad one as a ValueError."""
+    compiled: list[re.Pattern[str]] = []
+    for value in values:
+        try:
+            compiled.append(re.compile(value))
+        except re.error as error:
+            raise ValueError(f"invalid --exclude-pattern {value!r}: {error}") from error
+    return tuple(compiled)
+
+
+def _eligible(
+    node: Node,
+    excluded_names: frozenset[str],
+    excluded_patterns: tuple[re.Pattern[str], ...] = (),
+) -> bool:
     name = node.label.rsplit(".", 1)[-1]
     if name in excluded_names:
+        return False
+    # Patterns are searched against the qualified label so a caller can
+    # express framework conventions Minotaur must not know about (pytest's
+    # ``Test*`` classes, Qt overrides, generated modules) without Minotaur
+    # hard-coding any language or framework.
+    if any(pattern.search(node.label) for pattern in excluded_patterns):
         return False
     if name.startswith("test_"):
         return False
