@@ -144,6 +144,14 @@ the candidate `path:line` sites. Neither is ever reported as `no impact`.
 Containment and callback-only `references` edges are intentionally not part of
 this call-chain impact query.
 
+Module-level callers appear as `module` symbols: if a target is called at
+module scope (`handle()` written directly in a module body, not inside a
+function), the importing module is a real inbound dependant and shows up as
+`depth N: package.module`. This differs from `diff`, which excludes module
+symbols entirely (see below) — `impact` keeps them because a module-scope
+call site is a change an agent needs to know about, even though `diff` treats
+the same node class as unstable scaffolding.
+
 ### Find unreferenced symbols
 
 Find graph-clean functions, methods, and classes, optionally narrowing the
@@ -191,6 +199,11 @@ minotaur query diff OLD.json NEW.json --json
 
 Symbols are keyed by `(symbol kind, qualified label)`, so inserting lines is
 reported as relocation rather than as an unrelated removal and addition.
+Module symbols are excluded from `added`/`removed`/`relocated` entirely:
+their source range is the whole file, so any unrelated edit would otherwise
+register as a spurious relocation. This is the opposite of `impact`, which
+keeps module symbols as genuine inbound dependants — see "Trace inbound
+impact" above.
 Text output is grouped into additions, removals, relocations, then relationship
 changes:
 

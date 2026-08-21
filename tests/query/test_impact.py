@@ -78,3 +78,55 @@ def test_impact_groups_depths_and_marks_cutoff_boundary(tmp_path: Path, capsys: 
         {"boundary": False, "depth": 1, "kind": "function", "symbol": "chain.d"},
         {"boundary": True, "depth": 2, "kind": "function", "symbol": "chain.e"},
     ]
+
+
+def test_impact_includes_module_scope_caller_as_module_symbol(
+    tmp_path: Path, capsys: object
+) -> None:
+    # A call made directly in a module body (not inside a function) has the
+    # module itself as its inbound dependant. impact.py deliberately keeps
+    # module-kind nodes as real results, unlike diff.py, which drops them.
+    _write(
+        tmp_path,
+        "boot.py",
+        "def start():\n    pass\n\nstart()\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "impact",
+            "boot.start",
+            "--depth",
+            "1",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    result = capsys.readouterr()
+    assert status == 0
+    assert result.out.splitlines() == [
+        "depth 0: boot.start",
+        "depth 1: boot",
+    ]
+
+    status = cli.main(
+        [
+            "query",
+            "impact",
+            "boot.start",
+            "--depth",
+            "1",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert {"boundary": False, "depth": 1, "kind": "module", "symbol": "boot"} in payload["results"]
