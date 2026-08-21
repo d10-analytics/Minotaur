@@ -170,6 +170,13 @@ elsewhere in source text (including strings or comments), marking it
 src/package/helpers.py:18  package.helpers.orphan  function [text-mention]
 ```
 
+The fallback counts occurrences of the bare name and subtracts the definitions
+of that name in the scanned files, so definitions of the same name no longer
+vouch for each other. It is keyed by the bare name, not by the symbol: when two
+classes both define `render` and `'render'` appears once in a string, both
+`A.render` and `B.render` are marked `[text-mention]`, because source text
+cannot say which one was meant.
+
 JSON records contain `path`, `line`, `symbol`, `kind`, and `text_mention`.
 An empty result prints `no unreferenced symbols` and still exits `0`.
 

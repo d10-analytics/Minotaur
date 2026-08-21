@@ -67,7 +67,7 @@ def unreferenced(
 
     mentions: frozenset[str] = frozenset()
     if text_fallback:
-        mentions = _text_mentions(root, selected)
+        mentions = _text_mentions(index, root, selected)
 
     records: list[UnreferencedRecord] = []
     for node in suspects:
@@ -148,12 +148,38 @@ def _is_unreferenced(index: GraphIndex, node: Node) -> bool:
     return True
 
 
-def _text_mentions(root: Path, selected: frozenset[str]) -> frozenset[str]:
+def _text_mentions(index: GraphIndex, root: Path, selected: frozenset[str]) -> frozenset[str]:
     counts: dict[str, int] = {}
     for relative in selected:
         path = root / relative
         for token in _TOKEN_PATTERN.findall(path.read_text(encoding="utf-8")):
             counts[token] = counts.get(token, 0) + 1
-    # One occurrence is the definition itself. Any additional occurrence may
-    # be a string, comment, getattr, or another syntax the graph cannot resolve.
-    return frozenset(token for token, count in counts.items() if count > 1)
+    # Every definition of the name contributes one occurrence -- its own ``def``
+    # or ``class`` line -- so the baseline to beat is the number of definitions,
+    # not one. Comparing against a fixed 1 made same-name definitions vouch for
+    # each other: two unreferenced methods named ``render`` on different classes
+    # each counted the other's ``def`` line, both were tagged ``[text-mention]``,
+    # and a hygiene pass never surfaced either. Any occurrence beyond the
+    # definitions may be a string, comment, getattr, or another syntax the graph
+    # cannot resolve, so it keeps the suspect in the result.
+    definitions = _definition_counts(index, selected)
+    return frozenset(token for token, count in counts.items() if count > definitions.get(token, 0))
+
+
+def _definition_counts(index: GraphIndex, selected: frozenset[str]) -> dict[str, int]:
+    """Count graph definitions per bare name inside the scanned files.
+
+    Only the kinds written as ``def``/``class`` statements are counted, and only
+    where they live in a scanned file, so each counted definition corresponds to
+    exactly one token occurrence in the text that ``_text_mentions`` reads.
+    """
+    counts: dict[str, int] = {}
+    for node in index.symbols():
+        location = node.location
+        if node.symbol_kind not in _CANDIDATE_KINDS or location is None:
+            continue
+        if location.path not in selected:
+            continue
+        name = node.label.rsplit(".", 1)[-1]
+        counts[name] = counts.get(name, 0) + 1
+    return counts
