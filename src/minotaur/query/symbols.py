@@ -22,10 +22,10 @@ class CallerRecord:
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
-            "path": self.path,
-            "line": self.line,
-            "column": self.column,
             "caller": self.caller,
+            "column": self.column,
+            "line": self.line,
+            "path": self.path,
             "unresolved": self.unresolved,
         }
         if self.reference is not None:
@@ -43,11 +43,11 @@ class DefinitionRecord:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "path": self.path,
-            "line": self.line,
-            "symbol": self.symbol,
-            "kind": self.kind,
             "duplicate": self.duplicate,
+            "kind": self.kind,
+            "line": self.line,
+            "path": self.path,
+            "symbol": self.symbol,
         }
 
 

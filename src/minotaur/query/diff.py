@@ -40,9 +40,9 @@ class Relocation:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "from": self.old_location.to_dict() if self.old_location is not None else None,
             "kind": self.kind,
             "symbol": self.symbol,
-            "from": self.old_location.to_dict() if self.old_location is not None else None,
             "to": self.new_location.to_dict() if self.new_location is not None else None,
         }
 
