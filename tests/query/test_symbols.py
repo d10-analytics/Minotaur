@@ -281,3 +281,38 @@ def test_all_query_renderers_hide_graph_internals_in_text_and_json(
             record = payload["results"][0]
             assert set(record) == {"hash_available", "lines", "path", "stale"}
             assert all(set(line) == {"line", "target", "text"} for line in record["lines"])
+
+
+def test_duplicate_label_is_ambiguous_for_callers_and_impact(
+    tmp_path: Path, capsys: object
+) -> None:
+    """F-01: a redefined function must not answer as an empty success.
+
+    ``mod.dup`` names two symbol nodes. Before the shared resolver, the CLI's
+    membership guard accepted the label and both queries returned no records,
+    printing ``no callers`` / ``no impact`` with exit 0 -- the "safe to
+    delete" reading D-08 forbids.
+    """
+    _write(tmp_path, "mod.py", "def dup():\n    return 1\n\n\ndef dup():\n    return 2\n")
+    _write(tmp_path, "use.py", "from mod import dup\n\n\ndef caller():\n    dup()\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    for command in ("callers", "impact"):
+        status = cli.main(
+            [
+                "query",
+                command,
+                "mod.dup",
+                "--graph",
+                str(graph),
+                "--root",
+                str(tmp_path),
+            ]
+        )
+        captured = capsys.readouterr()  # type: ignore[attr-defined]
+        assert status == 2
+        assert captured.out == ""
+        assert captured.err == (
+            "minotaur: error: ambiguous symbol: mod.dup; candidates: mod.py:1, mod.py:5\n"
+        )
