@@ -34,15 +34,16 @@ def impact(
     qualified_name: str,
     max_depth: int | None = None,
 ) -> tuple[ImpactRecord, ...]:
-    """Return inbound ``calls``/``imports`` impact records by shortest depth."""
+    """Return inbound ``calls``/``imports`` impact records by shortest depth.
+
+    Like ``callers``, an unresolvable name raises ``SymbolResolutionError``
+    rather than returning an empty result: ``no impact`` would read as "safe
+    to change" for a symbol the query never actually looked at.
+    """
 
     if max_depth is not None and max_depth < 0:
         raise ValueError(f"depth must be non-negative, got {max_depth}")
-    target = index.symbols_by_label.get(qualified_name, ())
-    if len(target) != 1:
-        return ()
-
-    target_id = target[0].id
+    target_id = index.resolve(qualified_name).id
     adjacency: dict[str, set[str]] = defaultdict(set)
     for kind in (RelationshipKind.CALLS.value, RelationshipKind.IMPORTS.value):
         for relationship in index.relationships(kind):

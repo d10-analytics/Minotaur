@@ -3,13 +3,51 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from difflib import get_close_matches
 
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
 from minotaur.graph_model.relationship import Relationship
+
+
+class SymbolResolutionError(ValueError):
+    """A queried name does not identify exactly one symbol node.
+
+    Subclasses ``ValueError`` on purpose: the CLI already maps that to exit
+    status 2 for every other query input error, so a failed resolution can
+    never be rendered as an empty-but-successful result.
+    """
+
+
+class UnknownSymbol(SymbolResolutionError):
+    """No symbol in the graph carries the queried label."""
+
+    def __init__(self, label: str, suggestions: Sequence[str] = ()) -> None:
+        self.label = label
+        self.suggestions = tuple(suggestions)
+        message = f"unknown symbol: {label}"
+        if self.suggestions:
+            message = f"{message}; nearest labels: {', '.join(self.suggestions)}"
+        super().__init__(message)
+
+
+class AmbiguousSymbol(SymbolResolutionError):
+    """Several symbols share the queried label, so no single answer exists.
+
+    A function defined twice in one module (conditional definitions, a
+    ``TYPE_CHECKING`` branch, an accidental redefinition) produces two symbol
+    nodes with the same label.  Answering for an arbitrary one of them would
+    hand an agent a confidently wrong caller or impact set, so the candidate
+    definition sites are reported instead and the caller must disambiguate.
+    """
+
+    def __init__(self, label: str, candidates: Sequence[str]) -> None:
+        self.label = label
+        self.candidates = tuple(candidates)
+        super().__init__(f"ambiguous symbol: {label}; candidates: {', '.join(self.candidates)}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,9 +93,22 @@ class GraphIndex:
     def symbols(self) -> tuple[Node, ...]:
         return tuple(node for node in self.nodes.values() if node.node_class == NodeClass.SYMBOL)
 
-    def symbol(self, label: str) -> Node | None:
+    def resolve(self, label: str) -> Node:
+        """Return the one symbol node labelled ``label`` or raise.
+
+        This is the single resolution point for every symbol-taking query, so
+        the "unknown" and "ambiguous" outcomes are decided once instead of
+        being re-derived (and disagreed about) by each caller.
+        """
         matches = self.symbols_by_label.get(label, ())
-        return matches[0] if len(matches) == 1 else None
+        if not matches:
+            # cutoff 0.0 keeps a suggestion list even for a wholly unrelated
+            # name; an agent gets the vocabulary of the graph either way.
+            raise UnknownSymbol(label, get_close_matches(label, self.labels(), n=5, cutoff=0.0))
+        if len(matches) > 1:
+            ordered = sorted(matches, key=_candidate_sort_key)
+            raise AmbiguousSymbol(label, tuple(_candidate(node) for node in ordered))
+        return matches[0]
 
     def labels(self) -> tuple[str, ...]:
         return tuple(sorted(self.symbols_by_label))
@@ -75,3 +126,28 @@ class GraphIndex:
             if relationship_kind == kind
             for relationship in values
         )
+
+
+def _candidate_sort_key(node: Node) -> tuple[str, int]:
+    """Order candidates by file then line -- numerically, not by text.
+
+    Sorting the formatted ``path:line`` strings would put line 10 before
+    line 2, so the ordering is computed from the location itself.
+    """
+    location = node.location
+    if location is None:
+        return (node.path or node.label, -1)
+    return (location.path, location.range.start.line)
+
+
+def _candidate(node: Node) -> str:
+    """Format one ambiguous definition site as ``path:line`` (1-based).
+
+    Line numbers match every other query renderer.  A symbol node without a
+    location still has to appear in the candidate list, so it degrades to its
+    file path and finally to its label rather than being silently dropped.
+    """
+    location = node.location
+    if location is not None:
+        return f"{location.path}:{location.range.start.line + 1}"
+    return node.path or node.label

@@ -77,6 +77,17 @@ use.py:5:5  unknown.target [unresolved]
 An unknown qualified name exits `2` and lists up to five nearest graph labels;
 zero callers is a successful result and prints `no callers`.
 
+A name that matches more than one symbol — a function defined twice in one
+module, for example — is ambiguous rather than empty. The query refuses to pick
+a definition, lists every candidate site, and exits `2`:
+
+```text
+minotaur: error: ambiguous symbol: mod.dup; candidates: mod.py:1, mod.py:5
+```
+
+Re-run against a single definition once the duplicate is resolved, or use
+`context` on a candidate site to see which one you mean.
+
 JSON uses the same records:
 
 ```json
@@ -117,6 +128,10 @@ depth 1: package.routes.dispatch
 
 With `--depth N`, symbols one step beyond the limit are shown as boundary
 records. JSON records contain `depth`, `symbol`, `kind`, and `boundary`.
+
+`impact` resolves its symbol exactly as `callers` does: an unknown name exits
+`2` with nearest labels, and a name shared by two definitions exits `2` listing
+the candidate `path:line` sites. Neither is ever reported as `no impact`.
 Containment and callback-only `references` edges are intentionally not part of
 this call-chain impact query.
 
@@ -209,7 +224,9 @@ Exit statuses are:
   `query` subcommand also exits `0`, matching every other argparse-based
   program);
 * `1` — a graph refresh completed but source diagnostics were reported; and
-* `2` — argument, graph-load, selection, or unknown-symbol error.
+* `2` — argument, graph-load, selection, unknown-symbol, or ambiguous-symbol
+  error (a symbol name that matches several definitions is never answered
+  from an arbitrary one of them).
 
 The commands never execute or import the analyzed source. Dynamic dispatch,
 reflection, generated code, and configuration-dependent behavior remain

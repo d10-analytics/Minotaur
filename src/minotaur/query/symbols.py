@@ -52,11 +52,13 @@ class DefinitionRecord:
 
 
 def callers(index: GraphIndex, qualified_name: str) -> tuple[CallerRecord, ...]:
-    """Return resolved call sites and matching unresolved references."""
-    target = index.symbols_by_label.get(qualified_name, ())
-    if len(target) != 1:
-        return ()
-    target_id = target[0].id
+    """Return resolved call sites and matching unresolved references.
+
+    Resolution failures propagate as ``SymbolResolutionError``: an unknown or
+    ambiguous name must reach the caller as an error, never as an empty tuple
+    that renders as a confident ``no callers``.
+    """
+    target_id = index.resolve(qualified_name).id
     resolved_records: list[CallerRecord] = []
     for relationship in index.incoming(RelationshipKind.CALLS.value, target_id):
         caller = index.nodes.get(relationship.source)

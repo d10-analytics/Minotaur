@@ -10,7 +10,6 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
@@ -215,7 +214,6 @@ class _GraphQuery:
 
     run: Callable[[argparse.Namespace, GraphIndex, Drift], Sequence[QueryRecord]]
     render_text: Callable[[Sequence[Any]], str]
-    requires_known_symbol: bool = False
 
 
 def _run_callers(
@@ -286,7 +284,6 @@ _GRAPH_QUERIES: Mapping[str, _GraphQuery] = {
     "callers": _GraphQuery(
         run=_run_callers,
         render_text=symbols_query.render_callers_text,
-        requires_known_symbol=True,
     ),
     "definitions": _GraphQuery(
         run=_run_definitions,
@@ -295,7 +292,6 @@ _GRAPH_QUERIES: Mapping[str, _GraphQuery] = {
     "impact": _GraphQuery(
         run=_run_impact,
         render_text=impact_query.render_text,
-        requires_known_symbol=True,
     ),
     "unreferenced": _GraphQuery(
         run=_run_unreferenced,
@@ -344,10 +340,11 @@ def _run_graph_query(query: argparse.Namespace) -> int:
         Path(query.graph), Path(query.root).resolve(), query.no_refresh
     )
     index = GraphIndex.build(document)
-    if handler.requires_known_symbol and query.symbol not in index.symbols_by_label:
-        suggestions = get_close_matches(query.symbol, index.labels(), n=5, cutoff=0.0)
-        _error(_unknown_symbol_message(query.symbol, suggestions))
-        return 2
+    # No symbol guard here: each query resolves its own name through
+    # GraphIndex.resolve, whose SymbolResolutionError is a ValueError and so
+    # reaches _query's handler as an exit-2 error message.  A membership test
+    # duplicated here previously accepted duplicate labels that the queries
+    # then answered with an empty result.
     records = handler.run(query, index, observed)
     output = render_json(query.name, records) if query.json else handler.render_text(records)
     print(output, end="")
@@ -452,12 +449,6 @@ def _query_source_paths(
             ):
                 selected.add(relative)
     return tuple(sorted(selected))
-
-
-def _unknown_symbol_message(symbol: str, suggestions: Sequence[str]) -> str:
-    if not suggestions:
-        return f"unknown symbol: {symbol}"
-    return f"unknown symbol: {symbol}; nearest labels: {', '.join(suggestions)}"
 
 
 def _target_selection(root: Path, targets: tuple[Path, ...]) -> tuple[str, ...]:
