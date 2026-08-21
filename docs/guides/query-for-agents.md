@@ -41,6 +41,11 @@ This is useful when an agent deliberately needs the prior snapshot. It does
 not make stale facts current. Graphs made before selection metadata was
 recorded cannot be refreshed automatically; analyze them again first.
 
+For a stale `unreferenced --text-fallback --no-refresh` query, Minotaur keeps
+the result graph-only: it does not scan current source text or require selected
+source paths to remain readable. The stale warnings identify why optional
+current-source text mentions are unavailable.
+
 `context` always reads the current source without refreshing the graph. It
 compares the requested file's recorded hash and labels the excerpt when the
 file changed. `diff` compares two graph files and therefore has no source-root

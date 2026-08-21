@@ -23,11 +23,14 @@ Normal recursive scans exclude hidden directories, caches, and virtual
 environments. Explicitly selecting such a file or directory includes it.
 The output parent directory must already exist, and an output path may never
 also be a selected source file. An existing graph can be reused when the
-recorded selection is still clean: Minotaur prints
+recorded selection is clean and, for a Git work tree, its recorded commit and
+branch still match the current checkout: Minotaur prints
 `graph is up to date, skipping analysis` and leaves the file unchanged. Use
 `--force` to analyze and rewrite an existing graph regardless of freshness.
 When a previously generated graph has drifted, Minotaur safely replaces it
-after validating the current selection.
+after validating the current selection. A Git commit or branch change also
+causes re-analysis even when selected source content is unchanged, so the
+graph's `source_control` metadata remains a coherent snapshot.
 
 The command writes canonical JSON atomically. It exits `0` on a clean graph,
 `1` after writing a valid partial graph with parse or source-read diagnostics,
