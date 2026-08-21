@@ -539,3 +539,60 @@ def test_unreferenced_exclude_file_rejects_a_json_document_that_is_not_a_list_or
     assert status == 2
     assert captured.out == ""
     assert "exclude file must contain a JSON list or object of names" in captured.err
+
+
+def test_unreferenced_exclude_pattern_matches_qualified_labels(
+    tmp_path: Path, capsys: object
+) -> None:
+    _write(
+        tmp_path,
+        "suite.py",
+        "class TestThing:\n    def check(self):\n        return 1\n\n"
+        "class Widget:\n    def paintEvent(self, event):\n        return 2\n\n"
+        "def orphan():\n    return 3\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert (
+        cli.main(
+            ["analyze", "--root", str(tmp_path), "--output", str(graph), str(tmp_path / "suite.py")]
+        )
+        == 0
+    )
+    capsys.readouterr()  # type: ignore[attr-defined]
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--exclude-pattern",
+            r"\.Test\w*(\.|$)",
+            "--exclude-pattern",
+            r"Event$",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 0
+    # The test class, its method, and the Qt-style override are excluded by
+    # the caller's patterns; Minotaur itself knows nothing about pytest or Qt.
+    # Widget stays: only its override matched, not the class itself.
+    assert captured.out == ("suite.py:5  suite.Widget  class\nsuite.py:9  suite.orphan  function\n")
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--exclude-pattern",
+            "(unclosed",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 2
+    assert "invalid --exclude-pattern '(unclosed'" in captured.err

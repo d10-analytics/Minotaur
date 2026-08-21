@@ -378,3 +378,70 @@ def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_fil
 
     assert output.read_bytes() == b"old graph"
     assert list(tmp_path.glob(".graph.json.*")) == []
+
+
+def test_analyze_warns_when_imports_only_resolve_under_a_different_root(
+    tmp_path: Path, capsys: object
+) -> None:
+    # A src/ layout analyzed from the repository root: every cross-module
+    # import names `pkg.*` while module labels carry the `src.` prefix.
+    _write(tmp_path, "src/pkg/__init__.py", "")
+    _write(tmp_path, "src/pkg/a.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "src/pkg/b.py", "from pkg.a import helper\nimport numpy\nhelper()\n")
+
+    status = cli.main(
+        [
+            "analyze",
+            "--root",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "g.json"),
+            str(tmp_path / "src/pkg"),
+        ]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 0
+    # numpy is unresolved but not root-mismatched, so the ratio is 1 of 2.
+    assert "warning: 50% of imports (1 of 2) only resolve with a different root" in captured.err
+    assert f"pass --root {tmp_path.resolve() / 'src'}" in captured.err
+    graph = json.loads((tmp_path / "g.json").read_text(encoding="utf-8"))
+    assert graph["extensions"]["minotaur-python"] == {
+        "import_root_hint": "src",
+        "imports_resolved": 0,
+        "imports_root_mismatched": 1,
+        "imports_unresolved": 2,
+    }
+
+    status = cli.main(
+        [
+            "analyze",
+            "--root",
+            str(tmp_path / "src"),
+            "--output",
+            str(tmp_path / "g2.json"),
+            "--force",
+            str(tmp_path / "src/pkg"),
+        ]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 0
+    assert "warning" not in captured.err
+    graph = json.loads((tmp_path / "g2.json").read_text(encoding="utf-8"))
+    assert graph["extensions"]["minotaur-python"] == {
+        "imports_resolved": 1,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 1,
+    }
+
+
+def test_missing_target_error_explains_working_directory_resolution(
+    tmp_path: Path, capsys: object
+) -> None:
+
+    status = cli.main(
+        ["analyze", "--root", str(tmp_path), "--output", str(tmp_path / "g.json"), "nope"]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 2
+    assert "target does not exist: nope" in captured.err
+    assert f"resolved from the current directory {Path.cwd()}, not from --root" in captured.err
