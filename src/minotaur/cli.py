@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from minotaur.graph_model.document import GraphDocument, SourceControl
-from minotaur.graph_model.loading import GraphLoadError, load_graph_file
+from minotaur.graph_model.loading import GraphLoadError, graph_digest, load_graph_file, stamp_path
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import build_presentation
@@ -136,7 +136,9 @@ def _analyze_selection(
             ),
         ),
     )
-    _write_atomically(output, serialize(result.document))
+    content = serialize(result.document)
+    _write_atomically(output, content)
+    _write_atomically(stamp_path(output), f"{graph_digest(content)}\n".encode("ascii"))
     _warn_unresolved_imports(result.document, workspace.root)
     return result
 
