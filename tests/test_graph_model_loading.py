@@ -4,10 +4,14 @@ AC-12: ``LoadedGraph.canonical`` is a lazy cached property.  The query path
 never accesses it, so monkeypatching ``canonicalize`` to raise does not
 affect ``query`` on a clean or ``--no-refresh`` graph, but ``visualize``
 (which reads ``.canonical``) propagates the error.
+
+AC-01: A stamped load skips the JSON-schema pass; a flipped byte raises.
+AC-02: Every non-matching sidecar state falls back to full validation.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -16,7 +20,14 @@ from unittest.mock import patch
 import pytest
 
 from minotaur import cli
-from minotaur.graph_model.loading import load_graph_bytes
+from minotaur.graph_model.loading import (
+    GraphLoadError,
+    _validate_wire_shape,
+    graph_digest,
+    load_graph_bytes,
+    load_graph_file,
+    stamp_path,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -180,3 +191,241 @@ class TestLazyCanonical:
         # Access canonical on only one side — equality still holds.
         _ = a.canonical
         assert a == b
+
+
+# ---------------------------------------------------------------------------
+# Helpers for stamp-aware tests
+# ---------------------------------------------------------------------------
+
+_EXAMPLE_GRAPH = Path(__file__).parents[1] / "examples/synthetic-graphs/small-workflow.json"
+
+
+def _stamped_graph(tmp_path: Path) -> tuple[Path, bytes]:
+    """Copy the example graph into *tmp_path* and write a correct sidecar."""
+    data = _EXAMPLE_GRAPH.read_bytes()
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_bytes(data)
+    stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+    return graph_path, data
+
+
+# ---------------------------------------------------------------------------
+# AC-01 proof
+# ---------------------------------------------------------------------------
+
+
+class TestStampAwareLoader:
+    """Prove that a matching sidecar skips the schema pass (AC-01)."""
+
+    def test_stamped_load_skips_schema(self, tmp_path: Path) -> None:
+        """A matching sidecar suppresses the schema pass."""
+        graph_path, data = _stamped_graph(tmp_path)
+        with patch(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            side_effect=AssertionError("schema seam must not be called"),
+        ):
+            loaded = load_graph_file(graph_path)
+        assert loaded.validated is False
+        assert loaded.digest == hashlib.sha256(data).hexdigest()
+
+    def test_flipped_byte_raises(self, tmp_path: Path) -> None:
+        """Flipping one graph byte makes the digest mismatch, running the seam."""
+        graph_path, data = _stamped_graph(tmp_path)
+        # Re-serialize with a trivial change that keeps the JSON valid
+        # but produces different bytes (different digest).
+        raw = json.loads(data)
+        raw["_tampered"] = True
+        graph_path.write_bytes(json.dumps(raw).encode())
+        # The sidecar still has the OLD digest, which no longer matches.
+        with (
+            patch(
+                "minotaur.graph_model.loading._validate_wire_shape",
+                side_effect=AssertionError("schema seam was called"),
+            ),
+            pytest.raises(AssertionError, match="schema seam was called"),
+        ):
+            load_graph_file(graph_path)
+
+    def test_validate_flag_forces_schema(self, tmp_path: Path) -> None:
+        """``validate=True`` runs the schema pass even when the sidecar matches."""
+        graph_path, data = _stamped_graph(tmp_path)
+        loaded = load_graph_file(graph_path, validate=True)
+        assert loaded.validated is True
+        assert loaded.digest == hashlib.sha256(data).hexdigest()
+
+    def test_load_graph_bytes_always_validates(self) -> None:
+        """``load_graph_bytes`` runs the schema seam even for stamped bytes."""
+        data = _EXAMPLE_GRAPH.read_bytes()
+        seam_called = False
+        original = _validate_wire_shape
+
+        def tracking_seam(raw: dict[str, object]) -> None:
+            nonlocal seam_called
+            seam_called = True
+            original(raw)
+
+        with patch(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            side_effect=tracking_seam,
+        ):
+            loaded = load_graph_bytes(data)
+        assert seam_called
+        assert loaded.validated is True
+        assert loaded.digest == hashlib.sha256(data).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# AC-02 proof
+# ---------------------------------------------------------------------------
+
+_SIDECAR_STATES: list[tuple[str, object]] = []
+
+
+def _make_sidecar_states() -> list[tuple[str, object]]:
+    """Build the parametrized sidecar-state table.
+
+    Each entry is ``(id_string, setup_callable)`` where the callable takes
+    ``(graph_path, correct_digest)`` and arranges the sidecar.
+    """
+
+    def absent(gp: Path, _d: str) -> None:
+        # No sidecar file at all.
+        sp = stamp_path(gp)
+        if sp.exists():
+            sp.unlink()
+
+    def oserror_dir(gp: Path, _d: str) -> None:
+        # A directory at the sidecar path triggers OSError on open.
+        sp = stamp_path(gp)
+        sp.mkdir(parents=True, exist_ok=True)
+
+    def empty(gp: Path, _d: str) -> None:
+        stamp_path(gp).write_text("", encoding="utf-8")
+
+    def whitespace(gp: Path, _d: str) -> None:
+        stamp_path(gp).write_text("   \n\t  \n", encoding="utf-8")
+
+    def non_hex_64(gp: Path, _d: str) -> None:
+        stamp_path(gp).write_text("g" * 64 + "\n", encoding="utf-8")
+
+    def uppercase(gp: Path, d: str) -> None:
+        stamp_path(gp).write_text(d.upper() + "\n", encoding="utf-8")
+
+    def sha256sum_form(gp: Path, d: str) -> None:
+        stamp_path(gp).write_text(f"{d}  graph.json\n", encoding="utf-8")
+
+    def wrong_digest(gp: Path, d: str) -> None:
+        wrong = d[:-1] + ("0" if d[-1] != "0" else "1")
+        stamp_path(gp).write_text(wrong + "\n", encoding="utf-8")
+
+    def junk_8k(gp: Path, d: str) -> None:
+        # First 64 bytes are the correct digest, but the file is 8 KiB.
+        stamp_path(gp).write_text(d + "x" * (8192 - 64) + "\n", encoding="utf-8")
+
+    def non_utf8(gp: Path, _d: str) -> None:
+        stamp_path(gp).write_bytes(b"\xff\xfe" + b"\x80" * 62)
+
+    return [
+        ("absent", absent),
+        ("oserror_dir", oserror_dir),
+        ("empty", empty),
+        ("whitespace", whitespace),
+        ("non_hex_64", non_hex_64),
+        ("uppercase", uppercase),
+        ("sha256sum_form", sha256sum_form),
+        ("wrong_digest", wrong_digest),
+        ("junk_8k", junk_8k),
+        ("non_utf8", non_utf8),
+    ]
+
+
+_SIDECAR_STATES = _make_sidecar_states()
+
+
+class TestSidecarFallback:
+    """Prove every non-matching sidecar state falls back to full validation (AC-02)."""
+
+    @pytest.fixture()
+    def valid_graph(self, tmp_path: Path) -> tuple[Path, bytes, str]:
+        """Copy the example graph into tmp_path and return (path, data, digest)."""
+        data = _EXAMPLE_GRAPH.read_bytes()
+        gp = tmp_path / "graph.json"
+        gp.write_bytes(data)
+        return gp, data, graph_digest(data)
+
+    @pytest.mark.parametrize(
+        "state_id, setup",
+        _SIDECAR_STATES,
+        ids=[s[0] for s in _SIDECAR_STATES],
+    )
+    def test_fallback_to_full_validation(
+        self,
+        valid_graph: tuple[Path, bytes, str],
+        state_id: str,
+        setup: object,
+    ) -> None:
+        """Non-matching sidecar loads succeed with validated=True."""
+        graph_path, data, correct_digest = valid_graph
+        # Set up the sidecar state.
+        setup(graph_path, correct_digest)  # type: ignore[operator]
+
+        seam_called = False
+        original = _validate_wire_shape
+
+        def tracking_seam(raw: dict[str, object]) -> None:
+            nonlocal seam_called
+            seam_called = True
+            original(raw)
+
+        with patch(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            side_effect=tracking_seam,
+        ):
+            loaded = load_graph_file(graph_path)
+
+        assert seam_called, f"schema seam not called for sidecar state {state_id!r}"
+        assert loaded.validated is True
+        assert loaded.digest == correct_digest
+
+    @pytest.mark.parametrize(
+        "state_id, setup",
+        _SIDECAR_STATES,
+        ids=[s[0] for s in _SIDECAR_STATES],
+    )
+    def test_fallback_rejects_invalid_graph(
+        self,
+        tmp_path: Path,
+        state_id: str,
+        setup: object,
+    ) -> None:
+        """Non-matching sidecar with an invalid graph raises GraphLoadError."""
+        invalid = {"not": "a valid graph"}
+        graph_path = tmp_path / "graph.json"
+        data = json.dumps(invalid).encode()
+        graph_path.write_bytes(data)
+        digest = graph_digest(data)
+        setup(graph_path, digest)  # type: ignore[operator]
+
+        with pytest.raises(GraphLoadError):
+            load_graph_file(graph_path)
+
+    def test_load_graph_bytes_still_validates_stamped_bytes(self) -> None:
+        """``load_graph_bytes`` with exact stamped-graph bytes runs the schema."""
+        data = _EXAMPLE_GRAPH.read_bytes()
+        seam_called = False
+        original = _validate_wire_shape
+
+        def tracking_seam(raw: dict[str, object]) -> None:
+            nonlocal seam_called
+            seam_called = True
+            original(raw)
+
+        with patch(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            side_effect=tracking_seam,
+        ):
+            loaded = load_graph_bytes(data)
+
+        assert seam_called
+        assert loaded.validated is True
+        assert loaded.digest == graph_digest(data)
