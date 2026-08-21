@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.loading import load_graph_file, stamp_path
 
 
 def _write(root: Path, path: str, source: str) -> Path:
@@ -378,6 +380,107 @@ def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_fil
 
     assert output.read_bytes() == b"old graph"
     assert list(tmp_path.glob(".graph.json.*")) == []
+
+
+def test_analyze_writes_sidecar_matching_graph_bytes_and_query_refresh_updates_it(
+    tmp_path: Path, capsys: object
+) -> None:
+    """AC-03: sidecar matches graph after analyze, and again after query refresh."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+    assert status == 0
+
+    # Sidecar exists and matches the graph bytes.
+    graph_bytes = output.read_bytes()
+    sidecar = stamp_path(output)
+    assert sidecar.exists()
+    expected_digest = hashlib.sha256(graph_bytes).hexdigest()
+    assert sidecar.read_text(encoding="ascii").strip() == expected_digest
+
+    # Drift the source so a query refresh rewrites the graph.
+    _write(root, "app.py", "def app():\n    return 2\n")
+    capsys.readouterr()  # type: ignore[attr-defined]
+    status = cli.main(
+        [
+            "query",
+            "definitions",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+            "app",
+        ]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 0
+    assert "refreshed graph" in captured.err
+
+    # After refresh, the sidecar matches the new graph bytes.
+    new_graph_bytes = output.read_bytes()
+    assert new_graph_bytes != graph_bytes
+    new_expected_digest = hashlib.sha256(new_graph_bytes).hexdigest()
+    assert sidecar.read_text(encoding="ascii").strip() == new_expected_digest
+
+
+def test_stamp_write_failure_exits_two_and_leaves_mismatched_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: object
+) -> None:
+    """AC-04 (ii): stamp-write failure leaves graph on disk with stale sidecar."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    # First analyze: creates graph + sidecar.
+    status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+    assert status == 0
+    old_sidecar_content = stamp_path(output).read_text(encoding="ascii").strip()
+
+    # Drift the source.
+    _write(root, "app.py", "def app():\n    return 2\n")
+
+    # Monkeypatch _write_atomically to fail only on the second call (the stamp).
+    original_write = cli._write_atomically
+    call_count = 0
+
+    def fail_on_stamp(path: Path, content: bytes) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise OSError("simulated stamp write failure")
+        original_write(path, content)
+
+    monkeypatch.setattr(cli, "_write_atomically", fail_on_stamp)
+    capsys.readouterr()  # type: ignore[attr-defined]
+
+    status = cli.main(
+        [
+            "analyze",
+            "--root",
+            str(root),
+            "--output",
+            str(output),
+            "--force",
+            str(root),
+        ]
+    )
+
+    # Command exits 2.
+    assert status == 2
+
+    # The new graph bytes are on disk (the first _write_atomically succeeded).
+    new_graph_bytes = output.read_bytes()
+    new_digest = hashlib.sha256(new_graph_bytes).hexdigest()
+    # The sidecar on disk does not match the new graph bytes.
+    sidecar_content = stamp_path(output).read_text(encoding="ascii").strip()
+    assert sidecar_content == old_sidecar_content
+    assert sidecar_content != new_digest
+
+    # A subsequent load_graph_file takes the full-validation path.
+    loaded = load_graph_file(output)
+    assert loaded.validated is True
 
 
 def test_analyze_warns_when_imports_only_resolve_under_a_different_root(
