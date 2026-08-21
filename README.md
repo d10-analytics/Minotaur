@@ -18,6 +18,8 @@ and what remains unresolved.
 [download and open the offline HTML](examples/python-workflow/minotaur-graph.html).
 To intentionally refresh the preview, install the `visualizer` extra and
 Chromium, then run `python3 scripts/capture_python_workflow_demo.py`.
+The embedded preview predates the bundled example's `--root src` re-rooting;
+it remains a visual placeholder until that browser-backed capture is refreshed.
 
 ## Current capabilities
 
