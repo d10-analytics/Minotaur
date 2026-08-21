@@ -6,7 +6,7 @@ moment a renderer changes, so this test re-runs every documented transcript
 and compares byte-for-byte instead of trusting the paste.
 
 Commands run through ``python -m minotaur`` from the repository root, exactly
-as the documentation shows them, so argument parsing and ``--root .``
+as the documentation shows them, so argument parsing and ``--root src``
 resolution are exercised the way a reader would experience them.
 """
 
@@ -22,10 +22,7 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 EXAMPLE_GRAPH = ROOT / "examples" / "python-workflow" / "minotaur-graph.json"
-DOCUMENTS = (
-    ROOT / "docs" / "guides" / "query-for-agents.md",
-    ROOT / "README.md",
-)
+DOCUMENTS = (ROOT / "README.md",)
 CONSOLE_BLOCK = re.compile(r"^```console\n(.*?)^```$", re.DOTALL | re.MULTILINE)
 
 # The diff walkthrough writes a fresh analysis to a scratch path. Tests must
@@ -63,8 +60,8 @@ TRANSCRIPTS = _transcripts()
 def test_documentation_contains_the_expected_walkthrough_commands() -> None:
     """Guard the parser itself: a silently empty scan would pass every case."""
     commands = [command for _, command, _ in TRANSCRIPTS]
-    assert len(commands) == 10
-    assert sum(command.startswith("minotaur query ") for command in commands) == 9
+    assert len(commands) == 1
+    assert sum(command.startswith("minotaur query ") for command in commands) == 1
 
 
 @pytest.mark.parametrize(
@@ -93,7 +90,7 @@ def test_documented_command_still_prints_its_pasted_output(
                 "minotaur",
                 "analyze",
                 "--root",
-                ".",
+                "src",
                 "--output",
                 scratch,
                 "--force",

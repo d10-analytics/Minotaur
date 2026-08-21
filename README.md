@@ -18,6 +18,8 @@ and what remains unresolved.
 [download and open the offline HTML](examples/python-workflow/minotaur-graph.html).
 To intentionally refresh the preview, install the `visualizer` extra and
 Chromium, then run `python3 scripts/capture_python_workflow_demo.py`.
+The embedded preview predates the bundled example's `--root src` re-rooting;
+it remains a visual placeholder until that browser-backed capture is refreshed.
 
 ## Current capabilities
 
@@ -30,22 +32,36 @@ Minotaur is in early development. Its current implementation includes:
 - a self-contained HTML explorer with filters, themes, source excerpts, and
   call-site inspection.
 
+## Query workflow
+
+The query workflow has two steps: analyze Python source to build a graph, then
+ask focused questions against that snapshot. For example,
+`minotaur analyze --root src --output graph.json src` records the structure and
+source evidence that later queries can navigate without importing or executing
+the project.
+
+The query family turns that graph into practical navigation and review tools:
+`definitions` finds where a name is defined, `callers` traces who calls it,
+`impact` shows what depends on it if it changes, and `unreferenced` produces a
+candidate list for a dead-code audit. `context` reads the surrounding source
+at a reported location, while `diff` compares two graph snapshots so changes
+in the analyzed structure are easy to review.
+
 Queries run against any analyzed graph, including the checked-in example:
 
 ```console
-$ minotaur query callers src.minotaur.language_interpreter.selection._resolve_target \
-    --graph examples/python-workflow/minotaur-graph.json --root . --no-refresh
-src/minotaur/language_interpreter/selection.py:48:20  src.minotaur.language_interpreter.selection.select_sources
+$ minotaur query callers minotaur.language_interpreter.selection._resolve_target \
+    --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
+minotaur/language_interpreter/selection.py:48:20  minotaur.language_interpreter.selection.select_sources
 ```
 
 `--no-refresh` answers from the graph as checked in instead of re-analyzing
-drifted files and rewriting it. The
-[graph query guide](docs/guides/query-for-agents.md) walks the remaining
-commands through the same example.
+drifted files and rewriting it. See the [query walkthrough](examples/query-walkthrough/)
+for a step-by-step tour with executed output, and the [query reference](docs/guides/query-reference.md)
+for the complete command and freshness details.
 
 Current Python-analysis behavior and limits are described in the
-[Python analysis guide](docs/guides/analyze-python.md). Agent-oriented graph
-navigation is documented in the [graph query guide](docs/guides/query-for-agents.md).
+[Python analysis guide](docs/guides/analyze-python.md).
 
 ## Local-first and privacy-conscious
 

@@ -218,6 +218,15 @@ def test_checked_in_python_workflow_artifacts_match_fresh_cli_output(tmp_path: P
         for relationship in loaded.document.relationships
         for evidence in relationship.evidence
     } == {"static-analysis"}
+    embedded = (
+        generated_html.read_text(encoding="utf-8")
+        .split('<script id="minotaur-presentation" type="application/json">', 1)[1]
+        .split("</script>", 1)[0]
+    )
+    presentation = json.loads(embedded)
+    excerpts = presentation["excerpts"]["paths"]
+    assert excerpts
+    assert {excerpt["status"] for excerpt in excerpts.values()} == {"available"}
     assert generated_graph.read_bytes() == checked_in_graph.read_bytes()
     assert generated_html.read_bytes() == checked_in_html.read_bytes()
 

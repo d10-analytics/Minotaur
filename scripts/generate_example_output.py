@@ -42,7 +42,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _run_cli(
         "analyze",
         "--root",
-        ".",
+        "src",
         "--output",
         str(graph),
         "--force",
@@ -56,7 +56,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--output",
         str(html),
         "--source-root",
-        ".",
+        "src",
         "--force",
     )
     return 0
