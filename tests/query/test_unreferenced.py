@@ -20,7 +20,7 @@ def _analyze(root: Path, output: Path) -> int:
     return cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
 
 
-def test_unreferenced_excludes_called_callback_test_dunder_and_container_calls(
+def test_unreferenced_excludes_called_callback_test_and_dunder_names(
     tmp_path: Path, capsys: object
 ) -> None:
     _write(
@@ -40,8 +40,7 @@ def test_unreferenced_excludes_called_callback_test_dunder_and_container_calls(
         "    pass\n\n"
         "def use():\n"
         "    called()\n"
-        "    register(callback_only)\n\n"
-        "container_orphan = orphan\n",
+        "    register(callback_only)\n",
     )
     _write(
         tmp_path,
@@ -324,3 +323,60 @@ def test_unreferenced_excludes_symbols_used_only_in_a_signature(
 
     assert status == 0
     assert captured.out == "app.py:7  app.orphan  function\napp.py:10  app.top  function\n"
+
+
+def test_unreferenced_counts_module_scope_call_and_callback_registration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Module-scope statements are attributed to the module node, which is also
+    # the ``contains`` container of every top-level function. While that
+    # container was treated as the symbol's own definition, an assignment from
+    # a call, a callback handed to a registrar, and a bare alias were all
+    # discarded and these three live functions were reported dead.
+    _write(
+        tmp_path,
+        "wiring.py",
+        "def create_app():\n    return 1\n\n"
+        "def cleanup():\n    pass\n\n"
+        "def handler():\n    pass\n\n"
+        "def orphan():\n    pass\n\n"
+        "def register(callback):\n    pass\n\n"
+        "app = create_app()\n"
+        "register(cleanup)\n"
+        "HOOKS = {'on_event': handler}\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(["query", "unreferenced", "--graph", str(graph), "--root", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "wiring.py:10  wiring.orphan  function\n"
+
+
+def test_unreferenced_counts_a_call_from_a_sibling_method(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A method reached only from a sibling method of the same class must not be
+    # reported: the call is attributed to the sibling, and no class-container
+    # exclusion may swallow it.
+    _write(
+        tmp_path,
+        "service.py",
+        "class Service:\n"
+        "    def outer(self):\n"
+        "        return self.inner()\n\n"
+        "    def inner(self):\n"
+        "        return 1\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(["query", "unreferenced", "--graph", str(graph), "--root", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == (
+        "service.py:1  service.Service  class\nservice.py:2  service.Service.outer  method\n"
+    )
