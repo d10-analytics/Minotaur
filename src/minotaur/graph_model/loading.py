@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,9 +31,15 @@ class LoadedGraph:
     computation on first read.  Dropping ``slots=True`` lets
     ``functools.cached_property`` write through ``__dict__``, which
     ``frozen=True`` does not block.
+
+    ``validated`` is ``True`` when the JSON-schema pass ran on this load.
+    ``digest`` is the SHA-256 hex digest of the exact bytes that were parsed.
+    Both are load provenance, not graph content.
     """
 
     document: GraphDocument
+    validated: bool
+    digest: str
 
     @functools.cached_property
     def canonical(self) -> dict[str, object]:
@@ -57,6 +64,16 @@ def _is_utc_rfc3339(value: object) -> bool:
     return True
 
 
+def stamp_path(graph: Path) -> Path:
+    """Return the sidecar digest path for *graph*."""
+    return graph.with_name(graph.name + ".sha256")
+
+
+def graph_digest(data: bytes) -> str:
+    """Return the SHA-256 hex digest of *data*."""
+    return hashlib.sha256(data).hexdigest()
+
+
 def schema() -> dict[str, object]:
     """Load the sole packaged v1 schema resource.
 
@@ -71,7 +88,17 @@ def schema() -> dict[str, object]:
     return loaded
 
 
-def load_graph_bytes(content: bytes) -> LoadedGraph:
+def _validate_wire_shape(raw: dict[str, object]) -> None:
+    """Run the JSON-schema pass against the packaged v1 schema."""
+    jsonschema.Draft202012Validator(schema(), format_checker=_FORMAT_CHECKER).validate(raw)
+
+
+def load_graph_bytes(
+    content: bytes,
+    *,
+    _skip_schema: bool = False,
+    _digest: str | None = None,
+) -> LoadedGraph:
     """Parse, schema-check, model-load, and semantically validate bytes.
 
     Canonicalization is deferred to ``LoadedGraph.canonical`` (a cached
@@ -79,6 +106,9 @@ def load_graph_bytes(content: bytes) -> LoadedGraph:
     avoid the cost entirely.  Every validation stage still runs eagerly:
     malformed or dangling graph facts are rejected before any downstream
     consumer can access the loaded result.
+
+    Private parameters are for ``load_graph_file``'s trusted-load path
+    and must not be used by external callers.
     """
     try:
         decoded = content.decode("utf-8")
@@ -90,12 +120,14 @@ def load_graph_bytes(content: bytes) -> LoadedGraph:
         raise GraphLoadError(f"graph input is not valid JSON: {error.msg}") from None
     if not isinstance(raw, dict):
         raise GraphLoadError("graph input must contain a JSON object")
+    validated = not _skip_schema
     try:
         # Schema validation protects wire shape; model construction and the
         # semantic report then protect cross-record invariants such as endpoint
         # identity. Keeping both checks here gives every presentation path the
         # same admission policy.
-        jsonschema.Draft202012Validator(schema(), format_checker=_FORMAT_CHECKER).validate(raw)
+        if validated:
+            _validate_wire_shape(raw)
         document = GraphDocument.from_dict(raw)
     except (jsonschema.ValidationError, ValueError) as error:
         raise GraphLoadError(str(error)) from None
@@ -103,13 +135,33 @@ def load_graph_bytes(content: bytes) -> LoadedGraph:
     if not report.is_valid:
         details = "; ".join(f"{issue.json_pointer}: {issue.message}" for issue in report)
         raise GraphLoadError(f"graph semantic validation failed: {details}")
-    return LoadedGraph(document=document)
+    digest = _digest if _digest is not None else graph_digest(content)
+    return LoadedGraph(document=document, validated=validated, digest=digest)
 
 
-def load_graph_file(path: Path) -> LoadedGraph:
-    """Read a graph file before passing it through the shared strict boundary."""
+def load_graph_file(path: Path, *, validate: bool = False) -> LoadedGraph:
+    """Read a graph file before passing it through the shared strict boundary.
+
+    When *validate* is ``False`` (the default) and a sidecar at
+    ``stamp_path(path)`` matches the SHA-256 of the graph bytes, the
+    JSON-schema pass is skipped.  Every other sidecar state falls back to
+    full validation.  The function never writes the sidecar.
+    """
     try:
-        return load_graph_bytes(path.read_bytes())
+        data = path.read_bytes()
     except OSError as error:
         message = f"could not read graph input {path}: {error.strerror or error}"
         raise GraphLoadError(message) from None
+
+    digest = graph_digest(data)
+
+    skip_schema = False
+    if not validate:
+        try:
+            with stamp_path(path).open("rb") as fh:
+                stamp = fh.read(4096).decode("utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            stamp = ""
+        skip_schema = stamp == digest
+
+    return load_graph_bytes(data, _skip_schema=skip_schema, _digest=digest)
