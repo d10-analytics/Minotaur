@@ -137,7 +137,43 @@ def _analyze_selection(
         ),
     )
     _write_atomically(output, serialize(result.document))
+    _warn_unresolved_imports(result.document, workspace.root)
     return result
+
+
+_ROOT_MISMATCH_WARNING_RATIO = 0.05
+
+
+def _count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _warn_unresolved_imports(document: GraphDocument, root: Path) -> None:
+    """Warn when at least 5% of imports would resolve under a different root.
+
+    Every interpreter may record ``imports_resolved`` / ``imports_unresolved``
+    / ``imports_root_mismatched`` and an ``import_root_hint`` under its own
+    extension namespace; the totals are summed so the check stays
+    language-agnostic. Only root-mismatched imports count: third-party and
+    out-of-selection imports are legitimately unresolved and must not warn.
+    """
+    total = mismatched = 0
+    hint: str | None = None
+    for value in (document.extensions or {}).values():
+        total += _count(value.get("imports_resolved")) + _count(value.get("imports_unresolved"))
+        mismatched += _count(value.get("imports_root_mismatched"))
+        candidate = value.get("import_root_hint")
+        if hint is None and isinstance(candidate, str) and candidate:
+            hint = candidate
+    if total == 0 or mismatched / total < _ROOT_MISMATCH_WARNING_RATIO:
+        return
+    percent = round(100 * mismatched / total)
+    suggestion = f"--root {root / hint}" if hint else "a --root matching the package layout"
+    print(
+        f"minotaur: warning: {percent}% of imports ({mismatched} of {total}) only resolve "
+        f"with a different root; pass {suggestion} so module names match import names",
+        file=sys.stderr,
+    )
 
 
 def _git_source_control(root: Path) -> SourceControl | None:
@@ -306,6 +342,7 @@ def _run_unreferenced(
         root,
         selected_paths,
         excluded_names,
+        excluded_patterns=unreferenced_query.compile_patterns(query.exclude_pattern),
         # A stale no-refresh query is intentionally graph-only. The saved
         # graph remains queryable even when selected files have been removed
         # or can no longer be read, so text fallback must not inspect the
@@ -435,6 +472,13 @@ def _add_query_subparsers(query: argparse.ArgumentParser) -> None:
     unreferenced_parser.add_argument("paths", nargs="*", metavar="PATH")
     unreferenced_parser.add_argument("--exclude", action="append", default=[])
     unreferenced_parser.add_argument("--exclude-file", type=Path)
+    unreferenced_parser.add_argument(
+        "--exclude-pattern",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help="exclude symbols whose qualified name matches this regex (repeatable)",
+    )
     unreferenced_parser.add_argument("--text-fallback", action="store_true")
     diff_parser = commands.add_parser("diff", help="compare two analyzed graph snapshots")
     diff_parser.add_argument("old", metavar="OLD")

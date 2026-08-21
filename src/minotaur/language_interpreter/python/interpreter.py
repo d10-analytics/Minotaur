@@ -11,7 +11,8 @@ from __future__ import annotations
 import ast
 import hashlib
 from collections import defaultdict
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from minotaur.graph_model.document import GraphDocument
@@ -46,6 +47,55 @@ class _Module:
     source: str
     file_id: str
     module_id: str
+
+
+@dataclass
+class _ImportTally:
+    """Counts of import statements that did or did not resolve in the workspace.
+
+    ``root_mismatched`` counts unresolved imports whose dotted name is a
+    strict suffix of an analyzed module name (``import minotaur.cli`` while
+    the graph knows ``src.minotaur.cli``). That is the signature of a
+    ``--root`` that does not match the package layout, which silently turns
+    every cross-module call into an unresolved reference; the CLI warns from
+    these counts. Third-party and out-of-selection imports are unresolved but
+    not mismatched, so they never trigger the warning.
+    """
+
+    resolved: int = 0
+    unresolved: int = 0
+    root_mismatched: int = 0
+    prefixes: dict[str, int] = field(default_factory=dict)
+    _suffixes: dict[str, str] | None = None
+
+    def note_unresolved(self, name: str, modules: Mapping[str, object]) -> None:
+        self.unresolved += 1
+        if self._suffixes is None:
+            self._suffixes = _module_suffixes(modules)
+        prefix = self._suffixes.get(name)
+        if prefix is None and "." in name:
+            # ``from pkg.mod import symbol``: the module part is what must match.
+            prefix = self._suffixes.get(name.rsplit(".", 1)[0])
+        if prefix is not None:
+            self.root_mismatched += 1
+            self.prefixes[prefix] = self.prefixes.get(prefix, 0) + 1
+
+    @property
+    def root_hint(self) -> str | None:
+        """The most common missing prefix as a root-relative directory."""
+        if not self.prefixes:
+            return None
+        prefix = max(sorted(self.prefixes), key=self.prefixes.__getitem__)
+        return prefix.replace(".", "/")
+
+
+def _module_suffixes(modules: Mapping[str, object]) -> dict[str, str]:
+    suffixes: dict[str, str] = {}
+    for name in modules:
+        parts = name.split(".")
+        for index in range(1, len(parts)):
+            suffixes.setdefault(".".join(parts[index:]), ".".join(parts[:index]))
+    return suffixes
 
 
 class _ScopeCallVisitor(ast.NodeVisitor):
@@ -176,6 +226,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         nodes.extend(declared_nodes)
 
     relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
+    tally = _ImportTally()
     for module in modules:
         _append(
             relationships, module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
@@ -188,6 +239,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             containers,
             relationships,
             nodes,
+            tally,
         )
 
     return AnalysisResult(
@@ -198,6 +250,15 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
                 _relationship(key, locations) for key, locations in relationships.items()
             ),
             generated_by=_PRODUCER,
+            # Flat keys: extension namespaces hold scalar-valued objects.
+            extensions={
+                "minotaur-python": {
+                    "imports_resolved": tally.resolved,
+                    "imports_unresolved": tally.unresolved,
+                    "imports_root_mismatched": tally.root_mismatched,
+                    **({"import_root_hint": tally.root_hint} if tally.root_hint else {}),
+                }
+            },
         ),
         tuple(diagnostics),
     )
@@ -280,8 +341,9 @@ def _analyze_module(
     containers: dict[str, str],
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
+    tally: _ImportTally,
 ) -> None:
-    aliases = _imports(module, modules, relationships, nodes)
+    aliases = _imports(module, modules, relationships, nodes, tally)
     for qualified, node_id in local_declarations.items():
         container = containers.get(qualified)
         if container is None:
@@ -412,6 +474,7 @@ def _imports(
     modules: dict[str, _Module],
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
+    tally: _ImportTally,
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for statement in module.tree.body:
@@ -419,6 +482,7 @@ def _imports(
             for alias in statement.names:
                 target = modules.get(alias.name)
                 if target is None:
+                    tally.note_unresolved(alias.name, modules)
                     _unresolved(
                         module.module_id,
                         alias.name,
@@ -427,6 +491,7 @@ def _imports(
                         nodes,
                     )
                 else:
+                    tally.resolved += 1
                     _append(
                         relationships,
                         module.module_id,
@@ -444,6 +509,7 @@ def _imports(
                 reference = f"{base}.{alias.name}" if base else alias.name
                 resolved_target = declarations_for_module(modules, reference)
                 if resolved_target is None:
+                    tally.note_unresolved(reference, modules)
                     _unresolved(
                         module.module_id,
                         reference,
@@ -452,6 +518,7 @@ def _imports(
                         nodes,
                     )
                 else:
+                    tally.resolved += 1
                     _append(
                         relationships,
                         module.module_id,

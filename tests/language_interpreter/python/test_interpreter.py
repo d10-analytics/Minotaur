@@ -100,7 +100,14 @@ def test_cli_records_file_content_hashes_and_root_relative_selection(tmp_path: P
     )
 
     graph = json.loads(output.read_text(encoding="utf-8"))
-    assert graph["extensions"] == {"minotaur": {"selection": ["a.py", "z.py"]}}
+    assert graph["extensions"] == {
+        "minotaur": {"selection": ["a.py", "z.py"]},
+        "minotaur-python": {
+            "imports_resolved": 0,
+            "imports_root_mismatched": 0,
+            "imports_unresolved": 0,
+        },
+    }
     for node in graph["nodes"]:
         if node["node_class"] == "file":
             digest = hashlib.sha256((root / node["path"]).read_bytes()).hexdigest()
