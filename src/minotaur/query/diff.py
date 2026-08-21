@@ -141,7 +141,10 @@ def _keyed_symbols(document: GraphDocument) -> dict[NodeKey, Node]:
         # Module nodes and contains edges describe graph scaffolding rather
         # than declarations an agent can act on.  Their source ranges shift
         # when a line is inserted, which would otherwise drown out the
-        # function/class changes in a useful diff.
+        # function/class changes in a useful diff.  impact.py deliberately
+        # makes the opposite call: it keeps module symbols as real inbound
+        # dependants, because a module-scope caller is a genuine impact
+        # target even though its location is unstable across edits.
         if node.node_class == NodeClass.SYMBOL and node.symbol_kind != "module":
             key = ("symbol", node.symbol_kind or "unknown", node.label)
         else:
