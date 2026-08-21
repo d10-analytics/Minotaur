@@ -259,7 +259,7 @@ def _query_skeleton(arguments: argparse.Namespace) -> int:
             _error(str(error))
             return 2
     try:
-        document, diagnostics, _ = _load_and_refresh_graph(
+        document, diagnostics, observed = _load_and_refresh_graph(
             Path(query.graph), Path(query.root).resolve(), query.no_refresh
         )
         index = GraphIndex.build(document)
@@ -293,14 +293,25 @@ def _query_skeleton(arguments: argparse.Namespace) -> int:
                 else render_text(query.name, definition_records)
             )
         elif query.name == "unreferenced":
-            selected_paths = _query_source_paths(index, Path(query.root).resolve(), query.paths)
+            root = Path(query.root).resolve()
+            stale_graph = query.no_refresh and not observed.is_clean
+            selected_paths = _query_source_paths(
+                index,
+                root,
+                query.paths,
+                validate_current_paths=not stale_graph,
+            )
             excluded_names = frozenset(query.exclude) | load_exclusions(query.exclude_file)
             unreferenced_records = unreferenced(
                 index,
-                Path(query.root).resolve(),
+                root,
                 selected_paths,
                 excluded_names,
-                text_fallback=query.text_fallback,
+                # A stale no-refresh query is intentionally graph-only. The
+                # saved graph remains queryable even when selected files have
+                # been removed or can no longer be read, so text fallback must
+                # not inspect the current workspace in this mode.
+                text_fallback=query.text_fallback and not stale_graph,
             )
             output = (
                 render_unreferenced_json(unreferenced_records)
@@ -357,12 +368,24 @@ def _query_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _query_source_paths(index: GraphIndex, root: Path, paths: Sequence[str]) -> tuple[str, ...]:
-    """Filter graph files by optional root-relative query paths."""
+def _query_source_paths(
+    index: GraphIndex,
+    root: Path,
+    paths: Sequence[str],
+    *,
+    validate_current_paths: bool = True,
+) -> tuple[str, ...]:
+    """Filter graph files by optional root-relative query paths.
+
+    Normal queries validate that each command path still exists and preserve
+    directory selection semantics. A stale ``--no-refresh`` query instead
+    filters the saved graph lexically: its command paths may be deleted or
+    unreadable, but containment checks still reject paths outside ``root``.
+    """
     graph_paths = {node.path for node in index.nodes.values() if node.path is not None}
     if not paths:
         return tuple(sorted(graph_paths))
-    targets: list[Path] = []
+    targets: list[tuple[Path, str]] = []
     for value in paths:
         target = Path(value)
         if not target.is_absolute():
@@ -372,18 +395,27 @@ def _query_source_paths(index: GraphIndex, root: Path, paths: Sequence[str]) -> 
             resolved.relative_to(root)
         except ValueError as error:
             raise ValueError(f"query path escapes root: {value}") from error
-        if not resolved.exists():
+        if validate_current_paths and not resolved.exists():
             raise ValueError(f"query path does not exist: {value}")
-        targets.append(resolved)
+        targets.append((resolved, resolved.relative_to(root).as_posix()))
 
     selected: set[str] = set()
-    for relative in graph_paths:
-        candidate = root / relative
-        if any(
-            candidate == target or target.is_dir() and target in candidate.parents
-            for target in targets
-        ):
-            selected.add(relative)
+    if validate_current_paths:
+        for relative in graph_paths:
+            candidate = root / relative
+            if any(
+                candidate == target or target.is_dir() and target in candidate.parents
+                for target, _ in targets
+            ):
+                selected.add(relative)
+    else:
+        for relative in graph_paths:
+            if any(
+                relative == target_relative
+                or relative.startswith(f"{target_relative}/")
+                for _, target_relative in targets
+            ):
+                selected.add(relative)
     return tuple(sorted(selected))
 
 
