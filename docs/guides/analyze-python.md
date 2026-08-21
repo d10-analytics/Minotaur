@@ -55,8 +55,12 @@ decorators, default arguments, and annotations are evaluated outside its body
 but are attributed to the function or method they belong to, at every nesting
 level. Annotations count because `def f(x: Handler)` is a real dependency on
 `Handler`: an agent asking whether a symbol is still used must see it before
-deleting that symbol. Nested function definitions do not become separate symbol
-nodes, and methods of nested classes remain outside this slice.
+deleting that symbol. Class headers are treated the same way: the decorators,
+bases, and keywords of `class Sub(Base, metaclass=Meta)` are references from
+the class (or, for a nested class, from the enclosing scope), so a base class
+used only through subclassing is not reported as unreferenced. Nested function
+definitions do not become separate symbol nodes, and methods of nested classes
+remain outside this slice.
 
 The interpreter also records resolvable non-call references as `references`
 relationships. For example, passing a function as `register(handler)` or

@@ -92,7 +92,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         # A nested class body executes while the enclosing scope is active, but
         # methods of that class execute in their own scope and remain outside
-        # this visitor's ownership.
+        # this visitor's ownership. The class header (decorators, bases, and
+        # keywords such as ``metaclass=``) is evaluated in the enclosing scope
+        # as well, so a base class is a real dependency of that scope.
+        for header in _class_header_nodes(node):
+            self.visit(header)
         for statement in node.body:
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.visit(statement)
@@ -332,7 +336,7 @@ def _analyze_module(
                 relationships,
                 nodes,
                 statement.name,
-                prefix_nodes=tuple(statement.decorator_list),
+                prefix_nodes=_class_header_nodes(statement),
             )
             for member in statement.body:
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -348,6 +352,21 @@ def _analyze_module(
                         statement.name,
                         prefix_nodes=_signature_nodes(member),
                     )
+
+
+def _class_header_nodes(node: ast.ClassDef) -> tuple[ast.AST, ...]:
+    """Return the expressions evaluated by a class statement's header.
+
+    ``class Sub(Base, metaclass=Meta)`` depends on ``Base`` and ``Meta`` just
+    as a decorator depends on its callable. Without these, every base class is
+    reported as unreferenced by ``query unreferenced`` whenever subclassing is
+    its only use.
+    """
+    return (
+        *node.decorator_list,
+        *node.bases,
+        *(keyword.value for keyword in node.keywords),
+    )
 
 
 def _signature_nodes(
