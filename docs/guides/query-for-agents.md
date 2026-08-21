@@ -157,7 +157,11 @@ minotaur query unreferenced src/package tests \
 
 The query excludes dunder names and `test_*` names. `--exclude` may be
 repeated; `--exclude-file` accepts a JSON list/object of names or one name per
-line. By default only graph relationships count. Add `--text-fallback` for a
+line. By default only graph relationships count: a symbol is reported when the
+only inbound call or reference comes from the symbol itself (its own decorators
+or a recursive call). Use recorded anywhere else keeps it out of the result,
+including module-scope use such as `app = create_app()` or `register(handler)`,
+which the graph attributes to the module. Add `--text-fallback` for a
 conservative hygiene pass that retains a suspect when its bare name appears
 elsewhere in source text (including strings or comments), marking it
 `[text-mention]`:

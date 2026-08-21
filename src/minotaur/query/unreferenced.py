@@ -47,9 +47,9 @@ def unreferenced(
     """Return selected function, method, and class symbols without inbound use.
 
     ``source_paths`` is the graph's selected file set after any command-path
-    filtering.  Graph relationships from a symbol itself or from its
-    ``contains`` container describe the symbol's own definition and do not
-    make it externally referenced.
+    filtering.  Only relationships whose source is the symbol itself are
+    discarded; every other inbound call or reference — including one from the
+    module node, which is how module-scope use is recorded — counts as use.
     """
     selected = frozenset(source_paths)
     candidates = [
@@ -131,11 +131,15 @@ def _eligible(node: Node, excluded_names: frozenset[str]) -> bool:
 
 
 def _is_unreferenced(index: GraphIndex, node: Node) -> bool:
+    # Only the symbol's own node is excluded: a decorator on the definition and
+    # a recursive self-call are both attributed to the symbol itself, and
+    # neither makes it used from anywhere else. The ``contains`` container is
+    # deliberately *not* excluded. For a method that container is its class,
+    # but for a top-level function it is the module node, which is also the
+    # attributed source of every module-scope statement — so excluding it
+    # discarded `app = create_app()`, `register(handler)`, and callback tables
+    # as if they were part of the definition, and reported live functions dead.
     own_sources = {node.id}
-    own_sources.update(
-        relationship.source
-        for relationship in index.incoming(RelationshipKind.CONTAINS.value, node.id)
-    )
     for kind in (RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value):
         if any(
             relationship.source not in own_sources for relationship in index.incoming(kind, node.id)
