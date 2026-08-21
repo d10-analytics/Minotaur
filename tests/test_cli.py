@@ -548,3 +548,127 @@ def test_missing_target_error_explains_working_directory_resolution(
     assert status == 2
     assert "target does not exist: nope" in captured.err
     assert f"resolved from the current directory {Path.cwd()}, not from --root" in captured.err
+
+
+def _stamped_graph(tmp_path: Path) -> Path:
+    """Create a small analyzed graph with a matching sidecar stamp."""
+    root = tmp_path / "src"
+    _write(root, "a.py", "x = 1\n")
+    output = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)]) == 0
+    assert stamp_path(output).exists()
+    return output
+
+
+class TestValidateFlag:
+    """AC-06: --validate forces schema pass at every user-facing graph read."""
+
+    def test_query_definitions_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert (
+            cli.main(["query", "definitions", "--graph", str(output), "--root", str(root), "a"])
+            == 0
+        )
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "definitions",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--no-refresh",
+                    "a",
+                ]
+            )
+
+    def test_query_context_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(
+            ["query", "context", "--graph", str(output), "--root", str(root), "--site", "a.py:1"]
+        ) in {0, 1}
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "context",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--site",
+                    "a.py:1",
+                ]
+            )
+
+    def test_query_diff_validate_forces_schema_on_old(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = _stamped_graph(tmp_path)
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(["query", "diff", str(output), str(output)]) == 0
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(["query", "diff", "--validate", str(output), str(output)])
+
+    def test_query_diff_validate_forces_schema_on_new(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output_old = _stamped_graph(tmp_path)
+        root2 = tmp_path / "src2"
+        _write(root2, "b.py", "y = 2\n")
+        output_new = tmp_path / "graph2.json"
+        assert (
+            cli.main(["analyze", "--root", str(root2), "--output", str(output_new), str(root2)])
+            == 0
+        )
+        call_count = 0
+        mod = __import__("minotaur.graph_model.loading", fromlist=["_validate_wire_shape"])
+        original_validate = mod._validate_wire_shape
+
+        def fail_on_second(raw: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise AssertionError("schema forced on NEW")
+            original_validate(raw)
+
+        monkeypatch.setattr("minotaur.graph_model.loading._validate_wire_shape", fail_on_second)
+        with pytest.raises(AssertionError, match="schema forced on NEW"):
+            cli.main(["query", "diff", "--validate", str(output_old), str(output_new)])
+
+    def test_visualize_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = _stamped_graph(tmp_path)
+        html_out = tmp_path / "viz.html"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        result = cli.main(["visualize", "--input", str(output), "--output", str(html_out)])
+        assert result == 0
+        html_out2 = tmp_path / "viz2.html"
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                ["visualize", "--input", str(output), "--output", str(html_out2), "--validate"]
+            )
