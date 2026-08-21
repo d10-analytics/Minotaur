@@ -47,8 +47,12 @@ The resulting graph records containment between these declarations, resolvable
 imports within the workspace, and direct calls whose static targets it can
 resolve. Calls and resolvable non-call name loads found inside nested functions,
 lambdas, and comprehensions are attributed to the enclosing top-level function,
-method, or module. Nested function definitions do not become separate symbol
-nodes, and methods of nested classes remain outside this slice.
+method, or module. A class body executes at definition time, so calls and loads
+in its non-method statements — a dataclass `field(default_factory=make_config)`,
+`handler = staticmethod(helper)`, a class-level signal or callback table — are
+attributed to the class itself; methods keep their own scope. Nested function
+definitions do not become separate symbol nodes, and methods of nested classes
+remain outside this slice.
 
 The interpreter also records resolvable non-call references as `references`
 relationships. For example, passing a function as `register(handler)` or

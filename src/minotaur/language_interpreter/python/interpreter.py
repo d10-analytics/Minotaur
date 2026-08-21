@@ -311,8 +311,19 @@ def _analyze_module(
                 prefix_nodes=tuple(statement.decorator_list),
             )
         elif isinstance(statement, ast.ClassDef):
+            # A class body executes at definition time in the class scope, so
+            # its non-method statements (dataclass field defaults, aliases such
+            # as `handler = staticmethod(helper)`, descriptor construction) are
+            # real calls and references and are attributed to the class node.
+            # Methods are excluded here and analyzed below in their own scope,
+            # matching how _ScopeCallVisitor.visit_ClassDef treats a nested
+            # class body inside a function.
             _calls(
-                [],
+                [
+                    member
+                    for member in statement.body
+                    if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                ],
                 declarations,
                 aliases,
                 module.name,
