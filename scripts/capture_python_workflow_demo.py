@@ -50,18 +50,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         page.goto(artifact.as_uri(), wait_until="load")
         page.wait_for_function("() => window.minotaurVisualizer?.cy")
         page.locator("#theme-mode").select_option("light")
-        edge = page.evaluate(
+        # Tap the edge through Cytoscape rather than at its rendered midpoint:
+        # the layout packs edges closely enough that a screen click can land
+        # on a neighbouring edge whenever the analyzed module gains or loses
+        # a relationship, which made this capture fragile across regenerations.
+        page.evaluate(
             """() => {
                 const selected = window.minotaurVisualizer.cy.edges().filter(
                     (edge) => edge.data('kind') === 'calls'
                 )[0];
                 if (!selected) throw new Error('expected a calls edge');
-                const point = selected.renderedMidpoint();
-                const bounds = window.minotaurVisualizer.cy.container().getBoundingClientRect();
-                return { x: bounds.left + point.x, y: bounds.top + point.y };
+                selected.emit('tap');
             }"""
         )
-        page.mouse.click(edge["x"], edge["y"])
         page.wait_for_selector("#call-site-select")
         page.wait_for_selector(".call-site-highlight")
         detail = page.locator("#detail").bounding_box()
