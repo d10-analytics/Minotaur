@@ -411,7 +411,8 @@ def _query_source_paths(
     else:
         for relative in graph_paths:
             if any(
-                relative == target_relative
+                target_relative == "."
+                or relative == target_relative
                 or relative.startswith(f"{target_relative}/")
                 for _, target_relative in targets
             ):
