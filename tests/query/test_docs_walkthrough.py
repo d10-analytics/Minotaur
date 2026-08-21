@@ -6,7 +6,7 @@ moment a renderer changes, so this test re-runs every documented transcript
 and compares byte-for-byte instead of trusting the paste.
 
 Commands run through ``python -m minotaur`` from the repository root, exactly
-as the documentation shows them, so argument parsing and ``--root .``
+as the documentation shows them, so argument parsing and ``--root src``
 resolution are exercised the way a reader would experience them.
 """
 
@@ -93,7 +93,7 @@ def test_documented_command_still_prints_its_pasted_output(
                 "minotaur",
                 "analyze",
                 "--root",
-                ".",
+                "src",
                 "--output",
                 scratch,
                 "--force",
