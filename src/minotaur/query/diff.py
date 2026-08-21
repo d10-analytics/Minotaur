@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
+from minotaur.query.render import dump_json
 
 # The first item makes keys from different node classes unambiguous.  Symbol
 # keys intentionally contain exactly the two fields promised by R-09; the
@@ -132,7 +132,7 @@ def render_text(result: DiffResult) -> str:
 def render_json(result: DiffResult) -> str:
     """Render the same semantic records used by text output."""
 
-    return json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+    return dump_json(result.to_dict())
 
 
 def _keyed_symbols(document: GraphDocument) -> dict[NodeKey, Node]:

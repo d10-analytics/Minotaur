@@ -98,18 +98,6 @@ def render_text(records: Iterable[UnreferencedRecord]) -> str:
     )
 
 
-def render_json(records: Iterable[UnreferencedRecord]) -> str:
-    """Render the same stable records used by text output."""
-    return (
-        json.dumps(
-            {"query": "unreferenced", "results": [record.to_dict() for record in records]},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
-
-
 def load_exclusions(path: Path | None) -> frozenset[str]:
     """Load names from a JSON exclusion list or mapping, with line fallback."""
     if path is None:

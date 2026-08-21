@@ -8,10 +8,11 @@ import subprocess
 import sys
 import tempfile
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from difflib import get_close_matches
 from pathlib import Path
+from typing import Any
 
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import GraphLoadError, load_graph_file
@@ -23,35 +24,14 @@ from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
 from minotaur.language_interpreter.registry import InterpreterRegistration, default_registry
 from minotaur.language_interpreter.selection import SelectionError, select_sources
 from minotaur.language_interpreter.workspace import Workspace
-from minotaur.query.context import context as build_context
-from minotaur.query.context import render_json as render_context_json
-from minotaur.query.context import render_text as render_context_text
-from minotaur.query.diff import diff as compare_graphs
-from minotaur.query.diff import render_json as render_diff_json
-from minotaur.query.diff import render_text as render_diff_text
+from minotaur.query import context as context_query
+from minotaur.query import diff as diff_query
+from minotaur.query import impact as impact_query
+from minotaur.query import symbols as symbols_query
+from minotaur.query import unreferenced as unreferenced_query
 from minotaur.query.freshness import Drift, drift, recorded_selection
-from minotaur.query.impact import (
-    impact,
-)
-from minotaur.query.impact import (
-    render_json as render_impact_json,
-)
-from minotaur.query.impact import (
-    render_text as render_impact_text,
-)
 from minotaur.query.index import GraphIndex
-from minotaur.query.render import QueryRecord, render_json, render_text
-from minotaur.query.symbols import callers, definitions
-from minotaur.query.unreferenced import (
-    load_exclusions,
-    unreferenced,
-)
-from minotaur.query.unreferenced import (
-    render_json as render_unreferenced_json,
-)
-from minotaur.query.unreferenced import (
-    render_text as render_unreferenced_text,
-)
+from minotaur.query.render import QueryRecord, render_json
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -222,109 +202,151 @@ def _load_and_refresh_graph(
     return result.document, result.diagnostics, observed
 
 
+@dataclass(frozen=True, slots=True)
+class _GraphQuery:
+    """One query answered from a freshness-checked graph index.
+
+    The table below is the single place that knows how a query is run and
+    rendered.  Keeping the per-query differences as data means a new query is
+    one entry rather than another branch in the dispatcher, and the shared
+    steps (refresh, index build, JSON envelope, diagnostics exit code) cannot
+    be spelled differently for one query by accident.
+    """
+
+    run: Callable[[argparse.Namespace, GraphIndex, Drift], Sequence[QueryRecord]]
+    render_text: Callable[[Sequence[Any]], str]
+    requires_known_symbol: bool = False
+
+
+def _run_callers(
+    query: argparse.Namespace, index: GraphIndex, observed: Drift
+) -> Sequence[QueryRecord]:
+    return symbols_query.callers(index, query.symbol)
+
+
+def _run_definitions(
+    query: argparse.Namespace, index: GraphIndex, observed: Drift
+) -> Sequence[QueryRecord]:
+    return symbols_query.definitions(index, query.symbol)
+
+
+def _run_impact(
+    query: argparse.Namespace, index: GraphIndex, observed: Drift
+) -> Sequence[QueryRecord]:
+    return impact_query.impact(index, query.symbol, query.depth)
+
+
+def _run_unreferenced(
+    query: argparse.Namespace, index: GraphIndex, observed: Drift
+) -> Sequence[QueryRecord]:
+    root = Path(query.root).resolve()
+    stale_graph = query.no_refresh and not observed.is_clean
+    selected_paths = _query_source_paths(
+        index,
+        root,
+        query.paths,
+        validate_current_paths=not stale_graph,
+    )
+    excluded_names = frozenset(query.exclude) | unreferenced_query.load_exclusions(
+        query.exclude_file
+    )
+    return unreferenced_query.unreferenced(
+        index,
+        root,
+        selected_paths,
+        excluded_names,
+        # A stale no-refresh query is intentionally graph-only. The saved
+        # graph remains queryable even when selected files have been removed
+        # or can no longer be read, so text fallback must not inspect the
+        # current workspace in this mode.
+        text_fallback=query.text_fallback and not stale_graph,
+    )
+
+
+def _run_diff(query: argparse.Namespace) -> str:
+    old = load_graph_file(Path(query.old)).document
+    new = load_graph_file(Path(query.new)).document
+    result = diff_query.diff(old, new)
+    return diff_query.render_json(result) if query.json else diff_query.render_text(result)
+
+
+def _run_context(query: argparse.Namespace) -> str:
+    document = load_graph_file(Path(query.graph)).document
+    record = context_query.context(
+        document,
+        Path(query.root).resolve(),
+        query.site,
+        before=query.before,
+        after=query.after,
+    )
+    return context_query.render_json(record) if query.json else context_query.render_text(record)
+
+
+_GRAPH_QUERIES: Mapping[str, _GraphQuery] = {
+    "callers": _GraphQuery(
+        run=_run_callers,
+        render_text=symbols_query.render_callers_text,
+        requires_known_symbol=True,
+    ),
+    "definitions": _GraphQuery(
+        run=_run_definitions,
+        render_text=symbols_query.render_definitions_text,
+    ),
+    "impact": _GraphQuery(
+        run=_run_impact,
+        render_text=impact_query.render_text,
+        requires_known_symbol=True,
+    ),
+    "unreferenced": _GraphQuery(
+        run=_run_unreferenced,
+        render_text=unreferenced_query.render_text,
+    ),
+}
+
+# Snapshot queries intentionally do not call _load_and_refresh_graph: diff
+# compares two graphs as they were recorded, and context needs the current
+# excerpt while its per-file hash check makes a changed source explicit in the
+# result.  They also keep their own JSON envelopes, which are not record lists.
+_SNAPSHOT_QUERIES: Mapping[str, Callable[[argparse.Namespace], str]] = {
+    "diff": _run_diff,
+    "context": _run_context,
+}
+
+
 def _query(arguments: argparse.Namespace) -> int:
     """Dispatch a fixed query against one graph snapshot."""
     try:
         query = _query_parser().parse_args(arguments.query_args)
     except SystemExit:
         return 2
-    if query.name == "diff":
-        try:
-            old = load_graph_file(Path(query.old)).document
-            new = load_graph_file(Path(query.new)).document
-            result = compare_graphs(old, new)
-            output = render_diff_json(result) if query.json else render_diff_text(result)
-            print(output, end="")
-            return 0
-        except (GraphLoadError, OSError, ValueError) as error:
-            _error(str(error))
-            return 2
-    if query.name == "context":
-        try:
-            # Context intentionally does not call _load_and_refresh_graph:
-            # agents need the current excerpt while the per-file hash check
-            # makes a changed source explicit in the result.
-            document = load_graph_file(Path(query.graph)).document
-            record = build_context(
-                document,
-                Path(query.root).resolve(),
-                query.site,
-                before=query.before,
-                after=query.after,
-            )
-            output = render_context_json(record) if query.json else render_context_text(record)
-            print(output, end="")
-            return 0
-        except (GraphLoadError, OSError, ValueError) as error:
-            _error(str(error))
-            return 2
     try:
-        document, diagnostics, observed = _load_and_refresh_graph(
-            Path(query.graph), Path(query.root).resolve(), query.no_refresh
-        )
-        index = GraphIndex.build(document)
-        if query.name == "impact":
-            if query.symbol not in index.symbols_by_label:
-                suggestions = get_close_matches(query.symbol, index.labels(), n=5, cutoff=0.0)
-                _error(_unknown_symbol_message(query.symbol, suggestions))
-                return 2
-            impact_records = impact(index, query.symbol, query.depth)
-            output = (
-                render_impact_json(impact_records)
-                if query.json
-                else render_impact_text(impact_records)
-            )
-        elif query.name == "callers":
-            if query.symbol not in index.symbols_by_label:
-                suggestions = get_close_matches(query.symbol, index.labels(), n=5, cutoff=0.0)
-                _error(_unknown_symbol_message(query.symbol, suggestions))
-                return 2
-            caller_records: Sequence[QueryRecord] = callers(index, query.symbol)
-            output = (
-                render_json(query.name, caller_records)
-                if query.json
-                else render_text(query.name, caller_records)
-            )
-        elif query.name == "definitions":
-            definition_records = definitions(index, query.symbol)
-            output = (
-                render_json(query.name, definition_records)
-                if query.json
-                else render_text(query.name, definition_records)
-            )
-        elif query.name == "unreferenced":
-            root = Path(query.root).resolve()
-            stale_graph = query.no_refresh and not observed.is_clean
-            selected_paths = _query_source_paths(
-                index,
-                root,
-                query.paths,
-                validate_current_paths=not stale_graph,
-            )
-            excluded_names = frozenset(query.exclude) | load_exclusions(query.exclude_file)
-            unreferenced_records = unreferenced(
-                index,
-                root,
-                selected_paths,
-                excluded_names,
-                # A stale no-refresh query is intentionally graph-only. The
-                # saved graph remains queryable even when selected files have
-                # been removed or can no longer be read, so text fallback must
-                # not inspect the current workspace in this mode.
-                text_fallback=query.text_fallback and not stale_graph,
-            )
-            output = (
-                render_unreferenced_json(unreferenced_records)
-                if query.json
-                else render_unreferenced_text(unreferenced_records)
-            )
-        else:
-            raise ValueError(f"unsupported query: {query.name}")
-        print(output, end="")
-        return 1 if diagnostics else 0
+        snapshot = _SNAPSHOT_QUERIES.get(query.name)
+        if snapshot is not None:
+            print(snapshot(query), end="")
+            return 0
+        return _run_graph_query(query)
     except (GraphLoadError, OSError, ValueError) as error:
         _error(str(error))
         return 2
+
+
+def _run_graph_query(query: argparse.Namespace) -> int:
+    """Answer one index-backed query, refreshing the graph when it has drifted."""
+    handler = _GRAPH_QUERIES.get(query.name)
+    if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
+        raise ValueError(f"unsupported query: {query.name}")
+    document, diagnostics, observed = _load_and_refresh_graph(
+        Path(query.graph), Path(query.root).resolve(), query.no_refresh
+    )
+    index = GraphIndex.build(document)
+    if handler.requires_known_symbol and query.symbol not in index.symbols_by_label:
+        suggestions = get_close_matches(query.symbol, index.labels(), n=5, cutoff=0.0)
+        _error(_unknown_symbol_message(query.symbol, suggestions))
+        return 2
+    records = handler.run(query, index, observed)
+    output = render_json(query.name, records) if query.json else handler.render_text(records)
+    print(output, end="")
+    return 1 if diagnostics else 0
 
 
 def _query_parser() -> argparse.ArgumentParser:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -96,17 +95,4 @@ def render_text(records: Sequence[ImpactRecord]) -> str:
     return "".join(
         f"{'[boundary] ' if record.boundary else ''}depth {record.depth}: {record.symbol}\n"
         for record in records
-    )
-
-
-def render_json(records: Sequence[ImpactRecord]) -> str:
-    """Serialize the same records used by text output."""
-
-    return (
-        json.dumps(
-            {"query": "impact", "results": [record.to_dict() for record in records]},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
     )

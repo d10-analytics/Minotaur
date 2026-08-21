@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,7 @@ from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import is_safe_path
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
+from minotaur.query.render import dump_json
 from minotaur.source import read_source_path
 
 
@@ -147,14 +147,7 @@ def render_text(record: ContextRecord) -> str:
 
 def render_json(record: ContextRecord) -> str:
     """Render the same context records used by text output."""
-    return (
-        json.dumps(
-            {"query": "context", "results": [record.to_dict()]},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
+    return dump_json({"query": "context", "results": [record.to_dict()]})
 
 
 def _file_node(document: GraphDocument, path: str) -> Node:

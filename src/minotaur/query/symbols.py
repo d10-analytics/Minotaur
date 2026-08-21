@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from minotaur.graph_model.location import Location
@@ -143,3 +144,30 @@ def _caller_record(
 
 def _caller_sort_key(record: CallerRecord) -> tuple[object, ...]:
     return (record.path, record.line, record.column, record.caller, record.reference or "")
+
+
+def render_callers_text(records: Sequence[CallerRecord]) -> str:
+    """Render one line per call site, marking unresolved recall matches."""
+    if not records:
+        return "no callers\n"
+    return "".join(_caller_text(record) for record in records)
+
+
+def render_definitions_text(records: Sequence[DefinitionRecord]) -> str:
+    """Render one line per definition, marking shared bare names."""
+    if not records:
+        return "no definitions\n"
+    return "".join(_definition_text(record) for record in records)
+
+
+def _caller_text(record: CallerRecord) -> str:
+    suffix = " [unresolved]" if record.unresolved else ""
+    label = (
+        record.reference if record.unresolved and record.reference is not None else record.caller
+    )
+    return f"{record.path}:{record.line}:{record.column}  {label}{suffix}\n"
+
+
+def _definition_text(record: DefinitionRecord) -> str:
+    suffix = " [duplicate-name]" if record.duplicate else ""
+    return f"{record.path}:{record.line}  {record.symbol}  {record.kind}{suffix}\n"

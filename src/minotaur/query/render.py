@@ -1,4 +1,4 @@
-"""Stable text and JSON renderers for query result records."""
+"""Shared JSON envelope helpers for query output."""
 
 from __future__ import annotations
 
@@ -6,38 +6,26 @@ import json
 from collections.abc import Sequence
 from typing import Protocol
 
-from minotaur.query.symbols import CallerRecord, DefinitionRecord
-
 
 class QueryRecord(Protocol):
     def to_dict(self) -> dict[str, object]: ...
 
 
-def render_text(query: str, records: Sequence[QueryRecord]) -> str:
-    if not records:
-        return "no callers\n" if query == "callers" else "no definitions\n"
-    if query == "callers":
-        return "".join(
-            _caller_text(record) for record in records if isinstance(record, CallerRecord)
-        )
-    return "".join(
-        _definition_text(record) for record in records if isinstance(record, DefinitionRecord)
-    )
+def dump_json(payload: object) -> str:
+    """Serialize one query payload in the single canonical JSON form.
 
-
-def render_json(query: str, records: Sequence[QueryRecord]) -> str:
-    payload = {"query": query, "results": [record.to_dict() for record in records]}
+    Every query routes its JSON through this helper -- including ``diff`` and
+    ``context``, whose envelopes are not record lists -- so sort order,
+    separators, and the trailing newline cannot drift between commands.
+    """
     return json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
 
 
-def _caller_text(record: CallerRecord) -> str:
-    suffix = " [unresolved]" if record.unresolved else ""
-    label = (
-        record.reference if record.unresolved and record.reference is not None else record.caller
-    )
-    return f"{record.path}:{record.line}:{record.column}  {label}{suffix}\n"
+def render_json(query_name: str, records: Sequence[QueryRecord]) -> str:
+    """Render the shared ``{"query", "results"}`` envelope for record queries.
 
-
-def _definition_text(record: DefinitionRecord) -> str:
-    suffix = " [duplicate-name]" if record.duplicate else ""
-    return f"{record.path}:{record.line}  {record.symbol}  {record.kind}{suffix}\n"
+    Text rendering stays with each query module because its line format is
+    query-specific, but the JSON envelope is one contract for agents, so it is
+    written once here instead of being hand-rolled per module.
+    """
+    return dump_json({"query": query_name, "results": [record.to_dict() for record in records]})
