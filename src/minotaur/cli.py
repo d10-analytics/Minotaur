@@ -67,6 +67,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             except (GraphLoadError, OSError, ValueError):
                 existing = None
             if existing is not None:
+                # Both of these repeat work ``_analyze_selection`` will also
+                # do below when the graph turns out not to be clean:
+                # ``select_sources`` (line 59, above) is re-run inside
+                # ``_analyze_selection``, and ``_git_source_control`` runs its
+                # three ``git`` subprocesses again there too. The duplication
+                # is accepted rather than threaded through as a parameter
+                # because it only costs cheap directory walks and subprocess
+                # calls, while a clean-graph skip avoids a full re-parse of
+                # every selected source file — the expensive part stays paid
+                # once either way.
                 current_selection = _target_selection(root, targets)
                 current_source_control = _git_source_control(root)
                 if (
@@ -223,6 +233,17 @@ def _load_and_refresh_graph(graph_path: Path, root: Path, no_refresh: bool) -> _
     _report_stale(observed.paths)
     all_targets = tuple(root / target for target in recorded)
     existing_targets = tuple(target for target in all_targets if target.exists())
+    # Analysis only reads the targets that still exist, but the selection
+    # metadata records every target, including a deleted one. Because the
+    # deleted target was never analyzed it gets no file node, so
+    # ``drift._file_nodes`` has nothing to report it ``missing`` against and
+    # it never forces a perpetual refresh. Keeping it in the recorded
+    # selection matters for the opposite case: if the file is recreated,
+    # ``drift._added_files`` walks the recorded selection and finds a path
+    # that exists on disk but still has no file node, so the recreated file
+    # is correctly detected as `added`. Recording only ``existing_targets``
+    # would drop the deleted path from the selection entirely and a
+    # recreated file at that path would never be picked up again.
     result = _analyze_selection(
         root,
         existing_targets,
