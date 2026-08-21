@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,12 +21,22 @@ class GraphLoadError(ValueError):
     """Raised when an input is not a structurally and semantically valid graph."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class LoadedGraph:
-    """The model and deterministic wire representation produced by the boundary."""
+    """The model and deterministic wire representation produced by the boundary.
+
+    ``canonical`` is a cached property so the query path never pays the
+    canonicalization cost.  Only ``visualize`` accesses it, triggering the
+    computation on first read.  Dropping ``slots=True`` lets
+    ``functools.cached_property`` write through ``__dict__``, which
+    ``frozen=True`` does not block.
+    """
 
     document: GraphDocument
-    canonical: dict[str, object]
+
+    @functools.cached_property
+    def canonical(self) -> dict[str, object]:
+        return canonicalize(self.document)
 
 
 # Keep this checker local to the input boundary. The model intentionally does
@@ -61,12 +72,13 @@ def schema() -> dict[str, object]:
 
 
 def load_graph_bytes(content: bytes) -> LoadedGraph:
-    """Parse, schema-check, model-load, semantically validate, and canonicalize bytes.
+    """Parse, schema-check, model-load, and semantically validate bytes.
 
-    Each stage deliberately precedes canonicalization. Canonicalization is a
-    representation guarantee, not a repair mechanism: malformed or dangling
-    graph facts must be rejected rather than silently normalized into output
-    that a renderer or downstream tool could mistake for trustworthy input.
+    Canonicalization is deferred to ``LoadedGraph.canonical`` (a cached
+    property) so callers that never read it — such as the query path —
+    avoid the cost entirely.  Every validation stage still runs eagerly:
+    malformed or dangling graph facts are rejected before any downstream
+    consumer can access the loaded result.
     """
     try:
         decoded = content.decode("utf-8")
@@ -91,7 +103,7 @@ def load_graph_bytes(content: bytes) -> LoadedGraph:
     if not report.is_valid:
         details = "; ".join(f"{issue.json_pointer}: {issue.message}" for issue in report)
         raise GraphLoadError(f"graph semantic validation failed: {details}")
-    return LoadedGraph(document=document, canonical=canonicalize(document))
+    return LoadedGraph(document=document)
 
 
 def load_graph_file(path: Path) -> LoadedGraph:
