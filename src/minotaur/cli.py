@@ -314,17 +314,22 @@ _SNAPSHOT_QUERIES: Mapping[str, Callable[[argparse.Namespace], str]] = {
 
 
 def _query(arguments: argparse.Namespace) -> int:
-    """Dispatch a fixed query against one graph snapshot."""
+    """Dispatch a fixed query against one graph snapshot.
+
+    The query subcommands are registered directly on the main parser (see
+    ``_parser``), so ``arguments`` here is already a fully parsed query
+    invocation — there is no nested ``parse_args`` call left to raise
+    ``SystemExit``. That matters for exit codes: argparse itself now handles
+    ``--help`` (exit 0) and usage errors (exit 2) exactly as it does for
+    ``analyze`` and ``visualize``, instead of this function collapsing both
+    outcomes to a single hard-coded exit 2.
+    """
     try:
-        query = _query_parser().parse_args(arguments.query_args)
-    except SystemExit:
-        return 2
-    try:
-        snapshot = _SNAPSHOT_QUERIES.get(query.name)
+        snapshot = _SNAPSHOT_QUERIES.get(arguments.name)
         if snapshot is not None:
-            print(snapshot(query), end="")
+            print(snapshot(arguments), end="")
             return 0
-        return _run_graph_query(query)
+        return _run_graph_query(arguments)
     except (GraphLoadError, OSError, ValueError) as error:
         _error(str(error))
         return 2
@@ -349,9 +354,17 @@ def _run_graph_query(query: argparse.Namespace) -> int:
     return 1 if diagnostics else 0
 
 
-def _query_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="minotaur query")
-    commands = parser.add_subparsers(dest="name", required=True)
+def _add_query_subparsers(query: argparse.ArgumentParser) -> None:
+    """Register the query subcommands directly on the ``query`` subparser.
+
+    Nesting these on the main parser (instead of parsing a captured
+    ``argparse.REMAINDER`` blob in a second, throwaway parser) is what makes
+    ``minotaur query <name> --help`` exit 0 and ``minotaur query --help``
+    list the subcommands: argparse owns the whole invocation in one
+    ``parse_args`` call, so its help and error handling behave the same way
+    here as they do for ``analyze`` and ``visualize``.
+    """
+    commands = query.add_subparsers(dest="name", required=True)
     callers_parser = commands.add_parser("callers", help="find callers of a qualified symbol")
     callers_parser.add_argument("symbol", metavar="QUALIFIED_NAME")
     definitions_parser = commands.add_parser("definitions", help="find definitions of a bare name")
@@ -387,7 +400,6 @@ def _query_parser() -> argparse.ArgumentParser:
             "--no-refresh", action="store_true", help="answer from the graph as-is"
         )
         command.add_argument("--json", action="store_true", help="emit stable JSON records")
-    return parser
 
 
 def _query_source_paths(
@@ -469,7 +481,7 @@ def _parser() -> argparse.ArgumentParser:
     visualize.add_argument("--source-root", help="optional source root for embedded excerpts")
     visualize.add_argument("--force", action="store_true", help="replace an existing output file")
     query = commands.add_parser("query", help="query an analyzed graph")
-    query.add_argument("query_args", nargs=argparse.REMAINDER)
+    _add_query_subparsers(query)
     return parser
 
 

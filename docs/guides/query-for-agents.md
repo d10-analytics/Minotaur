@@ -205,7 +205,9 @@ or evidence/provenance blocks. Empty result sets are represented by an empty
 
 Exit statuses are:
 
-* `0` — results were printed, including an empty result set;
+* `0` — results were printed, including an empty result set (`--help` on any
+  `query` subcommand also exits `0`, matching every other argparse-based
+  program);
 * `1` — a graph refresh completed but source diagnostics were reported; and
 * `2` — argument, graph-load, selection, or unknown-symbol error.
 
