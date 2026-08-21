@@ -193,6 +193,34 @@ def test_unreferenced_no_refresh_uses_graph_path_when_source_is_unreadable(
     assert "minotaur: stale: unreadable.py" in captured.err
 
 
+def test_unreferenced_no_refresh_root_path_filters_saved_graph_without_filesystem_checks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "present.py"
+    _write(tmp_path, "present.py", "def orphan():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    source.unlink()
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            ".",
+            "--no-refresh",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "present.py:1  present.orphan  function\n"
+    assert "minotaur: stale: present.py" in captured.err
+
+
 def test_unreferenced_clean_graph_still_validates_missing_query_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
