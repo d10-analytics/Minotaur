@@ -251,7 +251,17 @@ def test_all_query_renderers_hide_graph_internals_in_text_and_json(
         assert all(set(item) == relationship_keys for item in payload["relationships_added"])
         assert all(set(item) == relationship_keys for item in payload["relationships_removed"])
     else:
-        assert set(payload) == {"query", "results"}
+        if query_name == "context":
+            # context never refreshes, so it carries no freshness envelope
+            # fields; its per-result "stale" flag reports the file hash instead.
+            assert set(payload) == {"query", "results"}
+        else:
+            # Record queries answer from a freshness-checked graph, so the
+            # envelope also states whether that graph was rewritten and which
+            # paths had drifted.
+            assert set(payload) == {"query", "refreshed", "results", "stale"}
+            assert payload["refreshed"] is False
+            assert payload["stale"] == []
         assert payload["query"] == query_name
         assert isinstance(payload["results"], list)
         assert payload["results"]

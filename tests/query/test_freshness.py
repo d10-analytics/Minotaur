@@ -49,6 +49,22 @@ def _query_definitions(root: Path, output: Path, *, no_refresh: bool = False) ->
     return cli.main(arguments)
 
 
+def _query_definitions_json(root: Path, output: Path, *, no_refresh: bool = False) -> int:
+    arguments = [
+        "query",
+        "definitions",
+        "foo",
+        "--graph",
+        str(output),
+        "--root",
+        str(root),
+        "--json",
+    ]
+    if no_refresh:
+        arguments.append("--no-refresh")
+    return cli.main(arguments)
+
+
 def test_drift_uses_bytes_not_mtime(tmp_path: Path) -> None:
     root = tmp_path / "source"
     source = _write(root, "app.py", "def app():\n    return 1\n")
@@ -94,11 +110,12 @@ def test_query_refresh_removes_deleted_direct_selection_and_preserves_metadata(
     assert _analyze(root, output, source) == 0
     source.unlink()
 
-    document, diagnostics, observed = cli._load_and_refresh_graph(output, root, False)
+    graph = cli._load_and_refresh_graph(output, root, False)
 
-    assert observed.missing == ("deleted.py",)
-    assert diagnostics == ()
-    assert not any(node.path == "deleted.py" for node in document.nodes)
+    assert graph.drift.missing == ("deleted.py",)
+    assert graph.refreshed is True
+    assert graph.diagnostics == ()
+    assert not any(node.path == "deleted.py" for node in graph.document.nodes)
     assert json.loads(output.read_text(encoding="utf-8"))["extensions"] == {
         "minotaur": {"selection": ["deleted.py"]}
     }
@@ -115,14 +132,16 @@ def test_query_no_refresh_keeps_graph_and_warns_with_stale_path(
     before = output.read_bytes()
     source.write_text("def app():\n    return 2\n", encoding="utf-8")
 
-    document, diagnostics, observed = cli._load_and_refresh_graph(output, root, True)
+    graph = cli._load_and_refresh_graph(output, root, True)
     captured = capsys.readouterr()
 
-    assert observed.changed == ("app.py",)
-    assert diagnostics == ()
-    assert document == load_graph_file(output).document
+    assert graph.drift.changed == ("app.py",)
+    assert graph.refreshed is False
+    assert graph.diagnostics == ()
+    assert graph.document == load_graph_file(output).document
     assert output.read_bytes() == before
     assert "stale: app.py" in captured.err
+    assert "refreshed graph" not in captured.err
 
 
 def test_public_query_refreshes_changed_definition_and_no_refresh_keeps_old_answer(
@@ -204,3 +223,88 @@ def test_recorded_hash_is_sha256_of_exact_source_bytes(tmp_path: Path) -> None:
         file_node["extensions"]["minotaur-python"]["content_sha256"]
         == hashlib.sha256(source.read_bytes()).hexdigest()
     )
+
+
+def test_public_query_refresh_announces_rewrite_and_stale_paths_on_stderr(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    source = _write(root, "app.py", "def foo():\n    return 1\n")
+    _write(root, "other.py", "def bar():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    assert _analyze(root, output, root) == 0
+    source.write_text("# edited\ndef foo():\n    return 2\n", encoding="utf-8")
+    (root / "other.py").unlink()
+
+    assert _query_definitions(root, output) == 0
+    captured = capsys.readouterr()
+
+    # A refresh rewrites the file the agent analyzed, so it is announced with
+    # the same per-path lines the --no-refresh path prints.
+    assert captured.err.splitlines() == [
+        "minotaur: refreshed graph (2 drifted paths)",
+        "minotaur: stale: app.py",
+        "minotaur: stale: other.py",
+    ]
+
+
+def test_query_json_reports_refreshed_state_and_drifted_paths(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    source = _write(root, "app.py", "def foo():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    assert _analyze(root, output, root) == 0
+    assert _query_definitions_json(root, output) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "query": "definitions",
+        "refreshed": False,
+        "results": [
+            {
+                "duplicate": False,
+                "kind": "function",
+                "line": 1,
+                "path": "app.py",
+                "symbol": "app.foo",
+            }
+        ],
+        "stale": [],
+    }
+
+    source.write_text("# edited\ndef foo():\n    return 2\n", encoding="utf-8")
+    assert _query_definitions_json(root, output) == 0
+    # The refreshed answer still reports the paths that had drifted: an agent
+    # reading JSON has no stderr and needs to know the graph was rewritten.
+    assert json.loads(capsys.readouterr().out) == {
+        "query": "definitions",
+        "refreshed": True,
+        "results": [
+            {
+                "duplicate": False,
+                "kind": "function",
+                "line": 2,
+                "path": "app.py",
+                "symbol": "app.foo",
+            }
+        ],
+        "stale": ["app.py"],
+    }
+
+    source.write_text("# edited again\n" + source.read_text(encoding="utf-8"), encoding="utf-8")
+    assert _query_definitions_json(root, output, no_refresh=True) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "query": "definitions",
+        "refreshed": False,
+        "results": [
+            {
+                "duplicate": False,
+                "kind": "function",
+                "line": 2,
+                "path": "app.py",
+                "symbol": "app.foo",
+            }
+        ],
+        "stale": ["app.py"],
+    }

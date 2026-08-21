@@ -11,20 +11,22 @@ from minotaur import cli
 # Every query serializes through one helper, so the envelope is asserted as an
 # exact string: compact separators, sorted keys, and a single trailing newline
 # are the contract agents parse, and a per-module renderer must not drift from
-# it.
+# it.  The record queries also carry the freshness of the answer itself
+# (`refreshed`, `stale`); the snapshot queries `context` and `diff` do not
+# refresh anything and keep their own envelopes.
 EXPECTED = {
     "definitions": (
-        '{"query":"definitions","results":[{"duplicate":false,"kind":"function",'
-        '"line":1,"path":"mod.py","symbol":"mod.target"}]}\n'
+        '{"query":"definitions","refreshed":false,"results":[{"duplicate":false,'
+        '"kind":"function","line":1,"path":"mod.py","symbol":"mod.target"}],"stale":[]}\n'
     ),
-    "callers": '{"query":"callers","results":[]}\n',
+    "callers": '{"query":"callers","refreshed":false,"results":[],"stale":[]}\n',
     "impact": (
-        '{"query":"impact","results":[{"boundary":false,"depth":0,"kind":"function",'
-        '"symbol":"mod.target"}]}\n'
+        '{"query":"impact","refreshed":false,"results":[{"boundary":false,"depth":0,'
+        '"kind":"function","symbol":"mod.target"}],"stale":[]}\n'
     ),
     "unreferenced": (
-        '{"query":"unreferenced","results":[{"kind":"function","line":1,"path":"mod.py",'
-        '"symbol":"mod.target","text_mention":false}]}\n'
+        '{"query":"unreferenced","refreshed":false,"results":[{"kind":"function","line":1,'
+        '"path":"mod.py","symbol":"mod.target","text_mention":false}],"stale":[]}\n'
     ),
     "context": (
         '{"query":"context","results":[{"hash_available":true,"lines":[{"line":1,'
