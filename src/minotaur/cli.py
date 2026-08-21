@@ -495,7 +495,7 @@ def _query_source_paths(
         for relative in graph_paths:
             candidate = root / relative
             if any(
-                candidate == target or target.is_dir() and target in candidate.parents
+                candidate == target or (target.is_dir() and target in candidate.parents)
                 for target, _ in targets
             ):
                 selected.add(relative)
