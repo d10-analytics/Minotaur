@@ -36,6 +36,23 @@ from minotaur.graph_model.provenance import (
     resolve_symbol_kind,
 )
 
+# Module-level constant for reject_unknown_fields (F-13).
+_NODE_FIELDS = frozenset(
+    {
+        "id",
+        "identity",
+        "node_class",
+        "label",
+        "symbol_kind",
+        "language",
+        "location",
+        "path",
+        "reference_text",
+        "expected_symbol_kind",
+        "extensions",
+    }
+)
+
 # Which identity bases each node class may use. Resource nodes may carry a
 # source location, so they may also be identified by one.
 _PERMITTED_BASES: dict[NodeClass, tuple[IdentityBasis, ...]] = {
@@ -189,7 +206,12 @@ class Node:
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, object]) -> Node:
+    def from_dict(
+        cls,
+        data: dict[str, object],
+        *,
+        memo: dict[tuple[str, int, int, int, int], Location] | None = None,
+    ) -> Node:
         """Deserialize from a parsed JSON dict.
 
         Performs structural validation (types, required fields) but not
@@ -197,25 +219,7 @@ class Node:
         A Node returned from from_dict is structurally well-formed but
         not necessarily semantically valid — the validator checks that.
         """
-        reject_unknown_fields(
-            data,
-            frozenset(
-                {
-                    "id",
-                    "identity",
-                    "node_class",
-                    "label",
-                    "symbol_kind",
-                    "language",
-                    "location",
-                    "path",
-                    "reference_text",
-                    "expected_symbol_kind",
-                    "extensions",
-                }
-            ),
-            "node",
-        )
+        reject_unknown_fields(data, _NODE_FIELDS, "node")
         node_id = data.get("id")
         if not isinstance(node_id, str):
             raise ValueError("node requires an 'id' string")
@@ -252,7 +256,7 @@ class Node:
         if location_data is not None:
             if not isinstance(location_data, dict):
                 raise ValueError("'location' must be an object when present")
-            location = Location.from_dict(location_data)
+            location = Location.from_dict(location_data, memo=memo)
 
         extensions = data.get("extensions")
         if extensions is not None and not isinstance(extensions, dict):

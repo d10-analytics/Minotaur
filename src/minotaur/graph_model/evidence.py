@@ -27,6 +27,11 @@ from minotaur.graph_model._parsing import (
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.provenance import Provenance
 
+# Module-level constants for reject_unknown_fields (F-13).
+_PRODUCER_FIELDS = frozenset({"name", "version"})
+_RULE_FIELDS = frozenset({"id", "version"})
+_EVIDENCE_FIELDS = frozenset({"provenance", "producer", "rule", "locations", "extensions"})
+
 
 @dataclass(frozen=True, slots=True)
 class Producer:
@@ -63,7 +68,7 @@ class Producer:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Producer:
-        reject_unknown_fields(data, frozenset({"name", "version"}), "producer")
+        reject_unknown_fields(data, _PRODUCER_FIELDS, "producer")
         name = data.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError("producer requires a non-empty 'name' string")
@@ -108,7 +113,7 @@ class Rule:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Rule:
-        reject_unknown_fields(data, frozenset({"id", "version"}), "rule")
+        reject_unknown_fields(data, _RULE_FIELDS, "rule")
         rule_id = data.get("id")
         if not isinstance(rule_id, str) or not rule_id:
             raise ValueError("rule requires a non-empty 'id' string")
@@ -202,12 +207,13 @@ class Evidence:
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, object]) -> Evidence:
-        reject_unknown_fields(
-            data,
-            frozenset({"provenance", "producer", "rule", "locations", "extensions"}),
-            "evidence",
-        )
+    def from_dict(
+        cls,
+        data: dict[str, object],
+        *,
+        memo: dict[tuple[str, int, int, int, int], Location] | None = None,
+    ) -> Evidence:
+        reject_unknown_fields(data, _EVIDENCE_FIELDS, "evidence")
         # Provenance is required and must be a known core value.
         # Extension provenance values are not supported in v1 — the
         # provenance enum is closed, unlike symbol_kind and relationship_kind.
@@ -243,7 +249,7 @@ class Evidence:
                 raise ValueError("'locations' must be an array when present")
             if not locations_data:
                 raise ValueError("'locations' array must be non-empty when present")
-            locations = tuple(Location.from_dict(loc) for loc in locations_data)
+            locations = tuple(Location.from_dict(loc, memo=memo) for loc in locations_data)
 
         extensions = data.get("extensions")
         if extensions is not None and not isinstance(extensions, dict):

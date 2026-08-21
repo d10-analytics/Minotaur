@@ -36,6 +36,11 @@ from minotaur.graph_model._parsing import (
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.provenance import IdentityBasis
 
+# Module-level constant for reject_unknown_fields (F-13).
+_IDENTITY_FIELDS = frozenset(
+    {"basis", "namespace", "upstream_identifier", "originating_node", "resource_key"}
+)
+
 # Compiled once: validates the wire format of node IDs without checking
 # the digest's correctness (that requires reconstructing the identity input).
 NODE_ID_RE = re.compile(r"^node:sha256:[a-f0-9]{64}$")
@@ -145,13 +150,7 @@ class NodeIdentity:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> NodeIdentity:
-        reject_unknown_fields(
-            data,
-            frozenset(
-                {"basis", "namespace", "upstream_identifier", "originating_node", "resource_key"}
-            ),
-            "identity",
-        )
+        reject_unknown_fields(data, _IDENTITY_FIELDS, "identity")
         basis_str = data.get("basis")
         if not isinstance(basis_str, str):
             raise ValueError("identity requires a 'basis' string")
