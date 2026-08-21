@@ -244,13 +244,15 @@ def _report_stale(paths: Sequence[str]) -> None:
         print(f"minotaur: stale: {path}", file=sys.stderr)
 
 
-def _load_and_refresh_graph(graph_path: Path, root: Path, no_refresh: bool) -> _QueryGraph:
+def _load_and_refresh_graph(
+    graph_path: Path, root: Path, no_refresh: bool, *, validate: bool = False
+) -> _QueryGraph:
     """Load a query graph, refreshing its recorded selection when stale.
 
     Callers use the returned drift's ``paths``/``is_clean`` value for warnings
     and exit-code selection.
     """
-    loaded = load_graph_file(graph_path)
+    loaded = load_graph_file(graph_path, validate=validate)
     observed = drift(loaded.document, root)
     if observed.is_clean:
         return _QueryGraph(loaded.document, (), observed, False)
@@ -354,14 +356,15 @@ def _run_unreferenced(
 
 
 def _run_diff(query: argparse.Namespace) -> str:
-    old = load_graph_file(Path(query.old)).document
-    new = load_graph_file(Path(query.new)).document
+    validate: bool = query.validate
+    old = load_graph_file(Path(query.old), validate=validate).document
+    new = load_graph_file(Path(query.new), validate=validate).document
     result = diff_query.diff(old, new)
     return diff_query.render_json(result) if query.json else diff_query.render_text(result)
 
 
 def _run_context(query: argparse.Namespace) -> str:
-    document = load_graph_file(Path(query.graph)).document
+    document = load_graph_file(Path(query.graph), validate=query.validate).document
     record = context_query.context(
         document,
         Path(query.root).resolve(),
@@ -428,7 +431,9 @@ def _run_graph_query(query: argparse.Namespace) -> int:
     handler = _GRAPH_QUERIES.get(query.name)
     if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
         raise ValueError(f"unsupported query: {query.name}")
-    graph = _load_and_refresh_graph(Path(query.graph), Path(query.root).resolve(), query.no_refresh)
+    graph = _load_and_refresh_graph(
+        Path(query.graph), Path(query.root).resolve(), query.no_refresh, validate=query.validate
+    )
     index = GraphIndex.build(graph.document)
     # No symbol guard here: each query resolves its own name through
     # GraphIndex.resolve, whose SymbolResolutionError is a ValueError and so
@@ -503,6 +508,8 @@ def _add_query_subparsers(query: argparse.ArgumentParser) -> None:
             "--no-refresh", action="store_true", help="answer from the graph as-is"
         )
         command.add_argument("--json", action="store_true", help="emit stable JSON records")
+        _add_validate_flag(command)
+    _add_validate_flag(diff_parser)
 
 
 def _query_source_paths(
@@ -562,6 +569,15 @@ def _target_selection(root: Path, targets: tuple[Path, ...]) -> tuple[str, ...]:
     return tuple(sorted({target.resolve().relative_to(root).as_posix() for target in targets}))
 
 
+def _add_validate_flag(parser: argparse.ArgumentParser) -> None:
+    """Add ``--validate`` to force full schema validation on graph load."""
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="force full schema validation even when the sidecar stamp matches",
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="minotaur")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -577,6 +593,7 @@ def _parser() -> argparse.ArgumentParser:
     visualize.add_argument("--output", required=True, help="destination HTML file")
     visualize.add_argument("--source-root", help="optional source root for embedded excerpts")
     visualize.add_argument("--force", action="store_true", help="replace an existing output file")
+    _add_validate_flag(visualize)
     query = commands.add_parser("query", help="query an analyzed graph")
     _add_query_subparsers(query)
     return parser
@@ -592,7 +609,7 @@ def _visualize(arguments: argparse.Namespace) -> int:
     """
     input_path = Path(arguments.input)
     try:
-        loaded = load_graph_file(input_path)
+        loaded = load_graph_file(input_path, validate=arguments.validate)
         # D-12: a freshness guard was considered for visualize but declined;
         # rendering need not have a source root and remains cheap to repeat.
         output = _preflight_output(Path(arguments.output), (input_path.resolve(),), arguments.force)
