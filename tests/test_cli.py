@@ -550,6 +550,21 @@ def test_missing_target_error_explains_working_directory_resolution(
     assert f"resolved from the current directory {Path.cwd()}, not from --root" in captured.err
 
 
+def _unstamped_graph(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a small analyzed graph and then remove its sidecar stamp.
+
+    Returns (graph_path, source_root).
+    """
+    root = tmp_path / "src"
+    _write(root, "a.py", "x = 1\n")
+    output = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)]) == 0
+    sidecar = stamp_path(output)
+    assert sidecar.exists()
+    sidecar.unlink()
+    return output, root
+
+
 def _stamped_graph(tmp_path: Path) -> Path:
     """Create a small analyzed graph with a matching sidecar stamp."""
     root = tmp_path / "src"
@@ -672,3 +687,198 @@ class TestValidateFlag:
             cli.main(
                 ["visualize", "--input", str(output), "--output", str(html_out2), "--validate"]
             )
+
+
+class TestStampAfterValidation:
+    """AC-18: user-facing commands that fully validate a graph leave a sidecar."""
+
+    def _assert_sidecar_matches_bytes(self, graph_path: Path) -> None:
+        """Verify the sidecar contains the digest of the graph bytes on disk."""
+        sidecar = stamp_path(graph_path)
+        assert sidecar.exists(), f"sidecar not created for {graph_path}"
+        expected = hashlib.sha256(graph_path.read_bytes()).hexdigest()
+        assert sidecar.read_text(encoding="ascii").strip() == expected
+
+    def test_query_definitions_stamps_unstamped_graph(self, tmp_path: Path) -> None:
+        """AC-18 (a): query definitions exits 0 and leaves correct sidecar."""
+        output, root = _unstamped_graph(tmp_path)
+        status = cli.main(
+            ["query", "definitions", "--graph", str(output), "--root", str(root), "a"]
+        )
+        assert status == 0
+        self._assert_sidecar_matches_bytes(output)
+
+    def test_query_context_stamps_unstamped_graph(self, tmp_path: Path) -> None:
+        """AC-18 (a): query context exits 0 and leaves correct sidecar."""
+        output, root = _unstamped_graph(tmp_path)
+        status = cli.main(
+            [
+                "query",
+                "context",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+                "--site",
+                "a.py:1",
+            ]
+        )
+        assert status == 0
+        self._assert_sidecar_matches_bytes(output)
+
+    def test_query_diff_stamps_both_graphs(self, tmp_path: Path) -> None:
+        """AC-18 (a): query diff exits 0 and stamps OLD and NEW."""
+        old_path, _ = _unstamped_graph(tmp_path)
+        # Create a second unstamped graph in a subdirectory.
+        root2 = tmp_path / "src2"
+        _write(root2, "b.py", "y = 2\n")
+        new_path = tmp_path / "graph2.json"
+        assert (
+            cli.main(["analyze", "--root", str(root2), "--output", str(new_path), str(root2)]) == 0
+        )
+        stamp_path(new_path).unlink()
+        assert not stamp_path(old_path).exists()
+        assert not stamp_path(new_path).exists()
+
+        status = cli.main(["query", "diff", str(old_path), str(new_path)])
+        assert status == 0
+        self._assert_sidecar_matches_bytes(old_path)
+        self._assert_sidecar_matches_bytes(new_path)
+
+    def test_visualize_stamps_unstamped_graph(self, tmp_path: Path) -> None:
+        """AC-18 (a): visualize exits 0 and leaves correct sidecar."""
+        output, _ = _unstamped_graph(tmp_path)
+        html_out = tmp_path / "viz.html"
+        status = cli.main(["visualize", "--input", str(output), "--output", str(html_out)])
+        assert status == 0
+        self._assert_sidecar_matches_bytes(output)
+
+    def test_validate_flag_also_stamps(self, tmp_path: Path) -> None:
+        """AC-18 (b): --validate also leaves a matching sidecar."""
+        output, root = _unstamped_graph(tmp_path)
+        status = cli.main(
+            [
+                "query",
+                "definitions",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+                "--validate",
+                "--no-refresh",
+                "a",
+            ]
+        )
+        assert status == 0
+        self._assert_sidecar_matches_bytes(output)
+
+    def test_stamped_graph_skips_stamp_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC-18 (c): a stamped graph triggers no sidecar write.
+
+        With _write_atomically monkeypatched to raise AssertionError, the
+        query still exits 0, proving the write path is never entered when
+        the stamp already matches (validated is False).
+        """
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            cli,
+            "_write_atomically",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("_write_atomically must not be called")
+            ),
+        )
+        status = cli.main(
+            [
+                "query",
+                "definitions",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+                "--no-refresh",
+                "a",
+            ]
+        )
+        assert status == 0
+
+    def test_stamp_write_failure_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC-18 (d): OSError during stamp write does not fail the command."""
+        output, root = _unstamped_graph(tmp_path)
+        monkeypatch.setattr(
+            cli,
+            "_write_atomically",
+            lambda *a, **kw: (_ for _ in ()).throw(OSError("simulated write failure")),
+        )
+        status = cli.main(
+            [
+                "query",
+                "definitions",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+                "--no-refresh",
+                "a",
+            ]
+        )
+        assert status == 0
+        assert not stamp_path(output).exists()
+
+    def test_analyze_clean_skip_does_not_stamp(self, tmp_path: Path) -> None:
+        """AC-18 (e): analyze's clean-skip probe leaves no sidecar."""
+        root = tmp_path / "src"
+        _write(root, "a.py", "x = 1\n")
+        output = tmp_path / "graph.json"
+        assert cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)]) == 0
+        # Remove the sidecar that analyze's write path created.
+        stamp_path(output).unlink()
+        # Re-run analyze: the graph is clean, so it hits the skip path.
+        status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+        assert status == 0
+        assert not stamp_path(output).exists()
+
+    def test_stamp_records_loaded_digest_not_current_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC-18 (f): sidecar records digest of originally loaded bytes.
+
+        The graph file is replaced on disk between the load and the stamp
+        write. The sidecar must still equal the digest of the original bytes.
+        """
+        output, root = _unstamped_graph(tmp_path)
+        original_bytes = output.read_bytes()
+        original_digest = hashlib.sha256(original_bytes).hexdigest()
+
+        original_load = cli.load_graph_file
+
+        def load_then_replace(path: Path, **kwargs: object) -> object:
+            result = original_load(path, **kwargs)
+            # Replace the file on disk after reading it.
+            path.write_bytes(b'{"replaced": true}')
+            return result
+
+        monkeypatch.setattr(cli, "load_graph_file", load_then_replace)
+        status = cli.main(
+            [
+                "query",
+                "definitions",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+                "--no-refresh",
+                "a",
+            ]
+        )
+        assert status == 0
+        sidecar = stamp_path(output)
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="ascii").strip() == original_digest
+        # The sidecar does NOT match the replaced file.
+        replaced_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+        assert replaced_digest != original_digest
