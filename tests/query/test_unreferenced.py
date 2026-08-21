@@ -299,3 +299,28 @@ def test_unreferenced_excludes_symbols_used_only_in_a_class_body(
 
     assert status == 0
     assert captured.out == "config.py:9  config.orphan  function\nconfig.py:13  config.Cfg  class\n"
+
+
+def test_unreferenced_excludes_symbols_used_only_in_a_signature(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A default argument and an annotation are dependencies an agent must see
+    # before deleting the symbol; before signatures were traversed, both
+    # `default_cb` and `Handler` were reported as dead code.
+    _write(
+        tmp_path,
+        "app.py",
+        "def default_cb():\n    return 0\n\n"
+        "class Handler:\n    pass\n\n"
+        "def orphan():\n    pass\n\n"
+        "def top(cb=default_cb, handler: Handler = None):\n"
+        "    return cb, handler\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(["query", "unreferenced", "--graph", str(graph), "--root", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "app.py:7  app.orphan  function\napp.py:10  app.top  function\n"

@@ -398,3 +398,75 @@ def test_class_body_statements_are_attributed_to_the_class_not_dropped(
     # the class merely because the class body is now visited.
     assert (method, inner, RelationshipKind.CALLS.value) in relationships
     assert (cfg, inner, RelationshipKind.CALLS.value) not in relationships
+
+
+def test_function_signature_defaults_and_annotations_are_attributed_to_the_function(
+    tmp_path: Path,
+) -> None:
+    # Defaults and annotations are evaluated outside the body, so a visitor
+    # given only `statement.body` misses them; nested definitions already saw
+    # them through generic_visit. Both nesting levels must agree.
+    _write(
+        tmp_path,
+        "app.py",
+        "def default_cb():\n    return 0\n\n"
+        "def kw_default():\n    return 1\n\n"
+        "class Handler:\n    pass\n\n"
+        "class Result:\n    pass\n\n"
+        "def top(cb=default_cb, *, hook=kw_default) -> Result:\n"
+        "    return cb()\n\n"
+        "class Runner:\n"
+        "    def run(self, handler: Handler = default_cb):\n"
+        "        return handler\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    top = _node_id(result, "app.top")
+    run = _node_id(result, "app.Runner.run")
+    default_cb = _node_id(result, "app.default_cb")
+    kw_default = _node_id(result, "app.kw_default")
+    handler = _node_id(result, "app.Handler")
+    result_class = _node_id(result, "app.Result")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    assert (top, default_cb, RelationshipKind.REFERENCES.value) in relationships
+    assert (top, kw_default, RelationshipKind.REFERENCES.value) in relationships
+    assert (top, result_class, RelationshipKind.REFERENCES.value) in relationships
+    assert (run, handler, RelationshipKind.REFERENCES.value) in relationships
+    assert (run, default_cb, RelationshipKind.REFERENCES.value) in relationships
+    # A default is a reference to the callable, never a call of it.
+    assert (top, default_cb, RelationshipKind.CALLS.value) not in relationships
+
+
+def test_signature_references_match_between_nested_and_top_level_definitions(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def default_cb():\n    return 0\n\n"
+        "class Handler:\n    pass\n\n"
+        "def outer():\n"
+        "    def inner(cb=default_cb, handler: Handler = None):\n"
+        "        return cb\n\n"
+        "    return inner\n\n"
+        "def peer(cb=default_cb, handler: Handler = None):\n"
+        "    return cb\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    peer = _node_id(result, "app.peer")
+    default_cb = _node_id(result, "app.default_cb")
+    handler = _node_id(result, "app.Handler")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    for target in (default_cb, handler):
+        assert (outer, target, RelationshipKind.REFERENCES.value) in relationships
+        assert (peer, target, RelationshipKind.REFERENCES.value) in relationships
