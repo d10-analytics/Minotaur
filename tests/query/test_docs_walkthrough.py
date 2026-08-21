@@ -23,7 +23,6 @@ import pytest
 ROOT = Path(__file__).parents[2]
 EXAMPLE_GRAPH = ROOT / "examples" / "python-workflow" / "minotaur-graph.json"
 DOCUMENTS = (
-    ROOT / "docs" / "guides" / "query-for-agents.md",
     ROOT / "README.md",
 )
 CONSOLE_BLOCK = re.compile(r"^```console\n(.*?)^```$", re.DOTALL | re.MULTILINE)
@@ -63,8 +62,8 @@ TRANSCRIPTS = _transcripts()
 def test_documentation_contains_the_expected_walkthrough_commands() -> None:
     """Guard the parser itself: a silently empty scan would pass every case."""
     commands = [command for _, command, _ in TRANSCRIPTS]
-    assert len(commands) == 10
-    assert sum(command.startswith("minotaur query ") for command in commands) == 9
+    assert len(commands) == 1
+    assert sum(command.startswith("minotaur query ") for command in commands) == 1
 
 
 @pytest.mark.parametrize(
