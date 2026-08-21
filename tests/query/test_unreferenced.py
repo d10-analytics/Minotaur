@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from minotaur import cli
 
 
@@ -123,3 +125,121 @@ def test_unreferenced_text_fallback_tags_string_mentions_and_supports_paths_and_
         "one.orphan",
         "one.excluded",
     ]
+
+
+def test_unreferenced_no_refresh_uses_deleted_graph_path_without_text_reads(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "deleted.py"
+    _write(
+        tmp_path,
+        "deleted.py",
+        "def orphan():\n    pass\n\nmessage = 'orphan'\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    before = graph.read_bytes()
+    source.unlink()
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "deleted.py",
+            "--text-fallback",
+            "--no-refresh",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "deleted.py:1  deleted.orphan  function\n"
+    assert "text-mention" not in captured.out
+    assert "minotaur: stale: deleted.py" in captured.err
+    assert graph.read_bytes() == before
+
+
+def test_unreferenced_no_refresh_uses_graph_path_when_source_is_unreadable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "unreadable.py"
+    _write(tmp_path, "unreadable.py", "def orphan():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    source.unlink()
+    source.mkdir()
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "unreadable.py",
+            "--text-fallback",
+            "--no-refresh",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "unreadable.py:1  unreadable.orphan  function\n"
+    assert "minotaur: stale: unreadable.py" in captured.err
+
+
+def test_unreferenced_clean_graph_still_validates_missing_query_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "present.py", "def orphan():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "missing.py",
+            "--no-refresh",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "query path does not exist: missing.py" in captured.err
+
+
+def test_unreferenced_stale_graph_still_rejects_query_path_escape(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "present.py"
+    _write(tmp_path, "present.py", "def orphan():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    source.unlink()
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "../outside.py",
+            "--no-refresh",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "query path escapes root: ../outside.py" in captured.err
