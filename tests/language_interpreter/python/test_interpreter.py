@@ -359,3 +359,42 @@ def test_decorator_load_references_resolve_for_module_and_direct_method_scopes(
     assert decorated_location.evidence[0].locations[0].range.start.line == 2
     method_location = relationships[(run, handler, RelationshipKind.REFERENCES.value)]
     assert method_location.evidence[0].locations[0].range.start.line == 7
+
+
+def test_class_body_statements_are_attributed_to_the_class_not_dropped(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "from dataclasses import dataclass, field\n\n"
+        "def make_config():\n    return {}\n\n"
+        "def helper():\n    return 1\n\n"
+        "def inner():\n    return 2\n\n"
+        "@dataclass\n"
+        "class Cfg:\n"
+        "    defaults = make_config()\n"
+        "    data: dict = field(default_factory=make_config)\n"
+        "    handler = staticmethod(helper)\n\n"
+        "    def method(self):\n        return inner()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    cfg = _node_id(result, "app.Cfg")
+    method = _node_id(result, "app.Cfg.method")
+    make_config = _node_id(result, "app.make_config")
+    helper = _node_id(result, "app.helper")
+    inner = _node_id(result, "app.inner")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    assert (cfg, make_config, RelationshipKind.CALLS.value) in relationships
+    assert (cfg, make_config, RelationshipKind.REFERENCES.value) in relationships
+    assert (cfg, helper, RelationshipKind.REFERENCES.value) in relationships
+    assert (cfg, helper, RelationshipKind.CALLS.value) not in relationships
+    # Methods keep their own scope: a call in a method body is not hoisted to
+    # the class merely because the class body is now visited.
+    assert (method, inner, RelationshipKind.CALLS.value) in relationships
+    assert (cfg, inner, RelationshipKind.CALLS.value) not in relationships

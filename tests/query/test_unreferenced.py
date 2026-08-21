@@ -271,3 +271,31 @@ def test_unreferenced_stale_graph_still_rejects_query_path_escape(
 
     assert status == 2
     assert "query path escapes root: ../outside.py" in captured.err
+
+
+def test_unreferenced_excludes_symbols_used_only_in_a_class_body(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A class body executes at definition time, so a factory or callable used
+    # only there is live code; before class bodies were visited both targets
+    # below were reported as dead.
+    _write(
+        tmp_path,
+        "config.py",
+        "from dataclasses import dataclass, field\n\n"
+        "def make_config():\n    return {}\n\n"
+        "def helper():\n    return 1\n\n"
+        "def orphan():\n    pass\n\n"
+        "@dataclass\n"
+        "class Cfg:\n"
+        "    data: dict = field(default_factory=make_config)\n"
+        "    handler = staticmethod(helper)\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(["query", "unreferenced", "--graph", str(graph), "--root", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "config.py:9  config.orphan  function\nconfig.py:13  config.Cfg  class\n"
