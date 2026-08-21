@@ -285,6 +285,126 @@ def test_memo_guard_rejects_non_dict_start() -> None:
         GraphDocument.from_dict(doc_data)
 
 
+# --- Adversarial memo guard tests (reviewer-added) ---
+# These exercise guard paths not covered by AC-17's named scenarios,
+# specifically to confirm that no combination of valid-looking but
+# malformed input can bypass a guard and be served from the memo.
+
+
+def test_memo_guard_rejects_bool_in_character_position() -> None:
+    """Adversarial: {"character": True} must be rejected by type(sc) is int
+    guard, even when the line value matches a memoized location."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": 1, "character": True},
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="must be an integer"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_non_dict_end() -> None:
+    """Adversarial: range.end is not a dict -- must raise ValueError
+    ('range requires an end object'), not AttributeError. Complements the
+    existing non-dict-start test to cover the isinstance(end_raw, dict) guard."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": 1, "character": 0},
+            "end": "not-a-dict",
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="range requires an 'end' object"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_extra_field_in_position() -> None:
+    """Adversarial: a position dict with an extra field {"line", "character", "z"}
+    whose line/character values match a memoized location must be rejected by the
+    key-set guard (start_raw.keys() == _POSITION_FIELDS)."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": 1, "character": 0, "z": 99},
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="unsupported field"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_not_poisoned_by_failed_construction() -> None:
+    """Adversarial: a location with a negative line passes all memo guards
+    (type(-1) is int is True) but fails at Position.__post_init__. The
+    second relationship carries the same location shape with line: -1,
+    and a third relationship carries the same shape with line: 0.
+    This proves: (1) failed construction does not poison the memo, and
+    (2) a subsequent valid parse still succeeds."""
+    source_id = "node:sha256:" + "a" * 64
+    target_id = "node:sha256:" + "b" * 64
+
+    valid_loc: dict[str, object] = {
+        "path": "b.py",
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 5},
+        },
+    }
+    bad_loc: dict[str, object] = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": -1, "character": 0},
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = {
+        "format": "minotaur-graph",
+        "format_version": "0.1.0",
+        "coordinate_encoding": "utf-8",
+        "nodes": [
+            {
+                "id": source_id,
+                "identity": {"basis": "file-path", "namespace": "test"},
+                "node_class": "file",
+                "label": "a.py",
+                "path": "a.py",
+            },
+            {
+                "id": target_id,
+                "identity": {"basis": "file-path", "namespace": "test"},
+                "node_class": "file",
+                "label": "b.py",
+                "path": "b.py",
+            },
+        ],
+        "relationships": [
+            {
+                "source": source_id,
+                "target": target_id,
+                "kind": "calls",
+                "evidence": [
+                    {"provenance": "static-analysis", "locations": [valid_loc]},
+                ],
+            },
+            {
+                "source": source_id,
+                "target": target_id,
+                "kind": "imports",
+                "evidence": [
+                    {"provenance": "static-analysis", "locations": [bad_loc]},
+                ],
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="non-negative"):
+        GraphDocument.from_dict(doc_data)
+
+
 def test_extensions_are_deeply_immutable_but_serialize_as_json() -> None:
     extensions = {"example": {"nested": {"values": ["one"]}}}
     document = GraphDocument(
