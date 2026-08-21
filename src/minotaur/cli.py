@@ -169,9 +169,34 @@ def _run_git(root: Path, arguments: Sequence[str]) -> subprocess.CompletedProces
         return None
 
 
-def _load_and_refresh_graph(
-    graph_path: Path, root: Path, no_refresh: bool
-) -> tuple[GraphDocument, tuple[Diagnostic, ...], Drift]:
+@dataclass(frozen=True, slots=True)
+class _QueryGraph:
+    """One graph a query will answer from, with how it was obtained.
+
+    ``refreshed`` is recorded here rather than re-derived by each caller from
+    ``drift``/``--no-refresh``: whether the file on disk was rewritten is a
+    fact of this function, and a second spelling of the condition elsewhere
+    could disagree with what actually happened.
+    """
+
+    document: GraphDocument
+    diagnostics: tuple[Diagnostic, ...]
+    drift: Drift
+    refreshed: bool
+
+
+def _report_stale(paths: Sequence[str]) -> None:
+    """Print one ``stale:`` line per drifted path.
+
+    Both freshness modes report the same per-path lines through this helper so
+    an agent can parse one form regardless of whether the graph was then
+    refreshed or answered as-is.
+    """
+    for path in paths:
+        print(f"minotaur: stale: {path}", file=sys.stderr)
+
+
+def _load_and_refresh_graph(graph_path: Path, root: Path, no_refresh: bool) -> _QueryGraph:
     """Load a query graph, refreshing its recorded selection when stale.
 
     Callers use the returned drift's ``paths``/``is_clean`` value for warnings
@@ -180,15 +205,22 @@ def _load_and_refresh_graph(
     loaded = load_graph_file(graph_path)
     observed = drift(loaded.document, root)
     if observed.is_clean:
-        return loaded.document, (), observed
+        return _QueryGraph(loaded.document, (), observed, False)
     if no_refresh:
-        for path in observed.paths:
-            print(f"minotaur: stale: {path}", file=sys.stderr)
-        return loaded.document, (), observed
+        _report_stale(observed.paths)
+        return _QueryGraph(loaded.document, (), observed, False)
 
     recorded = recorded_selection(loaded.document)
     if not recorded:
         raise ValueError("graph has no recorded source selection; cannot refresh")
+    # Announce the rewrite before performing it, and from the same drift the
+    # refusal path reports: a refresh replaces the file an agent may have
+    # analyzed earlier, so it must never be the one silent freshness outcome.
+    print(
+        f"minotaur: refreshed graph ({len(observed.paths)} drifted paths)",
+        file=sys.stderr,
+    )
+    _report_stale(observed.paths)
     all_targets = tuple(root / target for target in recorded)
     existing_targets = tuple(target for target in all_targets if target.exists())
     result = _analyze_selection(
@@ -198,7 +230,7 @@ def _load_and_refresh_graph(
         True,
         metadata_targets=all_targets,
     )
-    return result.document, result.diagnostics, observed
+    return _QueryGraph(result.document, result.diagnostics, observed, True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,19 +368,26 @@ def _run_graph_query(query: argparse.Namespace) -> int:
     handler = _GRAPH_QUERIES.get(query.name)
     if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
         raise ValueError(f"unsupported query: {query.name}")
-    document, diagnostics, observed = _load_and_refresh_graph(
-        Path(query.graph), Path(query.root).resolve(), query.no_refresh
-    )
-    index = GraphIndex.build(document)
+    graph = _load_and_refresh_graph(Path(query.graph), Path(query.root).resolve(), query.no_refresh)
+    index = GraphIndex.build(graph.document)
     # No symbol guard here: each query resolves its own name through
     # GraphIndex.resolve, whose SymbolResolutionError is a ValueError and so
     # reaches _query's handler as an exit-2 error message.  A membership test
     # duplicated here previously accepted duplicate labels that the queries
     # then answered with an empty result.
-    records = handler.run(query, index, observed)
-    output = render_json(query.name, records) if query.json else handler.render_text(records)
+    records = handler.run(query, index, graph.drift)
+    output = (
+        render_json(
+            query.name,
+            records,
+            refreshed=graph.refreshed,
+            stale=graph.drift.paths,
+        )
+        if query.json
+        else handler.render_text(records)
+    )
     print(output, end="")
-    return 1 if diagnostics else 0
+    return 1 if graph.diagnostics else 0
 
 
 def _add_query_subparsers(query: argparse.ArgumentParser) -> None:

@@ -30,8 +30,17 @@ recorded selection and atomically rewrites `GRAPH`. It then answers from the
 new snapshot. A refresh that produced source diagnostics returns exit status
 `1`, just like `analyze`; a successful refresh returns `0`.
 
-`--no-refresh` answers from the existing graph and prints one warning to stderr
-for each drifted root-relative path, for example:
+A refresh is never silent. Before rewriting `GRAPH`, Minotaur announces it on
+stderr and lists every drifted root-relative path:
+
+```text
+minotaur: refreshed graph (2 drifted paths)
+minotaur: stale: src/example.py
+minotaur: stale: src/removed.py
+```
+
+`--no-refresh` answers from the existing graph and prints the same one warning
+per drifted path, without the `refreshed graph` line:
 
 ```text
 minotaur: stale: src/example.py
@@ -217,6 +226,21 @@ Every query supports `--json` where it is shown above. JSON is deterministic,
 uses the same records as text, and contains no node IDs, SHA-256 node digests,
 or evidence/provenance blocks. Empty result sets are represented by an empty
 `results` array (or the corresponding empty diff arrays).
+
+`callers`, `definitions`, `impact`, and `unreferenced` also report the
+freshness of the answer alongside it, so an agent reading only stdout learns
+what stderr would have told it:
+
+```json
+{"query":"definitions","refreshed":true,"results":[],"stale":["src/example.py"]}
+```
+
+`refreshed` is `true` when this invocation rewrote `GRAPH`, and `stale` lists
+the drifted root-relative paths that caused it — sorted, and reported whether
+or not the refresh happened, so `--no-refresh` names the paths its answer may
+be wrong about. A clean graph reports `false` and `[]`. `diff` and `context`
+refresh nothing and keep their own envelopes; `context` reports per-file
+staleness in its result instead.
 
 Exit statuses are:
 

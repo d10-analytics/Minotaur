@@ -21,11 +21,29 @@ def dump_json(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
 
 
-def render_json(query_name: str, records: Sequence[QueryRecord]) -> str:
-    """Render the shared ``{"query", "results"}`` envelope for record queries.
+def render_json(
+    query_name: str,
+    records: Sequence[QueryRecord],
+    *,
+    refreshed: bool,
+    stale: Sequence[str],
+) -> str:
+    """Render the shared record-query envelope for one query result.
 
     Text rendering stays with each query module because its line format is
     query-specific, but the JSON envelope is one contract for agents, so it is
     written once here instead of being hand-rolled per module.
+
+    ``refreshed`` and ``stale`` are required rather than defaulted: freshness
+    is the answer's provenance, and an agent parsing JSON has no stderr to
+    read, so a caller must state whether the graph it answered from was
+    rewritten and which paths had drifted.
     """
-    return dump_json({"query": query_name, "results": [record.to_dict() for record in records]})
+    return dump_json(
+        {
+            "query": query_name,
+            "refreshed": refreshed,
+            "results": [record.to_dict() for record in records],
+            "stale": sorted(stale),
+        }
+    )
