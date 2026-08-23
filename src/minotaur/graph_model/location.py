@@ -19,9 +19,33 @@ from minotaur.graph_model._parsing import reject_unknown_fields, reject_unpaired
 
 # Module-level constants for reject_unknown_fields — hoisted from per-call
 # frozenset literals to avoid 118 k+ allocations per graph load (F-13).
+# These are an ALLOWED-SET UPPER BOUND: reject_unknown_fields checks that a
+# dict's keys are a SUBSET of these, so an input missing some of these keys
+# still passes (a required-key check is done separately by each from_dict).
 _POSITION_FIELDS = frozenset({"line", "character"})
 _RANGE_FIELDS = frozenset({"start", "end"})
 _LOCATION_FIELDS = frozenset({"path", "range"})
+
+# Memo-key field sets for the Location interning fast path in from_dict
+# below (D-08). These look identical to the schema field sets above but
+# serve an incompatible purpose: the memo guard treats each of these as an
+# EXACT required key set (`d.keys() == _MEMO_*_FIELDS`), not an upper
+# bound, because the memo key tuple built further down reads exactly these
+# fields (path, start.line, start.character, end.line, end.character) and
+# nothing else. If the memo guard used the schema constants above instead,
+# adding a new optional field to Location/Range/Position would silently
+# widen the guard's accepted key set while the hard-coded memo key tuple
+# stayed the same width — two locations differing only in the new field
+# would then collide in the memo, and the second would be silently
+# replaced by the first's cached value.
+#
+# INVARIANT: each _MEMO_*_FIELDS set must name exactly the components read
+# into the memo key tuple below (memo_key = (path_raw, sl, sc, el, ec)).
+# Keep these two in lockstep by hand; test_graph_model_core.py exercises
+# this coupling behaviorally.
+_MEMO_POSITION_FIELDS = frozenset({"line", "character"})
+_MEMO_RANGE_FIELDS = frozenset({"start", "end"})
+_MEMO_LOCATION_FIELDS = frozenset({"path", "range"})
 
 # The v1 schema requires paths that are:
 #   - non-empty
@@ -186,10 +210,10 @@ class Location:
                 if (
                     isinstance(start_raw, dict)
                     and isinstance(end_raw, dict)
-                    and data.keys() == _LOCATION_FIELDS
-                    and range_raw.keys() == _RANGE_FIELDS
-                    and start_raw.keys() == _POSITION_FIELDS
-                    and end_raw.keys() == _POSITION_FIELDS
+                    and data.keys() == _MEMO_LOCATION_FIELDS
+                    and range_raw.keys() == _MEMO_RANGE_FIELDS
+                    and start_raw.keys() == _MEMO_POSITION_FIELDS
+                    and end_raw.keys() == _MEMO_POSITION_FIELDS
                 ):
                     path_raw = data.get("path")
                     if type(path_raw) is str:
