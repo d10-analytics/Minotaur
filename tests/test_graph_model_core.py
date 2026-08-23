@@ -405,6 +405,152 @@ def test_memo_not_poisoned_by_failed_construction() -> None:
         GraphDocument.from_dict(doc_data)
 
 
+def test_memo_key_includes_path_component() -> None:
+    """M-4: two locations that share a range but have different paths must
+    not collide in the memo. The first relationship's evidence populates
+    the memo with path "a.py"; the second relationship's evidence uses the
+    same range under path "b.py" and must parse to its own path, not the
+    first's cached one."""
+    shared_range = {
+        "start": {"line": 1, "character": 0},
+        "end": {"line": 1, "character": 5},
+    }
+    loc_a = {"path": "a.py", "range": shared_range}
+    loc_b = {"path": "b.py", "range": shared_range}
+    doc_data = _make_guard_test_document(loc_a, loc_b)
+
+    document = GraphDocument.from_dict(doc_data)
+
+    parsed_a = document.relationships[0].evidence[0].locations[0]
+    parsed_b = document.relationships[1].evidence[0].locations[0]
+    assert parsed_a.path == "a.py"
+    assert parsed_b.path == "b.py"
+    assert parsed_a is not parsed_b
+
+
+# --- M-5: memo-key component coupling ---
+# Each pair below is identical except in exactly one of the five components
+# the memo key is built from (path, start.line, start.character, end.line,
+# end.character). If the memo key tuple ever dropped one of these
+# components -- e.g. because a maintainer added a field to
+# _LOCATION_FIELDS and the memo guard's key-set check widened along with
+# it while the hard-coded key tuple stayed the same shape -- the second
+# location in the affected pair would collide with the first in the memo
+# and be silently served the first's (wrong) value.
+_MEMO_KEY_COMPONENT_CASES = [
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "b.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        id="path",
+    ),
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 2, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        id="start.line",
+    ),
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 9}, "end": {"line": 1, "character": 15}},
+        },
+        id="start.character",
+    ),
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 2, "character": 5}},
+        },
+        id="end.line",
+    ),
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 9}},
+        },
+        id="end.character",
+    ),
+]
+
+
+@pytest.mark.parametrize(("loc_a", "loc_b"), _MEMO_KEY_COMPONENT_CASES)
+def test_memo_key_distinguishes_every_component(
+    loc_a: dict[str, object], loc_b: dict[str, object]
+) -> None:
+    """M-5: verifies the coupling between _MEMO_LOCATION_FIELDS /
+    _MEMO_RANGE_FIELDS / _MEMO_POSITION_FIELDS and the memo key tuple by
+    proving, for each of the five components the key is built from, that
+    two locations differing only in that component parse independently
+    rather than one being served from the other's memo entry."""
+    doc_data = _make_guard_test_document(loc_a, loc_b)
+
+    document = GraphDocument.from_dict(doc_data)
+
+    parsed_a = document.relationships[0].evidence[0].locations[0]
+    parsed_b = document.relationships[1].evidence[0].locations[0]
+    assert parsed_a.to_dict() == loc_a
+    assert parsed_b.to_dict() == loc_b
+    assert parsed_a is not parsed_b
+
+
+def test_from_dict_memo_interns_equal_locations() -> None:
+    """L-5: proves the memo actually interns rather than merely producing
+    equal-but-distinct objects. Parses the python-workflow example graph
+    (which repeats several locations across nodes and evidence) and
+    asserts that every group of equal-valued Locations shares exactly one
+    object identity -- the count of distinct values equals the count of
+    distinct ids."""
+    source = json.loads((PYTHON_WORKFLOW / "minotaur-graph.json").read_text(encoding="utf-8"))
+    document = GraphDocument.from_dict(source)
+
+    locations: list[Location] = [
+        node.location for node in document.nodes if node.location is not None
+    ]
+    for relationship in document.relationships:
+        for evidence in relationship.evidence:
+            locations.extend(evidence.locations)
+
+    assert len(locations) > 0, "expected the example graph to contain locations"
+
+    distinct_by_value = {loc for loc in locations}
+    distinct_by_id = {id(loc) for loc in locations}
+    assert len(locations) > len(distinct_by_value), (
+        "expected repeated location values in the example graph to exercise interning"
+    )
+    assert len(distinct_by_value) == len(distinct_by_id)
+
+    # Every occurrence of an equal Location value must be the SAME object,
+    # not merely an equal one -- this is the actual interning claim.
+    by_value: dict[Location, set[int]] = {}
+    for loc in locations:
+        by_value.setdefault(loc, set()).add(id(loc))
+    for loc, ids in by_value.items():
+        assert len(ids) == 1, f"equal Location {loc!r} was not interned to a single object"
+
+
 def test_extensions_are_deeply_immutable_but_serialize_as_json() -> None:
     extensions = {"example": {"nested": {"values": ["one"]}}}
     document = GraphDocument(
