@@ -151,7 +151,19 @@ def _analyze_selection(
     # so stamping the resolved side would leave a symlinked graph permanently
     # unstamped and revalidated on every read.
     _write_atomically(output, content)
-    _write_atomically(stamp_path(output_path), f"{graph_digest(content)}\n".encode("ascii"))
+    sidecar = stamp_path(output_path)
+    try:
+        _write_atomically(sidecar, f"{graph_digest(content)}\n".encode("ascii"))
+    except OSError as error:
+        # M-3: the graph itself is already durable at this point (the write
+        # above succeeded); only the trust sidecar failed. Re-raise with a
+        # message naming the sidecar path and stating that fact, rather than
+        # letting the raw mkstemp temporary-file errno bubble up to the user
+        # (D-04's exit-2 policy for this failure is unchanged).
+        reason = error.strerror or str(error)
+        raise OSError(
+            f"could not write graph stamp {sidecar}: {reason} (the graph itself was written)"
+        ) from error
     _warn_unresolved_imports(result.document, workspace.root)
     return result
 
@@ -629,10 +641,16 @@ def _visualize(arguments: argparse.Namespace) -> int:
     input_path = Path(arguments.input)
     try:
         loaded = load_graph_file(input_path, validate=arguments.validate)
-        _stamp_if_validated(input_path, loaded)
         # D-12: a freshness guard was considered for visualize but declined;
         # rendering need not have a source root and remains cheap to repeat.
         output = _preflight_output(Path(arguments.output), (input_path.resolve(),), arguments.force)
+        # M-4: stamp only after the output preflight passes. Stamping before
+        # this check meant `visualize --output existing.html` without
+        # `--force` exited 2 while still creating `<input>.sha256` on disk —
+        # a filesystem write from a command that was about to refuse to run.
+        # `loaded.digest` is immutable, so deferring the stamp changes nothing
+        # about what gets written to the sidecar.
+        _stamp_if_validated(input_path, loaded)
         source_root = Path(arguments.source_root) if arguments.source_root is not None else None
         excerpts = prepare_excerpts(loaded.canonical, source_root)
         content = render_html(build_presentation(loaded.canonical, excerpts))
@@ -752,6 +770,14 @@ def _write_atomically(output: Path, content: bytes) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        # L-1: mkstemp creates the temporary file mode 0600, which the graph
+        # and sidecar would otherwise inherit through os.replace. In a shared
+        # checkout that leaves the file unreadable to anyone but the writer,
+        # who then silently pays the full-validation path forever. Widen the
+        # mode to whatever the process umask allows, same as a normal create.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(temporary, 0o666 & ~umask)
         os.replace(temporary, output)
     except OSError:
         # If writing fails before replacement, remove only the file created by
