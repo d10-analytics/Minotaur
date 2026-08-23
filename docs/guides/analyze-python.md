@@ -117,6 +117,13 @@ did not just write, is fully validated once by the first Minotaur command that
 reads it and stamped then, so later reads are fast. No manual migration or
 conversion step is needed.
 
+`scripts/benchmark_graph_load.py --graph GRAPH.json --root ROOT [--repeats N]
+[--verbose]` measures `analyze`, `query definitions --no-refresh`, the
+in-process loading and query-index components, and `serialize` against one
+graph, reporting median (and, with `--verbose`, min/max) wall-clock time per
+step. It never modifies the `--graph` path: `analyze` and every other timed
+step run against a temporary copy created and removed beside it.
+
 ## Diagnostics and unresolved references
 
 If a source file cannot be read or parsed, the analyzer reports a diagnostic
