@@ -17,9 +17,9 @@ Produces a fixed-width table of wall-clock measurements for:
   4. ``serialize`` on the loaded document with SHA-256 of output (AC-10)
 
 The script never writes to the caller-supplied ``--graph`` path: analyze and
-the component/serialize benchmarks all run against a temporary copy created
-next to it, which is removed (along with its sidecar) before the script
-exits.
+the component/serialize benchmarks all run against a graph in an
+invocation-owned temporary directory, which is removed (along with every
+artifact created there) before the script exits.
 
 Run from any directory with the .venv's Python:
 
@@ -35,6 +35,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -289,70 +290,68 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"Error: root directory not found: {root}\n")
         return 1
 
-    # M-1: never write the caller's --graph path. All analyze/query/component
-    # benchmarks run against a temporary graph beside it, removed on exit
-    # along with its sidecar.
-    temp_graph_path = graph_path.with_name(graph_path.name + ".bench.json")
-    temp_sidecar_path = temp_graph_path.with_name(temp_graph_path.name + ".sha256")
+    # M-1: never write the caller's --graph path. TemporaryDirectory creates a
+    # unique, invocation-owned location so concurrent runs and pre-existing
+    # sibling files cannot collide. Its context removes the graph, sidecar,
+    # and any other artifacts produced there on every exit path.
+    with tempfile.TemporaryDirectory(prefix="minotaur-benchmark-") as temp_directory:
+        temp_graph_path = Path(temp_directory) / graph_path.name
 
-    sys.stderr.write(f"Graph:        {graph_path}\n")
-    sys.stderr.write(f"Temp graph:   {temp_graph_path}\n")
-    sys.stderr.write(f"Root:         {root}\n")
-    sys.stderr.write(f"Repeats:      {repeats}\n")
-    sys.stderr.write(f"Python:       {python}\n\n")
+        sys.stderr.write(f"Graph:        {graph_path}\n")
+        sys.stderr.write(f"Temp graph:   {temp_graph_path}\n")
+        sys.stderr.write(f"Root:         {root}\n")
+        sys.stderr.write(f"Repeats:      {repeats}\n")
+        sys.stderr.write(f"Python:       {python}\n\n")
 
-    try:
-        rows: list[tuple[str, float, float, float]] = []
+        try:
+            rows: list[tuple[str, float, float, float]] = []
 
-        # 1. analyze (AC-09), into the temporary path only.
-        sys.stderr.write("Benchmarking: analyze ...\n")
-        analyze_times = _benchmark_analyze(python, root, temp_graph_path, repeats)
-        rows.append(
-            (
-                "analyze --root . --force .",
-                _median(analyze_times),
-                min(analyze_times),
-                max(analyze_times),
+            # 1. analyze (AC-09), into the temporary path only.
+            sys.stderr.write("Benchmarking: analyze ...\n")
+            analyze_times = _benchmark_analyze(python, root, temp_graph_path, repeats)
+            rows.append(
+                (
+                    "analyze --root . --force .",
+                    _median(analyze_times),
+                    min(analyze_times),
+                    max(analyze_times),
+                )
             )
-        )
 
-        # 2. query definitions (AC-05), against the freshly analyzed temp graph.
-        symbol = _find_query_symbol(temp_graph_path)
-        sys.stderr.write(f"Benchmarking: query definitions {symbol} ...\n")
-        query_times = _benchmark_query(python, temp_graph_path, root, symbol, repeats)
-        rows.append(
-            (
-                f"query definitions {symbol} --no-refresh",
-                _median(query_times),
-                min(query_times),
-                max(query_times),
+            # 2. query definitions (AC-05), against the freshly analyzed temp graph.
+            symbol = _find_query_symbol(temp_graph_path)
+            sys.stderr.write(f"Benchmarking: query definitions {symbol} ...\n")
+            query_times = _benchmark_query(python, temp_graph_path, root, symbol, repeats)
+            rows.append(
+                (
+                    f"query definitions {symbol} --no-refresh",
+                    _median(query_times),
+                    min(query_times),
+                    max(query_times),
+                )
             )
-        )
 
-        # 3. In-process components
-        sys.stderr.write("Benchmarking: in-process components ...\n")
-        components = _benchmark_components(temp_graph_path, root, repeats)
-        for name, times in components.items():
-            rows.append((name, _median(times), min(times), max(times)))
-        components_sum = sum(_median(times) for times in components.values())
-        rows.append(("components sum", components_sum, components_sum, components_sum))
+            # 3. In-process components
+            sys.stderr.write("Benchmarking: in-process components ...\n")
+            components = _benchmark_components(temp_graph_path, root, repeats)
+            for name, times in components.items():
+                rows.append((name, _median(times), min(times), max(times)))
+            components_sum = sum(_median(times) for times in components.values())
+            rows.append(("components sum", components_sum, components_sum, components_sum))
 
-        # 4. serialize (AC-10)
-        sys.stderr.write("Benchmarking: serialize ...\n")
-        serialize_times, serialize_sha = _benchmark_serialize(temp_graph_path, repeats)
-        rows.append(
-            ("serialize", _median(serialize_times), min(serialize_times), max(serialize_times))
-        )
+            # 4. serialize (AC-10)
+            sys.stderr.write("Benchmarking: serialize ...\n")
+            serialize_times, serialize_sha = _benchmark_serialize(temp_graph_path, repeats)
+            rows.append(
+                ("serialize", _median(serialize_times), min(serialize_times), max(serialize_times))
+            )
 
-        # Print results
-        table = _format_table(rows, serialize_sha, verbose)
-        print(table)
-    except _SubprocessError as error:
-        sys.stderr.write(str(error))
-        return 1
-    finally:
-        temp_graph_path.unlink(missing_ok=True)
-        temp_sidecar_path.unlink(missing_ok=True)
+            # Print results
+            table = _format_table(rows, serialize_sha, verbose)
+            print(table)
+        except _SubprocessError as error:
+            sys.stderr.write(str(error))
+            return 1
 
     return 0
 
