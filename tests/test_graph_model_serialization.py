@@ -484,6 +484,27 @@ _EDGE_CASES: list[tuple[str, object]] = [
     ("string_simple", "hello"),
     # Mixed nesting
     ("mixed_deep", {"z": [1, {"b": 2, "a": [True, None, "x"]}, 3], "a": "first"}),
+    # Astral keys over nested containers — the astral path sorts keys itself
+    # rather than delegating to json.dumps(sort_keys=True), so every container
+    # type it recurses through needs coverage.
+    ("astral_nested_dict", {"\U0001d11e": {"z": 1, "a": 2}}),
+    ("astral_nested_list", {"\U0001d11e": [{"z": 1, "a": 2}]}),
+    ("astral_nested_tuple", {"\U0001d11e": ({"z": 1, "a": 2},)}),
+    ("astral_tuple_of_tuples", {"\U0001d11e": (({"z": 1, "a": 2},), ({"y": 3, "b": 4},))}),
+    ("astral_tuple_in_list", {"\U0001d11e": [({"z": 1, "a": 2},)]}),
+    (
+        "astral_deep_mixed_tree",
+        {
+            "\U0001d11e": [
+                {"z": 1, "\U0001f600": ({"q": 2, "b": [{"n": 1, "m": 2}]},)},
+                ({"y": 3, "a": {"w": 4, "\U0001d11e": 5}},),
+            ],
+            "b": ({"z": 6, "a": 7},),
+        },
+    ),
+    # Astral key only at a nested level: the root dict is BMP-keyed, but the
+    # astral path still triggers for the whole document.
+    ("astral_key_only_nested", {"root": ({"\U0001d11e": {"z": 1, "a": 2}, "b": 3},)}),
 ]
 
 
