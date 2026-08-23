@@ -425,6 +425,68 @@ def test_analyze_writes_sidecar_matching_graph_bytes_and_query_refresh_updates_i
     assert sidecar.read_text(encoding="ascii").strip() == new_expected_digest
 
 
+def _symlinked_graph(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Return (source_root, symlink graph path, real graph path) for a symlink output."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    real_directory = tmp_path / "build"
+    real_directory.mkdir()
+    real = real_directory / "graph.json"
+    link = tmp_path / "graph.json"
+    link.symlink_to(real)
+    return root, link, real
+
+
+def test_analyze_through_symlink_stamps_beside_the_link_not_the_resolved_file(
+    tmp_path: Path,
+) -> None:
+    """H-1: the sidecar follows the caller path so the next read is a trusted load."""
+    root, link, real = _symlinked_graph(tmp_path)
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(link), str(root)])
+    assert status == 0
+
+    # The graph itself went through the symlink to the real file.
+    assert link.is_symlink()
+    assert real.is_file()
+    graph_bytes = real.read_bytes()
+    assert graph_bytes.startswith(b"{")
+
+    # The sidecar sits beside the link — the path every reader derives from.
+    link_sidecar = stamp_path(link)
+    assert link_sidecar.exists()
+    assert not stamp_path(real).exists()
+    expected = hashlib.sha256(graph_bytes).hexdigest()
+    assert link_sidecar.read_text(encoding="ascii").strip() == expected
+
+    # And so the next read through the link skips schema validation.
+    assert load_graph_file(link).validated is False
+
+
+def test_query_refresh_through_symlink_updates_the_sidecar_beside_the_link(
+    tmp_path: Path, capsys: object
+) -> None:
+    """H-1: the refresh write path stamps the caller path too, not the resolved one."""
+    root, link, real = _symlinked_graph(tmp_path)
+    assert cli.main(["analyze", "--root", str(root), "--output", str(link), str(root)]) == 0
+    original_bytes = real.read_bytes()
+
+    # Drift the source so the query refreshes (and rewrites) the graph.
+    _write(root, "app.py", "def app():\n    return 2\n")
+    capsys.readouterr()  # type: ignore[attr-defined]
+    status = cli.main(["query", "definitions", "--graph", str(link), "--root", str(root), "app"])
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 0
+    assert "refreshed graph" in captured.err
+
+    assert link.is_symlink()
+    new_bytes = real.read_bytes()
+    assert new_bytes != original_bytes
+    expected = hashlib.sha256(new_bytes).hexdigest()
+    assert stamp_path(link).read_text(encoding="ascii").strip() == expected
+    assert load_graph_file(link).validated is False
+
+
 def test_stamp_write_failure_exits_two_and_leaves_mismatched_sidecar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: object
 ) -> None:
