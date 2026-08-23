@@ -10,6 +10,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file
 from minotaur.graph_model.provenance import NodeClass, RelationshipKind
@@ -546,8 +548,15 @@ def test_duplicate_imports_are_deduplicated_to_one_node_per_triple(tmp_path: Pat
     assert not any(issue.code == IssueCode.NODE_ID_DUPLICATE for issue in validation.issues)
 
 
-def test_unresolved_dedup_scales_sublinearly_with_site_count(tmp_path: Path) -> None:
-    """AC-08 (b): 25,000 distinct unresolved sites complete in <= 3 seconds."""
+@pytest.mark.slow
+def test_unresolved_dedup_completes_25000_sites_within_three_seconds(tmp_path: Path) -> None:
+    """AC-08 (b): 25,000 distinct unresolved sites complete in <= 3 seconds.
+
+    This is an absolute wall-clock gate on a single size point, not a scaling
+    comparison. It discriminates the set-based dedup (this branch) from the
+    O(n^2) scan it replaced: observed 0.56s on this branch vs 5.38s on main,
+    for 25,000 sites, measured 2026-08-23.
+    """
     site_count = 25_000
     # Generate a module with site_count distinct unresolved import statements.
     # Each `import unique_N` is a distinct (origin, reference_text, location)
