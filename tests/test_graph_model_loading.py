@@ -398,7 +398,9 @@ class TestSidecarFallback:
         state_id: str,
         setup: object,
     ) -> None:
-        """Non-matching sidecar with an invalid graph raises GraphLoadError."""
+        """Non-matching sidecar with a schema-invalid graph raises GraphLoadError
+        with the same message ``load_graph_bytes`` produces on a fully-validating
+        path (AC-02: "the same message as on main")."""
         invalid = {"not": "a valid graph"}
         graph_path = tmp_path / "graph.json"
         data = json.dumps(invalid).encode()
@@ -406,8 +408,62 @@ class TestSidecarFallback:
         digest = graph_digest(data)
         setup(graph_path, digest)  # type: ignore[operator]
 
-        with pytest.raises(GraphLoadError):
+        with pytest.raises(GraphLoadError) as always_validated:
+            load_graph_bytes(data)
+        expected_message = str(always_validated.value)
+        # Pin a stable substring so a reworded schema error is still caught
+        # even if both the fallback and reference paths changed together.
+        assert "'format' is a required property" in expected_message
+
+        with pytest.raises(GraphLoadError) as fallback:
             load_graph_file(graph_path)
+        assert str(fallback.value) == expected_message
+
+    @pytest.mark.parametrize(
+        "state_id, setup",
+        _SIDECAR_STATES,
+        ids=[s[0] for s in _SIDECAR_STATES],
+    )
+    def test_fallback_rejects_semantically_invalid_graph(
+        self,
+        tmp_path: Path,
+        state_id: str,
+        setup: object,
+    ) -> None:
+        """Non-matching sidecar with a schema-valid but semantically invalid
+        graph (a relationship endpoint that names no declared node) raises
+        GraphLoadError with the same message ``load_graph_bytes`` produces on
+        a fully-validating path (AC-02), covering the ``validate_document``
+        seam as well as the ``_validate_wire_shape`` seam above."""
+        invalid = {
+            "format": "minotaur-graph",
+            "format_version": "0.1.0",
+            "coordinate_encoding": "utf-8",
+            "nodes": [],
+            "relationships": [
+                {
+                    "source": f"node:sha256:{'a' * 64}",
+                    "target": f"node:sha256:{'b' * 64}",
+                    "kind": "contains",
+                    "evidence": [{"provenance": "static-analysis"}],
+                }
+            ],
+        }
+        graph_path = tmp_path / "graph.json"
+        data = json.dumps(invalid).encode()
+        graph_path.write_bytes(data)
+        digest = graph_digest(data)
+        setup(graph_path, digest)  # type: ignore[operator]
+
+        with pytest.raises(GraphLoadError) as always_validated:
+            load_graph_bytes(data)
+        expected_message = str(always_validated.value)
+        assert "relationship source" in expected_message
+        assert "does not identify a declared node" in expected_message
+
+        with pytest.raises(GraphLoadError) as fallback:
+            load_graph_file(graph_path)
+        assert str(fallback.value) == expected_message
 
     def test_load_graph_bytes_still_validates_stamped_bytes(self) -> None:
         """``load_graph_bytes`` with exact stamped-graph bytes runs the schema."""
