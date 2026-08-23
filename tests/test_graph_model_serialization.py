@@ -7,11 +7,90 @@ from pathlib import Path
 
 import pytest
 
-from minotaur.graph_model._parsing import _jcs_serialize
+from minotaur.graph_model._parsing import _jcs_serialize, _utf16_sort_key
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.serialization import canonicalize, serialize
 
 EXAMPLES = Path(__file__).parents[1] / "examples/synthetic-graphs"
+REPO_ROOT = Path(__file__).parents[1]
+
+
+# ---------------------------------------------------------------------------
+# Oracle: verbatim previous pure-Python JCS encoder (AC-10)
+# ---------------------------------------------------------------------------
+# This code was moved verbatim from src/minotaur/graph_model/_parsing.py.
+# It serves as the ground-truth reference for the C-encoder composition that
+# replaced it. The oracle must never be modified to match the implementation;
+# if they disagree the implementation is wrong.
+
+_JCS_ESCAPE_MAP: dict[str, str] = {
+    '"': '\\"',
+    "\\": "\\\\",
+    "\b": "\\b",
+    "\f": "\\f",
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+for _i in range(0x20):
+    _ch = chr(_i)
+    if _ch not in _JCS_ESCAPE_MAP:
+        _JCS_ESCAPE_MAP[_ch] = f"\\u{_i:04x}"
+
+
+def _jcs_encode(value: object, parts: list[str]) -> None:
+    """Recursively encode a value into JCS string fragments."""
+    if isinstance(value, bool):
+        parts.append("true" if value else "false")
+
+    elif value is None:
+        parts.append("null")
+
+    elif isinstance(value, str):
+        parts.append('"')
+        for ch in value:
+            escaped = _JCS_ESCAPE_MAP.get(ch)
+            if escaped is not None:
+                parts.append(escaped)
+            else:
+                parts.append(ch)
+        parts.append('"')
+
+    elif isinstance(value, int):
+        parts.append(str(value))
+
+    elif isinstance(value, dict):
+        parts.append("{")
+        sorted_keys = sorted(value.keys(), key=_utf16_sort_key)
+        for i, key in enumerate(sorted_keys):
+            if i > 0:
+                parts.append(",")
+            _jcs_encode(key, parts)
+            parts.append(":")
+            _jcs_encode(value[key], parts)
+        parts.append("}")
+
+    elif isinstance(value, list | tuple):
+        parts.append("[")
+        for i, item in enumerate(value):
+            if i > 0:
+                parts.append(",")
+            _jcs_encode(item, parts)
+        parts.append("]")
+
+    else:
+        raise TypeError(
+            f"JCS serialization does not support {type(value).__name__}; "
+            f"Minotaur v1 does not implement IEEE 754 float serialization"
+        )
+
+
+def _oracle_serialize(value: object) -> bytes:
+    """Oracle JCS serialization — the previous pure-Python encoder."""
+    parts: list[str] = []
+    _jcs_encode(value, parts)
+    return "".join(parts).encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -331,3 +410,160 @@ def test_jcs_nested_structure() -> None:
     value = {"b": [True, None, {"z": 1, "a": 2}], "a": "hello"}
     result = _jcs_serialize(value)
     assert result == b'{"a":"hello","b":[true,null,{"a":2,"z":1}]}'
+
+
+# ---------------------------------------------------------------------------
+# AC-10 (a): Oracle equality over every graph fixture
+# ---------------------------------------------------------------------------
+
+
+def _collect_graph_fixtures() -> list[Path]:
+    """Return all valid JSON graph fixtures under tests/ and examples/."""
+    paths: list[Path] = []
+    for directory in [REPO_ROOT / "tests", REPO_ROOT / "examples"]:
+        paths.extend(sorted(directory.rglob("*.json")))
+    return paths
+
+
+@pytest.mark.parametrize(
+    "fixture_path",
+    _collect_graph_fixtures(),
+    ids=lambda p: str(p.relative_to(REPO_ROOT)),
+)
+def test_oracle_equality_fixtures(fixture_path: Path) -> None:
+    """Implementation and oracle produce identical bytes for every fixture."""
+    source = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert _jcs_serialize(source) == _oracle_serialize(source)
+
+
+# ---------------------------------------------------------------------------
+# AC-10 (b): Generated edge-case sweep — oracle equality
+# ---------------------------------------------------------------------------
+
+
+_EDGE_CASES: list[tuple[str, object]] = [
+    # Astral-plane dict keys (non-BMP, surrogate pairs in UTF-16)
+    ("astral_key_musical", {"\U0001d11e": "treble clef"}),
+    ("astral_key_emoji", {"\U0001f600": "grinning"}),
+    # Astral keys in both insertion orders
+    ("astral_two_keys_ab", {"\U0001d11e": 1, "\U0001f600": 2}),
+    ("astral_two_keys_ba", {"\U0001f600": 2, "\U0001d11e": 1}),
+    # Private use area U+E000–U+FFFF (BMP, no surrogate pairs)
+    ("pua_key_e000", {"": "private use start"}),
+    ("pua_key_fffd", {"�": "replacement char"}),
+    # Every control character 0x00–0x1F
+    *[
+        (f"control_0x{i:02x}", {f"key_{i:02x}": f"val\x00contains{chr(i)}ctrl"})
+        for i in range(0x20)
+    ],
+    # Quote and backslash
+    ("quote_in_value", {"k": 'say "hello"'}),
+    ("backslash_in_value", {"k": "path\\to\\file"}),
+    ("quote_in_key", {'"quoted"': "v"}),
+    ("backslash_in_key", {"back\\slash": "v"}),
+    # Non-ASCII text
+    ("non_ascii_value", {"k": "café üñîçøðé"}),
+    ("non_ascii_key", {"üñî": "unicode key"}),
+    ("cjk_text", {"k": "世界"}),
+    # Ints beyond 2**53
+    ("big_int_pos", {"n": 2**53 + 1}),
+    ("big_int_neg", {"n": -(2**53 + 1)}),
+    ("very_big_int", {"n": 2**128}),
+    # Nested empty containers
+    ("empty_dict", {}),
+    ("empty_list", []),
+    ("nested_empty", {"a": {}, "b": [], "c": {"d": []}}),
+    ("deeply_nested_empty", [[[[{}]]]]),
+    # Scalars
+    ("bool_true", True),
+    ("bool_false", False),
+    ("null", None),
+    ("int_zero", 0),
+    ("int_negative", -42),
+    ("string_empty", ""),
+    ("string_simple", "hello"),
+    # Mixed nesting
+    ("mixed_deep", {"z": [1, {"b": 2, "a": [True, None, "x"]}, 3], "a": "first"}),
+    # Astral keys over nested containers — the astral path sorts keys itself
+    # rather than delegating to json.dumps(sort_keys=True), so every container
+    # type it recurses through needs coverage.
+    ("astral_nested_dict", {"\U0001d11e": {"z": 1, "a": 2}}),
+    ("astral_nested_list", {"\U0001d11e": [{"z": 1, "a": 2}]}),
+    ("astral_nested_tuple", {"\U0001d11e": ({"z": 1, "a": 2},)}),
+    ("astral_tuple_of_tuples", {"\U0001d11e": (({"z": 1, "a": 2},), ({"y": 3, "b": 4},))}),
+    ("astral_tuple_in_list", {"\U0001d11e": [({"z": 1, "a": 2},)]}),
+    (
+        "astral_deep_mixed_tree",
+        {
+            "\U0001d11e": [
+                {"z": 1, "\U0001f600": ({"q": 2, "b": [{"n": 1, "m": 2}]},)},
+                ({"y": 3, "a": {"w": 4, "\U0001d11e": 5}},),
+            ],
+            "b": ({"z": 6, "a": 7},),
+        },
+    ),
+    # Astral key only at a nested level: the root dict is BMP-keyed, but the
+    # astral path still triggers for the whole document.
+    ("astral_key_only_nested", {"root": ({"\U0001d11e": {"z": 1, "a": 2}, "b": 3},)}),
+]
+
+
+@pytest.mark.parametrize("name,value", _EDGE_CASES, ids=[c[0] for c in _EDGE_CASES])
+def test_oracle_equality_edge_cases(name: str, value: object) -> None:
+    """Implementation and oracle agree on every edge-case input."""
+    _ = name
+    assert _jcs_serialize(value) == _oracle_serialize(value)
+
+
+# ---------------------------------------------------------------------------
+# AC-10 (c): Float TypeError — both paths reject floats
+# ---------------------------------------------------------------------------
+
+
+def test_float_raises_implementation_top_level() -> None:
+    with pytest.raises(TypeError, match="float"):
+        _jcs_serialize(3.14)
+
+
+def test_float_raises_oracle_top_level() -> None:
+    with pytest.raises(TypeError, match="float"):
+        _oracle_serialize(3.14)
+
+
+def test_float_raises_implementation_nested_dict() -> None:
+    with pytest.raises(TypeError, match="float"):
+        _jcs_serialize({"a": 1.5})
+
+
+def test_float_raises_oracle_nested_dict() -> None:
+    with pytest.raises(TypeError, match="float"):
+        _oracle_serialize({"a": 1.5})
+
+
+def test_float_raises_implementation_nested_list() -> None:
+    with pytest.raises(TypeError, match="float"):
+        _jcs_serialize([1, 2.0, 3])
+
+
+def test_float_raises_oracle_nested_list() -> None:
+    with pytest.raises(TypeError, match="float"):
+        _oracle_serialize([1, 2.0, 3])
+
+
+# ---------------------------------------------------------------------------
+# AC-11: No production import of pure-Python encoder
+# ---------------------------------------------------------------------------
+
+
+def test_no_production_jcs_encode_or_escape_map() -> None:
+    """_jcs_encode and _JCS_ESCAPE_MAP must not appear in src/."""
+    src_dir = REPO_ROOT / "src"
+    violations: list[str] = []
+    for py_file in sorted(src_dir.rglob("*.py")):
+        content = py_file.read_text(encoding="utf-8")
+        for name in ("_jcs_encode", "_JCS_ESCAPE_MAP"):
+            for lineno, line in enumerate(content.splitlines(), 1):
+                if name in line:
+                    rel = py_file.relative_to(REPO_ROOT)
+                    violations.append(f"{rel}:{lineno}: {line.strip()}")
+    assert violations == [], "Pure-Python encoder names found in src/:\n" + "\n".join(violations)

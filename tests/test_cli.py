@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -12,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.loading import load_graph_file, stamp_path
 
 
 def _write(root: Path, path: str, source: str) -> Path:
@@ -380,6 +384,221 @@ def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_fil
     assert list(tmp_path.glob(".graph.json.*")) == []
 
 
+def test_written_files_respect_process_umask(tmp_path: Path) -> None:
+    """L-1: mkstemp's 0600 mode is widened to the process umask on replace."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    old_umask = os.umask(0o022)
+    try:
+        status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+    finally:
+        os.umask(old_umask)
+
+    assert status == 0
+    expected_mode = 0o666 & ~0o022
+    assert stat.S_IMODE(output.stat().st_mode) == expected_mode
+    assert stat.S_IMODE(stamp_path(output).stat().st_mode) == expected_mode
+
+
+def test_sidecar_replace_failure_cleans_up_temp_file_and_preserves_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L-2: a failed sidecar os.replace leaves no temp file and keeps the graph."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+    sidecar = stamp_path(output)
+    original_replace = cli.os.replace
+
+    def fail_only_for_sidecar(source: Path, destination: Path) -> None:
+        if Path(destination) == sidecar:
+            raise OSError("simulated sidecar replace failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(cli.os, "replace", fail_only_for_sidecar)
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+
+    assert status == 2
+    assert output.exists()
+    # The graph is intact and parseable; only the sidecar write failed.
+    json.loads(output.read_text(encoding="utf-8"))
+    assert not sidecar.exists()
+    assert list(tmp_path.glob(f".{sidecar.name}.*")) == []
+
+
+def test_analyze_writes_sidecar_matching_graph_bytes_and_query_refresh_updates_it(
+    tmp_path: Path, capsys: object
+) -> None:
+    """AC-03: sidecar matches graph after analyze, and again after query refresh."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+    assert status == 0
+
+    # Sidecar exists and matches the graph bytes.
+    graph_bytes = output.read_bytes()
+    sidecar = stamp_path(output)
+    assert sidecar.exists()
+    expected_digest = hashlib.sha256(graph_bytes).hexdigest()
+    assert sidecar.read_text(encoding="ascii").strip() == expected_digest
+
+    # Drift the source so a query refresh rewrites the graph.
+    _write(root, "app.py", "def app():\n    return 2\n")
+    capsys.readouterr()  # type: ignore[attr-defined]
+    status = cli.main(
+        [
+            "query",
+            "definitions",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+            "app",
+        ]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 0
+    assert "refreshed graph" in captured.err
+
+    # After refresh, the sidecar matches the new graph bytes.
+    new_graph_bytes = output.read_bytes()
+    assert new_graph_bytes != graph_bytes
+    new_expected_digest = hashlib.sha256(new_graph_bytes).hexdigest()
+    assert sidecar.read_text(encoding="ascii").strip() == new_expected_digest
+
+
+def _symlinked_graph(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Return (source_root, symlink graph path, real graph path) for a symlink output."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    real_directory = tmp_path / "build"
+    real_directory.mkdir()
+    real = real_directory / "graph.json"
+    link = tmp_path / "graph.json"
+    link.symlink_to(real)
+    return root, link, real
+
+
+def test_analyze_through_symlink_stamps_beside_the_link_not_the_resolved_file(
+    tmp_path: Path,
+) -> None:
+    """H-1: the sidecar follows the caller path so the next read is a trusted load."""
+    root, link, real = _symlinked_graph(tmp_path)
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(link), str(root)])
+    assert status == 0
+
+    # The graph itself went through the symlink to the real file.
+    assert link.is_symlink()
+    assert real.is_file()
+    graph_bytes = real.read_bytes()
+    assert graph_bytes.startswith(b"{")
+
+    # The sidecar sits beside the link — the path every reader derives from.
+    link_sidecar = stamp_path(link)
+    assert link_sidecar.exists()
+    assert not stamp_path(real).exists()
+    expected = hashlib.sha256(graph_bytes).hexdigest()
+    assert link_sidecar.read_text(encoding="ascii").strip() == expected
+
+    # And so the next read through the link skips schema validation.
+    assert load_graph_file(link).validated is False
+
+
+def test_query_refresh_through_symlink_updates_the_sidecar_beside_the_link(
+    tmp_path: Path, capsys: object
+) -> None:
+    """H-1: the refresh write path stamps the caller path too, not the resolved one."""
+    root, link, real = _symlinked_graph(tmp_path)
+    assert cli.main(["analyze", "--root", str(root), "--output", str(link), str(root)]) == 0
+    original_bytes = real.read_bytes()
+
+    # Drift the source so the query refreshes (and rewrites) the graph.
+    _write(root, "app.py", "def app():\n    return 2\n")
+    capsys.readouterr()  # type: ignore[attr-defined]
+    status = cli.main(["query", "definitions", "--graph", str(link), "--root", str(root), "app"])
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 0
+    assert "refreshed graph" in captured.err
+
+    assert link.is_symlink()
+    new_bytes = real.read_bytes()
+    assert new_bytes != original_bytes
+    expected = hashlib.sha256(new_bytes).hexdigest()
+    assert stamp_path(link).read_text(encoding="ascii").strip() == expected
+    assert load_graph_file(link).validated is False
+
+
+def test_stamp_write_failure_exits_two_and_leaves_mismatched_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: object
+) -> None:
+    """AC-04 (ii): stamp-write failure leaves graph on disk with stale sidecar."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    # First analyze: creates graph + sidecar.
+    status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+    assert status == 0
+    old_sidecar_content = stamp_path(output).read_text(encoding="ascii").strip()
+
+    # Drift the source.
+    _write(root, "app.py", "def app():\n    return 2\n")
+
+    # Monkeypatch _write_atomically to fail only on the second call (the stamp).
+    original_write = cli._write_atomically
+    call_count = 0
+
+    def fail_on_stamp(path: Path, content: bytes) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise OSError("simulated stamp write failure")
+        original_write(path, content)
+
+    monkeypatch.setattr(cli, "_write_atomically", fail_on_stamp)
+    capsys.readouterr()  # type: ignore[attr-defined]
+
+    status = cli.main(
+        [
+            "analyze",
+            "--root",
+            str(root),
+            "--output",
+            str(output),
+            "--force",
+            str(root),
+        ]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+
+    # Command exits 2.
+    assert status == 2
+
+    # M-3: the diagnostic names the sidecar path and states the graph was
+    # already written, instead of leaking the raw mkstemp temporary-file
+    # errno on stderr.
+    assert f"could not write graph stamp {stamp_path(output)}" in captured.err
+    assert "the graph itself was written" in captured.err
+
+    # The new graph bytes are on disk (the first _write_atomically succeeded).
+    new_graph_bytes = output.read_bytes()
+    new_digest = hashlib.sha256(new_graph_bytes).hexdigest()
+    # The sidecar on disk does not match the new graph bytes.
+    sidecar_content = stamp_path(output).read_text(encoding="ascii").strip()
+    assert sidecar_content == old_sidecar_content
+    assert sidecar_content != new_digest
+
+    # A subsequent load_graph_file takes the full-validation path.
+    loaded = load_graph_file(output)
+    assert loaded.validated is True
+
+
 def test_analyze_warns_when_imports_only_resolve_under_a_different_root(
     tmp_path: Path, capsys: object
 ) -> None:
@@ -445,3 +664,441 @@ def test_missing_target_error_explains_working_directory_resolution(
     assert status == 2
     assert "target does not exist: nope" in captured.err
     assert f"resolved from the current directory {Path.cwd()}, not from --root" in captured.err
+
+
+def _unstamped_graph(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a small analyzed graph and then remove its sidecar stamp.
+
+    Returns (graph_path, source_root).
+    """
+    root = tmp_path / "src"
+    _write(root, "a.py", "x = 1\n")
+    output = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)]) == 0
+    sidecar = stamp_path(output)
+    assert sidecar.exists()
+    sidecar.unlink()
+    return output, root
+
+
+def _stamped_graph(tmp_path: Path) -> Path:
+    """Create a small analyzed graph with a matching sidecar stamp."""
+    root = tmp_path / "src"
+    _write(root, "a.py", "x = 1\n")
+    output = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)]) == 0
+    assert stamp_path(output).exists()
+    return output
+
+
+class TestValidateFlag:
+    """AC-06: --validate forces schema pass at every user-facing graph read."""
+
+    def test_query_definitions_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert (
+            cli.main(["query", "definitions", "--graph", str(output), "--root", str(root), "a"])
+            == 0
+        )
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "definitions",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--no-refresh",
+                    "a",
+                ]
+            )
+
+    def test_query_context_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(
+            ["query", "context", "--graph", str(output), "--root", str(root), "--site", "a.py:1"]
+        ) in {0, 1}
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "context",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--site",
+                    "a.py:1",
+                ]
+            )
+
+    def test_query_diff_validate_forces_schema_on_old(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = _stamped_graph(tmp_path)
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(["query", "diff", str(output), str(output)]) == 0
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(["query", "diff", "--validate", str(output), str(output)])
+
+    def test_query_diff_validate_forces_schema_on_new(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output_old = _stamped_graph(tmp_path)
+        root2 = tmp_path / "src2"
+        _write(root2, "b.py", "y = 2\n")
+        output_new = tmp_path / "graph2.json"
+        assert (
+            cli.main(["analyze", "--root", str(root2), "--output", str(output_new), str(root2)])
+            == 0
+        )
+        call_count = 0
+        mod = __import__("minotaur.graph_model.loading", fromlist=["_validate_wire_shape"])
+        original_validate = mod._validate_wire_shape
+
+        def fail_on_second(raw: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise AssertionError("schema forced on NEW")
+            original_validate(raw)
+
+        monkeypatch.setattr("minotaur.graph_model.loading._validate_wire_shape", fail_on_second)
+        # L-4: without --validate, both graphs are stamped, so the trusted
+        # load path never calls the broken schema seam and the command
+        # succeeds despite the monkeypatch.
+        assert cli.main(["query", "diff", str(output_old), str(output_new)]) == 0
+        with pytest.raises(AssertionError, match="schema forced on NEW"):
+            cli.main(["query", "diff", "--validate", str(output_old), str(output_new)])
+
+    def test_query_callers_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L-4: --validate is threaded for `query callers` too."""
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(["query", "callers", "--graph", str(output), "--root", str(root), "a"]) == 0
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "callers",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--no-refresh",
+                    "a",
+                ]
+            )
+
+    def test_query_impact_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L-4: --validate is threaded for `query impact` too."""
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(["query", "impact", "--graph", str(output), "--root", str(root), "a"]) == 0
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "impact",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--no-refresh",
+                    "a",
+                ]
+            )
+
+    def test_query_unreferenced_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L-4: --validate is threaded for `query unreferenced` too."""
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(["query", "unreferenced", "--graph", str(output), "--root", str(root)]) == 0
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "unreferenced",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--no-refresh",
+                ]
+            )
+
+    def test_visualize_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = _stamped_graph(tmp_path)
+        html_out = tmp_path / "viz.html"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        result = cli.main(["visualize", "--input", str(output), "--output", str(html_out)])
+        assert result == 0
+        html_out2 = tmp_path / "viz2.html"
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                ["visualize", "--input", str(output), "--output", str(html_out2), "--validate"]
+            )
+
+
+class TestStampAfterValidation:
+    """AC-18: user-facing commands that fully validate a graph leave a sidecar."""
+
+    def _assert_sidecar_matches_bytes(self, graph_path: Path) -> None:
+        """Verify the sidecar contains the digest of the graph bytes on disk."""
+        sidecar = stamp_path(graph_path)
+        assert sidecar.exists(), f"sidecar not created for {graph_path}"
+        expected = hashlib.sha256(graph_path.read_bytes()).hexdigest()
+        assert sidecar.read_text(encoding="ascii").strip() == expected
+
+    def test_query_definitions_stamps_unstamped_graph(self, tmp_path: Path) -> None:
+        """AC-18 (a): query definitions exits 0 and leaves correct sidecar."""
+        output, root = _unstamped_graph(tmp_path)
+        status = cli.main(
+            ["query", "definitions", "--graph", str(output), "--root", str(root), "a"]
+        )
+        assert status == 0
+        self._assert_sidecar_matches_bytes(output)
+
+    def test_query_context_stamps_unstamped_graph(self, tmp_path: Path) -> None:
+        """AC-18 (a): query context exits 0 and leaves correct sidecar."""
+        output, root = _unstamped_graph(tmp_path)
+        status = cli.main(
+            [
+                "query",
+                "context",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+                "--site",
+                "a.py:1",
+            ]
+        )
+        assert status == 0
+        self._assert_sidecar_matches_bytes(output)
+
+    def test_query_diff_stamps_both_graphs(self, tmp_path: Path) -> None:
+        """AC-18 (a): query diff exits 0 and stamps OLD and NEW."""
+        old_path, _ = _unstamped_graph(tmp_path)
+        # Create a second unstamped graph in a subdirectory.
+        root2 = tmp_path / "src2"
+        _write(root2, "b.py", "y = 2\n")
+        new_path = tmp_path / "graph2.json"
+        assert (
+            cli.main(["analyze", "--root", str(root2), "--output", str(new_path), str(root2)]) == 0
+        )
+        stamp_path(new_path).unlink()
+        assert not stamp_path(old_path).exists()
+        assert not stamp_path(new_path).exists()
+
+        status = cli.main(["query", "diff", str(old_path), str(new_path)])
+        assert status == 0
+        self._assert_sidecar_matches_bytes(old_path)
+        self._assert_sidecar_matches_bytes(new_path)
+
+    def test_visualize_stamps_unstamped_graph(self, tmp_path: Path) -> None:
+        """AC-18 (a): visualize exits 0 and leaves correct sidecar."""
+        output, _ = _unstamped_graph(tmp_path)
+        html_out = tmp_path / "viz.html"
+        status = cli.main(["visualize", "--input", str(output), "--output", str(html_out)])
+        assert status == 0
+        self._assert_sidecar_matches_bytes(output)
+
+    def test_visualize_output_preflight_refusal_creates_no_sidecar(self, tmp_path: Path) -> None:
+        """M-4: a refused --output write must not still stamp the input graph."""
+        output, _ = _unstamped_graph(tmp_path)
+        html_out = tmp_path / "viz.html"
+        html_out.write_text("old", encoding="utf-8")
+
+        status = cli.main(["visualize", "--input", str(output), "--output", str(html_out)])
+
+        assert status == 2
+        assert not stamp_path(output).exists()
+
+    def test_validate_flag_also_stamps(self, tmp_path: Path) -> None:
+        """AC-18 (b): --validate also leaves a matching sidecar."""
+        output, root = _unstamped_graph(tmp_path)
+        status = cli.main(
+            [
+                "query",
+                "definitions",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+                "--validate",
+                "--no-refresh",
+                "a",
+            ]
+        )
+        assert status == 0
+        self._assert_sidecar_matches_bytes(output)
+
+    def test_stamped_graph_skips_stamp_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC-18 (c): a stamped graph triggers no sidecar write.
+
+        With _write_atomically monkeypatched to raise AssertionError, the
+        query still exits 0, proving the write path is never entered when
+        the stamp already matches (validated is False).
+        """
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            cli,
+            "_write_atomically",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("_write_atomically must not be called")
+            ),
+        )
+        status = cli.main(
+            [
+                "query",
+                "definitions",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+                "--no-refresh",
+                "a",
+            ]
+        )
+        assert status == 0
+
+    def test_stamp_write_failure_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: object
+    ) -> None:
+        """AC-18 (d): OSError during stamp write does not fail the command."""
+        output, root = _unstamped_graph(tmp_path)
+        query_args = [
+            "query",
+            "definitions",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+            "--no-refresh",
+            "a",
+        ]
+
+        # L-5: run the same query without failure injection first, so the
+        # normal answer can be compared against the swallowed-failure run.
+        baseline_status = cli.main(query_args)
+        baseline_out = capsys.readouterr().out  # type: ignore[attr-defined]
+        assert baseline_status == 0
+        assert baseline_out
+        # The baseline run stamped the graph; remove it so the failure-
+        # injected run below exercises the same unstamped starting state.
+        stamp_path(output).unlink()
+
+        monkeypatch.setattr(
+            cli,
+            "_write_atomically",
+            lambda *a, **kw: (_ for _ in ()).throw(OSError("simulated write failure")),
+        )
+        status = cli.main(query_args)
+        captured = capsys.readouterr()  # type: ignore[attr-defined]
+        assert status == 0
+        assert not stamp_path(output).exists()
+        assert captured.out == baseline_out
+
+    def test_analyze_clean_skip_does_not_stamp(self, tmp_path: Path) -> None:
+        """AC-18 (e): analyze's clean-skip probe leaves no sidecar."""
+        root = tmp_path / "src"
+        _write(root, "a.py", "x = 1\n")
+        output = tmp_path / "graph.json"
+        assert cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)]) == 0
+        # Remove the sidecar that analyze's write path created.
+        stamp_path(output).unlink()
+        # Re-run analyze: the graph is clean, so it hits the skip path.
+        status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+        assert status == 0
+        assert not stamp_path(output).exists()
+
+    def test_stamp_records_loaded_digest_not_current_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC-18 (f): sidecar records digest of originally loaded bytes.
+
+        The graph file is replaced on disk between the load and the stamp
+        write. The sidecar must still equal the digest of the original bytes.
+        """
+        output, root = _unstamped_graph(tmp_path)
+        original_bytes = output.read_bytes()
+        original_digest = hashlib.sha256(original_bytes).hexdigest()
+
+        original_load = cli.load_graph_file
+
+        def load_then_replace(path: Path, **kwargs: object) -> object:
+            result = original_load(path, **kwargs)
+            # Replace the file on disk after reading it.
+            path.write_bytes(b'{"replaced": true}')
+            return result
+
+        monkeypatch.setattr(cli, "load_graph_file", load_then_replace)
+        status = cli.main(
+            [
+                "query",
+                "definitions",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+                "--no-refresh",
+                "a",
+            ]
+        )
+        assert status == 0
+        sidecar = stamp_path(output)
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="ascii").strip() == original_digest
+        # The sidecar does NOT match the replaced file.
+        replaced_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+        assert replaced_digest != original_digest

@@ -6,10 +6,11 @@ Create a local, standalone graph explorer from a validated Minotaur graph:
 minotaur visualize --input graph.json --output graph.html --source-root path/to/source
 ```
 
-The command validates the JSON Schema, loads the graph model, performs
-semantic validation, and canonicalizes it before writing output atomically.
-It refuses an existing destination unless `--force` is supplied, and refuses
-an output that aliases the input graph.
+The command loads the graph model, performs semantic validation, and
+canonicalizes it before writing output atomically. A matching sidecar digest
+skips the JSON Schema pass; use `--validate` to force that pass regardless of
+sidecar state. It refuses an existing destination unless `--force` is
+supplied, and refuses an output that aliases the input graph.
 
 The generated file has no external scripts, stylesheets, editor links, or
 network requests. It includes Cytoscape 3.34.0 and Cytoscape-Dagre 4.0.0;

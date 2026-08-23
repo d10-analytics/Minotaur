@@ -227,6 +227,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
 
     relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
     tally = _ImportTally()
+    seen_ids: set[str] = set()
     for module in modules:
         _append(
             relationships, module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
@@ -239,6 +240,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             containers,
             relationships,
             nodes,
+            seen_ids,
             tally,
         )
 
@@ -341,9 +343,10 @@ def _analyze_module(
     containers: dict[str, str],
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
+    seen_ids: set[str],
     tally: _ImportTally,
 ) -> None:
-    aliases = _imports(module, modules, relationships, nodes, tally)
+    aliases = _imports(module, modules, relationships, nodes, seen_ids, tally)
     for qualified, node_id in local_declarations.items():
         container = containers.get(qualified)
         if container is None:
@@ -362,6 +365,7 @@ def _analyze_module(
         module.module_id,
         relationships,
         nodes,
+        seen_ids,
     )
     for statement in module.tree.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -374,6 +378,7 @@ def _analyze_module(
                 declarations[f"{module.name}.{statement.name}"],
                 relationships,
                 nodes,
+                seen_ids,
                 prefix_nodes=_signature_nodes(statement),
             )
         elif isinstance(statement, ast.ClassDef):
@@ -397,6 +402,7 @@ def _analyze_module(
                 declarations[f"{module.name}.{statement.name}"],
                 relationships,
                 nodes,
+                seen_ids,
                 statement.name,
                 prefix_nodes=_class_header_nodes(statement),
             )
@@ -411,6 +417,7 @@ def _analyze_module(
                         declarations[f"{module.name}.{statement.name}.{member.name}"],
                         relationships,
                         nodes,
+                        seen_ids,
                         statement.name,
                         prefix_nodes=_signature_nodes(member),
                     )
@@ -474,6 +481,7 @@ def _imports(
     modules: dict[str, _Module],
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
+    seen_ids: set[str],
     tally: _ImportTally,
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
@@ -489,6 +497,7 @@ def _imports(
                         _location(module.path, statement),
                         relationships,
                         nodes,
+                        seen_ids,
                     )
                 else:
                     tally.resolved += 1
@@ -516,6 +525,7 @@ def _imports(
                         _location(module.path, statement),
                         relationships,
                         nodes,
+                        seen_ids,
                     )
                 else:
                     tally.resolved += 1
@@ -562,6 +572,7 @@ def _calls(
     caller: str,
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
+    seen_ids: set[str],
     class_name: str | None = None,
     prefix_nodes: tuple[ast.AST, ...] = (),
 ) -> None:
@@ -575,7 +586,7 @@ def _calls(
         target = _resolve_call(text, declarations, aliases, module_name, class_name)
         location = _location(path, candidate.func)
         if target is None:
-            _unresolved(caller, text, location, relationships, nodes)
+            _unresolved(caller, text, location, relationships, nodes, seen_ids)
         else:
             _append(relationships, caller, target, RelationshipKind.CALLS.value, location)
     for reference in visitor.references:
@@ -616,6 +627,7 @@ def _unresolved(
     location: Location,
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
+    seen_ids: set[str],
 ) -> None:
     identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, _NAMESPACE, originating_node=origin)
     node_id = compute_node_id(
@@ -624,7 +636,8 @@ def _unresolved(
         location=location,
         reference_text=text,
     )
-    if not any(node.id == node_id for node in nodes):
+    if node_id not in seen_ids:
+        seen_ids.add(node_id)
         nodes.append(
             Node(
                 id=node_id,

@@ -1,0 +1,71 @@
+"""Behavioral coverage for the graph-loading benchmark utility."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).parents[1]
+BENCHMARK = ROOT / "scripts" / "benchmark_graph_load.py"
+
+
+def _run_benchmark(
+    tmp_path: Path, source: str
+) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path, Path]:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "app.py").write_text(source, encoding="utf-8")
+
+    graph = tmp_path / "minotaur-graph.json"
+    graph.write_bytes(b"caller-owned graph\n")
+    old_temp_graph = graph.with_name(graph.name + ".bench.json")
+    old_temp_sidecar = old_temp_graph.with_name(old_temp_graph.name + ".sha256")
+    old_temp_graph.write_bytes(b"caller-owned old benchmark graph\n")
+    old_temp_sidecar.write_bytes(b"caller-owned old benchmark sidecar\n")
+
+    temp_root = tmp_path / "temporary-directories"
+    temp_root.mkdir()
+    environment = os.environ.copy()
+    environment["TMPDIR"] = str(temp_root)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK),
+            "--graph",
+            str(graph),
+            "--root",
+            str(source_root),
+            "--repeats",
+            "1",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return completed, graph, old_temp_graph, old_temp_sidecar, temp_root
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_returncode"),
+    [
+        ("def main():\n    return 1\n", 0),
+        ("def broken(:\n", 1),
+    ],
+    ids=["success", "analyze-failure"],
+)
+def test_benchmark_owns_temporary_artifacts_without_touching_siblings(
+    tmp_path: Path, source: str, expected_returncode: int
+) -> None:
+    completed, graph, old_temp_graph, old_temp_sidecar, temp_root = _run_benchmark(tmp_path, source)
+
+    assert completed.returncode == expected_returncode, completed.stderr
+    assert graph.read_bytes() == b"caller-owned graph\n"
+    assert old_temp_graph.read_bytes() == b"caller-owned old benchmark graph\n"
+    assert old_temp_sidecar.read_bytes() == b"caller-owned old benchmark sidecar\n"
+    assert list(temp_root.iterdir()) == []

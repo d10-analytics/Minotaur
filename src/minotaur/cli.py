@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from minotaur.graph_model.document import GraphDocument, SourceControl
-from minotaur.graph_model.loading import GraphLoadError, load_graph_file
+from minotaur.graph_model.loading import (
+    GraphLoadError,
+    LoadedGraph,
+    graph_digest,
+    load_graph_file,
+    stamp_path,
+)
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import build_presentation
@@ -136,7 +142,28 @@ def _analyze_selection(
             ),
         ),
     )
-    _write_atomically(output, serialize(result.document))
+    content = serialize(result.document)
+    # The graph is written to the resolved path so the atomic replace targets
+    # the real file rather than swapping a symlink out for a regular file.  The
+    # sidecar, in contrast, must sit beside the path the caller gave: every
+    # reader derives the stamp from its own unresolved path (``load_graph_file``
+    # and ``_stamp_if_validated`` both call ``stamp_path`` on the caller path),
+    # so stamping the resolved side would leave a symlinked graph permanently
+    # unstamped and revalidated on every read.
+    _write_atomically(output, content)
+    sidecar = stamp_path(output_path)
+    try:
+        _write_atomically(sidecar, f"{graph_digest(content)}\n".encode("ascii"))
+    except OSError as error:
+        # M-3: the graph itself is already durable at this point (the write
+        # above succeeded); only the trust sidecar failed. Re-raise with a
+        # message naming the sidecar path and stating that fact, rather than
+        # letting the raw mkstemp temporary-file errno bubble up to the user
+        # (D-04's exit-2 policy for this failure is unchanged).
+        reason = error.strerror or str(error)
+        raise OSError(
+            f"could not write graph stamp {sidecar}: {reason} (the graph itself was written)"
+        ) from error
     _warn_unresolved_imports(result.document, workspace.root)
     return result
 
@@ -242,13 +269,16 @@ def _report_stale(paths: Sequence[str]) -> None:
         print(f"minotaur: stale: {path}", file=sys.stderr)
 
 
-def _load_and_refresh_graph(graph_path: Path, root: Path, no_refresh: bool) -> _QueryGraph:
+def _load_and_refresh_graph(
+    graph_path: Path, root: Path, no_refresh: bool, *, validate: bool = False
+) -> _QueryGraph:
     """Load a query graph, refreshing its recorded selection when stale.
 
     Callers use the returned drift's ``paths``/``is_clean`` value for warnings
     and exit-code selection.
     """
-    loaded = load_graph_file(graph_path)
+    loaded = load_graph_file(graph_path, validate=validate)
+    _stamp_if_validated(graph_path, loaded)
     observed = drift(loaded.document, root)
     if observed.is_clean:
         return _QueryGraph(loaded.document, (), observed, False)
@@ -352,16 +382,22 @@ def _run_unreferenced(
 
 
 def _run_diff(query: argparse.Namespace) -> str:
-    old = load_graph_file(Path(query.old)).document
-    new = load_graph_file(Path(query.new)).document
-    result = diff_query.diff(old, new)
+    validate: bool = query.validate
+    old_path, new_path = Path(query.old), Path(query.new)
+    old_loaded = load_graph_file(old_path, validate=validate)
+    _stamp_if_validated(old_path, old_loaded)
+    new_loaded = load_graph_file(new_path, validate=validate)
+    _stamp_if_validated(new_path, new_loaded)
+    result = diff_query.diff(old_loaded.document, new_loaded.document)
     return diff_query.render_json(result) if query.json else diff_query.render_text(result)
 
 
 def _run_context(query: argparse.Namespace) -> str:
-    document = load_graph_file(Path(query.graph)).document
+    graph_path = Path(query.graph)
+    loaded = load_graph_file(graph_path, validate=query.validate)
+    _stamp_if_validated(graph_path, loaded)
     record = context_query.context(
-        document,
+        loaded.document,
         Path(query.root).resolve(),
         query.site,
         before=query.before,
@@ -426,7 +462,9 @@ def _run_graph_query(query: argparse.Namespace) -> int:
     handler = _GRAPH_QUERIES.get(query.name)
     if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
         raise ValueError(f"unsupported query: {query.name}")
-    graph = _load_and_refresh_graph(Path(query.graph), Path(query.root).resolve(), query.no_refresh)
+    graph = _load_and_refresh_graph(
+        Path(query.graph), Path(query.root).resolve(), query.no_refresh, validate=query.validate
+    )
     index = GraphIndex.build(graph.document)
     # No symbol guard here: each query resolves its own name through
     # GraphIndex.resolve, whose SymbolResolutionError is a ValueError and so
@@ -501,6 +539,8 @@ def _add_query_subparsers(query: argparse.ArgumentParser) -> None:
             "--no-refresh", action="store_true", help="answer from the graph as-is"
         )
         command.add_argument("--json", action="store_true", help="emit stable JSON records")
+        _add_validate_flag(command)
+    _add_validate_flag(diff_parser)
 
 
 def _query_source_paths(
@@ -560,6 +600,15 @@ def _target_selection(root: Path, targets: tuple[Path, ...]) -> tuple[str, ...]:
     return tuple(sorted({target.resolve().relative_to(root).as_posix() for target in targets}))
 
 
+def _add_validate_flag(parser: argparse.ArgumentParser) -> None:
+    """Add ``--validate`` to force full schema validation on graph load."""
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="force full schema validation even when the sidecar stamp matches",
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="minotaur")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -575,6 +624,7 @@ def _parser() -> argparse.ArgumentParser:
     visualize.add_argument("--output", required=True, help="destination HTML file")
     visualize.add_argument("--source-root", help="optional source root for embedded excerpts")
     visualize.add_argument("--force", action="store_true", help="replace an existing output file")
+    _add_validate_flag(visualize)
     query = commands.add_parser("query", help="query an analyzed graph")
     _add_query_subparsers(query)
     return parser
@@ -590,10 +640,17 @@ def _visualize(arguments: argparse.Namespace) -> int:
     """
     input_path = Path(arguments.input)
     try:
-        loaded = load_graph_file(input_path)
+        loaded = load_graph_file(input_path, validate=arguments.validate)
         # D-12: a freshness guard was considered for visualize but declined;
         # rendering need not have a source root and remains cheap to repeat.
         output = _preflight_output(Path(arguments.output), (input_path.resolve(),), arguments.force)
+        # M-4: stamp only after the output preflight passes. Stamping before
+        # this check meant `visualize --output existing.html` without
+        # `--force` exited 2 while still creating `<input>.sha256` on disk —
+        # a filesystem write from a command that was about to refuse to run.
+        # `loaded.digest` is immutable, so deferring the stamp changes nothing
+        # about what gets written to the sidecar.
+        _stamp_if_validated(input_path, loaded)
         source_root = Path(arguments.source_root) if arguments.source_root is not None else None
         excerpts = prepare_excerpts(loaded.canonical, source_root)
         content = render_html(build_presentation(loaded.canonical, excerpts))
@@ -679,6 +736,25 @@ def _dispatch(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
     return registration.analyze_files(workspace, tuple(interpreter_files))
 
 
+def _stamp_if_validated(path: Path, loaded: LoadedGraph) -> None:
+    """Write the sidecar stamp when *loaded* was fully validated.
+
+    The helper writes ``loaded.digest`` — the digest of the exact bytes this
+    process parsed — and never re-reads *path*.  A concurrent writer that
+    replaces the file between the load and this call therefore cannot trick
+    this process into stamping bytes it never validated (D-14, AR-03).
+
+    Writing is best-effort: a read-only filesystem or a permission failure
+    must not turn a successful query into a command error.
+    """
+    if not loaded.validated:
+        return
+    try:
+        _write_atomically(stamp_path(path), f"{loaded.digest}\n".encode("ascii"))
+    except OSError:
+        return
+
+
 def _write_atomically(output: Path, content: bytes) -> None:
     """Replace ``output`` only after a complete canonical document is durable.
 
@@ -694,6 +770,14 @@ def _write_atomically(output: Path, content: bytes) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        # L-1: mkstemp creates the temporary file mode 0600, which the graph
+        # and sidecar would otherwise inherit through os.replace. In a shared
+        # checkout that leaves the file unreadable to anyone but the writer,
+        # who then silently pays the full-validation path forever. Widen the
+        # mode to whatever the process umask allows, same as a normal create.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(temporary, 0o666 & ~umask)
         os.replace(temporary, output)
     except OSError:
         # If writing fails before replacement, remove only the file created by

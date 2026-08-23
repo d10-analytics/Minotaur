@@ -17,6 +17,36 @@ from dataclasses import dataclass
 
 from minotaur.graph_model._parsing import reject_unknown_fields, reject_unpaired_surrogates
 
+# Module-level constants for reject_unknown_fields — hoisted from per-call
+# frozenset literals to avoid 118 k+ allocations per graph load (F-13).
+# These are an ALLOWED-SET UPPER BOUND: reject_unknown_fields checks that a
+# dict's keys are a SUBSET of these, so an input missing some of these keys
+# still passes (a required-key check is done separately by each from_dict).
+_POSITION_FIELDS = frozenset({"line", "character"})
+_RANGE_FIELDS = frozenset({"start", "end"})
+_LOCATION_FIELDS = frozenset({"path", "range"})
+
+# Memo-key field sets for the Location interning fast path in from_dict
+# below (D-08). These look identical to the schema field sets above but
+# serve an incompatible purpose: the memo guard treats each of these as an
+# EXACT required key set (`d.keys() == _MEMO_*_FIELDS`), not an upper
+# bound, because the memo key tuple built further down reads exactly these
+# fields (path, start.line, start.character, end.line, end.character) and
+# nothing else. If the memo guard used the schema constants above instead,
+# adding a new optional field to Location/Range/Position would silently
+# widen the guard's accepted key set while the hard-coded memo key tuple
+# stayed the same width — two locations differing only in the new field
+# would then collide in the memo, and the second would be silently
+# replaced by the first's cached value.
+#
+# INVARIANT: each _MEMO_*_FIELDS set must name exactly the components read
+# into the memo key tuple below (memo_key = (path_raw, sl, sc, el, ec)).
+# Keep these two in lockstep by hand; test_graph_model_core.py exercises
+# this coupling behaviorally.
+_MEMO_POSITION_FIELDS = frozenset({"line", "character"})
+_MEMO_RANGE_FIELDS = frozenset({"start", "end"})
+_MEMO_LOCATION_FIELDS = frozenset({"path", "range"})
+
 # The v1 schema requires paths that are:
 #   - non-empty
 #   - not absolute (no leading /)
@@ -70,7 +100,7 @@ class Position:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Position:
-        reject_unknown_fields(data, frozenset({"line", "character"}), "position")
+        reject_unknown_fields(data, _POSITION_FIELDS, "position")
         return cls(line=_require_int(data, "line"), character=_require_int(data, "character"))
 
     def __eq__(self, other: object) -> bool:
@@ -115,7 +145,7 @@ class Range:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Range:
-        reject_unknown_fields(data, frozenset({"start", "end"}), "range")
+        reject_unknown_fields(data, _RANGE_FIELDS, "range")
         start_data = data.get("start")
         end_data = data.get("end")
         if not isinstance(start_data, dict):
@@ -160,15 +190,63 @@ class Location:
         return {"path": self.path, "range": self.range.to_dict()}
 
     @classmethod
-    def from_dict(cls, data: dict[str, object]) -> Location:
-        reject_unknown_fields(data, frozenset({"path", "range"}), "location")
+    def from_dict(
+        cls,
+        data: dict[str, object],
+        *,
+        memo: dict[tuple[str, int, int, int, int], Location] | None = None,
+    ) -> Location:
+        # --- Memo lookup (D-08): key on the raw dict BEFORE any construction.
+        # Guard order is contractual — isinstance checks first (prevent
+        # AttributeError on non-dict values), then key-set checks, then
+        # type(v) is int (excludes bool, unlike isinstance).  Any guard
+        # failing falls through to the ordinary unmemoized parse.
+        memo_key: tuple[str, int, int, int, int] | None = None
+        if memo is not None:
+            range_raw = data.get("range")
+            if isinstance(range_raw, dict):
+                start_raw = range_raw.get("start")
+                end_raw = range_raw.get("end")
+                if (
+                    isinstance(start_raw, dict)
+                    and isinstance(end_raw, dict)
+                    and data.keys() == _MEMO_LOCATION_FIELDS
+                    and range_raw.keys() == _MEMO_RANGE_FIELDS
+                    and start_raw.keys() == _MEMO_POSITION_FIELDS
+                    and end_raw.keys() == _MEMO_POSITION_FIELDS
+                ):
+                    path_raw = data.get("path")
+                    if type(path_raw) is str:
+                        sl = start_raw.get("line")
+                        sc = start_raw.get("character")
+                        el = end_raw.get("line")
+                        ec = end_raw.get("character")
+                        if (
+                            type(sl) is int
+                            and type(sc) is int
+                            and type(el) is int
+                            and type(ec) is int
+                        ):
+                            memo_key = (path_raw, sl, sc, el, ec)
+                            cached = memo.get(memo_key)
+                            if cached is not None:
+                                return cached
+
+        # --- Normal parse path (unchanged validation) ---
+        reject_unknown_fields(data, _LOCATION_FIELDS, "location")
         path = data.get("path")
         range_data = data.get("range")
         if not isinstance(path, str):
             raise ValueError("location requires a 'path' string")
         if not isinstance(range_data, dict):
             raise ValueError("location requires a 'range' object")
-        return cls(path=path, range=Range.from_dict(range_data))
+        location = cls(path=path, range=Range.from_dict(range_data))
+
+        # Insert into memo only AFTER successful construction.
+        if memo is not None and memo_key is not None:
+            memo[memo_key] = location
+
+        return location
 
     @property
     def sort_key(self) -> tuple[str, int, int, int, int]:

@@ -31,7 +31,11 @@ from minotaur.graph_model._parsing import (
 )
 from minotaur.graph_model.evidence import Evidence
 from minotaur.graph_model.identity import is_valid_node_id_format
+from minotaur.graph_model.location import Location
 from minotaur.graph_model.provenance import resolve_relationship_kind
+
+# Module-level constant for reject_unknown_fields (F-13).
+_RELATIONSHIP_FIELDS = frozenset({"source", "target", "kind", "evidence", "extensions"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,10 +108,13 @@ class Relationship:
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, object]) -> Relationship:
-        reject_unknown_fields(
-            data, frozenset({"source", "target", "kind", "evidence", "extensions"}), "relationship"
-        )
+    def from_dict(
+        cls,
+        data: dict[str, object],
+        *,
+        memo: dict[tuple[str, int, int, int, int], Location] | None = None,
+    ) -> Relationship:
+        reject_unknown_fields(data, _RELATIONSHIP_FIELDS, "relationship")
         source = data.get("source")
         if not isinstance(source, str) or not source:
             raise ValueError("relationship requires a non-empty 'source' string")
@@ -125,7 +132,7 @@ class Relationship:
             raise ValueError("relationship requires an 'evidence' array")
         if not evidence_data:
             raise ValueError("relationship 'evidence' array must be non-empty")
-        evidence = tuple(Evidence.from_dict(ev) for ev in evidence_data)
+        evidence = tuple(Evidence.from_dict(ev, memo=memo) for ev in evidence_data)
 
         extensions = data.get("extensions")
         if extensions is not None and not isinstance(extensions, dict):

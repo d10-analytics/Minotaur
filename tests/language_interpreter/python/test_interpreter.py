@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from pathlib import Path
+
+import pytest
 
 from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file
 from minotaur.graph_model.provenance import NodeClass, RelationshipKind
-from minotaur.graph_model.validation import validate_document
+from minotaur.graph_model.validation import IssueCode, validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
-from minotaur.language_interpreter.python import analyze_python_workspace
+from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
+from minotaur.language_interpreter.workspace import Workspace
 
 
 def _write(root: Path, path: str, source: str) -> None:
@@ -507,3 +511,69 @@ def test_signature_references_match_between_nested_and_top_level_definitions(
     for target in (default_cb, handler):
         assert (outer, target, RelationshipKind.REFERENCES.value) in relationships
         assert (peer, target, RelationshipKind.REFERENCES.value) in relationships
+
+
+def test_duplicate_imports_are_deduplicated_to_one_node_per_triple(tmp_path: Path) -> None:
+    """AC-08 (a): repeated names in one import statement yield one node each."""
+    _write(
+        tmp_path,
+        "app.py",
+        "import ghost_mod, ghost_mod\nfrom ghost import a, a\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = [
+        node for node in result.document.nodes if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    ]
+
+    # Two distinct triples (different reference_text and statement location),
+    # each repeated once — dedup keeps exactly two nodes.
+    assert len(unresolved) == 2
+    assert {node.reference_text for node in unresolved} == {"ghost_mod", "ghost.a"}
+
+    # Each node's REFERENCES relationship has exactly one evidence location,
+    # because _relationship collapses equal locations via dict.fromkeys.
+    for node in unresolved:
+        refs = [
+            rel
+            for rel in result.document.relationships
+            if rel.target == node.id and rel.kind == RelationshipKind.REFERENCES.value
+        ]
+        assert len(refs) == 1
+        assert len(refs[0].evidence[0].locations) == 1
+
+    # The document is valid — no duplicate node IDs.
+    validation = validate_document(result.document)
+    assert validation.is_valid
+    assert not any(issue.code == IssueCode.NODE_ID_DUPLICATE for issue in validation.issues)
+
+
+@pytest.mark.slow
+def test_unresolved_dedup_completes_25000_sites_within_three_seconds(tmp_path: Path) -> None:
+    """AC-08 (b): 25,000 distinct unresolved sites complete in <= 3 seconds.
+
+    This is an absolute wall-clock gate on a single size point, not a scaling
+    comparison. It discriminates the set-based dedup (this branch) from the
+    O(n^2) scan it replaced: observed 0.56s on this branch vs 5.38s on main,
+    for 25,000 sites, measured 2026-08-23.
+    """
+    site_count = 25_000
+    # Generate a module with site_count distinct unresolved import statements.
+    # Each `import unique_N` is a distinct (origin, reference_text, location)
+    # triple, so every call to _unresolved exercises the dedup path.
+    lines = [f"import unique_{i}" for i in range(site_count)]
+    source = "\n".join(lines) + "\n"
+    _write(tmp_path, "generated.py", source)
+
+    workspace = Workspace(tmp_path)
+    files = (tmp_path / "generated.py",)
+
+    start = time.perf_counter()
+    result = analyze_python_files(workspace, files)
+    elapsed = time.perf_counter() - start
+
+    unresolved = [
+        node for node in result.document.nodes if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    ]
+    assert len(unresolved) == site_count
+    assert elapsed <= 3.0, f"analyze took {elapsed:.2f}s, expected <= 3.0s"

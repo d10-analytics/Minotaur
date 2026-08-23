@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
-from minotaur.graph_model.loading import GraphLoadError, load_graph_bytes
+from minotaur.graph_model.loading import GraphLoadError, load_graph_bytes, stamp_path
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import build_presentation
 from minotaur.graph_visualizer.source import prepare_excerpts
@@ -229,6 +229,12 @@ def test_checked_in_python_workflow_artifacts_match_fresh_cli_output(tmp_path: P
     assert {excerpt["status"] for excerpt in excerpts.values()} == {"available"}
     assert generated_graph.read_bytes() == checked_in_graph.read_bytes()
     assert generated_html.read_bytes() == checked_in_html.read_bytes()
+
+    generated_sidecar = stamp_path(generated_graph)
+    checked_in_sidecar = stamp_path(checked_in_graph)
+    assert generated_sidecar.exists(), "generate_example_output.py must produce a sidecar"
+    assert checked_in_sidecar.exists(), "checked-in sidecar missing from examples/"
+    assert generated_sidecar.read_bytes() == checked_in_sidecar.read_bytes()
 
 
 def test_renderer_keeps_resolved_reference_edges_from_analyzed_source(tmp_path: Path) -> None:

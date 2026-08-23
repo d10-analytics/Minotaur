@@ -25,6 +25,7 @@ from minotaur.graph_model.provenance import (
 from minotaur.graph_model.relationship import Relationship
 
 EXAMPLES = Path(__file__).parents[1] / "examples/synthetic-graphs"
+PYTHON_WORKFLOW = Path(__file__).parents[1] / "examples/python-workflow"
 
 
 def test_synthetic_documents_round_trip_and_verify_every_node_id() -> None:
@@ -145,6 +146,409 @@ def test_relationship_tuple_key_keeps_distinct_evidence_on_one_edge() -> None:
 
     assert relationship.tuple_key == (source, target, "calls")
     assert len(relationship.to_dict()["evidence"]) == 2
+
+
+def test_from_dict_round_trip_equality_with_memo(
+    # AC-14: round-trip equality over all example JSON files.
+) -> None:
+    """GraphDocument.from_dict produces identical round-trip dicts and equal
+    documents for every example graph, proving the memo is invisible."""
+    example_paths = sorted(EXAMPLES.glob("*.json")) + [
+        PYTHON_WORKFLOW / "minotaur-graph.json",
+    ]
+    assert len(example_paths) >= 4, "expected at least 4 example files"
+    for path in example_paths:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        doc1 = GraphDocument.from_dict(raw)
+        doc2 = GraphDocument.from_dict(raw)
+        assert doc1.to_dict() == raw, f"round-trip failed for {path.name}"
+        assert doc1 == doc2, f"double-parse equality failed for {path.name}"
+
+
+def _make_guard_test_document(
+    valid_location: dict[str, object],
+    malformed_location: dict[str, object],
+) -> dict[str, object]:
+    """Build a minimal document where the FIRST relationship evidence has
+    the valid location (populating the memo) and the SECOND relationship
+    evidence has the malformed location."""
+    source_id = "node:sha256:" + "a" * 64
+    target_id = "node:sha256:" + "b" * 64
+    return {
+        "format": "minotaur-graph",
+        "format_version": "0.1.0",
+        "coordinate_encoding": "utf-8",
+        "nodes": [
+            {
+                "id": source_id,
+                "identity": {"basis": "file-path", "namespace": "test"},
+                "node_class": "file",
+                "label": "a.py",
+                "path": "a.py",
+            },
+            {
+                "id": target_id,
+                "identity": {"basis": "file-path", "namespace": "test"},
+                "node_class": "file",
+                "label": "b.py",
+                "path": "b.py",
+            },
+        ],
+        "relationships": [
+            {
+                "source": source_id,
+                "target": target_id,
+                "kind": "calls",
+                "evidence": [
+                    {
+                        "provenance": "static-analysis",
+                        "locations": [valid_location],
+                    },
+                ],
+            },
+            {
+                "source": source_id,
+                "target": target_id,
+                "kind": "imports",
+                "evidence": [
+                    {
+                        "provenance": "static-analysis",
+                        "locations": [malformed_location],
+                    },
+                ],
+            },
+        ],
+    }
+
+
+_VALID_LOCATION: dict[str, object] = {
+    "path": "a.py",
+    "range": {
+        "start": {"line": 1, "character": 0},
+        "end": {"line": 1, "character": 5},
+    },
+}
+
+
+def test_memo_guard_rejects_bool_position_value() -> None:
+    """AC-17(a): {"line": true} where the memo has {"line": 1} must still
+    raise ValueError, not return the cached Location."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": True, "character": 0},
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="must be an integer"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_extra_field_in_location() -> None:
+    """AC-17(b): a location with an extra field whose path/range match a
+    memoized location must still raise ValueError from reject_unknown_fields."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": 1, "character": 0},
+            "end": {"line": 1, "character": 5},
+        },
+        "x": 1,
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="unsupported field"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_non_dict_range() -> None:
+    """AC-17(c): range is not a dict -- must raise today's ValueError
+    ('location requires a range object'), not AttributeError."""
+    malformed = {"path": "a.py", "range": 4}
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="location requires a 'range' object"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_non_dict_start() -> None:
+    """AC-17(c): range.start is not a dict -- must raise today's ValueError
+    ('range requires a start object'), not AttributeError."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": "not-a-dict",
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="range requires a 'start' object"):
+        GraphDocument.from_dict(doc_data)
+
+
+# --- Adversarial memo guard tests (reviewer-added) ---
+# These exercise guard paths not covered by AC-17's named scenarios,
+# specifically to confirm that no combination of valid-looking but
+# malformed input can bypass a guard and be served from the memo.
+
+
+def test_memo_guard_rejects_bool_in_character_position() -> None:
+    """Adversarial: {"character": True} must be rejected by type(sc) is int
+    guard, even when the line value matches a memoized location."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": 1, "character": True},
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="must be an integer"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_non_dict_end() -> None:
+    """Adversarial: range.end is not a dict -- must raise ValueError
+    ('range requires an end object'), not AttributeError. Complements the
+    existing non-dict-start test to cover the isinstance(end_raw, dict) guard."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": 1, "character": 0},
+            "end": "not-a-dict",
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="range requires an 'end' object"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_guard_rejects_extra_field_in_position() -> None:
+    """Adversarial: a position dict with an extra field {"line", "character", "z"}
+    whose line/character values match a memoized location must be rejected by the
+    key-set guard (start_raw.keys() == _POSITION_FIELDS)."""
+    malformed = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": 1, "character": 0, "z": 99},
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = _make_guard_test_document(_VALID_LOCATION, malformed)
+    with pytest.raises(ValueError, match="unsupported field"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_not_poisoned_by_failed_construction() -> None:
+    """Adversarial: a location with a negative line passes all memo guards
+    (type(-1) is int is True) but fails at Position.__post_init__. The
+    second relationship carries the same location shape with line: -1,
+    and a third relationship carries the same shape with line: 0.
+    This proves: (1) failed construction does not poison the memo, and
+    (2) a subsequent valid parse still succeeds."""
+    source_id = "node:sha256:" + "a" * 64
+    target_id = "node:sha256:" + "b" * 64
+
+    valid_loc: dict[str, object] = {
+        "path": "b.py",
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 5},
+        },
+    }
+    bad_loc: dict[str, object] = {
+        "path": "a.py",
+        "range": {
+            "start": {"line": -1, "character": 0},
+            "end": {"line": 1, "character": 5},
+        },
+    }
+    doc_data = {
+        "format": "minotaur-graph",
+        "format_version": "0.1.0",
+        "coordinate_encoding": "utf-8",
+        "nodes": [
+            {
+                "id": source_id,
+                "identity": {"basis": "file-path", "namespace": "test"},
+                "node_class": "file",
+                "label": "a.py",
+                "path": "a.py",
+            },
+            {
+                "id": target_id,
+                "identity": {"basis": "file-path", "namespace": "test"},
+                "node_class": "file",
+                "label": "b.py",
+                "path": "b.py",
+            },
+        ],
+        "relationships": [
+            {
+                "source": source_id,
+                "target": target_id,
+                "kind": "calls",
+                "evidence": [
+                    {"provenance": "static-analysis", "locations": [valid_loc]},
+                ],
+            },
+            {
+                "source": source_id,
+                "target": target_id,
+                "kind": "imports",
+                "evidence": [
+                    {"provenance": "static-analysis", "locations": [bad_loc]},
+                ],
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="non-negative"):
+        GraphDocument.from_dict(doc_data)
+
+
+def test_memo_key_includes_path_component() -> None:
+    """M-4: two locations that share a range but have different paths must
+    not collide in the memo. The first relationship's evidence populates
+    the memo with path "a.py"; the second relationship's evidence uses the
+    same range under path "b.py" and must parse to its own path, not the
+    first's cached one."""
+    shared_range = {
+        "start": {"line": 1, "character": 0},
+        "end": {"line": 1, "character": 5},
+    }
+    loc_a = {"path": "a.py", "range": shared_range}
+    loc_b = {"path": "b.py", "range": shared_range}
+    doc_data = _make_guard_test_document(loc_a, loc_b)
+
+    document = GraphDocument.from_dict(doc_data)
+
+    parsed_a = document.relationships[0].evidence[0].locations[0]
+    parsed_b = document.relationships[1].evidence[0].locations[0]
+    assert parsed_a.path == "a.py"
+    assert parsed_b.path == "b.py"
+    assert parsed_a is not parsed_b
+
+
+# --- M-5: memo-key component coupling ---
+# Each pair below is identical except in exactly one of the five components
+# the memo key is built from (path, start.line, start.character, end.line,
+# end.character). If the memo key tuple ever dropped one of these
+# components -- e.g. because a maintainer added a field to
+# _LOCATION_FIELDS and the memo guard's key-set check widened along with
+# it while the hard-coded key tuple stayed the same shape -- the second
+# location in the affected pair would collide with the first in the memo
+# and be silently served the first's (wrong) value.
+_MEMO_KEY_COMPONENT_CASES = [
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "b.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        id="path",
+    ),
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 2, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        id="start.line",
+    ),
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 9}, "end": {"line": 1, "character": 15}},
+        },
+        id="start.character",
+    ),
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 2, "character": 5}},
+        },
+        id="end.line",
+    ),
+    pytest.param(
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+        },
+        {
+            "path": "a.py",
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 9}},
+        },
+        id="end.character",
+    ),
+]
+
+
+@pytest.mark.parametrize(("loc_a", "loc_b"), _MEMO_KEY_COMPONENT_CASES)
+def test_memo_key_distinguishes_every_component(
+    loc_a: dict[str, object], loc_b: dict[str, object]
+) -> None:
+    """M-5: verifies the coupling between _MEMO_LOCATION_FIELDS /
+    _MEMO_RANGE_FIELDS / _MEMO_POSITION_FIELDS and the memo key tuple by
+    proving, for each of the five components the key is built from, that
+    two locations differing only in that component parse independently
+    rather than one being served from the other's memo entry."""
+    doc_data = _make_guard_test_document(loc_a, loc_b)
+
+    document = GraphDocument.from_dict(doc_data)
+
+    parsed_a = document.relationships[0].evidence[0].locations[0]
+    parsed_b = document.relationships[1].evidence[0].locations[0]
+    assert parsed_a.to_dict() == loc_a
+    assert parsed_b.to_dict() == loc_b
+    assert parsed_a is not parsed_b
+
+
+def test_from_dict_memo_interns_equal_locations() -> None:
+    """L-5: proves the memo actually interns rather than merely producing
+    equal-but-distinct objects. Parses the python-workflow example graph
+    (which repeats several locations across nodes and evidence) and
+    asserts that every group of equal-valued Locations shares exactly one
+    object identity -- the count of distinct values equals the count of
+    distinct ids."""
+    source = json.loads((PYTHON_WORKFLOW / "minotaur-graph.json").read_text(encoding="utf-8"))
+    document = GraphDocument.from_dict(source)
+
+    locations: list[Location] = [
+        node.location for node in document.nodes if node.location is not None
+    ]
+    for relationship in document.relationships:
+        for evidence in relationship.evidence:
+            locations.extend(evidence.locations)
+
+    assert len(locations) > 0, "expected the example graph to contain locations"
+
+    distinct_by_value = {loc for loc in locations}
+    distinct_by_id = {id(loc) for loc in locations}
+    assert len(locations) > len(distinct_by_value), (
+        "expected repeated location values in the example graph to exercise interning"
+    )
+    assert len(distinct_by_value) == len(distinct_by_id)
+
+    # Every occurrence of an equal Location value must be the SAME object,
+    # not merely an equal one -- this is the actual interning claim.
+    by_value: dict[Location, set[int]] = {}
+    for loc in locations:
+        by_value.setdefault(loc, set()).add(id(loc))
+    for loc, ids in by_value.items():
+        assert len(ids) == 1, f"equal Location {loc!r} was not interned to a single object"
 
 
 def test_extensions_are_deeply_immutable_but_serialize_as_json() -> None:

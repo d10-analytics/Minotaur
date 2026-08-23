@@ -3,34 +3,22 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 
 import jsonschema
 import pytest
 
+from minotaur import cli
 from minotaur.graph_model.document import GraphDocument
-from minotaur.graph_model.loading import schema
+from minotaur.graph_model.loading import _FORMAT_CHECKER, schema
 from minotaur.graph_model.validation import IssueCode, validate_document
 
 ROOT = Path(__file__).parents[1]
 INVALID_FIXTURES = ROOT / "tests/fixtures/minotaur-graph-v1/invalid"
-FORMAT_CHECKER = jsonschema.FormatChecker()
-
-
-@FORMAT_CHECKER.checks("date-time")
-def _is_valid_rfc3339_timestamp(value: object) -> bool:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        return False
-    try:
-        datetime.fromisoformat(f"{value[:-1]}+00:00")
-    except ValueError:
-        return False
-    return True
 
 
 def _validator() -> jsonschema.Draft202012Validator:
-    return jsonschema.Draft202012Validator(schema(), format_checker=FORMAT_CHECKER)
+    return jsonschema.Draft202012Validator(schema(), format_checker=_FORMAT_CHECKER)
 
 
 @pytest.mark.parametrize(
@@ -272,3 +260,53 @@ def test_unresolved_reference_node_may_carry_only_its_own_basis() -> None:
     unresolved["identity"] = {"basis": "resource-key", "namespace": "example", "resource_key": "k"}
 
     _assert_rejected_by_schema_and_model(document, "do not permit identity basis")
+
+
+# ---------------------------------------------------------------------------
+# AC-15 — Writer output satisfies the published v1 schema
+# ---------------------------------------------------------------------------
+
+_MINIMAL_PYTHON_SOURCE = """\
+def greet(name: str) -> str:
+    return f"Hello, {name}!"
+"""
+
+
+def _analyze_workspace(root: Path, graph_path: Path, *targets: Path) -> None:
+    """Run ``analyze`` to produce a graph JSON at *graph_path*."""
+    args = [
+        "analyze",
+        "--root",
+        str(root),
+        "--output",
+        str(graph_path),
+        "--force",
+        *(str(t) for t in targets),
+    ]
+    status = cli.main(args)
+    assert status == 0, f"analyze failed with exit {status}"
+
+
+def test_fresh_analyze_output_satisfies_published_v1_schema(tmp_path: Path) -> None:
+    """``analyze`` output must pass the published JSON schema.
+
+    ``R-02`` removes the only runtime moment the writer's output met the
+    schema (``D-09``).  This test is the explicit CI replacement, using the
+    same ``_FORMAT_CHECKER`` that the loader boundary uses so the contract
+    test and the load boundary cannot disagree about ``date-time``.
+    """
+    source = tmp_path / "src" / "example.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(_MINIMAL_PYTHON_SOURCE, encoding="utf-8")
+
+    graph_path = tmp_path / "minotaur-graph.json"
+    _analyze_workspace(tmp_path, graph_path, tmp_path / "src")
+
+    raw = json.loads(graph_path.read_text(encoding="utf-8"))
+
+    # Schema validation with the shared format checker
+    validator = jsonschema.Draft202012Validator(schema(), format_checker=_FORMAT_CHECKER)
+    validator.validate(raw)
+
+    # Sanity: the graph is non-trivial — at least one node was emitted
+    assert len(raw["nodes"]) > 0, "analyze produced an empty graph"

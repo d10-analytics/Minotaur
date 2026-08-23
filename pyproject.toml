@@ -40,6 +40,9 @@ minotaur = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: wall-clock-gated tests; deselect with -m 'not slow' on loaded runners",
+]
 
 [tool.mypy]
 files = ["src/minotaur"]

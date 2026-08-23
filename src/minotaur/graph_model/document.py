@@ -29,9 +29,26 @@ from minotaur.graph_model._parsing import (
     serialize_extensions,
 )
 from minotaur.graph_model.evidence import Producer
+from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import CoordinateEncoding
 from minotaur.graph_model.relationship import Relationship
+
+# Module-level constants for reject_unknown_fields (F-13).
+_SOURCE_CONTROL_FIELDS = frozenset({"system", "commit", "branch"})
+_DOCUMENT_FIELDS = frozenset(
+    {
+        "format",
+        "format_version",
+        "coordinate_encoding",
+        "generated_by",
+        "generated_at",
+        "source_control",
+        "nodes",
+        "relationships",
+        "extensions",
+    }
+)
 
 # Format constants. These are fixed for v1 and must match the JSON Schema's
 # `const` values exactly. A document with a different format or version is
@@ -94,7 +111,7 @@ class SourceControl:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> SourceControl:
-        reject_unknown_fields(data, frozenset({"system", "commit", "branch"}), "source_control")
+        reject_unknown_fields(data, _SOURCE_CONTROL_FIELDS, "source_control")
         system = data.get("system")
         if not isinstance(system, str):
             raise ValueError("source_control requires a 'system' string")
@@ -204,23 +221,11 @@ class GraphDocument:
         happens in the validation module after the document is loaded,
         so all errors can be reported together.
         """
-        reject_unknown_fields(
-            data,
-            frozenset(
-                {
-                    "format",
-                    "format_version",
-                    "coordinate_encoding",
-                    "generated_by",
-                    "generated_at",
-                    "source_control",
-                    "nodes",
-                    "relationships",
-                    "extensions",
-                }
-            ),
-            "graph document",
-        )
+        reject_unknown_fields(data, _DOCUMENT_FIELDS, "graph document")
+
+        # Parse-local location memo (D-08, AR-02): one dict per from_dict
+        # call, threaded to Node/Relationship → Evidence → Location.
+        location_memo: dict[tuple[str, int, int, int, int], Location] = {}
         # Verify the format envelope first. A document with the wrong
         # format name or version is not a v1 Minotaur graph, and we
         # should fail clearly rather than trying to parse it and getting
@@ -267,12 +272,12 @@ class GraphDocument:
         nodes_data = data.get("nodes")
         if not isinstance(nodes_data, list):
             raise ValueError("document requires a 'nodes' array")
-        nodes = tuple(Node.from_dict(n) for n in nodes_data)
+        nodes = tuple(Node.from_dict(n, memo=location_memo) for n in nodes_data)
 
         rels_data = data.get("relationships")
         if not isinstance(rels_data, list):
             raise ValueError("document requires a 'relationships' array")
-        relationships = tuple(Relationship.from_dict(r) for r in rels_data)
+        relationships = tuple(Relationship.from_dict(r, memo=location_memo) for r in rels_data)
 
         extensions = data.get("extensions")
         if extensions is not None and not isinstance(extensions, dict):

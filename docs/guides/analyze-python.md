@@ -110,6 +110,21 @@ not affect node identity or the graph format version. When the root is inside
 a Git work tree, the document may also contain the current commit and branch
 in `source_control`; this is snapshot context, not a freshness substitute.
 
+After writing the graph, `analyze` also writes a sidecar digest file beside it
+(see the [format reference](../formats/minotaur-graph-v1.md#sidecar-digest-file)).
+A pre-sidecar or foreign graph is fully validated and stamped by the first
+user-facing graph-reading command (`query`, `diff`, or `visualize`), so later
+reads are fast. An `analyze` clean-skip deliberately does not create a
+sidecar. No manual migration or conversion step is needed.
+
+`scripts/benchmark_graph_load.py --graph GRAPH.json --root ROOT [--repeats N]
+[--verbose]` measures `analyze`, `query definitions --no-refresh`, the
+in-process loading and query-index components, and `serialize` against one
+graph, reporting median (and, with `--verbose`, min/max) wall-clock time per
+step. It never modifies the `--graph` path: `analyze` and every other timed
+step run against a graph in a unique, invocation-owned temporary directory
+that is removed before the script exits.
+
 ## Diagnostics and unresolved references
 
 If a source file cannot be read or parsed, the analyzer reports a diagnostic
