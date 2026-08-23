@@ -122,8 +122,8 @@ sidecar. No manual migration or conversion step is needed.
 in-process loading and query-index components, and `serialize` against one
 graph, reporting median (and, with `--verbose`, min/max) wall-clock time per
 step. It never modifies the `--graph` path: `analyze` and every other timed
-step run against a temporary graph generated beside it and removed before the
-script exits.
+step run against a graph in a unique, invocation-owned temporary directory
+that is removed before the script exits.
 
 ## Diagnostics and unresolved references
 
