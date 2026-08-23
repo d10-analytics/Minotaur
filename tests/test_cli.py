@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -382,6 +384,51 @@ def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_fil
     assert list(tmp_path.glob(".graph.json.*")) == []
 
 
+def test_written_files_respect_process_umask(tmp_path: Path) -> None:
+    """L-1: mkstemp's 0600 mode is widened to the process umask on replace."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+
+    old_umask = os.umask(0o022)
+    try:
+        status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+    finally:
+        os.umask(old_umask)
+
+    assert status == 0
+    expected_mode = 0o666 & ~0o022
+    assert stat.S_IMODE(output.stat().st_mode) == expected_mode
+    assert stat.S_IMODE(stamp_path(output).stat().st_mode) == expected_mode
+
+
+def test_sidecar_replace_failure_cleans_up_temp_file_and_preserves_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L-2: a failed sidecar os.replace leaves no temp file and keeps the graph."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+    sidecar = stamp_path(output)
+    original_replace = cli.os.replace
+
+    def fail_only_for_sidecar(source: Path, destination: Path) -> None:
+        if Path(destination) == sidecar:
+            raise OSError("simulated sidecar replace failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(cli.os, "replace", fail_only_for_sidecar)
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+
+    assert status == 2
+    assert output.exists()
+    # The graph is intact and parseable; only the sidecar write failed.
+    json.loads(output.read_text(encoding="utf-8"))
+    assert not sidecar.exists()
+    assert list(tmp_path.glob(f".{sidecar.name}.*")) == []
+
+
 def test_analyze_writes_sidecar_matching_graph_bytes_and_query_refresh_updates_it(
     tmp_path: Path, capsys: object
 ) -> None:
@@ -528,9 +575,16 @@ def test_stamp_write_failure_exits_two_and_leaves_mismatched_sidecar(
             str(root),
         ]
     )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
 
     # Command exits 2.
     assert status == 2
+
+    # M-3: the diagnostic names the sidecar path and states the graph was
+    # already written, instead of leaking the raw mkstemp temporary-file
+    # errno on stderr.
+    assert f"could not write graph stamp {stamp_path(output)}" in captured.err
+    assert "the graph itself was written" in captured.err
 
     # The new graph bytes are on disk (the first _write_atomically succeeded).
     new_graph_bytes = output.read_bytes()
@@ -730,8 +784,89 @@ class TestValidateFlag:
             original_validate(raw)
 
         monkeypatch.setattr("minotaur.graph_model.loading._validate_wire_shape", fail_on_second)
+        # L-4: without --validate, both graphs are stamped, so the trusted
+        # load path never calls the broken schema seam and the command
+        # succeeds despite the monkeypatch.
+        assert cli.main(["query", "diff", str(output_old), str(output_new)]) == 0
         with pytest.raises(AssertionError, match="schema forced on NEW"):
             cli.main(["query", "diff", "--validate", str(output_old), str(output_new)])
+
+    def test_query_callers_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L-4: --validate is threaded for `query callers` too."""
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(["query", "callers", "--graph", str(output), "--root", str(root), "a"]) == 0
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "callers",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--no-refresh",
+                    "a",
+                ]
+            )
+
+    def test_query_impact_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L-4: --validate is threaded for `query impact` too."""
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(["query", "impact", "--graph", str(output), "--root", str(root), "a"]) == 0
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "impact",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--no-refresh",
+                    "a",
+                ]
+            )
+
+    def test_query_unreferenced_validate_forces_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L-4: --validate is threaded for `query unreferenced` too."""
+        output = _stamped_graph(tmp_path)
+        root = tmp_path / "src"
+        monkeypatch.setattr(
+            "minotaur.graph_model.loading._validate_wire_shape",
+            lambda raw: (_ for _ in ()).throw(AssertionError("schema forced")),
+        )
+        assert cli.main(["query", "unreferenced", "--graph", str(output), "--root", str(root)]) == 0
+        with pytest.raises(AssertionError, match="schema forced"):
+            cli.main(
+                [
+                    "query",
+                    "unreferenced",
+                    "--graph",
+                    str(output),
+                    "--root",
+                    str(root),
+                    "--validate",
+                    "--no-refresh",
+                ]
+            )
 
     def test_visualize_validate_forces_schema(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -815,6 +950,17 @@ class TestStampAfterValidation:
         assert status == 0
         self._assert_sidecar_matches_bytes(output)
 
+    def test_visualize_output_preflight_refusal_creates_no_sidecar(self, tmp_path: Path) -> None:
+        """M-4: a refused --output write must not still stamp the input graph."""
+        output, _ = _unstamped_graph(tmp_path)
+        html_out = tmp_path / "viz.html"
+        html_out.write_text("old", encoding="utf-8")
+
+        status = cli.main(["visualize", "--input", str(output), "--output", str(html_out)])
+
+        assert status == 2
+        assert not stamp_path(output).exists()
+
     def test_validate_flag_also_stamps(self, tmp_path: Path) -> None:
         """AC-18 (b): --validate also leaves a matching sidecar."""
         output, root = _unstamped_graph(tmp_path)
@@ -867,29 +1013,41 @@ class TestStampAfterValidation:
         assert status == 0
 
     def test_stamp_write_failure_swallowed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: object
     ) -> None:
         """AC-18 (d): OSError during stamp write does not fail the command."""
         output, root = _unstamped_graph(tmp_path)
+        query_args = [
+            "query",
+            "definitions",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+            "--no-refresh",
+            "a",
+        ]
+
+        # L-5: run the same query without failure injection first, so the
+        # normal answer can be compared against the swallowed-failure run.
+        baseline_status = cli.main(query_args)
+        baseline_out = capsys.readouterr().out  # type: ignore[attr-defined]
+        assert baseline_status == 0
+        assert baseline_out
+        # The baseline run stamped the graph; remove it so the failure-
+        # injected run below exercises the same unstamped starting state.
+        stamp_path(output).unlink()
+
         monkeypatch.setattr(
             cli,
             "_write_atomically",
             lambda *a, **kw: (_ for _ in ()).throw(OSError("simulated write failure")),
         )
-        status = cli.main(
-            [
-                "query",
-                "definitions",
-                "--graph",
-                str(output),
-                "--root",
-                str(root),
-                "--no-refresh",
-                "a",
-            ]
-        )
+        status = cli.main(query_args)
+        captured = capsys.readouterr()  # type: ignore[attr-defined]
         assert status == 0
         assert not stamp_path(output).exists()
+        assert captured.out == baseline_out
 
     def test_analyze_clean_skip_does_not_stamp(self, tmp_path: Path) -> None:
         """AC-18 (e): analyze's clean-skip probe leaves no sidecar."""
