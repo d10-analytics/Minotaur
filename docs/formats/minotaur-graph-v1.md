@@ -206,15 +206,16 @@ fixtures are in
 
 ### Sidecar digest file
 
-When Minotaur writes or fully validates a graph, it may place an optional
-sidecar file at `<GRAPH>.sha256` (for example, `my-graph.json.sha256` beside
+When `analyze` writes a graph, or a user-facing graph-reading command fully
+validates one, Minotaur may place an optional sidecar file at
+`<GRAPH>.sha256` (for example, `my-graph.json.sha256` beside
 `my-graph.json`). The sidecar contains exactly 64 lowercase hexadecimal
 characters followed by one newline — the SHA-256 digest of the graph file's
 exact bytes.
 
 The sidecar is a Minotaur-internal acceleration hint. Other consumers may
 ignore it entirely. Its absence or a digest mismatch does not indicate
-corruption; it only means the next Minotaur command that reads the graph will
+corruption; it only means the next user-facing graph-reading command will
 perform a full validation pass instead of a fast trusted load. Neither the
 graph's JSON bytes, its schema, nor its `format_version` are affected by
 sidecar presence or absence.

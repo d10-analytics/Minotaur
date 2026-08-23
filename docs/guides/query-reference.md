@@ -78,12 +78,15 @@ freshness check.
 
 ### First-read validation cost
 
-The first command that reads a graph Minotaur did not just write — a graph
-produced before sidecar stamping was introduced, a graph from another tool, or
-one whose sidecar was removed — performs a full JSON Schema validation and
-stamps the result. This validation happens once: subsequent reads of the same
-graph file find the stamp and skip schema validation, so they are fast. No
-manual step is required; the first reader handles it automatically.
+The first user-facing graph-reading command (`query`, `diff`, or `visualize`)
+that reads a graph Minotaur did not just write — a graph produced before
+sidecar stamping was introduced, a graph from another tool, or one whose
+sidecar was removed — performs a full JSON Schema validation and stamps the
+result. This validation happens once: subsequent reads of the same graph file
+find the stamp and skip schema validation, so they are fast. No manual step is
+required; the first graph-reading command handles it automatically. An
+`analyze` clean-skip deliberately does not create a sidecar, so it is not this
+stamping step.
 
 ### `--validate` flag
 
