@@ -198,15 +198,16 @@ def _utf16_sort_key(s: str) -> tuple[int, ...]:
 def _sort_keys_recursive(value: object) -> object:
     """Recursively sort all dict keys by JCS UTF-16 code-unit order.
 
-    Lists pass through with their element order preserved — domain-specific
-    array sorting (nodes, relationships, evidence, locations) is the caller's
-    responsibility.
+    Lists and tuples are both recursed into and returned as lists — JSON has a
+    single array type, so a tuple encodes exactly as a list does. Their element
+    order passes through unchanged: domain-specific array sorting (nodes,
+    relationships, evidence, locations) is the caller's responsibility.
     """
     if isinstance(value, dict):
         return {
             k: _sort_keys_recursive(v)
             for k, v in sorted(value.items(), key=lambda item: _utf16_sort_key(item[0]))
         }
-    if isinstance(value, list):
+    if isinstance(value, list | tuple):
         return [_sort_keys_recursive(item) for item in value]
     return value
