@@ -143,8 +143,15 @@ def _analyze_selection(
         ),
     )
     content = serialize(result.document)
+    # The graph is written to the resolved path so the atomic replace targets
+    # the real file rather than swapping a symlink out for a regular file.  The
+    # sidecar, in contrast, must sit beside the path the caller gave: every
+    # reader derives the stamp from its own unresolved path (``load_graph_file``
+    # and ``_stamp_if_validated`` both call ``stamp_path`` on the caller path),
+    # so stamping the resolved side would leave a symlinked graph permanently
+    # unstamped and revalidated on every read.
     _write_atomically(output, content)
-    _write_atomically(stamp_path(output), f"{graph_digest(content)}\n".encode("ascii"))
+    _write_atomically(stamp_path(output_path), f"{graph_digest(content)}\n".encode("ascii"))
     _warn_unresolved_imports(result.document, workspace.root)
     return result
 
