@@ -5,12 +5,25 @@ The harness deliberately does not import Minotaur itself.  Every operation is
 performed by a child process with a side-specific ``PYTHONPATH`` so an
 editable installation cannot accidentally make both sides execute the same
 checkout.
+
+Roots (specification ``D-06``): (1) ``tests/fixtures/equivalence_root`` beside
+this script -- a committed Python substrate small enough to read and rich
+enough that every query class has a real hit; (2) the baseline worktree's own
+``src``; (3) an optional large checkout supplied with ``--optional-root``,
+the only root that may be missing without failing the run.
+
+Queries come from a per-root JSON file keyed by the root directory's name, so
+a root is never compared with a query list written for a different tree.  A
+run fails when a root's queries do not actually produce output: an empty
+comparison is not a passing comparison.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -18,9 +31,12 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "equivalence_root"
+SCRATCH_PLACEHOLDER = "<scratch>"
 
 
 @dataclass(frozen=True)
@@ -32,15 +48,59 @@ class Side:
 @dataclass(frozen=True)
 class Completed:
     returncode: int
-    stdout: str
-    stderr: str
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool = False
+
+    @property
+    def stdout_text(self) -> str:
+        return self.stdout.decode("utf-8", "replace")
+
+    @property
+    def stderr_text(self) -> str:
+        return self.stderr.decode("utf-8", "replace")
+
+
+@dataclass(frozen=True)
+class RootQueries:
+    """The committed workload for one root."""
+
+    selection: str
+    queries: list[dict[str, Any]]
+
+
+@dataclass
+class Tally:
+    """What a root comparison actually did, so vacuity is visible."""
+
+    comparisons: int = 0
+    queries_expected: int = 0
+    queries_answered: int = 0
+    roots: list[str] = field(default_factory=list)
+
+    def absorb(self, other: Tally) -> None:
+        self.comparisons += other.comparisons
+        self.queries_expected += other.queries_expected
+        self.queries_answered += other.queries_answered
+        self.roots.extend(other.roots)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline-src", type=Path, required=True)
     parser.add_argument("--branch-src", type=Path, required=True)
-    parser.add_argument("--root", type=Path, action="append")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        action="append",
+        help="required root; a missing one fails the run",
+    )
+    parser.add_argument(
+        "--optional-root",
+        type=Path,
+        action="append",
+        help="root that may be absent (D-06 root (3)); skipped with a loud message",
+    )
     parser.add_argument(
         "--queries", type=Path, default=Path(__file__).with_name("equivalence_queries.json")
     )
@@ -68,15 +128,29 @@ def _run(
     cwd: Path | None = None,
     timeout: float = 300,
 ) -> Completed:
-    result = subprocess.run(
-        [sys.executable, *args],
-        cwd=cwd,
-        env=_env(side.src),
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout,
-    )
+    """Run one side's subprocess and capture raw bytes.
+
+    Output is compared as bytes: ``text=True`` would decode with the ambient
+    locale and translate newlines, so a real byte difference could be
+    normalised away by the instrument that exists to detect it.
+    """
+
+    try:
+        result = subprocess.run(
+            [sys.executable, *args],
+            cwd=cwd,
+            env=_env(side.src),
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as expired:
+        return Completed(
+            returncode=-1,
+            stdout=expired.stdout or b"",
+            stderr=f"<timed out after {timeout:g}s>".encode(),
+            timed_out=True,
+        )
     return Completed(result.returncode, result.stdout, result.stderr)
 
 
@@ -96,8 +170,8 @@ def _under(path: Path, directory: Path) -> bool:
 def _check_import(side: Side) -> str | None:
     result = _run(side, ["-c", "import minotaur; print(minotaur.__file__)"])
     if result.returncode:
-        return f"{side.name} import failed (exit {result.returncode}): {result.stderr.strip()}"
-    imported = Path(result.stdout.strip()).resolve()
+        return f"{side.name} import failed (exit {result.returncode}): {result.stderr_text.strip()}"
+    imported = Path(result.stdout_text.strip()).resolve()
     if not _under(imported, side.src):
         return f"minotaur imported from {imported}, outside {side.src}"
     return None
@@ -171,10 +245,18 @@ def _sha(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _normalise_stderr(value: str, baseline_scratch: Path, branch_scratch: Path) -> str:
-    return value.replace(str(baseline_scratch), "<baseline-scratch>").replace(
-        str(branch_scratch), "<branch-scratch>"
-    )
+def _normalise_stderr(value: bytes, *scratches: Path) -> bytes:
+    """Replace every scratch root with one shared placeholder.
+
+    Side-specific placeholders would make any diagnostic that echoes the graph
+    path differ by construction -- a false DIFFERENT from the normaliser
+    itself.
+    """
+
+    placeholder = SCRATCH_PLACEHOLDER.encode()
+    for scratch in scratches:
+        value = value.replace(str(scratch).encode(), placeholder)
+    return value
 
 
 def _row(
@@ -195,27 +277,52 @@ def _compare_processes(
     label: str,
     baseline: Completed,
     branch: Completed,
-    baseline_scratch: Path,
-    branch_scratch: Path,
+    *scratches: Path,
 ) -> bool:
+    if baseline.timed_out or branch.timed_out:
+        print(
+            f"{label}: FAILED timeout"
+            f" baseline={baseline.timed_out} branch={branch.timed_out}"
+            f" ({baseline.stderr_text.strip() or branch.stderr_text.strip()})"
+        )
+        return False
     left = (
         baseline.returncode,
         baseline.stdout,
-        _normalise_stderr(baseline.stderr, baseline_scratch, branch_scratch),
+        _normalise_stderr(baseline.stderr, *scratches),
     )
     right = (
         branch.returncode,
         branch.stdout,
-        _normalise_stderr(branch.stderr, baseline_scratch, branch_scratch),
+        _normalise_stderr(branch.stderr, *scratches),
     )
     return _row(label, left, right)
 
 
-def _load_queries(path: Path) -> list[dict[str, Any]]:
+def _load_queries(path: Path) -> dict[str, RootQueries]:
     loaded = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(loaded, list) or not all(isinstance(item, dict) for item in loaded):
-        raise ValueError("equivalence query file must contain a list of objects")
-    return loaded
+    if not isinstance(loaded, dict) or not loaded:
+        raise ValueError("equivalence query file must map a root name to its workload")
+    workloads: dict[str, RootQueries] = {}
+    for key, value in loaded.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"workload for root {key!r} must be an object")
+        selection = value.get("selection")
+        queries = value.get("queries")
+        if not isinstance(selection, str) or not selection:
+            raise ValueError(f"workload for root {key!r} needs a 'selection' target")
+        if (
+            not isinstance(queries, list)
+            or not queries
+            or not all(isinstance(item, dict) for item in queries)
+        ):
+            raise ValueError(f"workload for root {key!r} needs a non-empty list of query objects")
+        for item in queries:
+            expect = item.get("expect", "ok")
+            if expect not in ("ok", "error"):
+                raise ValueError(f"query {item.get('name')!r} has unknown expect {expect!r}")
+        workloads[key] = RootQueries(selection=selection, queries=queries)
+    return workloads
 
 
 def _analyze(
@@ -244,7 +351,7 @@ def _query_variants(item: dict[str, Any]) -> Iterable[tuple[str, list[str]]]:
     variants = item.get("variants", {})
     if not isinstance(variants, dict):
         raise ValueError(f"variants for {command} must be an object")
-    names = [("human", [])]
+    names: list[tuple[str, list[str]]] = [("human", [])]
     if variants.get("json"):
         names.append(("json", ["--json"]))
     if variants.get("no_refresh") and command != "diff":
@@ -254,24 +361,88 @@ def _query_variants(item: dict[str, Any]) -> Iterable[tuple[str, list[str]]]:
     yield from names
 
 
+def _answered(result: Completed) -> bool:
+    return not result.timed_out and result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _errored(result: Completed) -> bool:
+    return not result.timed_out and result.returncode == 2
+
+
+def _compare_queries(
+    sides: tuple[Side, Side],
+    root: Path,
+    workload: RootQueries,
+    graphs: tuple[Path, Path],
+    selections: tuple[Path, Path],
+    scratches: tuple[Path, Path],
+    tally: Tally,
+) -> bool:
+    """Compare every query, and require each one to have really answered.
+
+    Byte identity between two runs that both printed ``unknown symbol`` is not
+    evidence of anything, so the harness insists that every non-control entry
+    exits 0 with non-empty stdout on both sides and that every control entry
+    really is the error path it claims to be.
+    """
+
+    baseline, branch = sides
+    ok = True
+    for item in workload.queries:
+        command = str(item["command"])
+        name = str(item.get("name", command))
+        expect = str(item.get("expect", "ok"))
+        tally.queries_expected += 1
+        satisfied = True
+        for variant_name, extra in _query_variants(item):
+            args = [*_query_args(item, graphs[0], root, selections[0]), *extra]
+            branch_args = [*_query_args(item, graphs[1], root, selections[1]), *extra]
+            left = _run(baseline, args, cwd=root)
+            right = _run(branch, branch_args, cwd=root)
+            tally.comparisons += 1
+            if not _compare_processes(
+                f"root={root} query={name} variant={variant_name}", left, right, *scratches
+            ):
+                ok = False
+            probe = _answered if expect == "ok" else _errored
+            for label, result in (("baseline", left), ("branch", right)):
+                if not probe(result):
+                    satisfied = False
+                    print(
+                        f"root={root} query={name} variant={variant_name} {label}:"
+                        f" VACUOUS expected={expect} exit={result.returncode}"
+                        f" stdout_bytes={len(result.stdout)}",
+                        file=sys.stderr,
+                    )
+        if satisfied and expect == "ok":
+            tally.queries_answered += 1
+        if not satisfied:
+            ok = False
+    return ok
+
+
 def _compare_root(
     sides: tuple[Side, Side],
     root: Path,
-    queries: list[dict[str, Any]],
+    workload: RootQueries,
     scratch: Path,
-) -> bool:
+) -> tuple[bool, Tally]:
     baseline, branch = sides
+    tally = Tally(roots=[f"{root}"])
     baseline_dir = scratch / "baseline"
     branch_dir = scratch / "branch"
     baseline_dir.mkdir(parents=True, exist_ok=True)
     branch_dir.mkdir(parents=True, exist_ok=True)
+    scratches = (baseline_dir, branch_dir)
     baseline_graph = baseline_dir / "graph.json"
     branch_graph = branch_dir / "graph.json"
     baseline_analyze = _analyze(baseline, root, baseline_graph)
     branch_analyze = _analyze(branch, root, branch_graph)
-    ok = _compare_processes("analyze", baseline_analyze, branch_analyze, baseline_dir, branch_dir)
+    tally.comparisons += 1
+    ok = _compare_processes("analyze", baseline_analyze, branch_analyze, *scratches)
     if baseline_analyze.returncode or branch_analyze.returncode:
-        return False
+        return False, tally
+    tally.comparisons += 1
     if not _row(
         f"root={root} artifact=analyze graph SHA-256",
         _sha(baseline_graph),
@@ -313,62 +484,78 @@ def _compare_root(
         ],
         cwd=root,
     )
-    if not _compare_processes(
-        "visualize", base_visualize, branch_visualize, baseline_dir, branch_dir
-    ):
+    tally.comparisons += 1
+    if not _compare_processes("visualize", base_visualize, branch_visualize, *scratches):
         ok = False
-    if (
-        base_visualize.returncode == 0
-        and branch_visualize.returncode == 0
-        and not _row(
+    if base_visualize.returncode == 0 and branch_visualize.returncode == 0:
+        tally.comparisons += 1
+        if not _row(
             f"root={root} artifact=visualize HTML SHA-256", _sha(baseline_html), _sha(branch_html)
-        )
-    ):
-        ok = False
+        ):
+            ok = False
 
-    selection_target = "minotaur" if (root / "minotaur").is_dir() else "."
     baseline_selection = baseline_dir / "selection.json"
     branch_selection = branch_dir / "selection.json"
     for side, output in ((baseline, baseline_selection), (branch, branch_selection)):
-        result = _analyze(side, root, output, selection_target)
+        result = _analyze(side, root, output, workload.selection)
         if result.returncode:
+            print(
+                f"root={root}: selection analyze of {workload.selection} failed for {side.name}:"
+                f" {result.stderr_text.strip()}",
+                file=sys.stderr,
+            )
             ok = False
-    for item in queries:
-        command = str(item["command"])
-        for variant_name, extra in _query_variants(item):
-            args = _query_args(item, baseline_graph, root, baseline_selection)
-            branch_args = _query_args(item, branch_graph, root, branch_selection)
-            args.extend(extra)
-            branch_args.extend(extra)
-            left = _run(baseline, args, cwd=root)
-            right = _run(branch, branch_args, cwd=root)
-            if not _compare_processes(
-                f"root={root} query={item.get('name', command)} variant={variant_name}",
-                left,
-                right,
-                baseline_dir,
-                branch_dir,
-            ):
-                ok = False
+    if not _compare_queries(
+        sides,
+        root,
+        workload,
+        (baseline_graph, branch_graph),
+        (baseline_selection, branch_selection),
+        scratches,
+        tally,
+    ):
+        ok = False
 
-    drift_code = (
-        "from pathlib import Path; "
-        "from minotaur.graph_model.loading import load_graph_file; "
-        "from minotaur.query.freshness import drift; "
-        "d=drift(load_graph_file(Path(r'GRAPH')).document, Path(r'ROOT')); "
-        "print((sorted(d.changed), sorted(d.missing), sorted(d.added)))"
-    )
-    for label, side in (("baseline", baseline), ("branch", branch)):
-        command = drift_code.replace("GRAPH", str(baseline_graph)).replace("ROOT", str(root))
+    if not _compare_drift(sides, root, baseline_graph, tally):
+        ok = False
+    return ok, tally
+
+
+DRIFT_CODE = (
+    "from pathlib import Path; "
+    "from minotaur.graph_model.loading import load_graph_file; "
+    "from minotaur.query.freshness import drift; "
+    "d=drift(load_graph_file(Path(r'GRAPH')).document, Path(r'ROOT')); "
+    "print((sorted(d.changed), sorted(d.missing), sorted(d.added)))"
+)
+
+
+def _compare_drift(sides: tuple[Side, Side], root: Path, graph: Path, tally: Tally) -> bool:
+    """Compare the ``Drift`` value each tree computes from the same graph.
+
+    A side whose subprocess failed has no value to compare, so the row is a
+    named failure rather than a comparison against whatever the other side
+    happened to produce.
+    """
+
+    ok = True
+    values: dict[str, str | None] = {}
+    command = DRIFT_CODE.replace("GRAPH", str(graph)).replace("ROOT", str(root))
+    for label, side in (("baseline", sides[0]), ("branch", sides[1])):
         result = _run(side, ["-c", command], cwd=root)
-        if result.returncode:
+        if result.returncode or result.timed_out:
             ok = False
-            print(f"root={root} artifact=Drift {label}: subprocess failed: {result.stderr}")
-        elif label == "baseline":
-            baseline_drift = result.stdout.strip()
+            values[label] = None
+            print(f"root={root} artifact=Drift {label}: subprocess failed: {result.stderr_text}")
         else:
-            if not _row(f"root={root} artifact=Drift", baseline_drift, result.stdout.strip()):
-                ok = False
+            values[label] = result.stdout_text.strip()
+    baseline_value, branch_value = values["baseline"], values["branch"]
+    if baseline_value is None or branch_value is None:
+        print(f"root={root} artifact=Drift: FAILED not comparable")
+        return False
+    tally.comparisons += 1
+    if not _row(f"root={root} artifact=Drift", baseline_value, branch_value):
+        ok = False
     return ok
 
 
@@ -377,6 +564,8 @@ def _copy_without_git(source: Path, destination: Path) -> None:
 
 
 def _inject_serialize(src: Path) -> None:
+    """Perturb the graph bytes: one extra byte out of the JCS encoder."""
+
     parsing = src / "minotaur" / "graph_model" / "_parsing.py"
     with parsing.open("a", encoding="utf-8") as stream:
         stream.write(
@@ -387,13 +576,36 @@ def _inject_serialize(src: Path) -> None:
         )
 
 
-def _scenario_copy(root: Path, parent: Path, suffix: str, substrate: Path | None) -> Path:
+def _inject_visualize(src: Path) -> None:
+    """Perturb the visualize HTML only, leaving the graph bytes untouched."""
+
+    render = src / "minotaur" / "graph_visualizer" / "html" / "render.py"
+    with render.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n\n# Self-test-only output perturbation.\n"
+            "_equivalence_original_render_html = render_html\n"
+            "def render_html(presentation):\n"
+            "    return _equivalence_original_render_html(presentation)"
+            " + b'<!-- equivalence -->'\n"
+        )
+
+
+def _inject_query(src: Path) -> None:
+    """Perturb query stdout only, leaving graph and HTML bytes untouched."""
+
+    render = src / "minotaur" / "query" / "render.py"
+    with render.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n\n# Self-test-only output perturbation.\n"
+            "_equivalence_original_dump_json = dump_json\n"
+            "def dump_json(payload):\n"
+            "    return _equivalence_original_dump_json(payload) + '\\n'\n"
+        )
+
+
+def _scenario_copy(root: Path, parent: Path, suffix: str) -> Path:
     destination = parent / suffix
     _copy_without_git(root, destination)
-    if _first_python(destination) is None:
-        if substrate is None:
-            raise RuntimeError(f"scenario: no deterministic tracked Python substrate for {root}")
-        shutil.copy2(substrate, destination / "__equivalence_substrate__.py")
     return destination
 
 
@@ -409,13 +621,16 @@ def _scenario_side(side: Side, root: Path, destination: Path) -> tuple[Path, Pat
     initial = _analyze(side, destination, graph)
     if initial.returncode:
         print(
-            f"scenario: initial analyze failed for {destination}: {initial.stderr}", file=sys.stderr
+            f"scenario: initial analyze failed for {destination}: {initial.stderr_text}",
+            file=sys.stderr,
         )
         return None
     return source, graph
 
 
-def _scenario_query(side: Side, root: Path, graph: Path, no_refresh: bool) -> Completed:
+def _scenario_query(
+    side: Side, root: Path, graph: Path, no_refresh: bool, *, validate: bool = False
+) -> Completed:
     args = [
         "-m",
         "minotaur",
@@ -429,7 +644,23 @@ def _scenario_query(side: Side, root: Path, graph: Path, no_refresh: bool) -> Co
     ]
     if no_refresh:
         args.append("--no-refresh")
+    if validate:
+        args.append("--validate")
     return _run(side, args, cwd=root)
+
+
+SCENARIO_STEPS = "abcdefgijk"
+SIDECAR_STEPS = "ijk"
+
+
+def _apply_sidecar_step(letter: str, graph: Path) -> None:
+    """Move the trusted-load stamp out from under the query (``R-08``)."""
+
+    stamp = graph.with_name(graph.name + ".sha256")
+    if letter == "i":
+        stamp.unlink(missing_ok=True)
+    elif letter == "j":
+        stamp.write_text(f"{'0' * 64}  {graph.name}\n", encoding="utf-8")
 
 
 def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -> bool:
@@ -438,42 +669,29 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
     for root_index, root in enumerate(roots):
         scenario_root = scratch / f"scenario-{root_index}"
         scenario_root.mkdir(parents=True, exist_ok=True)
-        substrate = sides[0].src / "minotaur" / "cli.py"
         if _first_python(root) is None:
-            tracked = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(sides[0].src.parent),
-                    "ls-files",
-                    "--error-unmatch",
-                    "src/minotaur/cli.py",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
+            print(
+                f"scenario: root {root} has no Python source to mutate;"
+                " scenario mode would be vacuous",
+                file=sys.stderr,
             )
-            if tracked.returncode or not substrate.is_file():
-                print(
-                    f"scenario: no deterministic tracked Python substrate for {root}",
-                    file=sys.stderr,
-                )
-                ok = False
-                continue
-        for letter in "abcdefg":
+            ok = False
+            continue
+        for letter in SCENARIO_STEPS:
             copies = [
-                _scenario_copy(root, scenario_root, f"{letter}-baseline", substrate),
-                _scenario_copy(root, scenario_root, f"{letter}-branch", substrate),
+                _scenario_copy(root, scenario_root, f"{letter}-baseline"),
+                _scenario_copy(root, scenario_root, f"{letter}-branch"),
             ]
-            states = [
+            prepared = [
                 _scenario_side(side, root, copy) for side, copy in zip(sides, copies, strict=True)
             ]
-            if any(state is None for state in states):
+            if any(state is None for state in prepared):
                 print(f"scenario: failed to prepare step {letter} for {root}", file=sys.stderr)
                 ok = False
                 continue
+            states = [state for state in prepared if state is not None]
             before_sha = [_sha(state[1]) for state in states]
-            for source, _ in states:
+            for source, graph in states:
                 original = source.read_bytes()
                 if letter in "ab":
                     source.write_bytes(original + b"\n# equivalence edit\n")
@@ -490,13 +708,26 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                 elif letter == "g":
                     source.write_bytes(original + b"\n# temporary\n")
                     source.write_bytes(original)
-            left = _scenario_query(sides[0], copies[0], states[0][1], letter == "b")
-            right = _scenario_query(sides[1], copies[1], states[1][1], letter == "b")
+                elif letter in SIDECAR_STEPS:
+                    _apply_sidecar_step(letter, graph)
+            left = _scenario_query(
+                sides[0], copies[0], states[0][1], letter == "b", validate=letter == "k"
+            )
+            right = _scenario_query(
+                sides[1], copies[1], states[1][1], letter == "b", validate=letter == "k"
+            )
             if not _compare_processes(
                 f"scenario root={root} step={letter}", left, right, copies[0], copies[1]
             ):
                 ok = False
             if left.returncode not in (0, 1) or right.returncode not in (0, 1):
+                ok = False
+            if letter in SIDECAR_STEPS and not (_answered(left) and _answered(right)):
+                print(
+                    f"scenario root={root} step={letter}: query produced no answer"
+                    f" (baseline exit {left.returncode}, branch exit {right.returncode})",
+                    file=sys.stderr,
+                )
                 ok = False
             if left.returncode in (0, 1) and right.returncode in (0, 1):
                 left_sha = _sha(states[0][1])
@@ -518,8 +749,8 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                         (before_sha[1], right_sha),
                     )
             if letter in "fg" and (
-                "minotaur: refreshed graph" in left.stderr
-                or "minotaur: refreshed graph" in right.stderr
+                "minotaur: refreshed graph" in left.stderr_text
+                or "minotaur: refreshed graph" in right.stderr_text
             ):
                 print(f"scenario root={root} step={letter}: unexpected refresh", file=sys.stderr)
                 ok = False
@@ -527,7 +758,15 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                 retained[letter] = (copies, states)
         # Keep the two copies needed for the final analyze decision explicit.
         for letter in ("a", "f"):
-            copies, states = retained[letter]
+            kept = retained.get(letter)
+            if kept is None:
+                print(
+                    f"scenario root={root} step=h-{letter}: step {letter} left no copy to reuse",
+                    file=sys.stderr,
+                )
+                ok = False
+                continue
+            copies, states = kept
             before_sha = [_sha(state[1]) for state in states]
             for (source, _), _copy in zip(states, copies, strict=True):
                 if letter == "a":
@@ -550,7 +789,7 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                 ok = False
             skip_message = "minotaur: graph is up to date, skipping analysis"
             if letter == "a":
-                if any(skip_message in result.stderr for result in results):
+                if any(skip_message in result.stderr_text for result in results):
                     print(
                         f"scenario root={root} step=h-{letter}: unexpected clean skip",
                         file=sys.stderr,
@@ -566,7 +805,7 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                     )
                     ok = False
             else:
-                if any(skip_message not in result.stderr for result in results):
+                if any(skip_message not in result.stderr_text for result in results):
                     print(
                         f"scenario root={root} step=h-{letter}: missing clean-skip message",
                         file=sys.stderr,
@@ -586,21 +825,56 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
 
 def _compare(
     sides: tuple[Side, Side],
-    roots: list[Path],
-    queries: list[dict[str, Any]],
+    roots: Sequence[tuple[Path, bool]],
+    workloads: dict[str, RootQueries],
     scratch: Path,
     scenarios: bool,
 ) -> bool:
     ok = True
-    for index, root in enumerate(roots):
+    total = Tally()
+    compared: list[Path] = []
+    for index, (root, optional) in enumerate(roots):
         if not root.exists():
-            print(f"equivalence: skipped missing root {root}", file=sys.stderr)
-            continue
-        if not _compare_root(sides, root, queries, scratch / f"root-{index}"):
+            if optional:
+                print(f"equivalence: SKIPPED optional root {root} (absent)", file=sys.stderr)
+                continue
+            _fail(f"required root does not exist: {root}")
             ok = False
+            continue
+        workload = workloads.get(root.name)
+        if workload is None:
+            _fail(
+                f"no query workload for root {root} (key {root.name!r});"
+                f" known keys: {sorted(workloads)}"
+            )
+            ok = False
+            continue
+        root_ok, tally = _compare_root(sides, root, workload, scratch / f"root-{index}")
+        total.absorb(tally)
+        compared.append(root)
+        print(
+            f"root={root} summary: comparisons={tally.comparisons}"
+            f" queries_answered={tally.queries_answered}/{tally.queries_expected}"
+        )
+        if not root_ok:
+            ok = False
+    if not total.comparisons:
+        _fail("no artifact comparisons were performed")
+        ok = False
+    print(f"totals: roots={len(compared)} comparisons={total.comparisons}")
     if scenarios:
-        ok = _run_scenarios(sides, roots[:2], scratch / "scenarios") and ok
+        ok = _run_scenarios(sides, compared[:2], scratch / "scenarios") and ok
     return ok
+
+
+def _root_list(arguments: argparse.Namespace, baseline: Side) -> list[tuple[Path, bool]]:
+    required = (
+        [_resolve(path) for path in arguments.root]
+        if arguments.root
+        else [FIXTURE_ROOT, baseline.src]
+    )
+    optional = [_resolve(path) for path in arguments.optional_root or []]
+    return [(path, False) for path in required] + [(path, True) for path in optional]
 
 
 def _normal_run(arguments: argparse.Namespace, *, scratch_branch: Path | None = None) -> int:
@@ -610,16 +884,9 @@ def _normal_run(arguments: argparse.Namespace, *, scratch_branch: Path | None = 
         return _fail("both source paths must be directories")
     if _guards((baseline, branch), scratch_branch=scratch_branch):
         return 1
-    roots = (
-        [_resolve(path) for path in arguments.root]
-        if arguments.root
-        else [
-            baseline.src.parent / "examples/python-workflow",
-            baseline.src,
-        ]
-    )
+    roots = _root_list(arguments, baseline)
     try:
-        queries = _load_queries(_resolve(arguments.queries))
+        workloads = _load_queries(_resolve(arguments.queries))
     except (OSError, ValueError, json.JSONDecodeError) as error:
         return _fail(f"could not load queries: {error}")
     scratch = (
@@ -630,25 +897,64 @@ def _normal_run(arguments: argparse.Namespace, *, scratch_branch: Path | None = 
     scratch.mkdir(parents=True, exist_ok=True)
     try:
         return (
-            0 if _compare((baseline, branch), roots, queries, scratch, arguments.scenarios) else 1
+            0 if _compare((baseline, branch), roots, workloads, scratch, arguments.scenarios) else 1
         )
     finally:
         if arguments.scratch is None:
             shutil.rmtree(scratch, ignore_errors=True)
 
 
+INJECTIONS: tuple[tuple[str, Any, str], ...] = (
+    ("serialize", _inject_serialize, "artifact=analyze graph SHA-256: DIFFERENT"),
+    ("visualize", _inject_visualize, "artifact=visualize HTML SHA-256: DIFFERENT"),
+    ("query", _inject_query, "query="),
+)
+
+
+def _injected_run(
+    arguments: argparse.Namespace, branch_source: Path, temporary: Path, index: int
+) -> str | None:
+    """Run one injection and return a message when it was not caught properly."""
+
+    name, inject, marker = INJECTIONS[index]
+    copied = temporary / f"injected-src-{name}"
+    _copy_without_git(branch_source, copied)
+    inject(copied)
+    injected = argparse.Namespace(**vars(arguments))
+    injected.branch_src = copied
+    injected.scenarios = False
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        failed = _normal_run(injected, scratch_branch=copied)
+    output = captured.getvalue()
+    print(output, end="")
+    if failed == 0:
+        return f"self-test injection {name} unexpectedly passed"
+    differing = [line for line in output.splitlines() if line.endswith(": DIFFERENT")]
+    if not any(marker in line for line in differing):
+        return (
+            f"self-test injection {name} exited nonzero without the {marker!r} row"
+            " -- the injection no longer perturbs what the harness compares"
+        )
+    return None
+
+
 def _self_test(arguments: argparse.Namespace) -> int:
+    """Prove the harness reports each artifact class it claims to compare.
+
+    A nonzero exit is not enough evidence: an injection that stopped applying
+    (a renamed helper, say) would break the import guard and still exit
+    nonzero.  Each injection must produce the specific differing row for the
+    artifact class it perturbs.
+    """
+
     branch_source = _resolve(arguments.branch_src)
     with tempfile.TemporaryDirectory(prefix="minotaur-equivalence-self-test-") as temporary:
-        copied = Path(temporary) / "injected-src"
-        _copy_without_git(branch_source, copied)
-        _inject_serialize(copied)
-        injected = argparse.Namespace(**vars(arguments))
-        injected.branch_src = copied
-        injected.scenarios = False
-        failed = _normal_run(injected, scratch_branch=copied)
-        if failed == 0:
-            return _fail("self-test injection unexpectedly passed")
+        for index, (name, _inject, _marker) in enumerate(INJECTIONS):
+            failure = _injected_run(arguments, branch_source, Path(temporary), index)
+            if failure:
+                return _fail(failure)
+            print(f"self-test: injection {name} detected")
         clean_copy = Path(temporary) / "clean-src"
         _copy_without_git(branch_source, clean_copy)
         clean = argparse.Namespace(**vars(arguments))

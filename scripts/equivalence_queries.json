@@ -1,68 +1,148 @@
-[
-  {
-    "name": "definitions-many",
-    "command": "definitions",
-    "args": ["main"],
-    "variants": {"json": true, "no_refresh": true}
+{
+  "equivalence_root": {
+    "selection": "workflow/util.py",
+    "queries": [
+      {
+        "name": "definitions-many",
+        "command": "definitions",
+        "args": ["main"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "callers-qualified",
+        "command": "callers",
+        "args": ["workflow.service.Service.run"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "callers-zero",
+        "command": "callers",
+        "args": ["workflow.util.unused_helper"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "callers-unresolved",
+        "command": "callers",
+        "args": ["workflow.this_symbol_does_not_exist"],
+        "expect": "error",
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "definitions-invalid",
+        "command": "definitions",
+        "args": ["not a valid symbol"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "impact-depth",
+        "command": "impact",
+        "args": ["workflow.util.summarize", "--depth", "1"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "unreferenced-graph",
+        "command": "unreferenced",
+        "args": ["workflow"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "unreferenced-text",
+        "command": "unreferenced",
+        "args": ["workflow", "--text-fallback"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "context-real",
+        "command": "context",
+        "args": ["--site", "workflow/service.py:19"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "context-out-of-range",
+        "command": "context",
+        "args": ["--site", "workflow/service.py:999999"],
+        "expect": "error",
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "diff-selection",
+        "command": "diff",
+        "args": ["{graph}", "{selection}"],
+        "variants": {"json": true}
+      }
+    ]
   },
-  {
-    "name": "callers-qualified",
-    "command": "callers",
-    "args": ["minotaur.graph_model.location.Position.from_dict"],
-    "variants": {"json": true, "no_refresh": true}
-  },
-  {
-    "name": "callers-zero",
-    "command": "callers",
-    "args": ["minotaur.graph_model.validation.ValidationReport.is_valid"],
-    "variants": {"json": true, "no_refresh": true}
-  },
-  {
-    "name": "callers-unresolved",
-    "command": "callers",
-    "args": ["minotaur.this_symbol_does_not_exist"],
-    "variants": {"json": true, "no_refresh": true}
-  },
-  {
-    "name": "definitions-invalid",
-    "command": "definitions",
-    "args": ["not a valid symbol"],
-    "variants": {"json": true, "no_refresh": true}
-  },
-  {
-    "name": "impact-depth",
-    "command": "impact",
-    "args": ["minotaur.graph_model.location.Position.from_dict", "--depth", "1"],
-    "variants": {"json": true, "no_refresh": true}
-  },
-  {
-    "name": "unreferenced-graph",
-    "command": "unreferenced",
-    "args": ["minotaur"],
-    "variants": {"json": true, "no_refresh": true}
-  },
-  {
-    "name": "unreferenced-text",
-    "command": "unreferenced",
-    "args": ["minotaur", "--text-fallback"],
-    "variants": {"json": true, "no_refresh": true}
-  },
-  {
-    "name": "context-real",
-    "command": "context",
-    "args": ["--site", "minotaur/cli.py:42"],
-    "variants": {"json": true, "no_refresh": true}
-  },
-  {
-    "name": "context-out-of-range",
-    "command": "context",
-    "args": ["--site", "minotaur/cli.py:999999"],
-    "variants": {"json": true, "no_refresh": true}
-  },
-  {
-    "name": "diff-selection",
-    "command": "diff",
-    "args": ["{graph}", "{selection}"],
-    "variants": {"json": true}
+  "src": {
+    "selection": "minotaur",
+    "queries": [
+      {
+        "name": "definitions-many",
+        "command": "definitions",
+        "args": ["main"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "callers-qualified",
+        "command": "callers",
+        "args": ["minotaur.graph_model.location.Position.from_dict"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "callers-zero",
+        "command": "callers",
+        "args": ["minotaur.graph_model.validation.ValidationReport.is_valid"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "callers-unresolved",
+        "command": "callers",
+        "args": ["minotaur.this_symbol_does_not_exist"],
+        "expect": "error",
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "definitions-invalid",
+        "command": "definitions",
+        "args": ["not a valid symbol"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "impact-depth",
+        "command": "impact",
+        "args": ["minotaur.graph_model.location.Position.from_dict", "--depth", "1"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "unreferenced-graph",
+        "command": "unreferenced",
+        "args": ["minotaur"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "unreferenced-text",
+        "command": "unreferenced",
+        "args": ["minotaur", "--text-fallback"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "context-real",
+        "command": "context",
+        "args": ["--site", "minotaur/cli.py:42"],
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "context-out-of-range",
+        "command": "context",
+        "args": ["--site", "minotaur/cli.py:999999"],
+        "expect": "error",
+        "variants": {"json": true, "no_refresh": true}
+      },
+      {
+        "name": "diff-selection",
+        "command": "diff",
+        "args": ["{graph}", "{selection}"],
+        "variants": {"json": true}
+      }
+    ]
   }
-]
+}
