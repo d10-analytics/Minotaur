@@ -30,7 +30,7 @@ the caller and impact queries that follow.
 ```console
 $ minotaur query definitions select_sources \
     --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
-minotaur/language_interpreter/selection.py:36  minotaur.language_interpreter.selection.select_sources  function
+minotaur/language_interpreter/selection.py:34  minotaur.language_interpreter.selection.select_sources  function
 ```
 
 ## 3. Find callers
@@ -51,7 +51,7 @@ selected file. Its result identifies the exact call site.
 ```console
 $ minotaur query callers minotaur.language_interpreter.selection._resolve_target \
     --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
-minotaur/language_interpreter/selection.py:48:20  minotaur.language_interpreter.selection.select_sources
+minotaur/language_interpreter/selection.py:46:20  minotaur.language_interpreter.selection.select_sources
 ```
 
 ## 4. Trace impact
@@ -75,7 +75,7 @@ outside the analyzed selection.
 ```console
 $ minotaur query unreferenced minotaur/language_interpreter/selection.py \
     --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
-minotaur/language_interpreter/selection.py:36  minotaur.language_interpreter.selection.select_sources  function
+minotaur/language_interpreter/selection.py:34  minotaur.language_interpreter.selection.select_sources  function
 ```
 
 `--text-fallback` adds current-source token checks to the graph result. Here it
@@ -84,7 +84,7 @@ does not remove the candidate: the source contains no call to `select_sources`.
 ```console
 $ minotaur query unreferenced minotaur/language_interpreter/selection.py \
     --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh --text-fallback
-minotaur/language_interpreter/selection.py:36  minotaur.language_interpreter.selection.select_sources  function
+minotaur/language_interpreter/selection.py:34  minotaur.language_interpreter.selection.select_sources  function
 ```
 
 An exclusion pattern removes matching candidates from the audit. This pattern
@@ -107,9 +107,9 @@ provide enough surrounding code to understand the call.
 $ minotaur query context --site minotaur/language_interpreter/selection.py:48 \
     --before 1 --after 1 --graph examples/python-workflow/minotaur-graph.json --root src
 minotaur/language_interpreter/selection.py:47-49
-  47:     for target in targets:
-> 48:         resolved = _resolve_target(target, workspace.root)
-  49:         if resolved.is_file():
+  47:         if resolved.is_file():
+> 48:             if not registry.supports(resolved):
+  49:                 raise SelectionError(f"unsupported source file: {target}")
 ```
 
 ## 7. Observe freshness and choose a snapshot
@@ -138,7 +138,7 @@ $ minotaur query definitions select_sources \
     --graph /tmp/query-walkthrough-graph.json --root /tmp/query-walkthrough-src
 minotaur: refreshed graph (1 drifted paths)
 minotaur: stale: minotaur/language_interpreter/selection.py
-minotaur/language_interpreter/selection.py:36  minotaur.language_interpreter.selection.select_sources  function
+minotaur/language_interpreter/selection.py:34  minotaur.language_interpreter.selection.select_sources  function
 ```
 
 Append a second edit to the same temporary source before running the next
@@ -157,7 +157,7 @@ answer while deciding whether a refresh is appropriate.
 $ minotaur query definitions select_sources \
     --graph /tmp/query-walkthrough-graph.json --root /tmp/query-walkthrough-src --no-refresh
 minotaur: stale: minotaur/language_interpreter/selection.py
-minotaur/language_interpreter/selection.py:36  minotaur.language_interpreter.selection.select_sources  function
+minotaur/language_interpreter/selection.py:34  minotaur.language_interpreter.selection.select_sources  function
 ```
 
 ## 8. Compare snapshots
