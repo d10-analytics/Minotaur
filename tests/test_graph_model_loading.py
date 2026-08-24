@@ -290,6 +290,25 @@ def _stamped_graph(tmp_path: Path) -> tuple[Path, bytes]:
     return graph_path, data
 
 
+def _stamped_single_node_graph(tmp_path: Path, *, alter_id: bool) -> Path:
+    """Create an isolated graph for the sidecar trust-risk proof.
+
+    The altered node has no relationship endpoint, so a trusted load reaches
+    the node-ID decision instead of failing first on dangling structure. The
+    sidecar is regenerated after the edit to model the documented trust risk.
+    """
+    raw = json.loads(_EXAMPLE_GRAPH.read_text(encoding="utf-8"))
+    raw["nodes"] = [raw["nodes"][0]]
+    raw["relationships"] = []
+    if alter_id:
+        raw["nodes"][0]["id"] = "node:sha256:" + "0" * 64
+    data = json.dumps(raw, separators=(",", ":")).encode("utf-8")
+    graph_path = tmp_path / "single-node.json"
+    graph_path.write_bytes(data)
+    stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+    return graph_path
+
+
 # ---------------------------------------------------------------------------
 # AC-01 proof
 # ---------------------------------------------------------------------------
@@ -334,6 +353,37 @@ class TestStampAwareLoader:
         assert loaded.validated is True
         assert loaded.digest == hashlib.sha256(data).hexdigest()
 
+    def test_trusted_load_skips_only_node_id_verification(self, tmp_path: Path) -> None:
+        """A matching stamp skips IDs; missing stamps and ``--validate`` do not."""
+        graph_path, _data = _stamped_graph(tmp_path)
+
+        with patch(
+            "minotaur.graph_model.validation.verify_node_id",
+            side_effect=AssertionError("node-ID verification was called"),
+        ):
+            trusted = load_graph_file(graph_path)
+            assert trusted.validated is False
+
+            stamp_path(graph_path).unlink()
+            with pytest.raises(AssertionError, match="node-ID verification was called"):
+                load_graph_file(graph_path)
+
+            stamp_path(graph_path).write_text(
+                graph_digest(graph_path.read_bytes()) + "\n", encoding="utf-8"
+            )
+            with pytest.raises(AssertionError, match="node-ID verification was called"):
+                load_graph_file(graph_path, validate=True)
+
+    def test_regenerated_sidecar_accepts_altered_id_until_validate(self, tmp_path: Path) -> None:
+        """The documented trusted-sidecar risk is executable and bounded."""
+        graph_path = _stamped_single_node_graph(tmp_path, alter_id=True)
+
+        trusted = load_graph_file(graph_path)
+        assert trusted.validated is False
+
+        with pytest.raises(GraphLoadError, match="does not match the digest recomputed"):
+            load_graph_file(graph_path, validate=True)
+
     def test_load_graph_bytes_always_validates(self) -> None:
         """``load_graph_bytes`` runs the schema seam even for stamped bytes."""
         data = _EXAMPLE_GRAPH.read_bytes()
@@ -353,6 +403,33 @@ class TestStampAwareLoader:
         assert seam_called
         assert loaded.validated is True
         assert loaded.digest == hashlib.sha256(data).hexdigest()
+
+    def test_trusted_load_keeps_relationship_endpoint_validation(self, tmp_path: Path) -> None:
+        """A matching stamp does not suppress non-ID semantic checks."""
+        raw = {
+            "format": "minotaur-graph",
+            "format_version": "0.1.0",
+            "coordinate_encoding": "utf-8",
+            "nodes": [],
+            "relationships": [
+                {
+                    "source": f"node:sha256:{'a' * 64}",
+                    "target": f"node:sha256:{'b' * 64}",
+                    "kind": "contains",
+                    "evidence": [{"provenance": "static-analysis"}],
+                }
+            ],
+        }
+        data = json.dumps(raw).encode("utf-8")
+        graph_path = tmp_path / "dangling-trusted.json"
+        graph_path.write_bytes(data)
+        stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+
+        with pytest.raises(
+            GraphLoadError,
+            match="graph semantic validation failed:.*relationship source",
+        ):
+            load_graph_file(graph_path)
 
 
 # ---------------------------------------------------------------------------
