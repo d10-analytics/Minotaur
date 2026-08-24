@@ -58,7 +58,9 @@ minotaur/language_interpreter/selection.py:46:20  minotaur.language_interpreter.
 `--no-refresh` answers from the graph as checked in instead of re-analyzing
 drifted files and rewriting it. See the [query walkthrough](examples/query-walkthrough/)
 for a step-by-step tour with executed output, and the [query reference](docs/guides/query-reference.md)
-for the complete command and freshness details.
+for command options. The [freshness concept](docs/concepts/freshness.md) owns
+the complete order-of-operations contract, including what queries detect and
+what remains intentionally outside the freshness boundary.
 
 Current Python-analysis behavior and limits are described in the
 [Python analysis guide](docs/guides/analyze-python.md).

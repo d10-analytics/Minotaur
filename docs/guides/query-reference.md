@@ -35,69 +35,19 @@ common options:
 --graph GRAPH --root ROOT [--no-refresh] [--json]
 ```
 
-If a selected file changes, disappears, or a new supported file appears below
-a recorded directory target, Minotaur performs a full re-analysis of the
-recorded selection and atomically rewrites `GRAPH`. It then answers from the
-new snapshot. A refresh that produced source diagnostics returns exit status
-`1`, just like `analyze`; a successful refresh returns `0`.
+`--no-refresh` answers from the existing graph and reports drift without
+rewriting it; omit it when current source facts are required. `--json` exposes
+the `refreshed` and `stale` fields alongside query results. `context` reads
+current source without refreshing, while `diff` compares graph files and does
+not inspect a source root. For the complete order-of-operations contract,
+including detected and intentionally undetected changes, see
+[Graph freshness and snapshot order](../concepts/freshness.md).
 
-A refresh is never silent. Before rewriting `GRAPH`, Minotaur announces it on
-stderr and lists every drifted root-relative path:
-
-```text
-minotaur: refreshed graph (2 drifted paths)
-minotaur: stale: src/example.py
-minotaur: stale: src/removed.py
-```
-
-If every recorded target has been deleted, the refresh still runs and rewrites
-`GRAPH` as an empty graph, so queries report an empty result at exit `0` rather
-than answering from the prior snapshot; the recorded selection is kept so the
-paths are picked up again if the files return.
-
-`--no-refresh` answers from the existing graph and prints the same one warning
-per drifted path, without the `refreshed graph` line:
-
-```text
-minotaur: stale: src/example.py
-```
-
-This is useful when an agent deliberately needs the prior snapshot. It does
-not make stale facts current. Graphs made before selection metadata was
-recorded cannot be refreshed automatically; analyze them again first.
-
-For a stale `unreferenced --text-fallback --no-refresh` query, Minotaur keeps
-the result graph-only: it does not scan current source text or require selected
-source paths to remain readable. The stale warnings identify why optional
-current-source text mentions are unavailable.
-
-`context` always reads the current source without refreshing the graph. It
-compares the requested file's recorded hash and labels the excerpt when the
-file changed. `diff` compares two graph files and therefore has no source-root
-freshness check.
-
-### First-read validation cost
-
-The first user-facing graph-reading command (`query`, `diff`, or `visualize`)
-that reads a graph Minotaur did not just write — a graph produced before
-sidecar stamping was introduced, a graph from another tool, or one whose
-sidecar was removed — performs full JSON Schema validation and node-ID
-verification, then stamps the result. This validation happens once:
-subsequent reads of the same graph file find the matching stamp and skip those
-two checks, so they are fast. The trusted read still performs the remaining
-semantic checks, including relationship endpoint and duplicate checks. No
-manual step is required; the first graph-reading command handles it
-automatically. An `analyze` clean-skip deliberately does not create a sidecar,
-so it is not this stamping step.
-
-### `--validate` flag
-
-`callers`, `definitions`, `impact`, `unreferenced`, `context`, `diff`, and
-`visualize` accept `--validate`. When set, the command forces full JSON Schema
-and node-ID validation regardless of sidecar state. This is useful for
-verifying graph integrity after external edits or transfers. Without the flag,
-a matching sidecar is sufficient to skip those two checks; the remaining
-semantic checks still run.
+The `--validate` option on graph-reading commands forces full schema and
+node-ID validation even when a matching sidecar would authorize the trusted
+load path. Use it after external graph or sidecar edits; the concept page
+documents the accepted trusted-sidecar risk and the `analyze --force` escape
+hatch for source-selection changes.
 
 ## Query commands
 

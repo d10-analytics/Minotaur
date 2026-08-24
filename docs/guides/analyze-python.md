@@ -4,6 +4,10 @@ Minotaur provides a bounded analyzer for Python source structure. The
 language-neutral CLI selects files by registered extension; this release
 registers Python for `.py` files only.
 
+Analysis records source bytes and the selected targets for later freshness
+checks. See [Graph freshness and snapshot order](../concepts/freshness.md) for
+the exact refresh, no-refresh, clean-skip, and graph-integrity contract.
+
 ## Analyze selected paths
 
 Run the same command through the installed console script or as a module:
