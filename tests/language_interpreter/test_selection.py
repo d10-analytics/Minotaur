@@ -46,6 +46,14 @@ def _oracle_discover_directory(
     return tuple(sorted(found, key=lambda path: path.relative_to(root).as_posix()))
 
 
+def _oracle_select_sources(root: Path) -> tuple[Path, ...]:
+    selected: dict[str, Path] = {}
+    for candidate in _oracle_discover_directory(root, root, False):
+        if candidate.suffix.lower() == ".py":
+            selected[candidate.relative_to(root).as_posix()] = candidate
+    return tuple(selected[key] for key in sorted(selected))
+
+
 def _make_nested_excluded(root: Path) -> None:
     _write(root, "a/keep.py")
     _write(root, "a/__pycache__/b.py")
@@ -122,6 +130,32 @@ def test_discover_directory_matches_verbatim_previous_implementation(
     assert _discover_directory(root, root, include_excluded) == _oracle_discover_directory(
         root, root, include_excluded
     )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="backslash is a valid POSIX filename character")
+def test_literal_backslash_filename_keeps_distinct_root_relative_identity(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write(root, "a\\b.py")
+    _write(root, "a/b.py")
+
+    expected = _oracle_select_sources(root)
+    _, selected = select_sources(root, (root,), default_registry())
+    assert _discover_directory(root, root, False) == _oracle_discover_directory(root, root, False)
+    assert selected.files == expected
+    assert len(selected.files) == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="backslash is a valid POSIX filename character")
+def test_root_name_ending_in_backslash_preserves_containment(tmp_path: Path) -> None:
+    root = tmp_path / "workspace\\"
+    root.mkdir()
+    _write(root, "a.py")
+
+    expected = _oracle_select_sources(root)
+    _, selected = select_sources(root, (root,), default_registry())
+    assert _discover_directory(root, root, False) == _oracle_discover_directory(root, root, False)
+    assert selected.files == expected == (root / "a.py",)
 
 
 def test_shared_exclusion_predicate_controls_both_walkers(
