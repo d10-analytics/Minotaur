@@ -15,7 +15,11 @@ import functools
 import re
 from dataclasses import dataclass
 
-from minotaur.graph_model._parsing import reject_unknown_fields, reject_unpaired_surrogates
+from minotaur.graph_model._parsing import (
+    reject_unknown_fields,
+    reject_unpaired_surrogates,
+    type_error,
+)
 
 # Module-level constants for reject_unknown_fields — hoisted from per-call
 # frozenset literals to avoid 118 k+ allocations per graph load (F-13).
@@ -149,6 +153,15 @@ class Range:
     start: Position
     end: Position
 
+    def __post_init__(self) -> None:
+        # Model-layer type ownership (R-02): in-process construction and
+        # dataclasses.replace must not be able to hand the serializer a
+        # non-Position endpoint.
+        if not isinstance(self.start, Position):
+            raise type_error("range start", self.start, "a Position")
+        if not isinstance(self.end, Position):
+            raise type_error("range end", self.end, "a Position")
+
     def to_dict(self) -> dict[str, dict[str, int]]:
         return {"start": self.start.to_dict(), "end": self.end.to_dict()}
 
@@ -221,6 +234,10 @@ class Location:
         # (absolute, with traversal components, or empty) is never a valid
         # repository-relative reference. Letting one through would require
         # every downstream consumer to re-check.
+        if not isinstance(self.path, str):
+            raise type_error("location path", self.path, "a string")
+        if not isinstance(self.range, Range):
+            raise type_error("location range", self.range, "a Range")
         if not is_safe_path(self.path):
             raise ValueError(
                 f"path must be a non-empty, repository-relative, slash-separated "
