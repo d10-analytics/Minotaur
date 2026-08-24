@@ -47,7 +47,10 @@ The `--validate` option on graph-reading commands forces full schema and
 node-ID validation even when a matching sidecar would authorize the trusted
 load path. Use it after external graph or sidecar edits; the concept page
 documents the accepted trusted-sidecar risk and the `analyze --force` escape
-hatch for source-selection changes.
+hatch for source-selection changes. A pre-sidecar or foreign graph pays that
+full validation once, on the first graph-reading command that touches it; see
+["First-read validation cost"](../concepts/freshness.md#first-read-validation-cost)
+for the exact command list and the sidecar it writes.
 
 ## Query commands
 
@@ -183,6 +186,11 @@ cannot say which one was meant.
 
 JSON records contain `path`, `line`, `symbol`, `kind`, and `text_mention`.
 An empty result prints `no unreferenced symbols` and still exits `0`.
+
+`--text-fallback` is suppressed on a stale graph queried with `--no-refresh`,
+since that mode intentionally answers from graph relationships only; see the
+["stale graph + `--text-fallback` + `--no-refresh`" row](../concepts/freshness.md)
+in the freshness contract.
 
 ### Compare snapshots
 

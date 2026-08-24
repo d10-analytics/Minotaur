@@ -10,7 +10,10 @@ the exact refresh, no-refresh, clean-skip, and graph-integrity contract.
 
 ## Analyze selected paths
 
-Run the same command through the installed console script or as a module:
+Run the same command through the installed console script or as a module. If
+`minotaur` reports `ModuleNotFoundError: No module named 'orjson'`, your
+editable install predates `orjson` becoming a required dependency; re-run
+`pip install -e ".[dev]"` to pick it up.
 
 ```text
 minotaur analyze --root ROOT --output GRAPH.json [--force] TARGET [TARGET ...]

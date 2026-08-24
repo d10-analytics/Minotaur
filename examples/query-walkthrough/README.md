@@ -104,12 +104,12 @@ marker identifies the requested line, while the preceding and following lines
 provide enough surrounding code to understand the call.
 
 ```console
-$ minotaur query context --site minotaur/language_interpreter/selection.py:48 \
+$ minotaur query context --site minotaur/language_interpreter/selection.py:46 \
     --before 1 --after 1 --graph examples/python-workflow/minotaur-graph.json --root src
-minotaur/language_interpreter/selection.py:47-49
+minotaur/language_interpreter/selection.py:45-47
+  45:     for target in targets:
+> 46:         resolved = _resolve_target(target, workspace.root)
   47:         if resolved.is_file():
-> 48:             if not registry.supports(resolved):
-  49:                 raise SelectionError(f"unsupported source file: {target}")
 ```
 
 ## 7. Observe freshness and choose a snapshot

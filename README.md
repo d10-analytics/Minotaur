@@ -141,6 +141,11 @@ labeled human-authored annotations.
 
 ## Quick start
 
+If you have an existing editable install (`pip install -e ".[dev]"`) from
+before `orjson` became a required dependency, re-run that same install
+command so `orjson` is pulled in; otherwise `minotaur` commands fail with
+`ModuleNotFoundError: No module named 'orjson'`.
+
 Render an existing canonical graph locally with:
 
 ```bash
