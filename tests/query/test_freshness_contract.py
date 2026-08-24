@@ -199,6 +199,94 @@ def test_regenerated_sidecar_trusts_hand_edited_graph_until_validate(
     assert "does not match the digest recomputed from its identity" in captured.err
 
 
+def test_query_ignores_selection_mismatch_but_analyze_reconciles_it(tmp_path: Path, capsys) -> None:
+    """Freshness row: query drift ignores targets, while analyze reconciles them."""
+    root = tmp_path / "source"
+    selected = _write(root, "selected.py", "def foo():\n    return 1\n")
+    package = _write(root, "pkg/other.py", "def bar():\n    return 2\n").parent
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, selected) == 0
+
+    # The graph bytes are clean, so the query answers from its snapshot without
+    # consulting the analyze target set or rewriting the graph.
+    assert (
+        cli.main(
+            [
+                "query",
+                "definitions",
+                "foo",
+                "--graph",
+                str(output),
+                "--root",
+                str(root),
+            ]
+        )
+        == 0
+    )
+    query_capture = capsys.readouterr()
+    assert query_capture.out == "selected.py:1  selected.foo  function\n"
+    assert query_capture.err == ""
+
+    # Analyze has a stricter clean-skip probe: a changed target selection
+    # forces reconciliation even though the source bytes themselves are clean.
+    assert (
+        cli.main(
+            [
+                "analyze",
+                "--root",
+                str(root),
+                "--output",
+                str(output),
+                str(package),
+            ]
+        )
+        == 0
+    )
+    analyze_capture = capsys.readouterr()
+    assert "graph is up to date, skipping analysis" not in analyze_capture.err
+    assert json.loads(output.read_text(encoding="utf-8"))["extensions"]["minotaur"][
+        "selection"
+    ] == ["pkg"]
+
+
+def test_edit_after_drift_is_not_detected_between_drift_and_answer(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Freshness row: an edit after drift leaves the public answer on the old snapshot."""
+    root = tmp_path / "source"
+    source = _write(root, "app.py", "def foo():\n    return 1\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+
+    real_drift = cli.drift
+
+    def drift_then_edit(document, drift_root):
+        observed = real_drift(document, drift_root)
+        source.write_text("# edit landed after drift\ndef foo():\n    return 2\n", encoding="utf-8")
+        return observed
+
+    # This patches only the public CLI's drift seam: the edit is introduced
+    # after the real comparison returns, before the query builds its answer.
+    monkeypatch.setattr(cli, "drift", drift_then_edit)
+    status = cli.main(
+        [
+            "query",
+            "definitions",
+            "foo",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "app.py:1  app.foo  function\n"
+    assert captured.err == ""
+    assert source.read_text(encoding="utf-8").startswith("# edit landed after drift")
+
+
 def test_diff_does_not_call_source_drift(tmp_path: Path, monkeypatch, capsys) -> None:
     """Freshness row: diff compares snapshots and never calls the source drift guard."""
     root = tmp_path / "source"
