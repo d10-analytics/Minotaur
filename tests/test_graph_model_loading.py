@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-import tomllib
 from test_graph_model_serialization import (
     _collect_loadable_graph_fixtures,
     _oracle_serialize,
@@ -255,26 +255,47 @@ def test_orjson_rejections_surface_as_graph_load_errors(content: bytes) -> None:
 
 
 @pytest.mark.parametrize(
-    ("depth", "skip_schema"),
-    [(100, False), (495, True), (900, True)],
-    ids=["untrusted-shallow", "trusted-495", "trusted-900"],
+    ("depth", "skip_schema", "outcome"),
+    [
+        (100, False, "loads"),
+        (150, False, "nests deeper than the loader supports"),
+        (495, True, "loads"),
+        (900, True, "loads"),
+        (1010, True, "nests deeper than the loader supports"),
+        (1100, True, "graph input is not valid JSON: "),
+    ],
+    ids=[
+        "untrusted-100",
+        "untrusted-150-schema-bound",
+        "trusted-495",
+        "trusted-900",
+        "trusted-1010-freeze-bound",
+        "trusted-1100-decoder-bound",
+    ],
 )
-def test_deeply_nested_extensions_below_the_decoder_limit_load(
-    depth: int, skip_schema: bool
+def test_extension_nesting_bounds_surface_as_load_errors(
+    depth: int, skip_schema: bool, outcome: str
 ) -> None:
-    """Nesting the decoder accepts must not raise from any loader-side walk.
+    """Every nesting bound is a ``GraphLoadError``, never a raw traceback.
 
-    M-3: the deleted out-of-range walk recursed once per level and turned
-    extension nesting in the 163-495 range into an unhandled RecursionError on
-    every load, trusted included.  The trusted path now carries such documents
-    up to the decoder's own 1024-level limit.  The full-validation path is
-    still bounded further in by ``jsonschema``'s recursive validator, which is
-    unrelated to the loader and unchanged by this spec.
+    Three bounds exist and none is the decoder's for realistic input: the
+    recursive ``extensionValue`` schema introduced by this spec bounds the
+    full-validation path at roughly 120 levels (main accepted deeper documents
+    because its schema never descended into extension contents); the extension
+    freeze bounds the trusted path just short of 1000; orjson's fixed 1024
+    limit is only reached on the trusted path.  ``load_graph_bytes`` converts
+    the interpreter's ``RecursionError`` into the load boundary's own error.
+    The exact cliffs depend on the surrounding call stack, so the parameters
+    sit well inside each region rather than on its edge.
     """
     literal = "{" + '"n":{' * depth + "}" * depth + "}"
     content = _workflow_with_extension_literal(literal)
-    loaded = load_graph_bytes(content, _skip_schema=skip_schema)
-    assert loaded.document.extensions is not None
+    if outcome == "loads":
+        loaded = load_graph_bytes(content, _skip_schema=skip_schema)
+        assert loaded.document.extensions is not None
+        return
+    with pytest.raises(GraphLoadError, match=re.escape(outcome)):
+        load_graph_bytes(content, _skip_schema=skip_schema)
 
 
 def _workflow_with_position_line(literal: str) -> bytes:
@@ -345,9 +366,11 @@ def test_load_boundary_uses_orjson_without_a_decoder_fallback() -> None:
 
 
 def test_orjson_is_a_declared_runtime_dependency() -> None:
-    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())["project"]
-    dependencies = project["dependencies"]
-    assert any(dependency.startswith("orjson>=") for dependency in dependencies)
+    # A text match rather than ``tomllib``: that module is 3.11+, and importing
+    # it would drop this whole module from a run on the declared 3.10 floor.
+    text = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    dependencies = text.split("dependencies = [", 1)[1].split("]", 1)[0]
+    assert re.search(r'^\s*"orjson>=[\d.]+",?\s*$', dependencies, re.MULTILINE)
 
 
 # ---------------------------------------------------------------------------

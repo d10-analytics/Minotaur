@@ -27,6 +27,7 @@ from minotaur.graph_model.provenance import (
     resolve_symbol_kind,
 )
 from minotaur.graph_model.relationship import Relationship
+from minotaur.graph_model.serialization import serialize
 
 EXAMPLES = Path(__file__).parents[1] / "examples/synthetic-graphs"
 PYTHON_WORKFLOW = Path(__file__).parents[1] / "examples/python-workflow"
@@ -762,12 +763,91 @@ def test_extension_model_guard_accepts_json_values_and_is_idempotent() -> None:
     extensions = {
         "a\n": {
             "note": "\U0001d11e",
-            "values": [1, True, None, {"\ud800": 2}],
+            "values": [1, True, None, {"k": 2}, 2**64 - 1, -(2**63)],
         }
     }
     node = _extension_test_node(extensions)
     assert node.to_dict()["extensions"] == extensions
     assert replace(node).to_dict()["extensions"] == extensions
+    # Everything the model admits must be encodable: the freeze is the only
+    # guard between an in-process document and the serializer.
+    assert serialize(GraphDocument(coordinate_encoding=CoordinateEncoding.UTF_8, nodes=(node,)))
+
+
+_UNENCODABLE_EXTENSION_VALUES = [
+    ({"x": {"\ud800": 2}}, "extension key at /x/\ud800 must not contain unpaired surrogate"),
+    ({"x": {"s": "\udfff"}}, "extension value at /x/s must not contain unpaired surrogate"),
+    ({"x": {"values": ["ok", "\ud800"]}}, "extension value at /x/values/1 must not contain"),
+    ({"x": {"s": {1, 2}}}, "extension value at /x/s must be a string, integer, boolean, null"),
+    ({"x": {"s": b"ab"}}, "extension value at /x/s must be a string, integer, boolean, null"),
+    (
+        {"x": {"big": 2**64}},
+        "extension value at /x/big must fit in 64 bits, got 18446744073709551616",
+    ),
+    ({"x": {"big": -(2**63) - 1}}, "extension value at /x/big must fit in 64 bits"),
+]
+
+
+@pytest.mark.parametrize(("extensions", "message"), _UNENCODABLE_EXTENSION_VALUES)
+def test_extension_model_guard_rejects_values_the_serializer_cannot_encode(
+    extensions: dict[str, dict[str, object]], message: str
+) -> None:
+    """R-02(b): nothing the model admits may fail later inside ``serialize``.
+
+    Lone surrogates are BMP code points, so the non-BMP key check passes them;
+    UTF-8 cannot encode them.  Non-JSON leaves fail in the encoder as
+    ``TypeError``.  Integers past what ``orjson`` decodes as ``int`` serialize
+    fine but load back as a float and are rejected -- output no reader accepts.
+    """
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _extension_test_node(extensions)
+
+
+def _serializable_node() -> Node:
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, "test")
+    node_id = compute_node_id(identity, node_class=NodeClass.FILE.value, path="src/test.py")
+    return Node(
+        id=node_id, identity=identity, node_class=NodeClass.FILE, label="t", path="src/test.py"
+    )
+
+
+@pytest.mark.parametrize(
+    ("build", "message"),
+    [
+        (lambda: replace(_serializable_node(), label="\ud800"), "node label must not contain"),
+        (lambda: Producer("\ud800"), "producer name must not contain"),
+        (lambda: Producer("p", "\ud800"), "producer version must not contain"),
+        (lambda: Rule("\ud800", "1"), "rule id must not contain"),
+        (lambda: Rule("r", "\ud800"), "rule version must not contain"),
+        (lambda: SourceControl("git", None, "\ud800"), "branch must not contain"),
+        (
+            lambda: Position(line=2**64, character=0),
+            "line must fit in 64 bits, got 18446744073709551616",
+        ),
+        (lambda: Position(line=0, character=2**64), "character must fit in 64 bits"),
+    ],
+    ids=[
+        "label",
+        "producer-name",
+        "producer-version",
+        "rule-id",
+        "rule-version",
+        "branch",
+        "line",
+        "character",
+    ],
+)
+def test_string_and_position_fields_reject_unencodable_values_in_process(
+    build: object, message: str
+) -> None:
+    """Every string field the serializer writes rejects lone surrogates at
+    construction, and positions stay inside what ``orjson`` decodes as ``int``."""
+    with pytest.raises(ValueError, match=re.escape(message)):
+        build()  # type: ignore[operator]
+
+
+def test_position_accepts_the_largest_decodable_integer() -> None:
+    assert Position(line=2**64 - 1, character=2**64 - 1).line == 2**64 - 1
 
 
 @pytest.mark.parametrize(
