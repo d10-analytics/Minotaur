@@ -11,7 +11,6 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 BENCHMARK = ROOT / "scripts" / "benchmark_graph_load.py"
-EXAMPLE_GRAPH = ROOT / "examples" / "python-workflow" / "minotaur-graph.json"
 
 
 def _run_benchmark(
@@ -55,36 +54,6 @@ def _run_benchmark(
     return completed, graph, old_temp_graph, old_temp_sidecar, temp_root
 
 
-def _run_benchmark_against_checked_in_example(
-    tmp_path: Path, *, symbol: str | None = None
-) -> tuple[subprocess.CompletedProcess[str], Path]:
-    temp_root = tmp_path / "temporary-directories"
-    temp_root.mkdir(parents=True)
-    environment = os.environ.copy()
-    environment["TMPDIR"] = str(temp_root)
-    command = [
-        sys.executable,
-        str(BENCHMARK),
-        "--graph",
-        str(EXAMPLE_GRAPH),
-        "--root",
-        str(ROOT),
-        "--repeats",
-        "1",
-    ]
-    if symbol is not None:
-        command.extend(["--symbol", symbol])
-    completed = subprocess.run(
-        command,
-        cwd=ROOT,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return completed, temp_root
-
-
 @pytest.mark.parametrize(
     ("source", "expected_returncode"),
     [
@@ -116,17 +85,30 @@ def test_benchmark_rejects_query_that_matches_nothing(tmp_path: Path) -> None:
     assert "definitely_missing" in completed.stderr
 
 
-def test_benchmark_query_guard_uses_checked_in_example_graph(tmp_path: Path) -> None:
-    matching, matching_temp_root = _run_benchmark_against_checked_in_example(tmp_path / "main")
-    assert matching.returncode == 0, matching.stderr
-    assert list(matching_temp_root.iterdir()) == []
-
-    missing, missing_temp_root = _run_benchmark_against_checked_in_example(
-        tmp_path / "missing", symbol="definitely_missing"
+@pytest.mark.parametrize(
+    "symbol",
+    [None, "main", "definitely_missing"],
+    ids=["default-main", "explicit-main", "missing"],
+)
+def test_benchmark_query_symbol_guard_and_artifact_ownership(
+    tmp_path: Path, symbol: str | None
+) -> None:
+    completed, graph, old_temp_graph, old_temp_sidecar, temp_root = _run_benchmark(
+        tmp_path,
+        "def main():\n    return 1\n",
+        symbol=symbol,
     )
-    assert missing.returncode != 0
-    assert "definitely_missing" in missing.stderr
-    assert list(missing_temp_root.iterdir()) == []
+
+    expected_returncode = 1 if symbol == "definitely_missing" else 0
+    assert completed.returncode == expected_returncode, completed.stderr
+    if symbol is None:
+        assert "query definitions main --no-refresh" in completed.stdout
+    if symbol == "definitely_missing":
+        assert "Query for symbol 'definitely_missing' matched no definitions" in completed.stderr
+    assert graph.read_bytes() == b"caller-owned graph\n"
+    assert old_temp_graph.read_bytes() == b"caller-owned old benchmark graph\n"
+    assert old_temp_sidecar.read_bytes() == b"caller-owned old benchmark sidecar\n"
+    assert list(temp_root.iterdir()) == []
 
 
 def test_benchmark_accepts_explicit_matching_symbol(tmp_path: Path) -> None:
