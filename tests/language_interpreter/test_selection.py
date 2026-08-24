@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from minotaur.language_interpreter import exclusions
+from minotaur.language_interpreter import exclusions, selection
 from minotaur.language_interpreter.python.discovery import discover_python_files
 from minotaur.language_interpreter.registry import default_registry
 from minotaur.language_interpreter.selection import _discover_directory, select_sources
@@ -156,6 +156,24 @@ def test_root_name_ending_in_backslash_preserves_containment(tmp_path: Path) -> 
     _, selected = select_sources(root, (root,), default_registry())
     assert _discover_directory(root, root, False) == _oracle_discover_directory(root, root, False)
     assert selected.files == expected == (root / "a.py",)
+
+
+def test_filesystem_root_containment_discovers_child_without_scanning_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    physical_directory = tmp_path / "workspace"
+    physical_directory.mkdir()
+    child = physical_directory / "child.py"
+    child.write_text("value = 1\n", encoding="utf-8")
+    logical_root = Path("/")
+
+    def fake_walk(directory: str, *, followlinks: bool) -> object:
+        assert directory == os.fspath(logical_root)
+        assert followlinks is False
+        yield os.fspath(physical_directory), [], [child.name]
+
+    monkeypatch.setattr(selection.os, "walk", fake_walk)
+    assert _discover_directory(logical_root, logical_root, False) == (child,)
 
 
 def test_shared_exclusion_predicate_controls_both_walkers(
