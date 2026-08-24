@@ -104,8 +104,17 @@ def _discover_directory(directory: Path, root: Path, include_excluded: bool) -> 
     Directory entries are pruned by unresolved name, so a symlink living inside
     an excluded or hidden directory is never resolved and never reported.  The
     pre-change implementation judged exclusion only after resolving, so such a
-    link reported its physical target a second time; the public entry point is
-    unaffected because ``_add`` deduplicates on the root-relative path.
+    link reported its physical target.  When ``directory`` is ``root`` that
+    target is also reached directly and the public result is unchanged; when
+    ``directory`` is a subdirectory and the link is the only path to a file
+    outside it, that file is no longer discovered -- for that target, and for
+    ``drift().added`` over that recorded target.  This is the accepted scope
+    of the divergence (spec addendum, 2026-08-24): descending into ``.git`` or
+    ``.venv`` to hunt for such links would cost what this walk exists to save.
+
+    Note for maintainers: ``examples/query-walkthrough/README.md`` runs
+    ``unreferenced --text-fallback`` against this module and is byte-tested,
+    so a comment here must not spell the walker's public entry-point name.
     """
     found: list[Path] = []
     # realpath leaves no trailing separator except on the filesystem root, so
