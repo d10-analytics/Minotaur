@@ -15,11 +15,18 @@ def is_excluded(relative: Path) -> bool:
 
 
 def relative_order_key(path: Path, root: Path) -> str:
-    """Return a root-relative POSIX path without resolving the filesystem entry."""
+    """Return a root-relative POSIX path without resolving the filesystem entry.
+
+    The result is the graph wire path and the deduplication key, so an
+    out-of-root ``path`` is a caller error rather than something to paper over
+    with an absolute fallback: two files could then collide or be named by
+    machine-specific paths.  Callers establish containment first.
+    """
     separator = "\\" if root.anchor.endswith("\\") else "/"
     root_text = str(root)
     path_text = str(path)
     prefix = root_text if root_text.endswith(separator) else f"{root_text}{separator}"
-    if path_text.startswith(prefix):
-        path_text = path_text[len(prefix) :]
+    if not path_text.startswith(prefix):
+        raise ValueError(f"path is not inside root: {path_text} (root {root_text})")
+    path_text = path_text[len(prefix) :]
     return path_text.replace("\\", "/") if separator == "\\" else path_text
