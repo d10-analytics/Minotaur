@@ -189,11 +189,28 @@ not normalized or rendered.
 
 The loader uses `orjson` as its only JSON decoder; it does not fall back to the
 Python standard-library decoder. This keeps every load path on one acceptance
-boundary. In particular, `NaN`, `Infinity`, and `-Infinity`, integer literals
-outside the signed 64-bit range, and lone-surrogate escapes are rejected while
-decoding. These values are outside the v1 wire contract independently of the
-schema and model rules below. `orjson` is therefore a required runtime
-dependency for any installation that loads graph JSON.
+boundary. `orjson` is therefore a required runtime dependency for any
+installation that loads graph JSON. It differs from the standard-library
+decoder in four ways, all of which reject input that is outside the v1 wire
+contract anyway:
+
+- `NaN`, `Infinity`, and `-Infinity` — accepted by the standard library, but
+  rejected while decoding, reported as `graph input is not valid JSON: ...`.
+- Lone-surrogate escapes such as `"\ud800"` — likewise rejected while
+  decoding with the same prefix.
+- Nesting deeper than 1024 levels — rejected while decoding
+  (`graph input is not valid JSON: depth limit exceeded`). The standard-library
+  decoder has no fixed limit. No v1 document produced by Minotaur approaches
+  this depth; only deeply nested extension objects could.
+- Integer literals outside the signed 64-bit range — **not** a decode error.
+  `orjson` decodes such a literal as a floating-point value. The model layer
+  then rejects it as a non-integer, because every place a v1 document may hold
+  a number is guarded there: `line` and `character` by `Position`
+  (`'line' must be an integer, got float: ...`), and every extension value at
+  every depth by the extension freeze
+  (`extension value at /<pointer> must be an integer, got float: ...`). The
+  document is rejected either way; the message names the model layer rather
+  than the decoder.
 
 Semantic validation reports every independent finding with a JSON Pointer
 path and one of these codes: `node-id-mismatch`, `node-id-unverifiable`
@@ -234,9 +251,13 @@ exact bytes.
 
 The sidecar is a Minotaur-internal acceleration hint. Other consumers may
 ignore it entirely. A matching sidecar lets Minotaur trust that these exact
-bytes already passed JSON Schema and node-ID validation, so a subsequent
+bytes carry a correct wire shape and correct node IDs, so a subsequent
 user-facing read skips those two expensive checks while retaining all other
-semantic checks. Its absence or a digest mismatch does not indicate
+semantic checks. The two writers establish that differently: a user-facing
+read stamps only after it has fully validated the bytes, whereas `analyze`
+stamps the graph it just serialized without running `validate_document` at
+all — its node IDs are correct by construction, because it computes each one
+with `compute_node_id` from the same document it writes. Its absence or a digest mismatch does not indicate
 corruption; it only means the next read performs the full validation pass
 instead of a fast trusted load. The accepted risk (D-07) is that a graph whose
 contents were altered and whose sidecar was regenerated can bypass node-ID

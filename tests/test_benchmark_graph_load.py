@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -128,3 +130,62 @@ def test_benchmark_has_no_dead_query_symbol_scanner() -> None:
     assert not any(
         "_find_query_symbol" in path.read_text(encoding="utf-8") for path in source_files
     )
+
+
+def _load_benchmark_module() -> ModuleType:
+    """Import the benchmark script as a module for in-process inspection."""
+    spec = importlib.util.spec_from_file_location("benchmark_graph_load", BENCHMARK)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_benchmark_reports_both_trusted_and_untrusted_validate_rows(tmp_path: Path) -> None:
+    """H-2: the row labelled trusted must be measured the way a trusted load runs."""
+    completed, _graph, _old_graph, _old_sidecar, _temp_root = _run_benchmark(
+        tmp_path, "def main():\n    return 1\n"
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "validate_document (trusted)" in completed.stdout
+    assert "validate_document (untrusted)" in completed.stdout
+
+
+def test_components_sum_excludes_the_untrusted_validate_row() -> None:
+    """The sum must mirror what the end-to-end trusted query row actually pays."""
+    module = _load_benchmark_module()
+    expected = frozenset({"validate_document (untrusted)"})
+    assert expected == module._SUM_EXCLUDED_COMPONENTS
+
+
+def test_trusted_validate_row_passes_verify_node_ids_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Record the kwargs each timed ``validate_document`` call is given."""
+    module = _load_benchmark_module()
+
+    from minotaur.graph_model import validation
+    from minotaur.graph_model.loading import graph_digest, stamp_path
+
+    graph_source = ROOT / "examples/synthetic-graphs/small-workflow.json"
+    graph_path = tmp_path / "minotaur-graph.json"
+    data = graph_source.read_bytes()
+    graph_path.write_bytes(data)
+    stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+    root = tmp_path / "source"
+    root.mkdir()
+
+    calls: list[bool] = []
+    real = validation.validate_document
+
+    def _recording(document: object, **kwargs: object) -> object:
+        calls.append(bool(kwargs.get("verify_node_ids", True)))
+        return real(document, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(validation, "validate_document", _recording)
+
+    components = module._benchmark_components(graph_path, root, 1)
+
+    assert calls == [False, True]
+    assert set(components) >= {"validate_document (trusted)", "validate_document (untrusted)"}
