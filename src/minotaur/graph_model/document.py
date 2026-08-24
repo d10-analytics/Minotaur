@@ -26,6 +26,7 @@ from datetime import datetime
 from minotaur.graph_model._parsing import (
     freeze_extensions,
     reject_unknown_fields,
+    reject_unpaired_surrogates,
     serialize_extensions,
     type_error,
 )
@@ -109,6 +110,8 @@ class SourceControl:
 
         if self.branch is not None and not self.branch:
             raise ValueError("branch must be non-empty when present")
+        if self.branch is not None:
+            reject_unpaired_surrogates(self.branch, "branch")
 
     def to_dict(self) -> dict[str, str]:
         result: dict[str, str] = {"system": self.system}

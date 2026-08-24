@@ -160,6 +160,7 @@ class Node:
                 f"node path must be a safe repository-relative path, got {self.path!r}"
             )
         # symbol_kind and path feed the identity input; keep them JCS-encodable.
+        reject_unpaired_surrogates(self.label, "node label")
         if self.symbol_kind is not None:
             reject_unpaired_surrogates(self.symbol_kind, "'symbol_kind'")
         if self.path is not None:

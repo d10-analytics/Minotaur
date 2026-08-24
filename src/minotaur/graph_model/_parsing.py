@@ -112,6 +112,13 @@ def _json_pointer(segments: Sequence[str | int]) -> str:
     return "".join(f"/{segment}" for segment in segments)
 
 
+# The range ``orjson`` decodes as an ``int``: a literal outside it comes back as
+# a float and is rejected by the model layer, so an in-process document must
+# not be allowed to serialize an integer that no reader can load back (M-4).
+_INT_MIN = -(2**63)
+_INT_MAX = 2**64 - 1
+
+
 def _freeze_json(value: object, path: list[str | int] | None = None) -> object:
     # ``path`` is a mutable stack of segments rather than a pre-rendered string:
     # every extension value on a graph load walks this function, and the pointer
@@ -139,6 +146,9 @@ def _freeze_json(value: object, path: list[str | int] | None = None) -> object:
                 raise ValueError(
                     f"extension value at {_json_pointer([*path, key])} has a non-BMP key"
                 )
+            # A lone surrogate is a BMP code point, so the check above lets it
+            # through, yet UTF-8 cannot encode it and ``serialize`` would fail.
+            reject_unpaired_surrogates(key, f"extension key at {_json_pointer([*path, key])}")
             path.append(key)
             frozen[key] = _freeze_json(item, path)
             path.pop()
@@ -150,11 +160,29 @@ def _freeze_json(value: object, path: list[str | int] | None = None) -> object:
             frozen_items.append(_freeze_json(item, path))
             path.pop()
         return tuple(frozen_items)
+    # Leaves are whitelisted, not blacklisted: the schema's ``extensionValue``
+    # admits exactly string | integer | boolean | null, and anything else
+    # (``set``, ``bytes``, ``Decimal`` ...) would only fail later inside the
+    # encoder, after the model claimed to own the invariant.
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if not _INT_MIN <= value <= _INT_MAX:
+            raise ValueError(
+                f"extension value at {_json_pointer(path)} must fit in 64 bits, got {value!r}"
+            )
+        return value
     if isinstance(value, float):
         raise ValueError(
             f"extension value at {_json_pointer(path)} must be an integer, got float: {value!r}"
         )
-    return value
+    if isinstance(value, str):
+        reject_unpaired_surrogates(value, f"extension value at {_json_pointer(path)}")
+        return value
+    raise ValueError(
+        f"extension value at {_json_pointer(path)} must be a string, integer, boolean,"
+        f" null, array or object, got {type(value).__name__}"
+    )
 
 
 def _thaw_json(value: object) -> object:

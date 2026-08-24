@@ -22,6 +22,7 @@ from minotaur.graph_model._parsing import (
     freeze_extensions,
     hashable_json,
     reject_unknown_fields,
+    reject_unpaired_surrogates,
     serialize_extensions,
     type_error,
 )
@@ -64,6 +65,9 @@ class Producer:
         # it's nothing," which is not a valid claim.
         if self.version is not None and not self.version:
             raise ValueError("producer version must be non-empty when present")
+        reject_unpaired_surrogates(self.name, "producer name")
+        if self.version is not None:
+            reject_unpaired_surrogates(self.version, "producer version")
 
     def to_dict(self) -> dict[str, str]:
         result: dict[str, str] = {"name": self.name}
@@ -113,6 +117,9 @@ class Rule:
             raise ValueError("rule id must be non-empty")
         if self.version is not None and not self.version:
             raise ValueError("rule version must be non-empty when present")
+        reject_unpaired_surrogates(self.id, "rule id")
+        if self.version is not None:
+            reject_unpaired_surrogates(self.version, "rule version")
 
     def to_dict(self) -> dict[str, str]:
         result: dict[str, str] = {"id": self.id}

@@ -21,6 +21,9 @@ from minotaur.graph_model._parsing import (
     type_error,
 )
 
+# Largest integer ``orjson`` still decodes as an ``int`` (unsigned 64-bit max).
+_POSITION_MAX = 2**64 - 1
+
 # Module-level constants for reject_unknown_fields — hoisted from per-call
 # frozenset literals to avoid 118 k+ allocations per graph load (F-13).
 # These are an ALLOWED-SET UPPER BOUND: reject_unknown_fields checks that a
@@ -107,6 +110,13 @@ class Position:
             raise ValueError(f"line must be non-negative, got {self.line}")
         if self.character < 0:
             raise ValueError(f"character must be non-negative, got {self.character}")
+        # ``orjson`` decodes a wider literal as a float, which the wire path
+        # rejects; an in-process value past the bound would serialize to bytes
+        # no reader can load back.
+        if self.line > _POSITION_MAX:
+            raise ValueError(f"line must fit in 64 bits, got {self.line}")
+        if self.character > _POSITION_MAX:
+            raise ValueError(f"character must fit in 64 bits, got {self.character}")
 
     def to_dict(self) -> dict[str, int]:
         return {"line": self.line, "character": self.character}
