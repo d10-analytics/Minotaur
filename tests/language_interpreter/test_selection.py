@@ -176,6 +176,17 @@ def test_filesystem_root_containment_discovers_child_without_scanning_root(
     assert _discover_directory(logical_root, logical_root, False) == (child,)
 
 
+def test_filesystem_root_containment_is_reached_by_select_sources(tmp_path: Path) -> None:
+    child_directory = tmp_path / "workspace"
+    child_directory.mkdir()
+    child = child_directory / "child.py"
+    child.write_text("value = 1\n", encoding="utf-8")
+
+    _, selected = select_sources(Path("/"), (child_directory,), default_registry())
+
+    assert selected.files == (child,)
+
+
 def test_shared_exclusion_predicate_controls_both_walkers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
