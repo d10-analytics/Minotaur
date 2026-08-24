@@ -398,3 +398,47 @@ def test_extension_schema_identity_and_property_name_pattern_are_pinned() -> Non
     rejected["extensions"] = {"\U0001d11e\n": {"value": 1}}
     with pytest.raises(jsonschema.ValidationError):
         _validator().validate(rejected)
+
+
+# ---------------------------------------------------------------------------
+# R-02 / M-2: the trusted path and the schema reach the same verdict on keys
+# ---------------------------------------------------------------------------
+#
+# `extensionObject.propertyNames.minLength: 1` is a schema rule, and the
+# trusted load skips the schema.  Without the matching model-layer rule an
+# empty extension key would be admitted by exactly the path that has no second
+# opinion, so the two layers are asserted to agree case by case.
+
+_KEY_SHAPE_CASES: list[tuple[str, dict[str, dict[str, object]], bool]] = [
+    # (id, extensions, schema-valid?)
+    ("empty_key_nested", {"x": {"": 1}}, False),
+    ("empty_key_deep", {"x": {"y": {"": 1}}}, False),
+    ("empty_key_in_list", {"x": {"values": [{"": 1}]}}, False),
+    ("empty_top_level_name", {"": {"f": 1}}, False),
+    ("non_bmp_key_nested", {"x": {"\U0001d11e": 1}}, False),
+    ("ordinary_key", {"x": {"a": 1}}, True),
+    ("newline_key", {"x": {"a\n": 1}}, True),
+    ("astral_string_value", {"x": {"note": "\U0001d11e"}}, True),
+]
+
+
+@pytest.mark.parametrize(
+    ("extensions", "schema_valid"),
+    [(case[1], case[2]) for case in _KEY_SHAPE_CASES],
+    ids=[case[0] for case in _KEY_SHAPE_CASES],
+)
+def test_extension_key_verdicts_agree_on_trusted_and_full_validation_paths(
+    extensions: dict[str, dict[str, object]], schema_valid: bool
+) -> None:
+    document = _wire_with_extensions(extensions)
+    content = json.dumps(document).encode()
+
+    schema_errors = list(_validator().iter_errors(document))
+    assert bool(schema_errors) is not schema_valid, [e.message for e in schema_errors]
+
+    for skip_schema in (False, True):
+        if schema_valid:
+            load_graph_bytes(content, _skip_schema=skip_schema)
+        else:
+            with pytest.raises(GraphLoadError):
+                load_graph_bytes(content, _skip_schema=skip_schema)

@@ -728,6 +728,16 @@ _INVALID_EXTENSION_VALUES = [
     ({"x": {"\U0001f600": 1}}, "/x/\U0001f600"),
     ({"x": {"y": {"\U0001d11e": 1}}}, "/x/y/\U0001d11e"),
     ({"\U0001f600": {"f": 1}}, "/\U0001f600"),
+    # Non-BMP keys reached through every container the freeze recurses into,
+    # and in both insertion orders — the shapes the encoder's astral edge
+    # cases used to cover before R-02 made them unrepresentable.
+    ({"x": {"values": [{"\U0001d11e": 1}]}}, "/x/values/0/\U0001d11e"),
+    ({"x": {"values": [[{"\U0001d11e": 1}]]}}, "/x/values/0/0/\U0001d11e"),
+    ({"x": {"\U0001d11e": 1, "\U0001f600": 2}}, "/x/\U0001d11e"),
+    ({"x": {"\U0001f600": 2, "\U0001d11e": 1}}, "/x/\U0001f600"),
+    ({"x": {"y": {"z": {"\U0001f600": 1}}}}, "/x/y/z/\U0001f600"),
+    # Floats reached through nested lists, matching the same container sweep.
+    ({"x": {"values": [[1, 2.5]]}}, "/x/values/0/1"),
 ]
 
 
@@ -792,3 +802,265 @@ def test_position_wire_parser_keeps_require_int_message() -> None:
     with pytest.raises(ValueError) as error:
         GraphDocument.from_dict(source)
     assert str(error.value) == "'line' must be an integer, got float: 4.0"
+
+
+# ---------------------------------------------------------------------------
+# R-02 / AC-06: the model layer type-checks every field on every path
+# ---------------------------------------------------------------------------
+#
+# from_dict type-checks the wire, so these guards exist for the paths that do
+# not go through it: direct construction and dataclasses.replace().  Without
+# them a mistyped field reaches serialize() and compute_node_id(), which
+# happily encode it — `replace(node, label=1.5)` used to produce
+# `"label":1.5` and a plausible-looking digest.
+
+
+def _guard_identity() -> NodeIdentity:
+    return NodeIdentity(IdentityBasis.FILE_PATH, "test")
+
+
+def _guard_node() -> Node:
+    identity = _guard_identity()
+    return Node(
+        id=compute_node_id(identity, node_class=NodeClass.FILE.value, path="src/test.py"),
+        identity=identity,
+        node_class=NodeClass.FILE,
+        label="test.py",
+        path="src/test.py",
+    )
+
+
+def _guard_location() -> Location:
+    return Location(path="src/test.py", range=Range(Position(0, 0), Position(0, 4)))
+
+
+def _guard_evidence() -> Evidence:
+    return Evidence(
+        Provenance.STATIC_ANALYSIS,
+        producer=Producer(name="minotaur-python"),
+        locations=(_guard_location(),),
+    )
+
+
+def _guard_relationship() -> Relationship:
+    node_id = _guard_node().id
+    return Relationship(
+        source=node_id,
+        target=node_id,
+        kind=RelationshipKind.CALLS.value,
+        evidence=(_guard_evidence(),),
+    )
+
+
+def _guard_document() -> GraphDocument:
+    return GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(_guard_node(),),
+        relationships=(_guard_relationship(),),
+        generated_by=Producer(name="minotaur-python"),
+        generated_at="2026-01-01T00:00:00Z",
+        source_control=SourceControl(system="git", branch="main"),
+    )
+
+
+_FIELD_TYPE_GUARDS: list[tuple[str, object, str]] = [
+    # (field, replacement value, expected message)
+    # -- NodeIdentity --------------------------------------------------------
+    ("identity.basis", "file-path", "identity basis must be an IdentityBasis, got str"),
+    ("identity.namespace", 1, "identity namespace must be a string, got int"),
+    # -- Node ---------------------------------------------------------------
+    ("node.id", 1.5, "node id must be a string, got float"),
+    ("node.identity", {"basis": "file-path"}, "node identity must be a NodeIdentity, got dict"),
+    ("node.node_class", "file", "node_class must be a NodeClass, got str"),
+    ("node.label", 1.5, "node label must be a string, got float"),
+    ("node.symbol_kind", 1, "'symbol_kind' must be a string when present, got int"),
+    ("node.language", 1, "language must be a string when present, got int"),
+    (
+        "node.location",
+        {"path": "src/test.py"},
+        "'location' must be a Location when present, got dict",
+    ),
+    ("node.path", 1, "node path must be a string when present, got int"),
+    ("node.reference_text", 1, "'reference_text' must be a string when present, got int"),
+    (
+        "node.expected_symbol_kind",
+        1,
+        "'expected_symbol_kind' must be a string when present, got int",
+    ),
+    ("node.extensions", [], "extensions must be an object, got list"),
+    # -- Producer / Rule -----------------------------------------------------
+    ("producer.name", 1, "producer name must be a string, got int"),
+    ("producer.version", 1, "producer version must be a string when present, got int"),
+    ("rule.id", 1, "rule id must be a string, got int"),
+    ("rule.version", 1, "rule version must be a string when present, got int"),
+    # -- Evidence ------------------------------------------------------------
+    ("evidence.provenance", "static-analysis", "evidence provenance must be a Provenance, got str"),
+    (
+        "evidence.producer",
+        {"name": "x"},
+        "evidence 'producer' must be a Producer when present, got dict",
+    ),
+    ("evidence.rule", {"id": "x"}, "evidence 'rule' must be a Rule when present, got dict"),
+    ("evidence.locations", [], "evidence 'locations' must be a tuple, got list"),
+    ("evidence.locations", (1,), "evidence 'locations'[0] must be a Location, got int"),
+    ("evidence.extensions", [], "extensions must be an object, got list"),
+    # -- Relationship --------------------------------------------------------
+    ("relationship.source", 1, "relationship 'source' must be a string, got int"),
+    ("relationship.target", 1, "relationship 'target' must be a string, got int"),
+    ("relationship.kind", 1, "relationship 'kind' must be a string, got int"),
+    ("relationship.evidence", [], "relationship 'evidence' must be a tuple, got list"),
+    ("relationship.evidence", (1,), "relationship 'evidence'[0] must be an Evidence, got int"),
+    ("relationship.extensions", [], "extensions must be an object, got list"),
+    # -- SourceControl -------------------------------------------------------
+    ("source_control.commit", 1, "git commit must be a string when present, got int"),
+    ("source_control.branch", 1, "branch must be a string when present, got int"),
+    # -- GraphDocument -------------------------------------------------------
+    (
+        "document.coordinate_encoding",
+        "utf-8",
+        "coordinate_encoding must be a CoordinateEncoding, got str",
+    ),
+    ("document.nodes", [], "document 'nodes' must be a tuple, got list"),
+    ("document.nodes", (1,), "document 'nodes'[0] must be a Node, got int"),
+    ("document.relationships", [], "document 'relationships' must be a tuple, got list"),
+    (
+        "document.relationships",
+        (1,),
+        "document 'relationships'[0] must be a Relationship, got int",
+    ),
+    (
+        "document.generated_by",
+        {"name": "x"},
+        "'generated_by' must be a Producer when present, got dict",
+    ),
+    ("document.generated_at", 1, "generated_at must be a string when present, got int"),
+    (
+        "document.source_control",
+        {"system": "git"},
+        "'source_control' must be a SourceControl when present, got dict",
+    ),
+    ("document.extensions", [], "extensions must be an object, got list"),
+]
+
+_GUARD_FACTORIES = {
+    "identity": _guard_identity,
+    "node": _guard_node,
+    "producer": lambda: Producer(name="minotaur-python"),
+    "rule": lambda: Rule(id="rule-1"),
+    "evidence": _guard_evidence,
+    "relationship": _guard_relationship,
+    "source_control": lambda: SourceControl(system="git", branch="main"),
+    "document": _guard_document,
+}
+
+
+@pytest.mark.parametrize(
+    ("target", "value", "message"),
+    _FIELD_TYPE_GUARDS,
+    ids=[f"{target}-{index}" for index, (target, _, _) in enumerate(_FIELD_TYPE_GUARDS)],
+)
+def test_model_field_type_guards_reject_wrong_types_in_process(
+    target: str, value: object, message: str
+) -> None:
+    model_name, field_name = target.split(".")
+    valid = _GUARD_FACTORIES[model_name]()
+    with pytest.raises(ValueError, match=re.escape(message)):
+        replace(valid, **{field_name: value})  # type: ignore[type-var]
+
+
+def test_field_type_guard_matrix_covers_every_model_dataclass_field() -> None:
+    """Every field of every guarded model dataclass appears in the matrix.
+
+    R-02 makes the model layer the sole owner of the invariant, so the matrix
+    is only a proof while it is exhaustive; a newly added field must either be
+    guarded or be recorded here with the reason it needs no guard.
+    """
+    covered = {target for target, _, _ in _FIELD_TYPE_GUARDS}
+    exempt = {
+        # SourceControl already rejects every value that is not the literal
+        # string "git", of any type, with the message that names the v1 rule.
+        "source_control.system",
+        # NodeIdentity's conditional fields are guarded inside the
+        # permitted-basis branch so a value in a forbidden slot keeps its
+        # permission message; both halves are proved by the two dedicated
+        # tests below rather than by a whole-object replace().
+        "identity.upstream_identifier",
+        "identity.originating_node",
+        "identity.resource_key",
+    }
+    for model_name, factory in _GUARD_FACTORIES.items():
+        for field_name in factory().__dataclass_fields__:
+            target = f"{model_name}.{field_name}"
+            assert target in covered or target in exempt, f"{target} has no type guard"
+
+
+def test_source_control_system_rejects_a_non_string_with_its_v1_message() -> None:
+    with pytest.raises(ValueError, match=re.escape("v1 only supports 'git' source control, got 1")):
+        SourceControl(system=1, branch="main")  # type: ignore[arg-type]
+
+
+def test_identity_forbidden_conditional_field_keeps_its_permission_message() -> None:
+    """A non-str value in a forbidden slot is still a permission error.
+
+    The type guard sits inside the permitted branch so it cannot take over the
+    message that explains the real problem: this basis has no such field.
+    """
+    with pytest.raises(ValueError, match=re.escape("file-path basis does not permit")):
+        NodeIdentity(IdentityBasis.FILE_PATH, "test", upstream_identifier=1)  # type: ignore[arg-type]
+
+
+def test_identity_permitted_conditional_field_is_type_checked() -> None:
+    with pytest.raises(
+        ValueError, match=re.escape("identity 'upstream_identifier' must be a string, got int")
+    ):
+        NodeIdentity(IdentityBasis.UPSTREAM_IDENTIFIER, "test", upstream_identifier=1)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# R-02 / M-2: extension object keys must be non-empty strings at every depth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("extensions", "message"),
+    [
+        ({"x": {"": 1}}, "extension object at /x has an empty key"),
+        ({"x": {"y": {"": 1}}}, "extension object at /x/y has an empty key"),
+        ({"x": {"values": [{"": 1}]}}, "extension object at /x/values/0 has an empty key"),
+    ],
+)
+def test_extension_guard_rejects_empty_keys_below_the_top_level(
+    extensions: dict[str, dict[str, object]], message: str
+) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _extension_test_node(extensions)
+
+
+def test_extension_guard_keeps_the_top_level_empty_name_message() -> None:
+    with pytest.raises(ValueError, match=re.escape("extension names must be non-empty strings")):
+        _extension_test_node({"": {"f": 1}})
+
+
+@pytest.mark.parametrize(
+    ("extensions", "message"),
+    [
+        ({"x": {1: "one"}}, "extension object at /x has a non-string key: 1"),
+        ({"x": {"y": {None: 1}}}, "extension object at /x/y has a non-string key: None"),
+        (
+            {"x": {"values": [{2.5: 1}]}},
+            "extension object at /x/values/0 has a non-string key: 2.5",
+        ),
+    ],
+)
+def test_extension_guard_rejects_non_string_keys(
+    extensions: dict[str, dict[str, object]], message: str
+) -> None:
+    """json.dumps would silently stringify these, producing unreproducible bytes."""
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _extension_test_node(extensions)
+
+
+def test_replace_cannot_smuggle_a_float_past_the_serializer() -> None:
+    node = _guard_node()
+    with pytest.raises(ValueError, match=re.escape("node label must be a string, got float")):
+        replace(node, label=1.5)  # type: ignore[arg-type]
