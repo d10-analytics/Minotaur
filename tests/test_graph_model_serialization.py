@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
 from pathlib import Path
@@ -106,6 +107,58 @@ def _oracle_serialize(value: object) -> bytes:
     parts: list[str] = []
     _jcs_encode(value, parts)
     return "".join(parts).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# AC-08 (c): the oracle is pinned to the Baseline bytes
+# ---------------------------------------------------------------------------
+#
+# The oracle only proves the C-encoder composition correct while it stays the
+# code that composition replaced.  Anyone who "fixes" the oracle to agree with
+# the implementation has deleted the proof, so the oracle's source text is
+# pinned to its Baseline bytes and the pin fails before the equality tests do.
+
+_ORACLE_SEGMENT_START = "_JCS_ESCAPE_MAP: dict[str, str] = {"
+_ORACLE_SEGMENT_END = '    return "".join(parts).encode("utf-8")\n'
+
+# SHA-256 of the source text from _ORACLE_SEGMENT_START through
+# _ORACLE_SEGMENT_END inclusive, as it stands at Baseline commit fb63689 —
+# verified byte-identical to the segment in this file (`git diff fb63689 --
+# tests/test_graph_model_serialization.py` produces no hunk inside it).  To
+# recompute after a deliberate retirement of the oracle — never to make a
+# failing pin pass — write the baseline file out and hash the same slice:
+#
+#   git show fb63689:tests/test_graph_model_serialization.py > /tmp/base.py
+#   python -c "import hashlib, pathlib; \
+#       import test_graph_model_serialization as m; \
+#       t = pathlib.Path('/tmp/base.py').read_text(); \
+#       s = t.index(m._ORACLE_SEGMENT_START); \
+#       e = t.index(m._ORACLE_SEGMENT_END, s) + len(m._ORACLE_SEGMENT_END); \
+#       print(hashlib.sha256(t[s:e].encode()).hexdigest())"
+#
+_ORACLE_SEGMENT_SHA256 = "e4726121c36c8c0267e6ced6912dadb3bf343c068cb61493370add75eff1bb88"
+
+
+def _oracle_segment() -> str:
+    """Return this module's oracle source text: escape map through serializer."""
+    text = Path(__file__).read_text(encoding="utf-8")
+    start = text.index(_ORACLE_SEGMENT_START)
+    end = text.index(_ORACLE_SEGMENT_END, start) + len(_ORACLE_SEGMENT_END)
+    return text[start:end]
+
+
+def test_oracle_source_is_byte_unchanged_from_baseline() -> None:
+    """The oracle bodies still hash to their Baseline (fb63689) bytes."""
+    segment = _oracle_segment()
+    # Guard the extraction itself: a truncated slice would hash to something
+    # stable but prove nothing.
+    assert "def _jcs_encode(" in segment
+    assert "def _oracle_serialize(" in segment
+    assert hashlib.sha256(segment.encode("utf-8")).hexdigest() == _ORACLE_SEGMENT_SHA256, (
+        "the JCS oracle was edited; it is the Baseline encoder and is never "
+        "changed to agree with the implementation — if the implementation "
+        "disagrees with it, the implementation is wrong"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -501,13 +554,11 @@ def test_oracle_equality_fixtures(fixture_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Non-BMP object keys are absent by construction: R-02 forbids them and the
+# model layer rejects them on every path, so the shapes that used to live here
+# are rejection cases in test_graph_model_core.py's AC-06 matrix, not encoder
+# equality cases. Astral characters in string *values* stay covered below.
 _EDGE_CASES: list[tuple[str, object]] = [
-    # Astral-plane dict keys (non-BMP, surrogate pairs in UTF-16)
-    ("astral_key_musical", {"\U0001d11e": "treble clef"}),
-    ("astral_key_emoji", {"\U0001f600": "grinning"}),
-    # Astral keys in both insertion orders
-    ("astral_two_keys_ab", {"\U0001d11e": 1, "\U0001f600": 2}),
-    ("astral_two_keys_ba", {"\U0001f600": 2, "\U0001d11e": 1}),
     # Private use area U+E000–U+FFFF (BMP, no surrogate pairs)
     ("pua_key_e000", {"": "private use start"}),
     ("pua_key_fffd", {"�": "replacement char"}),
@@ -544,48 +595,28 @@ _EDGE_CASES: list[tuple[str, object]] = [
     ("string_simple", "hello"),
     # Mixed nesting
     ("mixed_deep", {"z": [1, {"b": 2, "a": [True, None, "x"]}, 3], "a": "first"}),
-    # Astral keys over nested containers — the astral path sorts keys itself
-    # rather than delegating to json.dumps(sort_keys=True), so every container
-    # type it recurses through needs coverage.
-    ("astral_nested_dict", {"\U0001d11e": {"z": 1, "a": 2}}),
-    ("astral_nested_list", {"\U0001d11e": [{"z": 1, "a": 2}]}),
-    ("astral_nested_tuple", {"\U0001d11e": ({"z": 1, "a": 2},)}),
-    ("astral_tuple_of_tuples", {"\U0001d11e": (({"z": 1, "a": 2},), ({"y": 3, "b": 4},))}),
-    ("astral_tuple_in_list", {"\U0001d11e": [({"z": 1, "a": 2},)]}),
+    # Astral characters in string values remain unrestricted by R-02, over the
+    # same nested container shapes the encoder recurses through.
+    ("astral_value_nested_dict", {"k": {"z": "\U0001d11e", "a": 2}}),
+    ("astral_value_nested_list", {"k": [{"z": "\U0001d11e", "a": 2}]}),
+    ("astral_value_nested_tuple", {"k": ({"z": "\U0001d11e", "a": 2},)}),
     (
-        "astral_deep_mixed_tree",
+        "astral_value_deep_mixed_tree",
         {
-            "\U0001d11e": [
-                {"z": 1, "\U0001f600": ({"q": 2, "b": [{"n": 1, "m": 2}]},)},
-                ({"y": 3, "a": {"w": 4, "\U0001d11e": 5}},),
+            "k": [
+                {"z": 1, "e": ({"q": "\U0001f600", "b": [{"n": 1, "m": 2}]},)},
+                ({"y": 3, "a": {"w": 4, "v": "\U0001d11e"}},),
             ],
             "b": ({"z": 6, "a": 7},),
         },
     ),
-    # Astral key only at a nested level: the root dict is BMP-keyed, but the
-    # astral path still triggers for the whole document.
-    ("astral_key_only_nested", {"root": ({"\U0001d11e": {"z": 1, "a": 2}, "b": 3},)}),
 ]
-
-
-def _contains_astral_key(value: object) -> bool:
-    """Return whether a nested JSON object has a key outside the BMP."""
-    if isinstance(value, dict):
-        return any(
-            any(ord(character) > 0xFFFF for character in key) or _contains_astral_key(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, list | tuple):
-        return any(_contains_astral_key(item) for item in value)
-    return False
 
 
 @pytest.mark.parametrize("name,value", _EDGE_CASES, ids=[c[0] for c in _EDGE_CASES])
 def test_oracle_equality_edge_cases(name: str, value: object) -> None:
-    """Implementation and oracle agree on every non-astral-key edge case."""
+    """Implementation and oracle agree on every edge case."""
     _ = name
-    if _contains_astral_key(value):
-        pytest.skip("non-BMP object keys are rejected by the model layer")
     assert _jcs_serialize(value) == _oracle_serialize(value)
 
 
