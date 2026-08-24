@@ -16,10 +16,10 @@ def is_excluded(relative: Path) -> bool:
 
 def relative_order_key(path: Path, root: Path) -> str:
     """Return a root-relative POSIX path without resolving the filesystem entry."""
-    root_text = str(root).rstrip("/\\")
+    separator = "\\" if root.anchor.endswith("\\") else "/"
+    root_text = str(root)
     path_text = str(path)
-    if path_text.startswith(root_text):
-        suffix = path_text[len(root_text) :]
-        if suffix.startswith(("/", "\\")):
-            path_text = suffix[1:]
-    return path_text.replace("\\", "/")
+    prefix = root_text if root_text.endswith(separator) else f"{root_text}{separator}"
+    if path_text.startswith(prefix):
+        path_text = path_text[len(prefix) :]
+    return path_text.replace("\\", "/") if separator == "\\" else path_text
