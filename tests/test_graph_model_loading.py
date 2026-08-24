@@ -238,15 +238,91 @@ def _workflow_with_extension_literal(literal: str) -> bytes:
         b'{"value":NaN}',
         b'{"value":Infinity}',
         b'{"value":-Infinity}',
-        _workflow_with_extension_literal(str(2**70)),
         b'{"value":"\\ud800"}',
+        b"[" * 1100 + b"]" * 1100,
     ],
-    ids=["nan", "infinity", "negative-infinity", "large-integer", "lone-surrogate"],
+    ids=["nan", "infinity", "negative-infinity", "lone-surrogate", "nesting-depth"],
 )
 def test_orjson_rejections_surface_as_graph_load_errors(content: bytes) -> None:
-    """The stricter decoder boundary exposes all five rejected JSON forms."""
+    """Every form the decoder itself refuses becomes one GraphLoadError.
+
+    The 1024-level nesting limit is `orjson`-specific and has no
+    standard-library equivalent; it must surface through the same boundary
+    rather than escaping as a raw decoder or recursion error.
+    """
     with pytest.raises(GraphLoadError, match=r"^graph input is not valid JSON: "):
         load_graph_bytes(content)
+
+
+@pytest.mark.parametrize(
+    ("depth", "skip_schema"),
+    [(100, False), (495, True), (900, True)],
+    ids=["untrusted-shallow", "trusted-495", "trusted-900"],
+)
+def test_deeply_nested_extensions_below_the_decoder_limit_load(
+    depth: int, skip_schema: bool
+) -> None:
+    """Nesting the decoder accepts must not raise from any loader-side walk.
+
+    M-3: the deleted out-of-range walk recursed once per level and turned
+    extension nesting in the 163-495 range into an unhandled RecursionError on
+    every load, trusted included.  The trusted path now carries such documents
+    up to the decoder's own 1024-level limit.  The full-validation path is
+    still bounded further in by ``jsonschema``'s recursive validator, which is
+    unrelated to the loader and unchanged by this spec.
+    """
+    literal = "{" + '"n":{' * depth + "}" * depth + "}"
+    content = _workflow_with_extension_literal(literal)
+    loaded = load_graph_bytes(content, _skip_schema=skip_schema)
+    assert loaded.document.extensions is not None
+
+
+def _workflow_with_position_line(literal: str) -> bytes:
+    """Return the workflow graph with its first `"line"` value replaced."""
+    path = Path(__file__).parents[1] / "examples/synthetic-graphs/small-workflow.json"
+    text = path.read_text(encoding="utf-8")
+    marker = '"line":'
+    index = text.index(marker) + len(marker)
+    end = index
+    while text[end] not in ",}":
+        end += 1
+    return (text[:index] + literal + text[end:]).encode()
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (
+            _workflow_with_extension_literal(str(2**70)),
+            r"extension value at /test/value must be an integer, got float: ",
+        ),
+        (
+            _workflow_with_position_line(str(2**70)),
+            r"'line' must be an integer, got float: ",
+        ),
+    ],
+    ids=["extension-value", "position-line"],
+)
+def test_integers_beyond_64_bits_are_rejected_by_the_model_layer(
+    content: bytes, expected: str
+) -> None:
+    """An oversized integer literal is still rejected — one layer further in.
+
+    `orjson` decodes such a literal as a float rather than raising, so the
+    loader no longer walks the decoded document looking for it. Every place a
+    v1 document may carry a number is guarded by the model layer instead, so
+    the document is rejected with that layer's message rather than
+    "graph input is not valid JSON: integer out of range".
+    """
+    with pytest.raises(GraphLoadError, match=expected):
+        load_graph_bytes(content)
+
+
+def test_loading_performs_no_recursive_walk_over_the_decoded_document() -> None:
+    """The out-of-range integer walk is gone, not merely unused (H-1/M-3)."""
+    source = (Path(__file__).parents[1] / "src/minotaur/graph_model/loading.py").read_text()
+    assert "_contains_out_of_range_integer" not in source
+    assert "integer out of range" not in source
 
 
 def test_invalid_utf8_message_is_unchanged() -> None:
