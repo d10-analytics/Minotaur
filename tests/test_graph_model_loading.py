@@ -18,6 +18,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import tomllib
+from test_graph_model_serialization import (
+    _collect_loadable_graph_fixtures,
+    _oracle_serialize,
+)
 
 from minotaur import cli
 from minotaur.graph_model.loading import (
@@ -28,6 +33,7 @@ from minotaur.graph_model.loading import (
     load_graph_file,
     stamp_path,
 )
+from minotaur.graph_model.serialization import canonicalize, serialize
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -191,6 +197,81 @@ class TestLazyCanonical:
         # Access canonical on only one side — equality still holds.
         _ = a.canonical
         assert a == b
+
+
+# ---------------------------------------------------------------------------
+# AC-14 and AC-15 proof: the decoder boundary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fixture_path",
+    _collect_loadable_graph_fixtures(),
+    ids=lambda path: str(path.relative_to(Path(__file__).parents[1])),
+)
+def test_strict_load_fixtures_round_trip_through_oracle(fixture_path: Path) -> None:
+    """Every strict-load fixture uses the one decoder and canonical serializer."""
+    content = fixture_path.read_bytes()
+    loaded = load_graph_bytes(content)
+    assert serialize(loaded.document) == _oracle_serialize(canonicalize(loaded.document))
+
+
+def test_python_workflow_graph_round_trips_to_its_committed_bytes() -> None:
+    """The committed canonical workflow graph remains byte-stable after loading."""
+    path = Path(__file__).parents[1] / "examples/python-workflow/minotaur-graph.json"
+    loaded = load_graph_bytes(path.read_bytes())
+    assert serialize(loaded.document) == path.read_bytes()
+
+
+def _workflow_with_extension_literal(literal: str) -> bytes:
+    """Return a valid graph document with a caller-supplied JSON literal."""
+    path = Path(__file__).parents[1] / "examples/synthetic-graphs/small-workflow.json"
+    text = path.read_text(encoding="utf-8")
+    marker = '"relationships":'
+    extension = '"extensions":{"test":{"value":' + literal + "}},"
+    return text.replace(marker, extension + marker, 1).encode()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'{"value":NaN}',
+        b'{"value":Infinity}',
+        b'{"value":-Infinity}',
+        _workflow_with_extension_literal(str(2**70)),
+        b'{"value":"\\ud800"}',
+    ],
+    ids=["nan", "infinity", "negative-infinity", "large-integer", "lone-surrogate"],
+)
+def test_orjson_rejections_surface_as_graph_load_errors(content: bytes) -> None:
+    """The stricter decoder boundary exposes all five rejected JSON forms."""
+    with pytest.raises(GraphLoadError, match=r"^graph input is not valid JSON: "):
+        load_graph_bytes(content)
+
+
+def test_invalid_utf8_message_is_unchanged() -> None:
+    with pytest.raises(GraphLoadError, match=r"^graph input is not valid UTF-8: "):
+        load_graph_bytes(b"\xff")
+
+
+def test_json_array_message_is_unchanged() -> None:
+    with pytest.raises(GraphLoadError, match="^graph input must contain a JSON object$"):
+        load_graph_bytes(b"[]")
+
+
+def test_load_boundary_uses_orjson_without_a_decoder_fallback() -> None:
+    source = (Path(__file__).parents[1] / "src/minotaur/graph_model/loading.py").read_text()
+    decode_start = source.index("raw: Any =")
+    decode_end = source.index("if not isinstance(raw, dict):", decode_start)
+    assert "orjson.loads(decoded)" in source[decode_start:decode_end]
+    assert "raw: Any = json.loads" not in source[decode_start:decode_end]
+    assert "json.loads(text)" in source
+
+
+def test_orjson_is_a_declared_runtime_dependency() -> None:
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())["project"]
+    dependencies = project["dependencies"]
+    assert any(dependency.startswith("orjson>=") for dependency in dependencies)
 
 
 # ---------------------------------------------------------------------------
