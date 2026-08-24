@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import struct
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import cast
@@ -121,95 +120,26 @@ def _thaw_json(value: object) -> object:
 #      trailing zeros after decimal point, no positive exponent sign).
 #   4. No whitespace between tokens.
 #
-# This implementation composes CPython's C ``json`` encoder with a
-# check-only walk (``_check_canonical_input``) that rejects floats (whose
-# C-encoder ``repr`` differs from JCS) and detects non-BMP dict keys
-# (whose code-point sort order differs from JCS's UTF-16 order).
-#
-# Common path (no astral keys, which is every Minotaur-produced graph):
-#   ``json.dumps(value, sort_keys=True, ...)`` — code-point key order
-#   equals UTF-16 order when no key has a surrogate pair.
-#
-# Astral path: ``json.dumps(_sort_keys_recursive(value), sort_keys=False,
-#   ...)`` — the existing UTF-16 walker orders keys, the C encoder keeps
-#   insertion order.
+# The model layer rejects non-integer extension values and non-BMP extension
+# keys before typed output reaches this encoder; this function is not a
+# validation boundary.
 #
 # The previous hand-written encoder now lives in
 # ``tests/test_graph_model_serialization.py`` as the oracle, ensuring
 # byte-identical output.
 
 
-def _check_canonical_input(value: object) -> bool:
-    """Walk *value* checking JCS preconditions; return whether any dict key is non-BMP.
-
-    Raises ``TypeError`` on any ``float`` leaf (JCS float serialization is
-    not implemented in Minotaur v1). Returns ``True`` if any dict key
-    contains a character outside the Basic Multilingual Plane, which
-    requires the astral-key sort path.
-    """
-    has_astral = False
-    stack: list[object] = [value]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, float):
-            raise TypeError(
-                f"JCS serialization does not support {type(current).__name__}; "
-                f"Minotaur v1 does not implement IEEE 754 float serialization"
-            )
-        elif isinstance(current, dict):
-            for key in current:
-                if not has_astral and len(key) != len(key.encode("utf-16-le")) // 2:
-                    has_astral = True
-                stack.append(current[key])
-        elif isinstance(current, list | tuple):
-            stack.extend(current)
-        # str, int, bool, None — no action needed
-    return has_astral
-
-
 def _jcs_serialize(value: object) -> bytes:
-    """Serialize a value to RFC 8785 JCS canonical form.
+    """Serialize typed model output to RFC 8785 JCS UTF-8 bytes.
 
-    Returns UTF-8 bytes because SHA-256 operates on bytes, and JCS defines
-    the canonical encoding as UTF-8.
+    Validation belongs to the model layer; this encoder only performs the
+    canonical JSON encoding and retains the C encoder's non-finite-number
+    guard.
     """
-    has_astral = _check_canonical_input(value)
-    if has_astral:
-        ordered = _sort_keys_recursive(value)
-        return json.dumps(
-            ordered, sort_keys=False, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
-    )
-
-
-def _utf16_sort_key(s: str) -> tuple[int, ...]:
-    """Produce a sort key based on UTF-16 code unit values.
-
-    RFC 8785 §3.2.3 specifies that object keys are sorted by comparing
-    their UTF-16 representations code unit by code unit. For BMP characters
-    this is the same as codepoint order, but supplementary characters
-    (U+10000+) are represented as surrogate pairs and sort differently
-    than their codepoint values would suggest.
-    """
-    raw = s.encode("utf-16-le")
-    return struct.unpack(f"<{len(raw) // 2}H", raw)
-
-
-def _sort_keys_recursive(value: object) -> object:
-    """Recursively sort all dict keys by JCS UTF-16 code-unit order.
-
-    Lists and tuples are both recursed into and returned as lists — JSON has a
-    single array type, so a tuple encodes exactly as a list does. Their element
-    order passes through unchanged: domain-specific array sorting (nodes,
-    relationships, evidence, locations) is the caller's responsibility.
-    """
-    if isinstance(value, dict):
-        return {
-            k: _sort_keys_recursive(v)
-            for k, v in sorted(value.items(), key=lambda item: _utf16_sort_key(item[0]))
-        }
-    if isinstance(value, list | tuple):
-        return [_sort_keys_recursive(item) for item in value]
-    return value
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
