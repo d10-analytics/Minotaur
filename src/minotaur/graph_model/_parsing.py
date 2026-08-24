@@ -39,6 +39,12 @@ def hashable_json(value: object) -> object:
 
 def reject_unknown_fields(data: dict[str, object], allowed: frozenset[str], context: str) -> None:
     """Reject fields that the v1 schema does not define for ``context``."""
+    # ``dict_keys`` can compare itself to the allowed set without materializing
+    # a difference set.  Graph loading visits this helper for every model
+    # object, so keep the common, conforming path allocation-free and only
+    # build the set needed to render the diagnostic when a field is unknown.
+    if data.keys() <= allowed:
+        return
     unknown = data.keys() - allowed
     if unknown:
         fields = ", ".join(repr(field) for field in sorted(unknown))

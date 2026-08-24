@@ -155,6 +155,40 @@ class Range:
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Range:
         reject_unknown_fields(data, _RANGE_FIELDS, "range")
+
+        # The usual Position.from_dict path deliberately owns validation and
+        # its error ordering for irregular wire input.  Fully conforming range
+        # dictionaries are common in graph loads, though, and their four
+        # primitive values can be copied directly while still constructing
+        # Position objects below.  Position.__post_init__ therefore remains
+        # the single owner of bool/sign checks; this shortcut only avoids the
+        # repeated dictionary lookups and helper calls for exact plain dicts.
+        # Keep the key-set test exact: the schema constants are upper bounds,
+        # whereas this path may read only these four named values.
+        if type(data) is dict and data.keys() == _MEMO_RANGE_FIELDS:
+            start_data = data["start"]
+            end_data = data["end"]
+            if (
+                type(start_data) is dict
+                and type(end_data) is dict
+                and start_data.keys() == _MEMO_POSITION_FIELDS
+                and end_data.keys() == _MEMO_POSITION_FIELDS
+            ):
+                start_line = start_data["line"]
+                start_character = start_data["character"]
+                end_line = end_data["line"]
+                end_character = end_data["character"]
+                if (
+                    type(start_line) is int
+                    and type(start_character) is int
+                    and type(end_line) is int
+                    and type(end_character) is int
+                ):
+                    return cls(
+                        start=Position(line=start_line, character=start_character),
+                        end=Position(line=end_line, character=end_character),
+                    )
+
         start_data = data.get("start")
         end_data = data.get("end")
         if not isinstance(start_data, dict):
