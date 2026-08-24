@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -133,3 +134,32 @@ def test_plain_source_copy_is_rejected_by_provenance_guard(tmp_path: Path) -> No
     )
     assert result.returncode == 1
     assert "not a repository checkout" in result.stderr
+
+
+def test_scenarios_materialize_root_without_source_and_retain_a_f_copies(tmp_path: Path) -> None:
+    root = tmp_path / "artifact-root"
+    root.mkdir()
+    (root / "README.md").write_text("artifact only\n", encoding="utf-8")
+    queries = _query_file(tmp_path)
+    result = _run(
+        "--baseline-src",
+        str(BASELINE_SRC),
+        "--branch-src",
+        str(ROOT / "src"),
+        "--queries",
+        str(queries),
+        "--root",
+        str(root),
+        "--scenarios",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "step=h-a copies=a" in result.stdout
+    assert "step=h-f copies=f" in result.stdout
+    assert "step=f graph SHA-256 before/after: IDENTICAL" in result.stdout
+    assert "step=g graph SHA-256 before/after: IDENTICAL" in result.stdout
+
+
+def test_definitions_many_query_is_the_bare_main_name() -> None:
+    entries = json.loads((ROOT / "scripts/equivalence_queries.json").read_text())
+    definitions = next(entry for entry in entries if entry["name"] == "definitions-many")
+    assert definitions["args"] == ["main"]
