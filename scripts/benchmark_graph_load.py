@@ -45,7 +45,9 @@ class _SubprocessError(Exception):
     """Raised when a benchmarked subprocess exits non-zero."""
 
 
-def _time_subprocess(args: list[str], cwd: Path, repeats: int) -> list[float]:
+def _time_subprocess(
+    args: list[str], cwd: Path, repeats: int, *, query_symbol: str | None = None
+) -> list[float]:
     """Run *args* as a subprocess *repeats* times, returning wall-clock seconds."""
     times: list[float] = []
     for _ in range(repeats):
@@ -59,27 +61,12 @@ def _time_subprocess(args: list[str], cwd: Path, repeats: int) -> list[float]:
                 f"  {' '.join(args)}\n"
                 f"  stderr: {stderr}\n"
             )
+        if query_symbol is not None and result.stdout in (b"", b"no definitions\n"):
+            raise _SubprocessError(
+                f"Query for symbol {query_symbol!r} matched no definitions:\n  {' '.join(args)}\n"
+            )
         times.append(elapsed)
     return times
-
-
-def _find_query_symbol(graph_path: Path) -> str:
-    """Pick a symbol to query from the graph's nodes.
-
-    Prefers 'main' if present, otherwise uses the first symbol-kind node.
-    """
-    raw = json.loads(graph_path.read_bytes())
-    for node in raw.get("nodes", []):
-        identity = node.get("identity", {})
-        if identity.get("symbol") == "main":
-            return "main"
-    # Fall back to any symbol
-    for node in raw.get("nodes", []):
-        identity = node.get("identity", {})
-        symbol = identity.get("symbol")
-        if symbol:
-            return symbol
-    return "main"
 
 
 def _benchmark_analyze(python: str, root: Path, graph_path: Path, repeats: int) -> list[float]:
@@ -116,7 +103,7 @@ def _benchmark_query(
         str(root),
         "--no-refresh",
     ]
-    return _time_subprocess(args, cwd=root, repeats=repeats)
+    return _time_subprocess(args, cwd=root, repeats=repeats, query_symbol=symbol)
 
 
 def _benchmark_components(graph_path: Path, root: Path, repeats: int) -> dict[str, list[float]]:
@@ -262,6 +249,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="repository root for analyze and query commands",
     )
     parser.add_argument(
+        "--symbol",
+        default="main",
+        help="symbol to query in the definitions measurement (default: main)",
+    )
+    parser.add_argument(
         "--repeats",
         type=int,
         default=3,
@@ -281,6 +273,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = arguments.root.resolve()
     repeats = arguments.repeats
     verbose = arguments.verbose
+    symbol = arguments.symbol
     python = sys.executable
 
     if not graph_path.is_file():
@@ -319,7 +312,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
             # 2. query definitions (AC-05), against the freshly analyzed temp graph.
-            symbol = _find_query_symbol(temp_graph_path)
             sys.stderr.write(f"Benchmarking: query definitions {symbol} ...\n")
             query_times = _benchmark_query(python, temp_graph_path, root, symbol, repeats)
             rows.append(
