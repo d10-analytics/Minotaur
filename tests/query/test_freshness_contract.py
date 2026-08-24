@@ -206,6 +206,7 @@ def test_query_ignores_selection_mismatch_but_analyze_reconciles_it(tmp_path: Pa
     package = _write(root, "pkg/other.py", "def bar():\n    return 2\n").parent
     output = tmp_path / "graph.json"
     assert _analyze(root, output, selected) == 0
+    before_query = output.read_bytes()
 
     # The graph bytes are clean, so the query answers from its snapshot without
     # consulting the analyze target set or rewriting the graph.
@@ -226,6 +227,10 @@ def test_query_ignores_selection_mismatch_but_analyze_reconciles_it(tmp_path: Pa
     query_capture = capsys.readouterr()
     assert query_capture.out == "selected.py:1  selected.foo  function\n"
     assert query_capture.err == ""
+    assert output.read_bytes() == before_query
+    assert json.loads(output.read_text(encoding="utf-8"))["extensions"]["minotaur"][
+        "selection"
+    ] == ["selected.py"]
 
     # Analyze has a stricter clean-skip probe: a changed target selection
     # forces reconciliation even though the source bytes themselves are clean.
