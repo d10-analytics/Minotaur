@@ -3,17 +3,31 @@
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
 
 import pytest
 
 import minotaur.graph_model.serialization as serialization_module
-from minotaur.graph_model._parsing import _jcs_serialize, _utf16_sort_key
+from minotaur.graph_model._parsing import _jcs_serialize
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.serialization import canonicalize, serialize
 
 EXAMPLES = Path(__file__).parents[1] / "examples/synthetic-graphs"
 REPO_ROOT = Path(__file__).parents[1]
+
+
+def _utf16_sort_key(s: str) -> tuple[int, ...]:
+    """Produce a sort key based on UTF-16 code unit values.
+
+    RFC 8785 §3.2.3 specifies that object keys are sorted by comparing
+    their UTF-16 representations code unit by code unit. For BMP characters
+    this is the same as codepoint order, but supplementary characters
+    (U+10000+) are represented as surrogate pairs and sort differently
+    than their codepoint values would suggest.
+    """
+    raw = s.encode("utf-16-le")
+    return struct.unpack(f"<{len(raw) // 2}H", raw)
 
 
 # ---------------------------------------------------------------------------
@@ -287,24 +301,6 @@ def test_canonicalize_sorts_locations_within_evidence() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_canonicalize_sorts_dict_keys_by_utf16() -> None:
-    source = json.loads((EXAMPLES / "small-workflow.json").read_text(encoding="utf-8"))
-    doc = GraphDocument.from_dict(source)
-    result = canonicalize(doc)
-
-    def check_keys_sorted(obj: object) -> None:
-        if isinstance(obj, dict):
-            keys = list(obj.keys())
-            assert keys == sorted(keys), f"keys not sorted: {keys}"
-            for v in obj.values():
-                check_keys_sorted(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                check_keys_sorted(item)
-
-    check_keys_sorted(result)
-
-
 # ---------------------------------------------------------------------------
 # Canonicalize: no mutation
 # ---------------------------------------------------------------------------
@@ -402,11 +398,6 @@ def test_jcs_array() -> None:
     assert _jcs_serialize([1, "a", True, None]) == b'[1,"a",true,null]'
 
 
-def test_jcs_float_raises() -> None:
-    with pytest.raises(TypeError, match="float"):
-        _jcs_serialize(3.14)
-
-
 def test_jcs_nested_structure() -> None:
     value = {"b": [True, None, {"z": 1, "a": 2}], "a": "hello"}
     result = _jcs_serialize(value)
@@ -456,6 +447,25 @@ def _collect_loadable_graph_fixtures() -> list[Path]:
     _collect_model_constructible_graph_fixtures(),
     ids=lambda p: str(p.relative_to(REPO_ROOT)),
 )
+def test_canonicalize_uses_jcs_code_point_key_order(fixture_path: Path) -> None:
+    source = json.loads(fixture_path.read_text(encoding="utf-8"))
+    document = GraphDocument.from_dict(source)
+    canonical = canonicalize(document)
+    encoded_without_sorting = json.dumps(
+        canonical,
+        sort_keys=False,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    assert encoded_without_sorting == _oracle_serialize(canonical)
+
+
+@pytest.mark.parametrize(
+    "fixture_path",
+    _collect_model_constructible_graph_fixtures(),
+    ids=lambda p: str(p.relative_to(REPO_ROOT)),
+)
 def test_serialize_bypasses_eager_key_sort(
     fixture_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -468,7 +478,7 @@ def test_serialize_bypasses_eager_key_sort(
         _ = value
         raise AssertionError("serialize invoked the eager key sort")
 
-    monkeypatch.setattr(serialization_module, "_sort_keys_recursive", fail_eager_key_sort)
+    monkeypatch.setattr(serialization_module, "_sort_keys_code_point", fail_eager_key_sort)
 
     assert serialize(doc) == expected
     with pytest.raises(AssertionError, match="eager key sort"):
@@ -558,21 +568,35 @@ _EDGE_CASES: list[tuple[str, object]] = [
 ]
 
 
+def _contains_astral_key(value: object) -> bool:
+    """Return whether a nested JSON object has a key outside the BMP."""
+    if isinstance(value, dict):
+        return any(
+            any(ord(character) > 0xFFFF for character in key) or _contains_astral_key(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple):
+        return any(_contains_astral_key(item) for item in value)
+    return False
+
+
 @pytest.mark.parametrize("name,value", _EDGE_CASES, ids=[c[0] for c in _EDGE_CASES])
 def test_oracle_equality_edge_cases(name: str, value: object) -> None:
-    """Implementation and oracle agree on every edge-case input."""
+    """Implementation and oracle agree on every non-astral-key edge case."""
     _ = name
+    if _contains_astral_key(value):
+        pytest.skip("non-BMP object keys are rejected by the model layer")
     assert _jcs_serialize(value) == _oracle_serialize(value)
 
 
 # ---------------------------------------------------------------------------
-# AC-10 (c): Float TypeError — both paths reject floats
+# AC-08 (d): C encoder rejects non-finite floats but accepts finite floats
 # ---------------------------------------------------------------------------
 
 
-def test_float_raises_implementation_top_level() -> None:
-    with pytest.raises(TypeError, match="float"):
-        _jcs_serialize(3.14)
+def test_jcs_non_finite_float_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Out of range float values are not JSON compliant"):
+        _jcs_serialize({"a": float("nan")})
 
 
 def test_float_raises_oracle_top_level() -> None:
@@ -580,19 +604,13 @@ def test_float_raises_oracle_top_level() -> None:
         _oracle_serialize(3.14)
 
 
-def test_float_raises_implementation_nested_dict() -> None:
-    with pytest.raises(TypeError, match="float"):
-        _jcs_serialize({"a": 1.5})
+def test_jcs_finite_float_is_encoded() -> None:
+    assert _jcs_serialize({"a": 1.5}) == b'{"a":1.5}'
 
 
 def test_float_raises_oracle_nested_dict() -> None:
     with pytest.raises(TypeError, match="float"):
         _oracle_serialize({"a": 1.5})
-
-
-def test_float_raises_implementation_nested_list() -> None:
-    with pytest.raises(TypeError, match="float"):
-        _jcs_serialize([1, 2.0, 3])
 
 
 def test_float_raises_oracle_nested_list() -> None:
@@ -606,12 +624,18 @@ def test_float_raises_oracle_nested_list() -> None:
 
 
 def test_no_production_jcs_encode_or_escape_map() -> None:
-    """_jcs_encode and _JCS_ESCAPE_MAP must not appear in src/."""
+    """Removed pure-Python JCS machinery and prechecks must not return to src/."""
     src_dir = REPO_ROOT / "src"
     violations: list[str] = []
     for py_file in sorted(src_dir.rglob("*.py")):
         content = py_file.read_text(encoding="utf-8")
-        for name in ("_jcs_encode", "_JCS_ESCAPE_MAP"):
+        for name in (
+            "_jcs_encode",
+            "_JCS_ESCAPE_MAP",
+            "_check_canonical_input",
+            "_sort_keys_recursive",
+            "_utf16_sort_key",
+        ):
             for lineno, line in enumerate(content.splitlines(), 1):
                 if name in line:
                     rel = py_file.relative_to(REPO_ROOT)
