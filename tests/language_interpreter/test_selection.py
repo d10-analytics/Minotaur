@@ -54,6 +54,20 @@ def _oracle_select_sources(root: Path) -> tuple[Path, ...]:
     return tuple(selected[key] for key in sorted(selected))
 
 
+def _dedup(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Drop repeated entries, keeping first-occurrence order."""
+    seen: dict[Path, None] = {}
+    for path in paths:
+        seen.setdefault(path, None)
+    return tuple(seen)
+
+
+def _is_subsequence(candidate: tuple[Path, ...], whole: tuple[Path, ...]) -> bool:
+    """Report whether ``candidate`` is ``whole`` with entries only removed."""
+    remaining = iter(whole)
+    return all(item in remaining for item in candidate)
+
+
 def _make_nested_excluded(root: Path) -> None:
     _write(root, "a/keep.py")
     _write(root, "a/__pycache__/b.py")
@@ -81,6 +95,18 @@ def _make_symlinked_directory(root: Path) -> None:
     os.symlink(root / "real", root / "linked")
 
 
+def _make_symlink_inside_hidden_directory(root: Path) -> None:
+    _write(root, "pkg/real.py")
+    (root / ".hidden").mkdir()
+    os.symlink(root / "pkg/real.py", root / ".hidden/link.py")
+
+
+def _make_symlink_inside_pycache(root: Path) -> None:
+    _write(root, "pkg/real.py")
+    (root / "__pycache__").mkdir()
+    os.symlink(root / "pkg/real.py", root / "__pycache__/link.py")
+
+
 def _make_broken_symlink(root: Path) -> None:
     os.symlink(root / "missing.py", root / "broken.py")
     _write(root, "kept.py")
@@ -106,6 +132,8 @@ _SHAPES: tuple[tuple[str, Callable[[Path], None], bool], ...] = (
     ("outside symlink", _make_outside_symlink, False),
     ("inside symlink", _make_inside_symlink, False),
     ("symlinked directory", _make_symlinked_directory, False),
+    ("symlink inside hidden directory", _make_symlink_inside_hidden_directory, False),
+    ("symlink inside __pycache__", _make_symlink_inside_pycache, False),
     ("broken symlink", _make_broken_symlink, False),
     ("non-ASCII names", _make_non_ascii, False),
     ("empty directory", _make_empty, False),
@@ -127,9 +155,66 @@ def test_discover_directory_matches_verbatim_previous_implementation(
     root.mkdir()
     builder(root)
 
-    assert _discover_directory(root, root, include_excluded) == _oracle_discover_directory(
-        root, root, include_excluded
-    )
+    discovered = _discover_directory(root, root, include_excluded)
+    oracle = _oracle_discover_directory(root, root, include_excluded)
+    # Reviewed 2026-08-24: the pre-change walker judged exclusion on the
+    # *resolved* path after descending, so a symlink living inside an excluded
+    # or hidden directory reported its physical target a second time.  Pruning
+    # by unresolved name drops that duplicate, and that removal is the only
+    # sanctioned divergence: everything else -- members, order, and which
+    # physical files are reported at all -- is identical, which is what the
+    # `_dedup` equality plus the subsequence check together pin down.
+    assert _dedup(discovered) == _dedup(oracle)
+    assert _is_subsequence(discovered, oracle)
+    # `select_sources` is the contract that must stay byte-identical; it never
+    # saw the duplicate because `_add` deduplicates on the root-relative path.
+    _, selected = select_sources(root, (root,), default_registry())
+    assert selected.files == _oracle_select_sources(root)
+
+
+def test_symlink_inside_excluded_directory_loses_only_its_duplicate(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _make_symlink_inside_pycache(root)
+    real = root / "pkg" / "real.py"
+
+    assert _oracle_discover_directory(root, root, False) == (real, real)
+    assert _discover_directory(root, root, False) == (real,)
+
+    _, selected = select_sources(root, (root,), default_registry())
+    assert selected.files == _oracle_select_sources(root) == (real,)
+
+
+def test_discover_directory_normalizes_an_unresolved_root(tmp_path: Path) -> None:
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    _write(physical, "pkg/module.py")
+    linked = tmp_path / "linked"
+    os.symlink(physical, linked)
+    expected = (physical / "pkg" / "module.py",)
+
+    # `select_sources` always resolves first (`Workspace`), so a symlinked root
+    # only reaches `_discover_directory` through a direct call. Normalizing
+    # both arguments makes that call agree with the physical one instead of
+    # silently reporting nothing.
+    assert _discover_directory(physical, physical, False) == expected
+    assert _discover_directory(linked, linked, False) == expected
+
+    _, selected = select_sources(linked, (linked,), default_registry())
+    assert selected.files == expected
+
+
+def test_relative_order_key_rejects_a_path_outside_root(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    assert exclusions.relative_order_key(root / "pkg" / "module.py", root) == "pkg/module.py"
+    # The key is the graph wire path and the deduplication key, so falling
+    # through to an absolute path would name files by machine-specific paths.
+    with pytest.raises(ValueError, match="not inside root"):
+        exclusions.relative_order_key(tmp_path / "outside.py", root)
+    with pytest.raises(ValueError, match="not inside root"):
+        exclusions.relative_order_key(root, root)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="backslash is a valid POSIX filename character")

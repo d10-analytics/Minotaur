@@ -92,10 +92,29 @@ def _discover_directory(directory: Path, root: Path, include_excluded: bool) -> 
     A symlinked file can resolve outside ``root`` even when its link name looks
     safe.  It is skipped here; explicitly naming that same link is rejected by
     ``_resolve_target`` so the user receives a clear selection error.
+
+    Both arguments are normalized once with ``os.path.realpath`` so the result
+    cannot depend on whether the caller already resolved them.  ``Workspace``
+    resolves the root and ``_resolve_target`` resolves each target, so this is
+    a no-op for ``select_sources``; it makes a direct call with a symlinked
+    root behave like the same call with its physical path.  That single
+    normalization is also what containment, relative-path, and ordering all
+    read, so the root is never trimmed two different ways.
+
+    Directory entries are pruned by unresolved name, so a symlink living inside
+    an excluded or hidden directory is never resolved and never reported.  The
+    pre-change implementation judged exclusion only after resolving, so such a
+    link reported its physical target a second time; ``select_sources`` is
+    unaffected because ``_add`` deduplicates on the root-relative path.
     """
     found: list[Path] = []
-    root_text = os.fspath(root)
-    for current_dir, dirnames, filenames in os.walk(os.fspath(directory), followlinks=False):
+    # realpath leaves no trailing separator except on the filesystem root, so
+    # the normalized text is directly usable as a containment prefix.
+    root_text = os.path.realpath(os.fspath(root))
+    root_path = Path(root_text)
+    for current_dir, dirnames, filenames in os.walk(
+        os.path.realpath(os.fspath(directory)), followlinks=False
+    ):
         dirnames[:] = [
             name
             for name in dirnames
@@ -113,7 +132,7 @@ def _discover_directory(directory: Path, root: Path, include_excluded: bool) -> 
             if not include_excluded and _is_excluded(_relative_path(resolved_text, root_text)):
                 continue
             found.append(resolved)
-    return tuple(sorted(found, key=lambda path: exclusions.relative_order_key(path, root)))
+    return tuple(sorted(found, key=lambda path: exclusions.relative_order_key(path, root_path)))
 
 
 def _is_excluded(relative: Path) -> bool:
@@ -122,13 +141,14 @@ def _is_excluded(relative: Path) -> bool:
 
 
 def _is_within_root(path: str, root: str) -> bool:
-    root = root.rstrip(os.sep) or os.sep
+    """Test containment against the root normalized by ``_discover_directory``."""
     if root == os.sep:
         return path.startswith(os.sep)
     return path == root or path.startswith(f"{root}{os.sep}")
 
 
 def _relative_path(path: str, root: str) -> Path:
+    """Strip the same normalized root ``_is_within_root`` just matched."""
     return Path(path[len(root) :].lstrip(os.sep))
 
 
