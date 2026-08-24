@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import stat
 import subprocess
 import sys
@@ -174,12 +173,12 @@ def test_output_preflight_and_module_console_entry_points_match(tmp_path: Path) 
     refused = _run(root, output, root)
     collision = _run(root, source, source, force=True)
     replaced = _run(root, output, root, force=True)
-    console_script = shutil.which("minotaur")
-    if console_script is None:
+    console_script = Path(sys.executable).with_name("minotaur")
+    if not console_script.is_file():
         pytest.skip("minotaur console script is not installed")
     console = subprocess.run(
         [
-            console_script,
+            str(console_script),
             "analyze",
             "--root",
             str(root),
