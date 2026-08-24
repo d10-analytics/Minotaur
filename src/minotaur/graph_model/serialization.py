@@ -31,8 +31,18 @@ from minotaur.graph_model.document import GraphDocument
 def canonicalize(document: GraphDocument) -> dict[str, object]:
     """Return a canonical dict representation of the document.
 
-    Calls ``document.to_dict()`` then applies canonical ordering to the
-    resulting dict tree. The input document is not mutated.
+    Calls ``document.to_dict()`` then applies canonical array and dict-key
+    ordering to the resulting dict tree. The input document is not mutated.
+    """
+    return cast(dict[str, object], _sort_keys_recursive(_canonical_arrays(document)))
+
+
+def _canonical_arrays(document: GraphDocument) -> dict[str, object]:
+    """Return a canonical dict with semantic arrays ordered.
+
+    This performs the array ordering shared by the public ``canonicalize``
+    view and the byte serializer. Dict-key ordering belongs to
+    ``canonicalize`` for dict consumers and to ``_jcs_serialize`` for bytes.
     """
     raw = document.to_dict()
     nodes = cast(list[dict[str, Any]], raw["nodes"])
@@ -54,16 +64,18 @@ def canonicalize(document: GraphDocument) -> dict[str, object]:
 
     raw["nodes"] = sorted(nodes, key=lambda n: n["id"])
 
-    return cast(dict[str, object], _sort_keys_recursive(raw))
+    return raw
 
 
 def serialize(document: GraphDocument) -> bytes:
     """Return the canonical JCS UTF-8 byte serialization of the document.
 
-    Equivalent to JCS-serializing the result of ``canonicalize(document)``.
-    Suitable for hashing and byte-level comparison.
+    Semantic arrays are ordered by ``_canonical_arrays``; dict keys are
+    ordered by the JCS encoder. This avoids the public ``canonicalize``
+    dict-key pass while producing the same bytes. Suitable for hashing and
+    byte-level comparison.
     """
-    return _jcs_serialize(canonicalize(document))
+    return _jcs_serialize(_canonical_arrays(document))
 
 
 def _location_sort_key(loc: dict[str, Any]) -> tuple[str, int, int, int, int]:
