@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import minotaur.graph_model.serialization as serialization_module
 from minotaur.graph_model._parsing import _jcs_serialize, _utf16_sort_key
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.serialization import canonicalize, serialize
@@ -418,11 +419,60 @@ def test_jcs_nested_structure() -> None:
 
 
 def _collect_graph_fixtures() -> list[Path]:
-    """Return all valid JSON graph fixtures under tests/ and examples/."""
+    """Return all nine raw JSON graph fixtures under tests/ and examples/."""
     paths: list[Path] = []
     for directory in [REPO_ROOT / "tests", REPO_ROOT / "examples"]:
         paths.extend(sorted(directory.rglob("*.json")))
     return paths
+
+
+# These collectors intentionally represent three different admission
+# boundaries. The raw set feeds the independent JSON encoder and schema
+# sweeps, so it includes every syntactically valid JSON fixture even when a
+# model or semantic check rejects that fixture. The model set feeds
+# ``GraphDocument.from_dict`` and the in-process serializer; it includes the
+# dangling-relationship fixture because model construction does not validate
+# relationship endpoints. The strict-load set feeds ``load_graph_bytes`` and
+# therefore contains only the four example graphs: strict loading validates
+# relationship endpoints and must exclude that dangling fixture. Keeping the
+# sets separate preserves both model-constructible coverage and strict-load
+# coverage without making either consumer claim the wrong admission boundary.
+
+
+def _collect_model_constructible_graph_fixtures() -> list[Path]:
+    """Return the four examples plus the model-constructible dangling graph."""
+    dangling = REPO_ROOT / "tests/fixtures/minotaur-graph-v1/invalid/dangling-relationship.json"
+    examples = sorted((REPO_ROOT / "examples").rglob("*.json"))
+    return examples + [dangling]
+
+
+def _collect_loadable_graph_fixtures() -> list[Path]:
+    """Return the four example graphs accepted by strict graph loading."""
+    return sorted((REPO_ROOT / "examples").rglob("*.json"))
+
+
+@pytest.mark.parametrize(
+    "fixture_path",
+    _collect_model_constructible_graph_fixtures(),
+    ids=lambda p: str(p.relative_to(REPO_ROOT)),
+)
+def test_serialize_bypasses_eager_key_sort(
+    fixture_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serialization retains bytes without the public dict-key normalization."""
+    source = json.loads(fixture_path.read_text(encoding="utf-8"))
+    doc = GraphDocument.from_dict(source)
+    expected = _oracle_serialize(canonicalize(doc))
+
+    def fail_eager_key_sort(value: object) -> object:
+        _ = value
+        raise AssertionError("serialize invoked the eager key sort")
+
+    monkeypatch.setattr(serialization_module, "_sort_keys_recursive", fail_eager_key_sort)
+
+    assert serialize(doc) == expected
+    with pytest.raises(AssertionError, match="eager key sort"):
+        canonicalize(doc)
 
 
 @pytest.mark.parametrize(
