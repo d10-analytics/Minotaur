@@ -143,6 +143,14 @@ def load_graph_bytes(
         document = GraphDocument.from_dict(raw)
     except (jsonschema.ValidationError, ValueError) as error:
         raise GraphLoadError(str(error)) from None
+    except RecursionError:
+        # Both the schema validator and the extension freeze recurse once per
+        # nesting level and reach the interpreter limit before orjson's own
+        # 1024-level guard would.  Surface that as the load boundary's error
+        # rather than a raw traceback (see ``docs/formats/minotaur-graph-v1.md``).
+        raise GraphLoadError(
+            "graph input nests deeper than the loader supports (extension objects)"
+        ) from None
     # A matching sidecar vouches for these exact bytes having already passed
     # schema and node-ID validation. Skip only those redundant checks on the
     # trusted path; endpoint, duplicate, identity-origin, location, and

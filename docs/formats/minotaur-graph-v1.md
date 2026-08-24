@@ -198,10 +198,19 @@ contract anyway:
   rejected while decoding, reported as `graph input is not valid JSON: ...`.
 - Lone-surrogate escapes such as `"\ud800"` — likewise rejected while
   decoding with the same prefix.
-- Nesting deeper than 1024 levels — rejected while decoding
-  (`graph input is not valid JSON: depth limit exceeded`). The standard-library
-  decoder has no fixed limit. No v1 document produced by Minotaur approaches
-  this depth; only deeply nested extension objects could.
+- Deeply nested extension objects — rejected as `GraphLoadError` at three
+  bounds, none of them a raw traceback. `orjson` refuses more than 1024
+  nesting levels while decoding (`graph input is not valid JSON: depth limit
+  exceeded`); the standard-library decoder instead recursed until the
+  interpreter's recursion limit and raised `RecursionError`. Before that limit
+  is reached, the recursive validators bound the document further in: the
+  full-validation path (no matching sidecar, or `--validate`) rejects extension
+  nesting past roughly 120 levels because the `extensionValue` schema
+  definition recurses per level, and the trusted path rejects nesting just
+  short of 1000 levels in the extension freeze. Both report
+  `graph input nests deeper than the loader supports (extension objects)`.
+  The exact cliff depends on the surrounding call stack; no v1 document
+  produced by Minotaur approaches any of these depths.
 - Integer literals outside the signed 64-bit range — **not** a decode error.
   `orjson` decodes such a literal as a floating-point value. The model layer
   then rejects it as a non-integer, because every place a v1 document may hold
@@ -263,7 +272,13 @@ instead of a fast trusted load. The accepted risk (D-07) is that a graph whose
 contents were altered and whose sidecar was regenerated can bypass node-ID
 recomputation on the trusted path. A matching sidecar is trusted regardless of
 who wrote it: directory write access, not Minotaur authorship, is the trust
-boundary. Use `--validate` for untrusted input.
+boundary. Use `--validate` for untrusted input. One known instance bounds
+the exposure (review of `spec/trusted-graph-load`, 2026-08-23): a 17-mutation
+fuzz of stamped, schema-violating graphs found 16 rejected identically on the
+trusted path by `from_dict` and `validate_document`; the sole divergence was
+`"language": null`, which the schema rejects but `from_dict` accepts as the
+absent-optional state — benign, but it is the concrete shape the accepted
+risk names.
 
 The first read of an unstamped graph writes an untracked
 `<GRAPH>.sha256` beside it. If a downstream repository commits its graph, it
