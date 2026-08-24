@@ -14,7 +14,7 @@ BENCHMARK = ROOT / "scripts" / "benchmark_graph_load.py"
 
 
 def _run_benchmark(
-    tmp_path: Path, source: str
+    tmp_path: Path, source: str, *, symbol: str | None = None
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path, Path]:
     source_root = tmp_path / "source"
     source_root.mkdir()
@@ -31,17 +31,20 @@ def _run_benchmark(
     temp_root.mkdir()
     environment = os.environ.copy()
     environment["TMPDIR"] = str(temp_root)
+    command = [
+        sys.executable,
+        str(BENCHMARK),
+        "--graph",
+        str(graph),
+        "--root",
+        str(source_root),
+        "--repeats",
+        "1",
+    ]
+    if symbol is not None:
+        command.extend(["--symbol", symbol])
     completed = subprocess.run(
-        [
-            sys.executable,
-            str(BENCHMARK),
-            "--graph",
-            str(graph),
-            "--root",
-            str(source_root),
-            "--repeats",
-            "1",
-        ],
+        command,
         cwd=ROOT,
         env=environment,
         text=True,
@@ -69,3 +72,28 @@ def test_benchmark_owns_temporary_artifacts_without_touching_siblings(
     assert old_temp_graph.read_bytes() == b"caller-owned old benchmark graph\n"
     assert old_temp_sidecar.read_bytes() == b"caller-owned old benchmark sidecar\n"
     assert list(temp_root.iterdir()) == []
+
+
+def test_benchmark_rejects_query_that_matches_nothing(tmp_path: Path) -> None:
+    completed, _graph, _old_graph, _old_sidecar, _temp_root = _run_benchmark(
+        tmp_path,
+        "def main():\n    return 1\n",
+        symbol="definitely_missing",
+    )
+
+    assert completed.returncode != 0
+    assert "definitely_missing" in completed.stderr
+
+
+def test_benchmark_accepts_explicit_matching_symbol(tmp_path: Path) -> None:
+    completed, _graph, _old_graph, _old_sidecar, _temp_root = _run_benchmark(
+        tmp_path,
+        "def main():\n    return 1\n",
+        symbol="main",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_benchmark_has_no_dead_query_symbol_scanner() -> None:
+    assert "_find_query_symbol" not in BENCHMARK.read_text(encoding="utf-8")
