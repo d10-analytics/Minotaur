@@ -18,6 +18,7 @@ literal because agents commonly parse these messages and JSON fields.
 | `analyze`, rename a tracked file, then query | yes | `drift.missing` plus `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (e)) | Both root-relative paths are reported as `minotaur: stale: <path>`; JSON `stale` contains both; exit `0` when clean | Analyze the renamed target explicitly if it is now outside the recorded directory |
 | `analyze`, switch branches so selected bytes differ, then query | yes | `drift.changed` in `minotaur/query/freshness.py` (same changed-byte observable as AC-03 scenario (a)) | Refresh and stale diagnostics name the changed paths; JSON has `refreshed: true`; exit `0` when clean | Treat the resulting graph as the new branch snapshot |
 | `analyze`, edit a tracked `.py`, then query with `--no-refresh` | yes, without refreshing | `drift.changed` and `_load_and_refresh_graph` in `minotaur/query/freshness.py` (AC-03 scenario (b)) | `minotaur: stale: <path>` with no refreshed line; JSON `refreshed: false`, `stale: [<path>]`; exit `0` for a clean answer or `1` if the saved graph has diagnostics | Omit `--no-refresh` when current facts are required |
+| `analyze`, edit a tracked `.py`, then `unreferenced --text-fallback --no-refresh` | yes, but the fallback text scan is also suppressed | `stale_graph = query.no_refresh and not observed.is_clean` gates `text_fallback=query.text_fallback and not stale_graph` in `_run_unreferenced` (`minotaur/cli.py:360`, `:380`) | Same `minotaur: stale: <path>` line and JSON `stale`; the result is graph-relationships-only even though `--text-fallback` was passed, and no `[text-mention]` marks appear | Omit `--no-refresh` (or drop `--text-fallback`, which would have no effect anyway) when a current-source text scan is required |
 | `analyze`, then `touch` a tracked file without changing bytes | no drift | `hashlib.sha256` comparison in `drift` (`minotaur/query/freshness.py`; AC-03 scenario (f)) | No stderr freshness line; JSON `refreshed: false`, `stale: []`; exit `0` | Change the bytes or use `analyze --force` if a new snapshot is required for another reason |
 | `analyze`, edit a tracked file, then restore identical bytes | no drift | Byte comparison in `drift` (`minotaur/query/freshness.py`; AC-03 scenario (g)) | No refresh or stale diagnostic; JSON `stale: []`; exit `0` | None is needed: the snapshot is byte-current again |
 | `analyze` a target, add a new `.py` outside every recorded directory | no | `_added_files` only walks `recorded_selection` in `minotaur/query/freshness.py` (AC-18: `test_new_python_outside_recorded_target_is_not_detected`) | No refresh; JSON `refreshed: false`, `stale: []`; exit `0` | Analyze the containing directory or file explicitly |
@@ -71,6 +72,14 @@ describes the checked-out branch.
 This option changes the action after detection, not the detection itself. The
 saved graph remains available for historical questions, and the stale lines and
 JSON fields make that choice visible to both humans and agents.
+
+### `unreferenced --text-fallback` with `--no-refresh` on a stale graph
+
+A stale no-refresh query is intentionally graph-only: the saved graph remains
+queryable even when a selected file has since been removed or can no longer be
+read, so `--text-fallback` must not inspect the current workspace in this
+mode. `--text-fallback` still has its normal effect when the graph is clean
+(no drift) or when `--no-refresh` is not passed.
 
 ### Touch without a byte change
 
@@ -198,6 +207,19 @@ sidecar edited together: the normal read can load it, while `--validate` forces
 the complete check and reports a node-ID mismatch. The sidecar is not a claim
 that the graph describes the current source; source freshness remains the
 separate `drift` contract above.
+
+### First-read validation cost
+
+A pre-sidecar or foreign graph has no digest to trust, so the first
+user-facing graph-reading command run against it pays the full schema and
+node-ID validation cost once, then writes the sidecar so later reads on the
+trusted path are fast. This one-time cost applies to `query callers`,
+`query definitions`, `query impact`, `query unreferenced`, `query context`,
+`query diff`, and `visualize` — every command that loads a graph file through
+`load_graph_file` and can stamp it via `_stamp_if_validated` in
+`minotaur/cli.py`. `analyze`'s own clean-skip probe deliberately does not
+create a sidecar, since it is reusing an existing graph rather than reading a
+foreign one. No manual migration or conversion step is needed.
 
 ## Analyze's clean-skip probe
 
