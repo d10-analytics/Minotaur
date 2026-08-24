@@ -431,6 +431,51 @@ class TestStampAwareLoader:
         ):
             load_graph_file(graph_path)
 
+    def test_trusted_load_keeps_duplicate_node_validation(self, tmp_path: Path) -> None:
+        """Skipping digest recomputation does not suppress duplicate detection."""
+        raw = json.loads(_EXAMPLE_GRAPH.read_text(encoding="utf-8"))
+        raw["nodes"][1]["id"] = raw["nodes"][0]["id"]
+        data = json.dumps(raw, separators=(",", ":")).encode("utf-8")
+        graph_path = tmp_path / "duplicate-node-trusted.json"
+        graph_path.write_bytes(data)
+        stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+
+        with pytest.raises(
+            GraphLoadError,
+            match="graph semantic validation failed:.*node id .* already declared",
+        ):
+            load_graph_file(graph_path)
+
+    def test_trusted_load_keeps_location_validation(self, tmp_path: Path) -> None:
+        """Skipping digest recomputation does not suppress range validation."""
+        raw = json.loads(_EXAMPLE_GRAPH.read_text(encoding="utf-8"))
+        raw["nodes"][0]["location"]["range"] = {
+            "start": {"line": 3, "character": 0},
+            "end": {"line": 2, "character": 0},
+        }
+        data = json.dumps(raw, separators=(",", ":")).encode("utf-8")
+        graph_path = tmp_path / "reversed-location-trusted.json"
+        graph_path.write_bytes(data)
+        stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+
+        with pytest.raises(
+            GraphLoadError,
+            match="graph semantic validation failed:.*range end .* precedes start",
+        ):
+            load_graph_file(graph_path)
+
+    def test_validate_flag_keeps_schema_validation_active(self, tmp_path: Path) -> None:
+        """The explicit full-validation escape hatch still runs the schema seam."""
+        graph_path, _data = _stamped_graph(tmp_path)
+        with (
+            patch(
+                "minotaur.graph_model.loading._validate_wire_shape",
+                side_effect=AssertionError("schema seam must run under --validate"),
+            ),
+            pytest.raises(AssertionError, match="schema seam must run under --validate"),
+        ):
+            load_graph_file(graph_path, validate=True)
+
 
 # ---------------------------------------------------------------------------
 # AC-02 proof
