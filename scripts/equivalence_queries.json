@@ -1,0 +1,68 @@
+[
+  {
+    "name": "definitions-many",
+    "command": "definitions",
+    "args": ["__init__"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "callers-qualified",
+    "command": "callers",
+    "args": ["minotaur.graph_model.location.Position.from_dict"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "callers-zero",
+    "command": "callers",
+    "args": ["minotaur.graph_model.validation.ValidationReport.is_valid"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "callers-unresolved",
+    "command": "callers",
+    "args": ["minotaur.this_symbol_does_not_exist"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "definitions-invalid",
+    "command": "definitions",
+    "args": ["not a valid symbol"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "impact-depth",
+    "command": "impact",
+    "args": ["minotaur.graph_model.location.Position.from_dict", "--depth", "1"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "unreferenced-graph",
+    "command": "unreferenced",
+    "args": ["minotaur"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "unreferenced-text",
+    "command": "unreferenced",
+    "args": ["minotaur", "--text-fallback"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "context-real",
+    "command": "context",
+    "args": ["--site", "minotaur/cli.py:42"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "context-out-of-range",
+    "command": "context",
+    "args": ["--site", "minotaur/cli.py:999999"],
+    "variants": {"json": true, "no_refresh": true}
+  },
+  {
+    "name": "diff-selection",
+    "command": "diff",
+    "args": ["{graph}", "{selection}"],
+    "variants": {"json": true}
+  }
+]
