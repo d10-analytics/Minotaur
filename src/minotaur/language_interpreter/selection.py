@@ -96,7 +96,7 @@ def _discover_directory(directory: Path, root: Path, include_excluded: bool) -> 
     Both arguments are normalized once with ``os.path.realpath`` so the result
     cannot depend on whether the caller already resolved them.  ``Workspace``
     resolves the root and ``_resolve_target`` resolves each target, so this is
-    a no-op for ``select_sources``; it makes a direct call with a symlinked
+    a no-op for the public selection entry point; it makes a direct call with a symlinked
     root behave like the same call with its physical path.  That single
     normalization is also what containment, relative-path, and ordering all
     read, so the root is never trimmed two different ways.
@@ -104,7 +104,7 @@ def _discover_directory(directory: Path, root: Path, include_excluded: bool) -> 
     Directory entries are pruned by unresolved name, so a symlink living inside
     an excluded or hidden directory is never resolved and never reported.  The
     pre-change implementation judged exclusion only after resolving, so such a
-    link reported its physical target a second time; ``select_sources`` is
+    link reported its physical target a second time; the public entry point is
     unaffected because ``_add`` deduplicates on the root-relative path.
     """
     found: list[Path] = []
