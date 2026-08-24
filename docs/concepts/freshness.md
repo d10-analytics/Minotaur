@@ -25,9 +25,10 @@ literal because agents commonly parse these messages and JSON fields.
 | `analyze`, edit a non-`.py` file | no | The registry selects only supported extensions; no file node reaches `drift` (`minotaur/language_interpreter/registry.py`; AC-18: `test_non_python_edit_is_not_detected`) | No refresh; JSON `stale: []`; exit `0` | Analyze the supported source that consumes the data, if appropriate |
 | `analyze`, then add or edit a file under an excluded or hidden directory that was never explicitly selected | no | `_is_excluded` in `minotaur/language_interpreter/selection.py` prevents discovery (AC-18: `test_excluded_and_hidden_directory_edits_are_not_detected`) | No refresh; JSON `refreshed: false`, `stale: []`; exit `0` | Explicitly select the excluded target when it is intentionally in scope |
 | `analyze`, edit a file reached only through an out-of-root symlink | no | `select_sources` resolves and rejects the escape in `minotaur/language_interpreter/selection.py` (AC-18: `test_out_of_root_symlink_edit_is_not_detected`) | No refresh; JSON `stale: []`; exit `0` | Analyze a root that contains the resolved file, or copy it inside the root |
-| `analyze` a file with a parse failure, then edit that file | no `changed`/`missing` finding | `interpreter.py` omits the failed file node after `SyntaxError`; `drift` can compare no recorded hash (AC-18: `test_parse_failed_file_has_no_changed_or_missing_finding_but_new_file_is_added`) | `changed` and `missing` remain empty for that file; a query still refreshes when the file appears in `added`, and the refresh's re-analysis of a still-broken file emits diagnostics, giving exit `1` | Fix the parse error, then analyze; a new supported file below a recorded directory is reported as `added` |
+| `analyze` a file with a parse failure, then edit that file | no `changed`/`missing` finding | `interpreter.py` omits the failed file node after `SyntaxError`; `drift` can compare no recorded hash (AC-18: `test_parse_failed_file_has_no_changed_or_missing_finding_but_new_file_is_added`) | `changed` and `missing` remain empty for that file; a query still refreshes when the file appears in `added`; its re-analysis returns exit `1`, but does not re-print the parse diagnostic | Run `analyze` to see the parse diagnostic, then fix the parse error; a new supported file below a recorded directory is reported as `added` |
 | Load a graph with no recorded selection and query after source drift | no automatic refresh | `recorded_selection` in `minotaur/query/freshness.py` and the guard in `_load_and_refresh_graph` in `minotaur/cli.py` (AC-18: `test_graph_without_recorded_selection_refuses_automatic_refresh`) | `minotaur: error: graph has no recorded source selection; cannot refresh`; exit `2` | Re-run `analyze` so the graph records its targets |
-| Hand-edit graph bytes and leave the sidecar untouched, then read it | yes — graph-file integrity | `load_graph_file` in `minotaur/graph_model/loading.py` finds the sidecar digest does not match the bytes and runs the full schema and semantic pass, including node-ID recomputation (AC-03 scenario (j)) | `minotaur: error: graph semantic validation failed: /nodes/N/id: node id '...' does not match the digest recomputed from its identity; ...` (or the schema finding for a shape edit); exit `2` | None needed: the edit is reported; `--validate` forces the same pass on a stamped graph |
+| Read valid graph bytes whose sidecar digest does not match | yes — distrust, not an integrity error | `load_graph_file` in `minotaur/graph_model/loading.py` rejects the stale sidecar and runs the full validation once (AC-03 scenario (j)) | No diagnostic; one slow full read; `<GRAPH>.sha256` is rewritten to the true digest; exit `0` | None needed: the graph was valid and is re-stamped after validation |
+| Hand-edit graph bytes and leave the sidecar untouched, then read it | yes for schema-shape and identity edits; no for a label-only edit | `load_graph_file` in `minotaur/graph_model/loading.py` rejects the stale sidecar and runs full schema and semantic validation, including node-ID recomputation (AC-18: `test_stale_sidecar_detects_schema_shape_and_node_identity_but_not_labels`) | A schema-shape or node-identity edit exits `2` with `minotaur: error: graph semantic validation failed: /nodes/N/id: node id '...' does not match the digest recomputed from its identity; ...`; a label-only edit exits `0` and is re-stamped | `--validate` forces the same full pass on a stamped graph; no trusted-path check detects a label-only edit |
 | Delete the sidecar, then read the graph | not an error | `load_graph_file` treats a missing or unreadable sidecar as untrusted and runs the full validation once; the read command re-stamps after it passes (AC-03 scenario (i)) | No diagnostic; the read is slower once; a new `<GRAPH>.sha256` appears | None needed |
 | Read with `--validate` regardless of sidecar state | yes — always the full pass | `load_graph_file(..., validate=True)` never consults the sidecar (AC-03 scenario (k)) | Same output as an untrusted read; after a passing read the sidecar is rewritten with the verified digest (`_stamp_if_validated` in `minotaur/cli.py`), so a mismatched stamp is repaired | Use after any external graph edit |
 | Hand-edit graph bytes and regenerate its sidecar, then read it | graph-file integrity is not detected on the trusted path | `load_graph_file` and `validate_document(..., verify_node_ids=False)` in `minotaur/graph_model/loading.py` (AC-18: `test_regenerated_sidecar_trusts_hand_edited_graph_until_validate`) | The trusted read loads without a finding; `--validate` runs the full check and reports a node-ID mismatch; exit `2` for the invalid validated read | Pass `--validate` after external graph edits |
@@ -35,6 +36,7 @@ literal because agents commonly parse these messages and JSON fields.
 | Query a graph whose bytes are clean but its selection metadata differs from the requested analyze targets | queries compare drift only | `_load_and_refresh_graph` calls `drift`; the analyze probe additionally compares selection and source control (`minotaur/cli.py`; AC-18: `test_query_ignores_selection_mismatch_but_analyze_reconciles_it`) | Query may answer without refresh; `analyze` re-runs instead of printing the clean-skip line | Use `analyze` to reconcile the recorded target set |
 | An edit lands after `drift()` and before the answer is printed | no concurrency detection | No lock or `flock`/`fcntl` guard exists around freshness and answer production (`minotaur/query/freshness.py`, `minotaur/cli.py`; AC-18: `test_edit_after_drift_is_not_detected_between_drift_and_answer`) | The answer can describe the pre-edit snapshot; no special diagnostic is promised | Coordinate writers externally when a consistent multi-process snapshot matters |
 | Run `query diff` | no source freshness check | `_run_diff` in `minotaur/cli.py` loads and compares two graph files directly (AC-18: `test_diff_does_not_call_source_drift`) | The normal diff text or JSON; exit `0` for a valid comparison; no `stale` field is added | Use a freshness-checked graph query first when comparing current source |
+| Run `visualize --source-root` after source drift | no source freshness check | `_visualize` in `minotaur/cli.py` does not call `drift`; `prepare_excerpts` in `minotaur/graph_visualizer/source.py` reads current bytes (AC-18: `test_visualize_source_root_does_not_call_source_drift`) | Exit `0` with no stale warning; embedded excerpts use current-file bytes against snapshot line ranges | Re-run `analyze` first, or omit `--source-root` to avoid embedding current source excerpts |
 | Run `query context` | no graph refresh; per-file hash comparison only | `_run_context` and `context` in `minotaur/cli.py` and `minotaur/query/context.py` (AC-18: `test_context_does_not_call_source_drift_and_no_refresh_is_a_noop`) | Text begins `[file changed since analysis]` when bytes differ (`[file hash unavailable]` when the file cannot be read), or the JSON envelope's `results[0].stale` is `true` (`hash_available: false` for the unreadable case) — `context` has no top-level `stale` array; exit `0` | Read the marker as a current-source warning, not as a graph refresh |
 | Run `query context --no-refresh` | latent no-op | The shared parser accepts the option, but `_run_context` never reads it (`minotaur/cli.py`; AC-18: `test_context_does_not_call_source_drift_and_no_refresh_is_a_noop`) | Stdout, stderr, and exit code are byte-identical to `context` without the flag | Do not rely on the flag to suppress context's per-file hash marker |
 
@@ -138,6 +140,22 @@ It does not prove that those bytes were produced by Minotaur or that their node
 IDs still agree with their identities; `--validate` is the explicit integrity
 check for this accepted trusted-sidecar risk.
 
+### Stale sidecar after a graph edit
+
+A sidecar mismatch makes the graph untrusted and triggers the complete validation
+pass once. A valid graph with only a bogus sidecar is therefore silently
+re-stamped. An invalid graph is rejected only when that full validation finds a
+schema-shape or identity problem: changing a node label does not alter its
+identity digest and remains accepted after the sidecar is repaired.
+
+### `visualize --source-root` after source drift
+
+Visualization does not run the query freshness check. When `--source-root` is
+provided, it reads current source bytes for excerpts while the graph still
+supplies snapshot paths and ranges. Re-analyze before visualizing if those
+excerpts must align with the graph snapshot; omit `--source-root` when no
+current source should be embedded.
+
 ### Analyze clean-skip
 
 The analyze command has to preserve more than query freshness: it also keeps
@@ -182,8 +200,9 @@ bytes, and compares them with the file node's recorded
 `extensions["minotaur-python"]["content_sha256"]`. Missing files and new files
 under recorded directory targets use separate `missing` and `added` sets. The
 query refresh path reports the sorted union before re-analyzing, so an agent can
-see exactly why the answer changed. A refresh that emits source diagnostics
-returns exit code `1`; a clean replacement returns `0`.
+see exactly why the answer changed. If that refresh encounters a source
+diagnostic, it returns exit code `1`; the query does not re-print the analysis
+diagnostic, so run `analyze` to see it. A clean replacement returns `0`.
 
 The `--no-refresh` escape hatch leaves the graph on disk and answers from its
 old facts. It still prints one `minotaur: stale: <path>` line per drifted path,
