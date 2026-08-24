@@ -13,9 +13,19 @@ enough that every query class has a real hit; (2) the baseline worktree's own
 the only root that may be missing without failing the run.
 
 Queries come from a per-root JSON file keyed by the root directory's name, so
-a root is never compared with a query list written for a different tree.  A
-run fails when a root's queries do not actually produce output: an empty
-comparison is not a passing comparison.
+a root is never compared with a query list written for a different tree.
+``--workload KEY`` names the workload for the root given in the same position
+when a checkout's directory name differs from its committed key (the Onyx
+checkout, say).  A run fails when a root's queries do not actually produce
+output: an empty comparison is not a passing comparison, and every root that
+is present must be compared -- a present root that cannot be is a failure,
+never a skip.  The final ``totals:`` line reports how many roots were compared
+against how many were requested so the number itself is the merge gate.
+
+Both interpreters must be CPython 3.11 or newer: import isolation rests on
+``PYTHONSAFEPATH``, which older interpreters ignore, and with the working
+directory set to a source root the branch side would then silently import the
+baseline package instead of its own.
 """
 
 from __future__ import annotations
@@ -102,6 +112,15 @@ def _parser() -> argparse.ArgumentParser:
         help="root that may be absent (D-06 root (3)); skipped with a loud message",
     )
     parser.add_argument(
+        "--workload",
+        action="append",
+        metavar="KEY",
+        help=(
+            "workload key for the optional root in the same position, when the"
+            " checkout directory is not named after its committed workload"
+        ),
+    )
+    parser.add_argument(
         "--queries", type=Path, default=Path(__file__).with_name("equivalence_queries.json")
     )
     parser.add_argument("--scratch", type=Path)
@@ -115,9 +134,18 @@ def _resolve(path: Path) -> Path:
 
 
 def _env(src: Path) -> dict[str, str]:
-    env = os.environ.copy()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        # A coverage-instrumented parent would make every child write a
+        # ``.coverage.*`` file into its working directory -- the fixture root
+        # and both checkouts -- and flip the provenance guard on the next run.
+        if not key.startswith("COVERAGE_")
+    }
     env["PYTHONPATH"] = str(src)
     env["PYTHONSAFEPATH"] = "1"
+    env["PYTHONHASHSEED"] = "0"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
 
@@ -167,13 +195,34 @@ def _under(path: Path, directory: Path) -> bool:
     return True
 
 
-def _check_import(side: Side) -> str | None:
-    result = _run(side, ["-c", "import minotaur; print(minotaur.__file__)"])
+IMPORT_PROBE = "import sys; import minotaur; print(sys.version_info[:2]); print(minotaur.__file__)"
+
+
+def _check_import(side: Side, cwd: Path | None = None) -> str | None:
+    """Prove *side* imports its own package from *cwd*.
+
+    The comparison subprocesses run with the working directory set to the root
+    under test, and root (2) is the baseline's own ``src``: exactly the
+    directory a non-isolated interpreter would put first on ``sys.path``.  The
+    probe therefore runs in that same configuration rather than in the
+    harness's own directory.
+    """
+    result = _run(side, ["-c", IMPORT_PROBE], cwd=cwd)
+    where = f" from {cwd}" if cwd is not None else ""
     if result.returncode:
-        return f"{side.name} import failed (exit {result.returncode}): {result.stderr_text.strip()}"
-    imported = Path(result.stdout_text.strip()).resolve()
+        return (
+            f"{side.name} import failed{where} (exit {result.returncode}):"
+            f" {result.stderr_text.strip()}"
+        )
+    version_line, _, imported_line = result.stdout_text.strip().partition("\n")
+    if version_line < "(3, 11)":
+        return (
+            f"{side.name} interpreter is Python {version_line}; import isolation needs"
+            " PYTHONSAFEPATH, which only CPython 3.11+ honours"
+        )
+    imported = Path(imported_line.strip()).resolve()
     if not _under(imported, side.src):
-        return f"minotaur imported from {imported}, outside {side.src}"
+        return f"minotaur imported{where} from {imported}, outside {side.src}"
     return None
 
 
@@ -521,11 +570,14 @@ def _compare_root(
     return ok, tally
 
 
+# Paths travel as ``argv`` so a scratch directory containing a quote, a
+# trailing backslash, or the literal text of a placeholder cannot corrupt the
+# snippet.
 DRIFT_CODE = (
-    "from pathlib import Path; "
+    "import sys; from pathlib import Path; "
     "from minotaur.graph_model.loading import load_graph_file; "
     "from minotaur.query.freshness import drift; "
-    "d=drift(load_graph_file(Path(r'GRAPH')).document, Path(r'ROOT')); "
+    "d=drift(load_graph_file(Path(sys.argv[1])).document, Path(sys.argv[2])); "
     "print((sorted(d.changed), sorted(d.missing), sorted(d.added)))"
 )
 
@@ -540,9 +592,8 @@ def _compare_drift(sides: tuple[Side, Side], root: Path, graph: Path, tally: Tal
 
     ok = True
     values: dict[str, str | None] = {}
-    command = DRIFT_CODE.replace("GRAPH", str(graph)).replace("ROOT", str(root))
     for label, side in (("baseline", sides[0]), ("branch", sides[1])):
-        result = _run(side, ["-c", command], cwd=root)
+        result = _run(side, ["-c", DRIFT_CODE, str(graph), str(root)], cwd=root)
         if result.returncode or result.timed_out:
             ok = False
             values[label] = None
@@ -629,14 +680,20 @@ def _scenario_side(side: Side, root: Path, destination: Path) -> tuple[Path, Pat
 
 
 def _scenario_query(
-    side: Side, root: Path, graph: Path, no_refresh: bool, *, validate: bool = False
+    side: Side,
+    root: Path,
+    graph: Path,
+    no_refresh: bool,
+    *,
+    symbol: str,
+    validate: bool = False,
 ) -> Completed:
     args = [
         "-m",
         "minotaur",
         "query",
         "definitions",
-        "main",
+        symbol,
         "--graph",
         str(graph),
         "--root",
@@ -663,10 +720,26 @@ def _apply_sidecar_step(letter: str, graph: Path) -> None:
         stamp.write_text(f"{'0' * 64}  {graph.name}\n", encoding="utf-8")
 
 
-def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -> bool:
+def _scenario_symbol(workload: RootQueries) -> str:
+    """The symbol the scenario query must answer: the root's own ``definitions`` query."""
+
+    for item in workload.queries:
+        if item.get("command") == "definitions" and item.get("expect", "ok") == "ok":
+            args = item.get("args", [])
+            if args:
+                return str(args[0])
+    raise ValueError("workload has no answering 'definitions' query for scenario mode")
+
+
+def _run_scenarios(
+    sides: tuple[Side, Side], roots: list[tuple[Path, RootQueries]], scratch: Path
+) -> bool:
     ok = True
-    retained: dict[str, tuple[list[Path], list[tuple[Path, Path]]]] = {}
-    for root_index, root in enumerate(roots):
+    for root_index, (root, workload) in enumerate(roots):
+        symbol = _scenario_symbol(workload)
+        # Per root: a step that failed to prepare for this root must not fall
+        # back on the previous root's retained copies.
+        retained: dict[str, tuple[list[Path], list[tuple[Path, Path]]]] = {}
         scenario_root = scratch / f"scenario-{root_index}"
         scenario_root.mkdir(parents=True, exist_ok=True)
         if _first_python(root) is None:
@@ -711,10 +784,20 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                 elif letter in SIDECAR_STEPS:
                     _apply_sidecar_step(letter, graph)
             left = _scenario_query(
-                sides[0], copies[0], states[0][1], letter == "b", validate=letter == "k"
+                sides[0],
+                copies[0],
+                states[0][1],
+                letter == "b",
+                symbol=symbol,
+                validate=letter == "k",
             )
             right = _scenario_query(
-                sides[1], copies[1], states[1][1], letter == "b", validate=letter == "k"
+                sides[1],
+                copies[1],
+                states[1][1],
+                letter == "b",
+                symbol=symbol,
+                validate=letter == "k",
             )
             if not _compare_processes(
                 f"scenario root={root} step={letter}", left, right, copies[0], copies[1]
@@ -722,7 +805,12 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                 ok = False
             if left.returncode not in (0, 1) or right.returncode not in (0, 1):
                 ok = False
-            if letter in SIDECAR_STEPS and not (_answered(left) and _answered(right)):
+            # Every step must really answer on both sides: two identical
+            # ``no definitions`` outputs would compare IDENTICAL while proving
+            # nothing about the freshness sequence under test.  Step (d)
+            # deletes the source that may define the symbol, so it is the one
+            # step judged only on exit code and byte identity.
+            if letter != "d" and not (_answered(left) and _answered(right)):
                 print(
                     f"scenario root={root} step={letter}: query produced no answer"
                     f" (baseline exit {left.returncode}, branch exit {right.returncode})",
@@ -783,8 +871,8 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                 f"scenario root={root} step=h-{letter} copies={letter}",
                 results[0],
                 results[1],
-                copies[0].parent,
-                copies[1].parent,
+                copies[0],
+                copies[1],
             ):
                 ok = False
             skip_message = "minotaur: graph is up to date, skipping analysis"
@@ -825,15 +913,16 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
 
 def _compare(
     sides: tuple[Side, Side],
-    roots: Sequence[tuple[Path, bool]],
+    roots: Sequence[tuple[Path, bool, str | None]],
     workloads: dict[str, RootQueries],
     scratch: Path,
     scenarios: bool,
 ) -> bool:
     ok = True
     total = Tally()
-    compared: list[Path] = []
-    for index, (root, optional) in enumerate(roots):
+    compared: list[tuple[Path, RootQueries]] = []
+    present = 0
+    for index, (root, optional, key) in enumerate(roots):
         if not root.exists():
             if optional:
                 print(f"equivalence: SKIPPED optional root {root} (absent)", file=sys.stderr)
@@ -841,17 +930,20 @@ def _compare(
             _fail(f"required root does not exist: {root}")
             ok = False
             continue
-        workload = workloads.get(root.name)
+        present += 1
+        workload_key = key or root.name
+        workload = workloads.get(workload_key)
         if workload is None:
             _fail(
-                f"no query workload for root {root} (key {root.name!r});"
-                f" known keys: {sorted(workloads)}"
+                f"no query workload for root {root} (key {workload_key!r});"
+                f" known keys: {sorted(workloads)} -- pass --workload KEY for a checkout"
+                " whose directory is not named after its workload"
             )
             ok = False
             continue
         root_ok, tally = _compare_root(sides, root, workload, scratch / f"root-{index}")
         total.absorb(tally)
-        compared.append(root)
+        compared.append((root, workload))
         print(
             f"root={root} summary: comparisons={tally.comparisons}"
             f" queries_answered={tally.queries_answered}/{tally.queries_expected}"
@@ -861,20 +953,34 @@ def _compare(
     if not total.comparisons:
         _fail("no artifact comparisons were performed")
         ok = False
-    print(f"totals: roots={len(compared)} comparisons={total.comparisons}")
+    if len(compared) != present:
+        _fail(f"only {len(compared)} of {present} present roots were compared")
+        ok = False
+    print(
+        f"totals: roots_compared={len(compared)} roots_present={present}"
+        f" roots_requested={len(roots)} comparisons={total.comparisons}"
+    )
     if scenarios:
         ok = _run_scenarios(sides, compared[:2], scratch / "scenarios") and ok
     return ok
 
 
-def _root_list(arguments: argparse.Namespace, baseline: Side) -> list[tuple[Path, bool]]:
+def _root_list(
+    arguments: argparse.Namespace, baseline: Side
+) -> list[tuple[Path, bool, str | None]]:
     required = (
         [_resolve(path) for path in arguments.root]
         if arguments.root
         else [FIXTURE_ROOT, baseline.src]
     )
     optional = [_resolve(path) for path in arguments.optional_root or []]
-    return [(path, False) for path in required] + [(path, True) for path in optional]
+    keys: list[str | None] = list(arguments.workload or [])
+    if len(keys) > len(optional):
+        raise ValueError(f"{len(keys)} --workload keys for {len(optional)} optional roots")
+    keys.extend([None] * (len(optional) - len(keys)))
+    return [(path, False, None) for path in required] + [
+        (path, True, key) for path, key in zip(optional, keys, strict=True)
+    ]
 
 
 def _normal_run(arguments: argparse.Namespace, *, scratch_branch: Path | None = None) -> int:
@@ -884,7 +990,19 @@ def _normal_run(arguments: argparse.Namespace, *, scratch_branch: Path | None = 
         return _fail("both source paths must be directories")
     if _guards((baseline, branch), scratch_branch=scratch_branch):
         return 1
-    roots = _root_list(arguments, baseline)
+    try:
+        roots = _root_list(arguments, baseline)
+    except ValueError as error:
+        return _fail(str(error))
+    # The isolation proof must run where the comparisons run: with the working
+    # directory set to each present root.
+    for root, _optional, _key in roots:
+        if not root.is_dir():
+            continue
+        for side in (baseline, branch):
+            problem = _check_import(side, cwd=root)
+            if problem:
+                return _fail(f"{side.name}: {problem}")
     try:
         workloads = _load_queries(_resolve(arguments.queries))
     except (OSError, ValueError, json.JSONDecodeError) as error:
