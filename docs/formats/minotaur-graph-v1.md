@@ -164,7 +164,17 @@ optional `import_root_hint` string, and the CLI stores
 `extensions["minotaur"]["selection"]` as the sorted root-relative targets
 supplied to the command (with `.` representing the root). These values are
 freshness and diagnostic metadata, not identity inputs or core graph facts.
-Extension values are flat objects of scalars and arrays.
+Extension values use a recursive grammar: an extension object maps non-empty
+BMP keys to strings, integers, booleans, null, arrays of extension values, or
+nested extension objects. Fractional values are not part of the v1 format; use
+a scaled integer when exact fractional semantics are needed, and document the
+scale in the extension's contract. Values that do not need arithmetic may be
+represented as strings.
+
+As of 2026-08-23, v1 constraints are tightened so that extension values cannot
+contain non-integer numbers and extension object keys must remain within the
+Basic Multilingual Plane. The model enforces these rules on every load and
+construction path, while the schema enforces them for third-party wire input.
 
 Array order does not change graph meaning. A canonical serializer sorts nodes
 by ID, relationships by `(source, target, kind)`, locations by path and range,

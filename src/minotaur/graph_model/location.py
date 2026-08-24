@@ -90,6 +90,15 @@ class Position:
         # Enforced at construction, not just at validation time, because a
         # negative position is never structurally meaningful — it cannot be
         # an "unchecked input we'll validate later."
+        if not isinstance(self.line, int) or isinstance(self.line, bool):
+            raise ValueError(
+                f"line must be an integer, got {type(self.line).__name__}: {self.line!r}"
+            )
+        if not isinstance(self.character, int) or isinstance(self.character, bool):
+            raise ValueError(
+                f"character must be an integer, got {type(self.character).__name__}: "
+                f"{self.character!r}"
+            )
         if self.line < 0:
             raise ValueError(f"line must be non-negative, got {self.line}")
         if self.character < 0:

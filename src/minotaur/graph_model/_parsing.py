@@ -69,12 +69,7 @@ def freeze_extensions(
     validate_extensions(extensions)
     if extensions is None:
         return None
-    return MappingProxyType(
-        {
-            name: cast(Mapping[str, object], _freeze_json(value))
-            for name, value in extensions.items()
-        }
-    )
+    return cast(Mapping[str, Mapping[str, object]], _freeze_json(extensions))
 
 
 def serialize_extensions(
@@ -92,11 +87,18 @@ def serialize_extensions(
     return result
 
 
-def _freeze_json(value: object) -> object:
+def _freeze_json(value: object, path: str = "") -> object:
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+        frozen: dict[object, object] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and max(key, default="") > "\uffff":
+                raise ValueError(f"extension value at {path}/{key} has a non-BMP key")
+            frozen[key] = _freeze_json(item, f"{path}/{key}")
+        return MappingProxyType(frozen)
     if isinstance(value, list | tuple):
-        return tuple(_freeze_json(item) for item in value)
+        return tuple(_freeze_json(item, f"{path}/{index}") for index, item in enumerate(value))
+    if isinstance(value, float):
+        raise ValueError(f"extension value at {path} must be an integer, got float: {value!r}")
     return value
 
 
