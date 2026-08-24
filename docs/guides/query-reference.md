@@ -81,20 +81,23 @@ freshness check.
 The first user-facing graph-reading command (`query`, `diff`, or `visualize`)
 that reads a graph Minotaur did not just write — a graph produced before
 sidecar stamping was introduced, a graph from another tool, or one whose
-sidecar was removed — performs a full JSON Schema validation and stamps the
-result. This validation happens once: subsequent reads of the same graph file
-find the stamp and skip schema validation, so they are fast. No manual step is
-required; the first graph-reading command handles it automatically. An
-`analyze` clean-skip deliberately does not create a sidecar, so it is not this
-stamping step.
+sidecar was removed — performs full JSON Schema validation and node-ID
+verification, then stamps the result. This validation happens once:
+subsequent reads of the same graph file find the matching stamp and skip those
+two checks, so they are fast. The trusted read still performs the remaining
+semantic checks, including relationship endpoint and duplicate checks. No
+manual step is required; the first graph-reading command handles it
+automatically. An `analyze` clean-skip deliberately does not create a sidecar,
+so it is not this stamping step.
 
 ### `--validate` flag
 
 `callers`, `definitions`, `impact`, `unreferenced`, `context`, `diff`, and
-`visualize` accept `--validate`. When set, the command forces a full JSON
-Schema validation regardless of sidecar state. This is useful for verifying
-graph integrity after external edits or transfers. Without the flag, a matching
-sidecar is sufficient and schema validation is skipped.
+`visualize` accept `--validate`. When set, the command forces full JSON Schema
+and node-ID validation regardless of sidecar state. This is useful for
+verifying graph integrity after external edits or transfers. Without the flag,
+a matching sidecar is sufficient to skip those two checks; the remaining
+semantic checks still run.
 
 ## Query commands
 

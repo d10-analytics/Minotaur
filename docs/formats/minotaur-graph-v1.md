@@ -233,8 +233,19 @@ characters followed by one newline — the SHA-256 digest of the graph file's
 exact bytes.
 
 The sidecar is a Minotaur-internal acceleration hint. Other consumers may
-ignore it entirely. Its absence or a digest mismatch does not indicate
-corruption; it only means the next user-facing graph-reading command will
-perform a full validation pass instead of a fast trusted load. Neither the
-graph's JSON bytes, its schema, nor its `format_version` are affected by
-sidecar presence or absence.
+ignore it entirely. A matching sidecar lets Minotaur trust that these exact
+bytes already passed JSON Schema and node-ID validation, so a subsequent
+user-facing read skips those two expensive checks while retaining all other
+semantic checks. Its absence or a digest mismatch does not indicate
+corruption; it only means the next read performs the full validation pass
+instead of a fast trusted load. The accepted risk (D-07) is that a graph whose
+contents were altered and whose sidecar was regenerated can bypass node-ID
+recomputation on the trusted path. A matching sidecar is trusted regardless of
+who wrote it: directory write access, not Minotaur authorship, is the trust
+boundary. Use `--validate` for untrusted input.
+
+The first read of an unstamped graph writes an untracked
+`<GRAPH>.sha256` beside it. If a downstream repository commits its graph, it
+should commit the sidecar with it or add `*.json.sha256` to its `.gitignore`.
+Neither the graph's JSON bytes, its schema, nor its `format_version` are
+affected by sidecar presence or absence.

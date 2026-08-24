@@ -57,7 +57,9 @@ class LoadedGraph:
     ``functools.cached_property`` write through ``__dict__``, which
     ``frozen=True`` does not block.
 
-    ``validated`` is ``True`` when the JSON-schema pass ran on this load.
+    ``validated`` is ``True`` when this load ran both the JSON-schema pass and
+    node-ID verification. A matching sidecar authorizes the trusted fast path,
+    which skips both checks while retaining the remaining semantic checks.
     ``digest`` is the SHA-256 hex digest of the exact bytes that were parsed.
     Both are load provenance, not graph content.
     """
@@ -158,7 +160,11 @@ def load_graph_bytes(
         document = GraphDocument.from_dict(raw)
     except (jsonschema.ValidationError, ValueError) as error:
         raise GraphLoadError(str(error)) from None
-    report: ValidationReport = validate_document(document)
+    # A matching sidecar vouches for these exact bytes having already passed
+    # schema and node-ID validation. Skip only those redundant checks on the
+    # trusted path; endpoint, duplicate, identity-origin, location, and
+    # evidence validation must still run for every load.
+    report: ValidationReport = validate_document(document, verify_node_ids=not _skip_schema)
     if not report.is_valid:
         details = "; ".join(f"{issue.json_pointer}: {issue.message}" for issue in report)
         raise GraphLoadError(f"graph semantic validation failed: {details}")
