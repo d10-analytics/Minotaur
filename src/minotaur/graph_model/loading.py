@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import jsonschema  # type: ignore[import-untyped]
+import orjson
 
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.serialization import canonicalize
@@ -115,8 +116,8 @@ def load_graph_bytes(
     except UnicodeDecodeError as error:
         raise GraphLoadError(f"graph input is not valid UTF-8: {error}") from None
     try:
-        raw: Any = json.loads(decoded)
-    except json.JSONDecodeError as error:
+        raw: Any = orjson.loads(decoded)
+    except orjson.JSONDecodeError as error:
         raise GraphLoadError(f"graph input is not valid JSON: {error.msg}") from None
     if not isinstance(raw, dict):
         raise GraphLoadError("graph input must contain a JSON object")

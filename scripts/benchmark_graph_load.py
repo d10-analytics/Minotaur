@@ -10,7 +10,7 @@ Produces a fixed-width table of wall-clock measurements for:
      sidecar, so this query takes the trusted, schema-skipping path — see
      ``_benchmark_query``).
   3. In-process component breakdown of one ``load_graph_file`` call:
-     UTF-8 decode, sidecar read + ``graph_digest``, ``json.loads``,
+     UTF-8 decode, sidecar read + ``graph_digest``, ``orjson.loads``,
      ``GraphDocument.from_dict`` (AC-14), ``validate_document`` (AC-13),
      ``drift()`` under the same ``--no-refresh`` sequence the query path
      uses, and the ``GraphIndex.build`` the query path performs.
@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
+
+import orjson
 
 
 class _SubprocessError(Exception):
@@ -123,7 +124,7 @@ def _benchmark_components(graph_path: Path, root: Path, repeats: int) -> dict[st
     components: dict[str, list[float]] = {
         "utf-8 decode": [],
         "sidecar_read+digest": [],
-        "json.loads": [],
+        "orjson.loads": [],
         "GraphDocument.from_dict": [],
         "validate_document": [],
         "drift (--no-refresh)": [],
@@ -147,10 +148,10 @@ def _benchmark_components(graph_path: Path, root: Path, repeats: int) -> dict[st
         _digest = graph_digest(raw_bytes)
         components["sidecar_read+digest"].append(time.perf_counter() - start)
 
-        # json.loads
+        # orjson.loads
         start = time.perf_counter()
-        raw = json.loads(decoded)
-        components["json.loads"].append(time.perf_counter() - start)
+        raw = orjson.loads(decoded)
+        components["orjson.loads"].append(time.perf_counter() - start)
 
         # GraphDocument.from_dict
         start = time.perf_counter()

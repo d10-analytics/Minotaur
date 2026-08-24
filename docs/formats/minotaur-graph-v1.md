@@ -182,9 +182,18 @@ and evidence by its JCS representation after locations are normalized.
 
 ## Validation and fixtures
 
-Validation proceeds as parse, JSON Schema validation, model construction,
+Validation proceeds as UTF-8 decode with the required `orjson` runtime
+dependency, JSON Schema validation, model construction,
 semantic validation, and then canonical normalization. Invalid documents are
 not normalized or rendered.
+
+The loader uses `orjson` as its only JSON decoder; it does not fall back to the
+Python standard-library decoder. This keeps every load path on one acceptance
+boundary. In particular, `NaN`, `Infinity`, and `-Infinity`, integer literals
+outside the signed 64-bit range, and lone-surrogate escapes are rejected while
+decoding. These values are outside the v1 wire contract independently of the
+schema and model rules below. `orjson` is therefore a required runtime
+dependency for any installation that loads graph JSON.
 
 Semantic validation reports every independent finding with a JSON Pointer
 path and one of these codes: `node-id-mismatch`, `node-id-unverifiable`
