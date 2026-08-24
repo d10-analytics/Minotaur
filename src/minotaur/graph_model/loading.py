@@ -23,6 +23,30 @@ class GraphLoadError(ValueError):
     """Raised when an input is not a structurally and semantically valid graph."""
 
 
+_SIGNED_INT_MAX = 2**63 - 1
+
+
+def _contains_out_of_range_integer(value: object) -> bool:
+    """Recognize numeric values outside the v1 signed 64-bit JSON boundary.
+
+    ``orjson`` decodes an integer literal beyond its native integer range as a
+    floating-point value rather than raising.  The graph wire contract still
+    rejects that literal at the decoding boundary, so inspect the decoded
+    object before schema/model validation and keep the same JSON error prefix.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value > _SIGNED_INT_MAX or value < -(_SIGNED_INT_MAX + 1)
+    if isinstance(value, float):
+        return value.is_integer() and abs(value) > _SIGNED_INT_MAX
+    if isinstance(value, dict):
+        return any(_contains_out_of_range_integer(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_out_of_range_integer(item) for item in value)
+    return False
+
+
 @dataclass(frozen=True)
 class LoadedGraph:
     """The model and deterministic wire representation produced by the boundary.
@@ -119,6 +143,8 @@ def load_graph_bytes(
         raw: Any = orjson.loads(decoded)
     except orjson.JSONDecodeError as error:
         raise GraphLoadError(f"graph input is not valid JSON: {error.msg}") from None
+    if _contains_out_of_range_integer(raw):
+        raise GraphLoadError("graph input is not valid JSON: integer out of range")
     if not isinstance(raw, dict):
         raise GraphLoadError("graph input must contain a JSON object")
     validated = not _skip_schema
