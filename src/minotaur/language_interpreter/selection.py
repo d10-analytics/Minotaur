@@ -123,6 +123,8 @@ def _is_excluded(relative: Path) -> bool:
 
 def _is_within_root(path: str, root: str) -> bool:
     root = root.rstrip(os.sep) or os.sep
+    if root == os.sep:
+        return path.startswith(os.sep)
     return path == root or path.startswith(f"{root}{os.sep}")
 
 
