@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -163,3 +164,35 @@ def test_definitions_many_query_is_the_bare_main_name() -> None:
     entries = json.loads((ROOT / "scripts/equivalence_queries.json").read_text())
     definitions = next(entry for entry in entries if entry["name"] == "definitions-many")
     assert definitions["args"] == ["main"]
+
+
+def test_root_two_import_isolated_from_top_level_package_and_self_test_detects_divergence(
+    tmp_path: Path,
+) -> None:
+    loader = importlib.util.spec_from_file_location("equivalence_harness", SCRIPT)
+    assert loader is not None and loader.loader is not None
+    harness = importlib.util.module_from_spec(loader)
+    sys.modules["equivalence_harness"] = harness
+    loader.loader.exec_module(harness)
+    probe = harness._run(
+        harness.Side("branch", ROOT / "src"),
+        ["-c", "import minotaur; print(minotaur.__file__)"],
+        cwd=BASELINE_SRC,
+    )
+    assert probe.returncode == 0
+    assert str((ROOT / "src" / "minotaur" / "__init__.py").resolve()) in probe.stdout
+
+    result = _run(
+        "--baseline-src",
+        str(BASELINE_SRC),
+        "--branch-src",
+        str(ROOT / "src"),
+        "--queries",
+        str(_query_file(tmp_path)),
+        "--root",
+        str(BASELINE_SRC),
+        "--self-test",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "artifact=analyze graph SHA-256: DIFFERENT" in result.stdout
+    assert "self-test: PASS" in result.stdout
