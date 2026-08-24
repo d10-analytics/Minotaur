@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Set
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from minotaur.graph_model._parsing import reject_unknown_fields
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.evidence import Evidence, Producer, Rule
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id, verify_node_id
@@ -57,6 +59,141 @@ def test_location_sort_key_orders_call_sites_and_rejects_dot_segments() -> None:
     assert sorted((later, earlier), key=lambda location: location.sort_key) == [earlier, later]
     with pytest.raises(ValueError, match="repository-relative"):
         Location("src/../secret.py", Range(Position(0, 0), Position(0, 1)))
+
+
+class _NonIteratingAllowedFields(Set[str]):
+    """Probe that catches the old difference operation on valid input."""
+
+    def __contains__(self, value: object) -> bool:
+        return value in {"line"}
+
+    def __iter__(self):
+        raise AssertionError("the conforming fast path must not iterate allowed fields")
+
+    def __len__(self) -> int:
+        return 1
+
+
+def test_reject_unknown_fields_does_not_iterate_allowed_set_on_success() -> None:
+    allowed = _NonIteratingAllowedFields()
+
+    assert reject_unknown_fields({"line": 1}, allowed, "position") is None  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        (
+            {"x": 1, "line": 1, "character": 0},
+            "position has unsupported field(s): 'x'",
+        ),
+        (
+            {"line": 1, "character": 0, "y": 2, "x": 3},
+            "position has unsupported field(s): 'x', 'y'",
+        ),
+    ],
+)
+def test_reject_unknown_fields_preserves_exact_failure_messages(
+    data: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError) as error:
+        reject_unknown_fields(data, frozenset({"line", "character"}), "position")
+
+    assert str(error.value) == message
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        (
+            {"end": {"line": 1, "character": 0}},
+            "range requires a 'start' object",
+        ),
+        (
+            {"start": 3, "end": {"line": 1, "character": 0}},
+            "range requires a 'start' object",
+        ),
+        (
+            {
+                "start": {"line": 1, "character": 0},
+                "end": {"line": 1, "character": 0},
+                "z": 1,
+            },
+            "range has unsupported field(s): 'z'",
+        ),
+        (
+            {
+                "start": {"line": 1, "character": 0, "z": 1},
+                "end": {"line": 1, "character": 0},
+            },
+            "position has unsupported field(s): 'z'",
+        ),
+        (
+            {
+                "start": {"line": 4.0, "character": 0},
+                "end": {"line": 4, "character": 0},
+            },
+            "'line' must be an integer, got float: 4.0",
+        ),
+        (
+            {
+                "start": {"line": True, "character": 0},
+                "end": {"line": 4, "character": 0},
+            },
+            "'line' must be an integer, got bool: True",
+        ),
+        (
+            {
+                "start": {"line": "4", "character": 0},
+                "end": {"line": 4, "character": 0},
+            },
+            "'line' must be an integer, got str: '4'",
+        ),
+        (
+            {
+                "start": {"line": -1, "character": 0},
+                "end": {"line": 4, "character": 0},
+            },
+            "line must be non-negative, got -1",
+        ),
+        (
+            {
+                "start": {"line": 4.0, "character": 0},
+                "end": {"line": 4, "character": 0},
+                "z": 1,
+            },
+            "range has unsupported field(s): 'z'",
+        ),
+    ],
+)
+def test_range_from_dict_preserves_error_messages_and_precedence(
+    data: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError) as error:
+        Range.from_dict(data)
+
+    assert str(error.value) == message
+
+
+def test_range_from_dict_round_trips_every_model_constructible_fixture_range() -> None:
+    fixture_paths = sorted(EXAMPLES.glob("*.json")) + [
+        PYTHON_WORKFLOW / "minotaur-graph.json",
+        Path(__file__).parent / "fixtures/minotaur-graph-v1/invalid/dangling-relationship.json",
+    ]
+    ranges: list[Range] = []
+    for path in fixture_paths:
+        document = GraphDocument.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        ranges.extend(node.location.range for node in document.nodes if node.location is not None)
+        ranges.extend(
+            location.range
+            for relationship in document.relationships
+            for evidence in relationship.evidence
+            for location in evidence.locations
+        )
+
+    assert ranges, "expected model-constructible fixtures to contain ranges"
+    for range_value in ranges:
+        assert Range.from_dict(range_value.to_dict()) == range_value
 
 
 def test_controlled_vocabularies_allow_core_and_namespaced_extensions_only() -> None:
