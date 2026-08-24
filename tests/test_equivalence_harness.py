@@ -45,6 +45,15 @@ def baseline_src(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
             text=True,
             check=False,
         )
+        # An interrupted session can leave the registration behind after the
+        # temporary directory is reaped; prune so the user's ``.git`` never
+        # carries a dangling worktree entry from a test run.
+        subprocess.run(
+            ["git", "-C", str(ROOT), "worktree", "prune"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
 
 @pytest.fixture(scope="session")
@@ -310,7 +319,13 @@ def test_every_non_control_query_answers_on_the_committed_fixture_root(
     assert "VACUOUS" not in result.stderr
     summary = next(line for line in result.stdout.splitlines() if " summary: " in line)
     answered, expected = summary.split("queries_answered=")[1].split("/")
-    assert int(answered) == int(expected) - 2, summary  # two negative controls
+    workload = json.loads((ROOT / "scripts/equivalence_queries.json").read_text())[
+        FIXTURE_ROOT.name
+    ]
+    controls = sum(1 for item in workload["queries"] if item.get("expect") == "error")
+    assert controls >= 2
+    assert int(answered) == int(expected) - controls, summary
+    assert int(expected) == len(workload["queries"]), summary
     assert "DIFFERENT" not in result.stdout
 
 
@@ -437,6 +452,171 @@ def test_a_missing_optional_root_is_skipped_loudly(baseline_src: Path, tmp_path:
     )
     assert result.returncode == 0, result.stderr
     assert "SKIPPED optional root" in result.stderr
+
+
+def test_a_present_optional_root_without_a_workload_fails_the_run(
+    baseline_src: Path, tmp_path: Path
+) -> None:
+    """Round 2 keyed workloads by directory name and made a *present* optional
+    root abort the run, so D-06 root (3) was silently never compared."""
+
+    present = _source_root(tmp_path)
+    onyx = _source_root(tmp_path, name="onyx-checkout")
+    result = _run(
+        "--baseline-src",
+        str(baseline_src),
+        "--branch-src",
+        str(ROOT / "src"),
+        "--queries",
+        str(_workload_file(tmp_path, present.name)),
+        "--root",
+        str(present),
+        "--optional-root",
+        str(onyx),
+    )
+    assert result.returncode == 1
+    assert "no query workload for root" in result.stderr
+    assert "pass --workload KEY" in result.stderr
+    assert "only 1 of 2 present roots were compared" in result.stderr
+    assert "roots_compared=1 roots_present=2 roots_requested=2" in result.stdout
+
+
+def test_workload_key_maps_an_optional_root_whose_directory_has_another_name(
+    baseline_src: Path, tmp_path: Path
+) -> None:
+    present = _source_root(tmp_path)
+    onyx = _source_root(tmp_path, name="onyx-checkout")
+    queries = json.loads(_workload_file(tmp_path, present.name).read_text(encoding="utf-8"))
+    queries["Onyx"] = queries[present.name]
+    workload = tmp_path / "keyed.json"
+    workload.write_text(json.dumps(queries), encoding="utf-8")
+    result = _run(
+        "--baseline-src",
+        str(baseline_src),
+        "--branch-src",
+        str(ROOT / "src"),
+        "--queries",
+        str(workload),
+        "--root",
+        str(present),
+        "--optional-root",
+        str(onyx),
+        "--workload",
+        "Onyx",
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"root={onyx.resolve()} summary:" in result.stdout
+    assert "roots_compared=2 roots_present=2 roots_requested=2" in result.stdout
+
+
+def test_more_workload_keys_than_optional_roots_is_an_error(
+    baseline_src: Path, tmp_path: Path
+) -> None:
+    present = _source_root(tmp_path)
+    result = _run(
+        "--baseline-src",
+        str(baseline_src),
+        "--branch-src",
+        str(ROOT / "src"),
+        "--queries",
+        str(_workload_file(tmp_path, present.name)),
+        "--root",
+        str(present),
+        "--workload",
+        "Onyx",
+    )
+    assert result.returncode == 1
+    assert "1 --workload keys for 0 optional roots" in result.stderr
+
+
+def test_drift_row_survives_a_scratch_path_that_collides_with_the_old_placeholders(
+    baseline_src: Path, tmp_path: Path
+) -> None:
+    """Paths reach the drift snippet as argv, so ``ROOT``/``GRAPH`` text and a
+    quote inside the scratch directory cannot rewrite the snippet."""
+
+    present = _source_root(tmp_path)
+    scratch = tmp_path / "ROOT'GRAPH"
+    result = _run(
+        "--baseline-src",
+        str(baseline_src),
+        "--branch-src",
+        str(ROOT / "src"),
+        "--queries",
+        str(_workload_file(tmp_path, present.name)),
+        "--root",
+        str(present),
+        "--scratch",
+        str(scratch),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "artifact=Drift: IDENTICAL" in result.stdout
+
+
+def test_import_probe_runs_from_each_root_and_refuses_an_old_interpreter(
+    harness: types.ModuleType, baseline_src: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The isolation proof must run in the comparison's own configuration
+    (``cwd`` = the root) and reject interpreters that ignore PYTHONSAFEPATH."""
+
+    seen: list[Path | None] = []
+    real_run = harness._run
+
+    def spy(side, args, *, cwd=None, timeout=300):
+        seen.append(cwd)
+        return real_run(side, args, cwd=cwd, timeout=timeout)
+
+    monkeypatch.setattr(harness, "_run", spy)
+    side = harness.Side("branch", ROOT / "src")
+    assert harness._check_import(side, cwd=baseline_src) is None
+    assert seen == [baseline_src]
+
+    def old_python(side, args, *, cwd=None, timeout=300):
+        location = str(ROOT / "src" / "minotaur" / "__init__.py").encode()
+        return harness.Completed(0, b"(3, 10)\n" + location, b"")
+
+    monkeypatch.setattr(harness, "_run", old_python)
+    error = harness._check_import(side, cwd=baseline_src)
+    assert error is not None and "PYTHONSAFEPATH" in error and "3.11+" in error
+
+
+def test_scenario_symbol_comes_from_the_root_workload(harness: types.ModuleType) -> None:
+    workload = harness.RootQueries(
+        selection="pkg",
+        queries=[
+            {"command": "callers", "args": ["pkg.f"]},
+            {"command": "definitions", "args": ["bad"], "expect": "error"},
+            {"command": "definitions", "args": ["entry"]},
+        ],
+    )
+    assert harness._scenario_symbol(workload) == "entry"
+    with pytest.raises(ValueError, match="no answering 'definitions' query"):
+        harness._scenario_symbol(harness.RootQueries(selection="pkg", queries=[]))
+
+
+def test_child_environment_is_scrubbed_and_pinned(
+    harness: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COVERAGE_PROCESS_START", "/nowhere/.coveragerc")
+    monkeypatch.setenv("COVERAGE_FILE", "/nowhere/.coverage")
+    env = harness._env(Path("/src"))
+    assert not any(key.startswith("COVERAGE_") for key in env)
+    assert env["PYTHONHASHSEED"] == "0"
+    assert env["PYTHONSAFEPATH"] == "1"
+    assert env["PYTHONPATH"] == "/src"
+
+
+def test_committed_workloads_cover_every_d06_root_with_real_error_controls() -> None:
+    """Root (3) needs a committed workload or it can never be compared; every
+    root's controls must include a genuine argument-validation error path."""
+
+    data = json.loads((SCRIPT.with_name("equivalence_queries.json")).read_text(encoding="utf-8"))
+    assert set(data) == {"equivalence_root", "src", "Onyx"}
+    for key, workload in data.items():
+        names = {item["name"] for item in workload["queries"]}
+        assert "definitions-invalid" not in names, key
+        errors = {item["name"] for item in workload["queries"] if item.get("expect") == "error"}
+        assert {"context-malformed-site", "impact-negative-depth"} <= errors, key
 
 
 def test_a_run_that_compares_nothing_fails(baseline_src: Path, tmp_path: Path) -> None:
