@@ -23,6 +23,7 @@ from minotaur.graph_model._parsing import (
     hashable_json,
     reject_unknown_fields,
     serialize_extensions,
+    type_error,
 )
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.provenance import Provenance
@@ -51,6 +52,10 @@ class Producer:
     version: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, str):
+            raise type_error("producer name", self.name, "a string")
+        if self.version is not None and not isinstance(self.version, str):
+            raise type_error("producer version", self.version, "a string when present")
         if not self.name:
             raise ValueError("producer name must be non-empty")
         # The schema defines version via nonEmptyString (minLength: 1).
@@ -100,6 +105,10 @@ class Rule:
     version: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.id, str):
+            raise type_error("rule id", self.id, "a string")
+        if self.version is not None and not isinstance(self.version, str):
+            raise type_error("rule version", self.version, "a string when present")
         if not self.id:
             raise ValueError("rule id must be non-empty")
         if self.version is not None and not self.version:
@@ -160,6 +169,20 @@ class Evidence:
     extensions: Mapping[str, Mapping[str, object]] | None = None
 
     def __post_init__(self) -> None:
+        # Field types first (R-02): in-process construction and
+        # dataclasses.replace() bypass from_dict's wire type checks.
+        if not isinstance(self.provenance, Provenance):
+            raise type_error("evidence provenance", self.provenance, "a Provenance")
+        if self.producer is not None and not isinstance(self.producer, Producer):
+            raise type_error("evidence 'producer'", self.producer, "a Producer when present")
+        if self.rule is not None and not isinstance(self.rule, Rule):
+            raise type_error("evidence 'rule'", self.rule, "a Rule when present")
+        if not isinstance(self.locations, tuple):
+            raise type_error("evidence 'locations'", self.locations, "a tuple")
+        for index, location in enumerate(self.locations):
+            if not isinstance(location, Location):
+                raise type_error(f"evidence 'locations'[{index}]", location, "a Location")
+
         # Enforce the curated-rule invariant at construction: if you claim
         # curated-rule provenance, you must identify the rule. This is a
         # schema-level requirement, not just a semantic-validation check,

@@ -3,9 +3,24 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import cast
+
+
+def type_error(context: str, value: object, expected: str) -> ValueError:
+    """Build the model-layer type rejection shared by every ``__post_init__``.
+
+    ``R-02`` makes the model layer the sole owner of the wire-format invariant
+    on every path, including in-process construction and
+    ``dataclasses.replace``.  The wire parsers type-check before constructing,
+    so these guards are the only thing standing between a hand-built object and
+    a serializer that would happily encode, say, ``"label": 1.5`` into bytes
+    that no reader can reproduce.  Every guard raises ``ValueError`` — the error
+    type the surrounding blocks already use — so a caller's ``except
+    ValueError`` keeps catching the whole class of construction failures.
+    """
+    return ValueError(f"{context} must be {expected}, got {type(value).__name__}")
 
 
 def reject_unpaired_surrogates(value: str, context: str) -> None:
@@ -45,10 +60,8 @@ def reject_unknown_fields(data: dict[str, object], allowed: frozenset[str], cont
     # build the set needed to render the diagnostic when a field is unknown.
     if data.keys() <= allowed:
         return
-    unknown = data.keys() - allowed
-    if unknown:
-        fields = ", ".join(repr(field) for field in sorted(unknown))
-        raise ValueError(f"{context} has unsupported field(s): {fields}")
+    fields = ", ".join(repr(field) for field in sorted(data.keys() - allowed))
+    raise ValueError(f"{context} has unsupported field(s): {fields}")
 
 
 def validate_extensions(
@@ -57,6 +70,8 @@ def validate_extensions(
     """Validate the v1 extension-object shape shared by all model objects."""
     if extensions is None:
         return
+    if not isinstance(extensions, Mapping):
+        raise type_error("extensions", extensions, "an object")
     for name, value in extensions.items():
         if not isinstance(name, str) or not name:
             raise ValueError("extension names must be non-empty strings")
@@ -92,18 +107,53 @@ def serialize_extensions(
     return result
 
 
-def _freeze_json(value: object, path: str = "") -> object:
+def _json_pointer(segments: Sequence[str | int]) -> str:
+    """Render accumulated path segments as the JSON-pointer-style error path."""
+    return "".join(f"/{segment}" for segment in segments)
+
+
+def _freeze_json(value: object, path: list[str | int] | None = None) -> object:
+    # ``path`` is a mutable stack of segments rather than a pre-rendered string:
+    # every extension value on a graph load walks this function, and the pointer
+    # text is only ever consumed by a ``raise``.  Pushing and popping a segment
+    # costs no allocation, whereas the previous eager ``f"{path}/{key}"`` built
+    # one throwaway string per key and per list index on the hot path.
+    if path is None:
+        path = []
     if isinstance(value, Mapping):
         frozen: dict[object, object] = {}
         for key, item in value.items():
-            if isinstance(key, str) and max(key, default="") > "\uffff":
-                raise ValueError(f"extension value at {path}/{key} has a non-BMP key")
-            frozen[key] = _freeze_json(item, f"{path}/{key}")
+            if not isinstance(key, str):
+                # ``json.dumps`` silently stringifies non-``str`` keys, which
+                # would let an in-process document serialize to bytes whose keys
+                # never round-trip back to the constructed value.
+                raise ValueError(
+                    f"extension object at {_json_pointer(path)} has a non-string key: {key!r}"
+                )
+            if not key:
+                # Mirrors the schema's ``propertyNames.minLength: 1`` on
+                # ``extensionObject`` so the trusted (schema-skipping) path and
+                # the full-validation path reach the same verdict.
+                raise ValueError(f"extension object at {_json_pointer(path)} has an empty key")
+            if max(key) > "\uffff":
+                raise ValueError(
+                    f"extension value at {_json_pointer([*path, key])} has a non-BMP key"
+                )
+            path.append(key)
+            frozen[key] = _freeze_json(item, path)
+            path.pop()
         return MappingProxyType(frozen)
     if isinstance(value, list | tuple):
-        return tuple(_freeze_json(item, f"{path}/{index}") for index, item in enumerate(value))
+        frozen_items: list[object] = []
+        for index, item in enumerate(value):
+            path.append(index)
+            frozen_items.append(_freeze_json(item, path))
+            path.pop()
+        return tuple(frozen_items)
     if isinstance(value, float):
-        raise ValueError(f"extension value at {path} must be an integer, got float: {value!r}")
+        raise ValueError(
+            f"extension value at {_json_pointer(path)} must be an integer, got float: {value!r}"
+        )
     return value
 
 
