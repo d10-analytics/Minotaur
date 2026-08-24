@@ -159,15 +159,15 @@ def test_discover_directory_matches_verbatim_previous_implementation(
     oracle = _oracle_discover_directory(root, root, include_excluded)
     # Reviewed 2026-08-24: the pre-change walker judged exclusion on the
     # *resolved* path after descending, so a symlink living inside an excluded
-    # or hidden directory reported its physical target a second time.  Pruning
-    # by unresolved name drops that duplicate, and that removal is the only
-    # sanctioned divergence: everything else -- members, order, and which
-    # physical files are reported at all -- is identical, which is what the
-    # `_dedup` equality plus the subsequence check together pin down.
+    # or hidden directory reported its physical target a second time when the
+    # scan started at the root.  Pruning by unresolved name drops that
+    # duplicate; for a root-level scan everything else -- members, order, and
+    # which physical files are reported at all -- is identical, which is what
+    # the `_dedup` equality plus the subsequence check together pin down.  The
+    # subdirectory-target shape, where the link is the only path to the file,
+    # is pinned separately below.
     assert _dedup(discovered) == _dedup(oracle)
     assert _is_subsequence(discovered, oracle)
-    # `select_sources` is the contract that must stay byte-identical; it never
-    # saw the duplicate because `_add` deduplicates on the root-relative path.
     _, selected = select_sources(root, (root,), default_registry())
     assert selected.files == _oracle_select_sources(root)
 
@@ -183,6 +183,45 @@ def test_symlink_inside_excluded_directory_loses_only_its_duplicate(tmp_path: Pa
 
     _, selected = select_sources(root, (root,), default_registry())
     assert selected.files == _oracle_select_sources(root) == (real,)
+
+
+def test_symlink_only_reachable_file_is_dropped_for_a_subdirectory_target(
+    tmp_path: Path,
+) -> None:
+    """The accepted divergence, stated at its true scope (spec addendum).
+
+    With ``sub`` as the target, ``pkg/real.py`` is reachable only through
+    ``sub/.hidden/link.py``.  The pre-change walker resolved the link and
+    reported the file once; pruning by name never sees it.  ``select_sources``
+    and ``drift().added`` over the recorded target ``sub`` therefore differ
+    from the pre-change result by exactly that file, and by nothing else.
+    """
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write(root, "pkg/real.py")
+    _write(root, "sub/plain.py")
+    hidden = root / "sub" / ".hidden"
+    hidden.mkdir()
+    os.symlink(root / "pkg" / "real.py", hidden / "link.py")
+    real = root / "pkg" / "real.py"
+    plain = root / "sub" / "plain.py"
+
+    oracle = _oracle_discover_directory(root / "sub", root, False)
+    assert oracle == (real, plain)
+    assert _discover_directory(root / "sub", root, False) == (plain,)
+
+    _, selected = select_sources(root, (root / "sub",), default_registry())
+    assert selected.files == (plain,)
+    assert tuple(sorted(set(oracle) - set(selected.files))) == (real,)
+
+    # A root-level scan still reaches the physical file directly.
+    _, whole = select_sources(root, (root,), default_registry())
+    assert whole.files == (real, plain)
+
+
+def test_relative_order_key_requires_an_absolute_root() -> None:
+    with pytest.raises(ValueError, match="root must be absolute"):
+        exclusions.relative_order_key(Path("rel/pkg/a.py"), Path("rel"))
 
 
 def test_discover_directory_normalizes_an_unresolved_root(tmp_path: Path) -> None:
