@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import minotaur
 from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file, stamp_path
 
@@ -174,7 +175,17 @@ def test_output_preflight_and_module_console_entry_points_match(tmp_path: Path) 
     collision = _run(root, source, source, force=True)
     replaced = _run(root, output, root, force=True)
     console_script = Path(sys.executable).with_name("minotaur")
+    if os.name == "nt" and not console_script.is_file():
+        console_script = console_script.with_suffix(".exe")
     if not console_script.is_file():
+        # When the running interpreter *is* the environment minotaur is
+        # installed into, the console script must exist beside it; a skip
+        # there would silently retire the only entry-point parity proof.
+        if Path(minotaur.__file__).is_relative_to(Path(sys.executable).parents[1]):
+            pytest.fail(
+                f"minotaur is installed in {sys.executable}'s environment"
+                f" but {console_script} is missing"
+            )
         pytest.skip("minotaur console script is not installed")
     console = subprocess.run(
         [

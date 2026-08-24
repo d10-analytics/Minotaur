@@ -336,6 +336,9 @@ def test_context_does_not_call_source_drift_and_no_refresh_is_a_noop(
     ]
     assert cli.main(common) == 0
     without_flag = capsys.readouterr()
+    # The marker is the documented observable; equality alone would still
+    # pass if the marker were dropped from both invocations.
+    assert without_flag.out.startswith("[file changed since analysis]\n")
     assert cli.main([*common, "--no-refresh"]) == 0
     with_flag = capsys.readouterr()
     assert (with_flag.out, with_flag.err) == (without_flag.out, without_flag.err)
