@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from minotaur.language_interpreter import exclusions
 from minotaur.language_interpreter.registry import InterpreterRegistry
 from minotaur.language_interpreter.workspace import Workspace
-
-_EXCLUDED_DIRECTORY_NAMES = frozenset(
-    {".git", ".mypy_cache", ".pytest_cache", "__pycache__", ".venv", "venv"}
-)
 
 
 class SelectionError(ValueError):
@@ -60,7 +58,14 @@ def select_sources(
                     _add(selected, workspace.root, candidate)
         else:  # pragma: no cover - Path types may be platform-specific.
             raise SelectionError(f"target is not a file or directory: {target}")
-    return workspace, SourceSelection(tuple(selected[key] for key in sorted(selected)))
+    return workspace, SourceSelection(
+        tuple(
+            sorted(
+                selected.values(),
+                key=lambda path: exclusions.relative_order_key(path, workspace.root),
+            )
+        )
+    )
 
 
 def _resolve_target(target: Path, root: Path) -> Path:
@@ -89,27 +94,43 @@ def _discover_directory(directory: Path, root: Path, include_excluded: bool) -> 
     ``_resolve_target`` so the user receives a clear selection error.
     """
     found: list[Path] = []
-    for candidate in directory.rglob("*"):
-        if not candidate.is_file():
-            continue
-        resolved = candidate.resolve()
-        try:
-            relative = resolved.relative_to(root)
-        except ValueError:
-            continue
-        if not include_excluded and _is_excluded(relative):
-            continue
-        found.append(resolved)
-    return tuple(sorted(found, key=lambda path: path.relative_to(root).as_posix()))
+    root_text = os.fspath(root)
+    for current_dir, dirnames, filenames in os.walk(os.fspath(directory), followlinks=False):
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not os.path.islink(os.path.join(current_dir, name))
+            and (include_excluded or not _is_excluded(Path(name)))
+        ]
+        for filename in filenames:
+            candidate = os.path.join(current_dir, filename)
+            resolved_text = os.path.realpath(candidate) if os.path.islink(candidate) else candidate
+            if not os.path.isfile(resolved_text):
+                continue
+            if not _is_within_root(resolved_text, root_text):
+                continue
+            resolved = Path(resolved_text)
+            if not include_excluded and _is_excluded(_relative_path(resolved_text, root_text)):
+                continue
+            found.append(resolved)
+    return tuple(sorted(found, key=lambda path: exclusions.relative_order_key(path, root)))
 
 
 def _is_excluded(relative: Path) -> bool:
     """Identify directories omitted from ordinary recursive source scans."""
-    return any(part in _EXCLUDED_DIRECTORY_NAMES or part.startswith(".") for part in relative.parts)
+    return exclusions.is_excluded(relative)
+
+
+def _is_within_root(path: str, root: str) -> bool:
+    return path == root or path.startswith(f"{root}{os.sep}")
+
+
+def _relative_path(path: str, root: str) -> Path:
+    return Path(path[len(root) + 1 :])
 
 
 def _add(selected: dict[str, Path], root: Path, path: Path) -> None:
     # Root-relative POSIX paths are graph wire paths and deterministic sort
     # keys. They also let equivalent resolved paths overwrite one dictionary
     # entry, which is the desired deduplication behavior.
-    selected[path.relative_to(root).as_posix()] = path
+    selected[exclusions.relative_order_key(path, root)] = path
