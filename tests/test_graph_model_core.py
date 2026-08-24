@@ -865,6 +865,13 @@ def _guard_document() -> GraphDocument:
 
 _FIELD_TYPE_GUARDS: list[tuple[str, object, str]] = [
     # (field, replacement value, expected message)
+    # -- Position / Range / Location -----------------------------------------
+    ("position.line", 1.5, "line must be an integer, got float: 1.5"),
+    ("position.character", "0", "character must be an integer, got str: '0'"),
+    ("range.start", (0, 0), "range start must be a Position, got tuple"),
+    ("range.end", None, "range end must be a Position, got NoneType"),
+    ("location.path", 1, "location path must be a string, got int"),
+    ("location.range", {"start": 0}, "location range must be a Range, got dict"),
     # -- NodeIdentity --------------------------------------------------------
     ("identity.basis", "file-path", "identity basis must be an IdentityBasis, got str"),
     ("identity.namespace", 1, "identity namespace must be a string, got int"),
@@ -943,6 +950,9 @@ _FIELD_TYPE_GUARDS: list[tuple[str, object, str]] = [
 ]
 
 _GUARD_FACTORIES = {
+    "position": lambda: Position(line=0, character=0),
+    "range": lambda: Range(Position(0, 0), Position(0, 1)),
+    "location": lambda: Location(path="a.py", range=Range(Position(0, 0), Position(0, 1))),
     "identity": _guard_identity,
     "node": _guard_node,
     "producer": lambda: Producer(name="minotaur-python"),
