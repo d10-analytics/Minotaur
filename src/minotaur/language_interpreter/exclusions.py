@@ -18,7 +18,8 @@ def relative_order_key(path: Path, root: Path) -> str:
     """Return a root-relative POSIX path without resolving the filesystem entry."""
     root_text = str(root).rstrip("/\\")
     path_text = str(path)
-    prefix = f"{root_text}/"
-    if path_text.startswith(prefix):
-        path_text = path_text[len(prefix) :]
+    if path_text.startswith(root_text):
+        suffix = path_text[len(root_text) :]
+        if suffix.startswith(("/", "\\")):
+            path_text = suffix[1:]
     return path_text.replace("\\", "/")

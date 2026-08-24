@@ -122,11 +122,16 @@ def _is_excluded(relative: Path) -> bool:
 
 
 def _is_within_root(path: str, root: str) -> bool:
-    return path == root or path.startswith(f"{root}{os.sep}")
+    root = root.rstrip("/\\") or os.sep
+    return (
+        path == root
+        or path.startswith(f"{root}{os.sep}")
+        or (root == os.sep and path.startswith(os.sep))
+    )
 
 
 def _relative_path(path: str, root: str) -> Path:
-    return Path(path[len(root) + 1 :])
+    return Path(path[len(root) :].lstrip("/\\"))
 
 
 def _add(selected: dict[str, Path], root: Path, path: Path) -> None:
