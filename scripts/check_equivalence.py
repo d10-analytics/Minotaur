@@ -57,6 +57,7 @@ def _resolve(path: Path) -> Path:
 def _env(src: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(src)
+    env["PYTHONSAFEPATH"] = "1"
     return env
 
 
