@@ -2,7 +2,7 @@
   {
     "name": "definitions-many",
     "command": "definitions",
-    "args": ["__init__"],
+    "args": ["main"],
     "variants": {"json": true, "no_refresh": true}
   },
   {

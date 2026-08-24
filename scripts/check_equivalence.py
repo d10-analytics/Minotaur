@@ -386,9 +386,13 @@ def _inject_serialize(src: Path) -> None:
         )
 
 
-def _scenario_copy(root: Path, parent: Path, suffix: str) -> Path:
+def _scenario_copy(root: Path, parent: Path, suffix: str, substrate: Path | None) -> Path:
     destination = parent / suffix
     _copy_without_git(root, destination)
+    if _first_python(destination) is None:
+        if substrate is None:
+            raise RuntimeError(f"scenario: no deterministic tracked Python substrate for {root}")
+        shutil.copy2(substrate, destination / "__equivalence_substrate__.py")
     return destination
 
 
@@ -399,8 +403,7 @@ def _first_python(root: Path) -> Path | None:
 def _scenario_side(side: Side, root: Path, destination: Path) -> tuple[Path, Path] | None:
     source = _first_python(destination)
     if source is None:
-        print(f"scenario: skipped {root}; no Python source file", file=sys.stderr)
-        return None
+        raise RuntimeError(f"scenario: copy has no Python source file for {root}")
     graph = destination.parent / f"{destination.name}.json"
     initial = _analyze(side, destination, graph)
     if initial.returncode:
@@ -430,19 +433,45 @@ def _scenario_query(side: Side, root: Path, graph: Path, no_refresh: bool) -> Co
 
 def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -> bool:
     ok = True
+    retained: dict[str, tuple[list[Path], list[tuple[Path, Path]]]] = {}
     for root_index, root in enumerate(roots):
         scenario_root = scratch / f"scenario-{root_index}"
         scenario_root.mkdir(parents=True, exist_ok=True)
+        substrate = sides[0].src / "minotaur" / "cli.py"
+        if _first_python(root) is None:
+            tracked = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(sides[0].src.parent),
+                    "ls-files",
+                    "--error-unmatch",
+                    "src/minotaur/cli.py",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if tracked.returncode or not substrate.is_file():
+                print(
+                    f"scenario: no deterministic tracked Python substrate for {root}",
+                    file=sys.stderr,
+                )
+                ok = False
+                continue
         for letter in "abcdefg":
             copies = [
-                _scenario_copy(root, scenario_root, f"{letter}-baseline"),
-                _scenario_copy(root, scenario_root, f"{letter}-branch"),
+                _scenario_copy(root, scenario_root, f"{letter}-baseline", substrate),
+                _scenario_copy(root, scenario_root, f"{letter}-branch", substrate),
             ]
             states = [
                 _scenario_side(side, root, copy) for side, copy in zip(sides, copies, strict=True)
             ]
             if any(state is None for state in states):
+                print(f"scenario: failed to prepare step {letter} for {root}", file=sys.stderr)
+                ok = False
                 continue
+            before_sha = [_sha(state[1]) for state in states]
             for source, _ in states:
                 original = source.read_bytes()
                 if letter in "ab":
@@ -475,26 +504,34 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                     f"scenario root={root} step={letter} graph SHA-256", left_sha, right_sha
                 ):
                     ok = False
+                if letter in "fg":
+                    if left_sha != before_sha[0] or right_sha != before_sha[1]:
+                        print(
+                            f"scenario root={root} step={letter}: graph changed unexpectedly",
+                            file=sys.stderr,
+                        )
+                        ok = False
+                    _row(
+                        f"scenario root={root} step={letter} graph SHA-256 before/after",
+                        (before_sha[0], left_sha),
+                        (before_sha[1], right_sha),
+                    )
             if letter in "fg" and (
                 "minotaur: refreshed graph" in left.stderr
                 or "minotaur: refreshed graph" in right.stderr
             ):
                 print(f"scenario root={root} step={letter}: unexpected refresh", file=sys.stderr)
                 ok = False
+            if letter in ("a", "f"):
+                retained[letter] = (copies, states)
         # Keep the two copies needed for the final analyze decision explicit.
         for letter in ("a", "f"):
-            copies = [
-                _scenario_copy(root, scenario_root, f"h-{letter}-baseline"),
-                _scenario_copy(root, scenario_root, f"h-{letter}-branch"),
-            ]
-            states = [
-                _scenario_side(side, root, copy) for side, copy in zip(sides, copies, strict=True)
-            ]
-            if any(state is None for state in states):
-                continue
+            copies, states = retained[letter]
             before_sha = [_sha(state[1]) for state in states]
             for (source, _), _copy in zip(states, copies, strict=True):
                 if letter == "a":
+                    # Step (a)'s query refreshes once; this follow-up edit
+                    # keeps the retained copy stale for the rewrite proof.
                     source.write_bytes(source.read_bytes() + b"\n# equivalence edit\n")
                 else:
                     os.utime(source, None)
@@ -503,7 +540,7 @@ def _run_scenarios(sides: tuple[Side, Side], roots: list[Path], scratch: Path) -
                 for side, copy, state in zip(sides, copies, states, strict=True)
             ]
             if not _compare_processes(
-                f"scenario root={root} step=h-{letter}",
+                f"scenario root={root} step=h-{letter} copies={letter}",
                 results[0],
                 results[1],
                 copies[0].parent,
