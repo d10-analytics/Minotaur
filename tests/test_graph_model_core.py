@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -564,3 +566,87 @@ def test_extensions_are_deeply_immutable_but_serialize_as_json() -> None:
     assert document.extensions is not None
     with pytest.raises(TypeError):
         document.extensions["other"] = {}
+
+
+def _extension_test_node(extensions: dict[str, dict[str, object]]) -> Node:
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, "test")
+    node_id = compute_node_id(identity, node_class=NodeClass.FILE.value, path="src/test.py")
+    return Node(
+        id=node_id,
+        identity=identity,
+        node_class=NodeClass.FILE,
+        label="test.py",
+        path="src/test.py",
+        extensions=extensions,
+    )
+
+
+_INVALID_EXTENSION_VALUES = [
+    ({"x": {"f": 1.5}}, "/x/f"),
+    ({"x": {"f": 4.0}}, "/x/f"),
+    ({"x": {"f": float("nan")}}, "/x/f"),
+    ({"x": {"f": float("inf")}}, "/x/f"),
+    ({"x": {"y": {"z": {"f": 1.5}}}}, "/x/y/z/f"),
+    ({"x": {"values": [{"f": 1.5}]}}, "/x/values/0/f"),
+    ({"x": {"\U0001f600": 1}}, "/x/\U0001f600"),
+    ({"x": {"y": {"\U0001d11e": 1}}}, "/x/y/\U0001d11e"),
+    ({"\U0001f600": {"f": 1}}, "/\U0001f600"),
+]
+
+
+@pytest.mark.parametrize(("extensions", "path"), _INVALID_EXTENSION_VALUES)
+@pytest.mark.parametrize("wire", [False, True], ids=["construction", "from-dict"])
+def test_extension_model_guard_rejects_float_and_non_bmp_keys(
+    extensions: dict[str, dict[str, object]], path: str, wire: bool
+) -> None:
+    if wire:
+        source = json.loads((EXAMPLES / "small-workflow.json").read_text(encoding="utf-8"))
+        nodes = source["nodes"]
+        assert isinstance(nodes, list)
+        nodes[0]["extensions"] = extensions
+        with pytest.raises(ValueError, match=re.escape(path)):
+            GraphDocument.from_dict(source)
+    else:
+        with pytest.raises(ValueError, match=re.escape(path)):
+            _extension_test_node(extensions)
+
+
+def test_extension_model_guard_accepts_json_values_and_is_idempotent() -> None:
+    extensions = {
+        "a\n": {
+            "note": "\U0001d11e",
+            "values": [1, True, None, {"\ud800": 2}],
+        }
+    }
+    node = _extension_test_node(extensions)
+    assert node.to_dict()["extensions"] == extensions
+    assert replace(node).to_dict()["extensions"] == extensions
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        (1.5, "line must be an integer, got float: 1.5"),
+        (True, "line must be an integer, got bool: True"),
+    ],
+)
+def test_position_rejects_non_integer_values_in_process(line: object, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        Position(line=line, character=0)  # type: ignore[arg-type]
+
+
+def test_position_wire_parser_keeps_require_int_message() -> None:
+    source = json.loads((EXAMPLES / "small-workflow.json").read_text(encoding="utf-8"))
+    nodes = source["nodes"]
+    assert isinstance(nodes, list)
+    location = nodes[0]["location"]
+    assert isinstance(location, dict)
+    range_data = location["range"]
+    assert isinstance(range_data, dict)
+    start = range_data["start"]
+    assert isinstance(start, dict)
+    start["line"] = 4.0
+
+    with pytest.raises(ValueError) as error:
+        GraphDocument.from_dict(source)
+    assert str(error.value) == "'line' must be an integer, got float: 4.0"

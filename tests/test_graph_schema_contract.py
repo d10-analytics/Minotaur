@@ -10,7 +10,7 @@ import pytest
 
 from minotaur import cli
 from minotaur.graph_model.document import GraphDocument
-from minotaur.graph_model.loading import _FORMAT_CHECKER, schema
+from minotaur.graph_model.loading import _FORMAT_CHECKER, GraphLoadError, load_graph_bytes, schema
 from minotaur.graph_model.validation import IssueCode, validate_document
 
 ROOT = Path(__file__).parents[1]
@@ -310,3 +310,91 @@ def test_fresh_analyze_output_satisfies_published_v1_schema(tmp_path: Path) -> N
 
     # Sanity: the graph is non-trivial — at least one node was emitted
     assert len(raw["nodes"]) > 0, "analyze produced an empty graph"
+
+
+def _wire_with_extensions(extensions: dict[str, dict[str, object]]) -> dict[str, object]:
+    document = _small_workflow()
+    nodes = _nodes(document)
+    nodes[0]["extensions"] = extensions
+    return document
+
+
+@pytest.mark.parametrize(
+    ("extensions", "instance_path"),
+    [
+        ({"x": {"f": 1.5}}, "On instance['nodes'][0]['extensions']['x']['f']"),
+        ({"\U0001f600": {"f": 1}}, "On instance['nodes'][0]['extensions']"),
+        ({"x": {"\U0001d11e": 1}}, "On instance['nodes'][0]['extensions']['x']"),
+    ],
+)
+def test_schema_rejects_non_integer_or_non_bmp_extension_wire_values(
+    extensions: dict[str, dict[str, object]], instance_path: str
+) -> None:
+    with pytest.raises(GraphLoadError) as error:
+        load_graph_bytes(json.dumps(_wire_with_extensions(extensions)).encode())
+    assert instance_path in str(error.value)
+
+
+def test_model_guard_owns_float_rejection_when_schema_accepts_json_integer() -> None:
+    document = _wire_with_extensions({"x": {"f": 4.0}})
+    _validator().validate(document)
+
+    with pytest.raises(GraphLoadError, match=r"/x/f"):
+        load_graph_bytes(json.dumps(document).encode())
+
+
+def test_schema_verdicts_are_unchanged_for_all_graph_fixtures() -> None:
+    from test_graph_model_serialization import _collect_graph_fixtures
+
+    expected_invalid = {
+        "tests/fixtures/minotaur-graph-v1/invalid/invalid-generated-at.json": {"$.generated_at"},
+        "tests/fixtures/minotaur-graph-v1/invalid/missing-curated-rule.json": {
+            "$.relationships[0].evidence[0]"
+        },
+        "tests/fixtures/minotaur-graph-v1/invalid/unsafe-path.json": {"$.nodes[0].path"},
+        "tests/fixtures/minotaur-graph-v1/invalid/wrong-position-type.json": {
+            "$.nodes[0].location.range.start.character"
+        },
+    }
+    for fixture_path in _collect_graph_fixtures():
+        relative = str(fixture_path.relative_to(ROOT))
+        errors = sorted(
+            error.json_path
+            for error in _validator().iter_errors(json.loads(fixture_path.read_text()))
+        )
+        assert errors == sorted(expected_invalid.get(relative, set())), relative
+
+
+def test_extension_schema_identity_and_property_name_pattern_are_pinned() -> None:
+    loaded_schema = schema()
+    assert loaded_schema["$id"] == "urn:minotaur:schemas:minotaur-graph:0.1.0"
+    defs = loaded_schema["$defs"]
+    assert isinstance(defs, dict)
+    assert defs["extensions"] == {
+        "type": "object",
+        "propertyNames": {"minLength": 1, "pattern": "^[\\u0000-\\uFFFF]*$"},
+        "additionalProperties": {"$ref": "#/$defs/extensionObject"},
+    }
+    assert defs["extensionObject"] == {
+        "type": "object",
+        "propertyNames": {"minLength": 1, "pattern": "^[\\u0000-\\uFFFF]*$"},
+        "additionalProperties": {"$ref": "#/$defs/extensionValue"},
+    }
+    assert defs["extensionValue"] == {
+        "anyOf": [
+            {"type": "string"},
+            {"type": "integer"},
+            {"type": "boolean"},
+            {"type": "null"},
+            {"type": "array", "items": {"$ref": "#/$defs/extensionValue"}},
+            {"$ref": "#/$defs/extensionObject"},
+        ]
+    }
+
+    accepted = _small_workflow()
+    accepted["extensions"] = {"a\n": {"value": 1}}
+    _validator().validate(accepted)
+    rejected = _small_workflow()
+    rejected["extensions"] = {"\U0001d11e\n": {"value": 1}}
+    with pytest.raises(jsonschema.ValidationError):
+        _validator().validate(rejected)
