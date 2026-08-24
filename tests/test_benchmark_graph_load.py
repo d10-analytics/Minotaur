@@ -123,8 +123,8 @@ def test_benchmark_accepts_explicit_matching_symbol(tmp_path: Path) -> None:
 
 def test_benchmark_has_no_dead_query_symbol_scanner() -> None:
     scripts = ROOT / "scripts"
+    source_files = tuple(scripts.rglob("*.py"))
+    assert BENCHMARK in source_files
     assert not any(
-        "_find_query_symbol" in path.read_text(encoding="utf-8")
-        for path in scripts.rglob("*")
-        if path.is_file()
+        "_find_query_symbol" in path.read_text(encoding="utf-8") for path in source_files
     )
