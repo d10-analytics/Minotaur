@@ -11,9 +11,15 @@ Produces a fixed-width table of wall-clock measurements for:
      ``_benchmark_query``).
   3. In-process component breakdown of one ``load_graph_file`` call:
      UTF-8 decode, sidecar read + ``graph_digest``, ``orjson.loads``,
-     ``GraphDocument.from_dict`` (AC-14), ``validate_document`` (AC-13),
-     ``drift()`` under the same ``--no-refresh`` sequence the query path
-     uses, and the ``GraphIndex.build`` the query path performs.
+     ``GraphDocument.from_dict`` (AC-14), ``validate_document (trusted)``
+     (AC-13, ``verify_node_ids=False`` — what a stamped load actually pays,
+     matching ``load_graph_bytes``'s ``verify_node_ids=not _skip_schema``),
+     ``validate_document (untrusted)`` (the default, node-ID verifying pass a
+     full-validation load pays), ``drift()`` under the same ``--no-refresh``
+     sequence the query path uses, and the ``GraphIndex.build`` the query path
+     performs.  ``components sum`` adds up the rows the end-to-end trusted
+     query row pays, so the untrusted ``validate_document`` row is measured and
+     printed but excluded from that sum.
   4. ``serialize`` on the loaded document with SHA-256 of output (AC-10)
 
 The script never writes to the caller-supplied ``--graph`` path: analyze and
@@ -40,6 +46,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import orjson
+
+# ``components sum`` must mirror the end-to-end trusted query row, which runs
+# ``validate_document(document, verify_node_ids=False)``. The untrusted row is
+# measured for visibility (R-06/D-17 label the gate row "trusted") but is not
+# part of that sum.
+_SUM_EXCLUDED_COMPONENTS = frozenset({"validate_document (untrusted)"})
 
 
 class _SubprocessError(Exception):
@@ -126,7 +138,8 @@ def _benchmark_components(graph_path: Path, root: Path, repeats: int) -> dict[st
         "sidecar_read+digest": [],
         "orjson.loads": [],
         "GraphDocument.from_dict": [],
-        "validate_document": [],
+        "validate_document (trusted)": [],
+        "validate_document (untrusted)": [],
         "drift (--no-refresh)": [],
         "GraphIndex.build": [],
     }
@@ -158,10 +171,18 @@ def _benchmark_components(graph_path: Path, root: Path, repeats: int) -> dict[st
         document = GraphDocument.from_dict(raw)
         components["GraphDocument.from_dict"].append(time.perf_counter() - start)
 
-        # validate_document
+        # validate_document on the trusted path: load_graph_bytes passes
+        # verify_node_ids=not _skip_schema, so a stamped graph skips the
+        # node-ID digest recomputation (R-08).
         start = time.perf_counter()
-        report = validate_document(document)
-        components["validate_document"].append(time.perf_counter() - start)
+        report = validate_document(document, verify_node_ids=False)
+        components["validate_document (trusted)"].append(time.perf_counter() - start)
+
+        # validate_document on the full-validation path: the default, which
+        # recomputes every node ID.
+        start = time.perf_counter()
+        validate_document(document)
+        components["validate_document (untrusted)"].append(time.perf_counter() - start)
 
         if not report.is_valid:
             sys.stderr.write(f"Warning: graph has {len(report.issues)} validation issues\n")
@@ -329,7 +350,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             components = _benchmark_components(temp_graph_path, root, repeats)
             for name, times in components.items():
                 rows.append((name, _median(times), min(times), max(times)))
-            components_sum = sum(_median(times) for times in components.values())
+            components_sum = sum(
+                _median(times)
+                for name, times in components.items()
+                if name not in _SUM_EXCLUDED_COMPONENTS
+            )
             rows.append(("components sum", components_sum, components_sum, components_sum))
 
             # 4. serialize (AC-10)
