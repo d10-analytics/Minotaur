@@ -59,3 +59,13 @@ def test_trusted_load_still_rejects_float_extension_values() -> None:
 
     with pytest.raises(GraphLoadError, match=r"/x/nested/value"):
         load_graph_bytes(json.dumps(document).encode(), _skip_schema=True)
+
+
+def test_trusted_load_still_rejects_non_bmp_extension_keys() -> None:
+    document = _example_document()
+    nodes = document["nodes"]
+    assert isinstance(nodes, list)
+    nodes[0]["extensions"] = {"x": {"nested": {"\U0001f600": 1}}}
+
+    with pytest.raises(GraphLoadError, match=r"/x/nested/\U0001f600"):
+        load_graph_bytes(json.dumps(document).encode(), _skip_schema=True)

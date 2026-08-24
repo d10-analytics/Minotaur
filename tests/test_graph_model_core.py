@@ -635,6 +635,11 @@ def test_position_rejects_non_integer_values_in_process(line: object, message: s
         Position(line=line, character=0)  # type: ignore[arg-type]
 
 
+def test_position_rejects_boolean_character_in_process() -> None:
+    with pytest.raises(ValueError, match="character must be an integer, got bool: True"):
+        Position(line=0, character=True)  # type: ignore[arg-type]
+
+
 def test_position_wire_parser_keeps_require_int_message() -> None:
     source = json.loads((EXAMPLES / "small-workflow.json").read_text(encoding="utf-8"))
     nodes = source["nodes"]
