@@ -297,7 +297,7 @@ def test_unreferenced_excludes_symbols_used_only_in_a_class_body(
     captured = capsys.readouterr()
 
     assert status == 0
-    assert captured.out == "config.py:9  config.orphan  function\nconfig.py:13  config.Cfg  class\n"
+    assert captured.out == "config.py:9  config.orphan  function\n"
 
 
 def test_unreferenced_excludes_symbols_used_only_in_a_signature(
