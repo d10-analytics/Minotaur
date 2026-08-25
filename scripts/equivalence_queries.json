@@ -30,8 +30,8 @@
         "args": [
           "workflow.util.unused_helper"
         ],
+        "expect": "empty",
         "variants": {
-          "json": true,
           "no_refresh": true
         }
       },
@@ -53,8 +53,8 @@
         "args": [
           "not a valid symbol"
         ],
+        "expect": "empty",
         "variants": {
-          "json": true,
           "no_refresh": true
         }
       },
@@ -190,8 +190,8 @@
         "args": [
           "minotaur.graph_model.validation.ValidationReport.is_valid"
         ],
+        "expect": "empty",
         "variants": {
-          "json": true,
           "no_refresh": true
         }
       },
@@ -213,8 +213,8 @@
         "args": [
           "not a valid symbol"
         ],
+        "expect": "empty",
         "variants": {
-          "json": true,
           "no_refresh": true
         }
       },
@@ -348,10 +348,10 @@
         "name": "callers-zero",
         "command": "callers",
         "args": [
-          "action_timer.OnyxTimer.stop"
+          "analysis_io.resolve_analysis_h5_path"
         ],
+        "expect": "empty",
         "variants": {
-          "json": true,
           "no_refresh": true
         }
       },
@@ -373,8 +373,8 @@
         "args": [
           "not a valid symbol"
         ],
+        "expect": "empty",
         "variants": {
-          "json": true,
           "no_refresh": true
         }
       },
@@ -409,7 +409,7 @@
         "name": "unreferenced-graph",
         "command": "unreferenced",
         "args": [
-          "instrument_reader"
+          "admin_tool"
         ],
         "variants": {
           "json": true,
@@ -420,7 +420,7 @@
         "name": "unreferenced-text",
         "command": "unreferenced",
         "args": [
-          "instrument_reader",
+          "admin_tool",
           "--text-fallback"
         ],
         "variants": {

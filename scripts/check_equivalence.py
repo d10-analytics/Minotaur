@@ -14,7 +14,8 @@ the only root that may be missing without failing the run.
 
 Queries come from a per-root JSON file keyed by the root directory's name, so
 a root is never compared with a query list written for a different tree.
-``--workload KEY`` names the workload for the root given in the same position
+When supplied, ``--workload KEY`` names the workload for each optional root in
+the same position; provide either no keys or exactly one key per optional root
 when a checkout's directory name differs from its committed key (the Onyx
 checkout, say).  A run fails when a root's queries do not actually produce
 output: an empty comparison is not a passing comparison, and every root that
@@ -116,8 +117,9 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         metavar="KEY",
         help=(
-            "workload key for the optional root in the same position, when the"
-            " checkout directory is not named after its committed workload"
+            "workload key for each optional root in the same position; provide"
+            " either none or exactly one per optional root when a checkout"
+            " directory is not named after its committed workload"
         ),
     )
     parser.add_argument(
@@ -195,7 +197,10 @@ def _under(path: Path, directory: Path) -> bool:
     return True
 
 
-IMPORT_PROBE = "import sys; import minotaur; print(sys.version_info[:2]); print(minotaur.__file__)"
+IMPORT_PROBE = (
+    "import sys; import minotaur; print(sys.version_info[0], sys.version_info[1]);"
+    " print(minotaur.__file__)"
+)
 
 
 def _check_import(side: Side, cwd: Path | None = None) -> str | None:
@@ -214,10 +219,16 @@ def _check_import(side: Side, cwd: Path | None = None) -> str | None:
             f"{side.name} import failed{where} (exit {result.returncode}):"
             f" {result.stderr_text.strip()}"
         )
-    version_line, _, imported_line = result.stdout_text.strip().partition("\n")
-    if version_line < "(3, 11)":
+    version_line, separator, imported_line = result.stdout_text.strip().partition("\n")
+    if not separator:
+        return f"{side.name} import probe returned no import location{where}"
+    try:
+        major, minor = (int(value) for value in version_line.split())
+    except ValueError:
+        return f"{side.name} import probe returned an invalid Python version: {version_line!r}"
+    if (major, minor) < (3, 11):
         return (
-            f"{side.name} interpreter is Python {version_line}; import isolation needs"
+            f"{side.name} interpreter is Python {major}.{minor}; import isolation needs"
             " PYTHONSAFEPATH, which only CPython 3.11+ honours"
         )
     imported = Path(imported_line.strip()).resolve()
@@ -348,6 +359,14 @@ def _compare_processes(
     return _row(label, left, right)
 
 
+EMPTY_QUERY_OUTPUTS = {
+    "callers": b"no callers\n",
+    "definitions": b"no definitions\n",
+    "unreferenced": b"no unreferenced symbols\n",
+    "diff": b"no changes\n",
+}
+
+
 def _load_queries(path: Path) -> dict[str, RootQueries]:
     loaded = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(loaded, dict) or not loaded:
@@ -368,8 +387,12 @@ def _load_queries(path: Path) -> dict[str, RootQueries]:
             raise ValueError(f"workload for root {key!r} needs a non-empty list of query objects")
         for item in queries:
             expect = item.get("expect", "ok")
-            if expect not in ("ok", "error"):
+            if expect not in ("ok", "empty", "error"):
                 raise ValueError(f"query {item.get('name')!r} has unknown expect {expect!r}")
+            if expect == "empty" and item.get("command") not in EMPTY_QUERY_OUTPUTS:
+                raise ValueError(
+                    f"query {item.get('name')!r} expects empty output from an unsupported command"
+                )
         workloads[key] = RootQueries(selection=selection, queries=queries)
     return workloads
 
@@ -411,7 +434,20 @@ def _query_variants(item: dict[str, Any]) -> Iterable[tuple[str, list[str]]]:
 
 
 def _answered(result: Completed) -> bool:
-    return not result.timed_out and result.returncode == 0 and bool(result.stdout.strip())
+    return (
+        not result.timed_out
+        and result.returncode == 0
+        and bool(result.stdout.strip())
+        and result.stdout not in EMPTY_QUERY_OUTPUTS.values()
+    )
+
+
+def _empty(result: Completed, command: str) -> bool:
+    return (
+        not result.timed_out
+        and result.returncode == 0
+        and result.stdout == EMPTY_QUERY_OUTPUTS[command]
+    )
 
 
 def _errored(result: Completed) -> bool:
@@ -429,10 +465,11 @@ def _compare_queries(
 ) -> bool:
     """Compare every query, and require each one to have really answered.
 
-    Byte identity between two runs that both printed ``unknown symbol`` is not
-    evidence of anything, so the harness insists that every non-control entry
-    exits 0 with non-empty stdout on both sides and that every control entry
-    really is the error path it claims to be.
+    Byte identity between two runs that both printed ``unknown symbol`` or
+    ``no definitions`` is not evidence of anything.  The harness insists that
+    every answering entry exits 0 with meaningful stdout on both sides, every
+    empty-result entry prints its command's exact human literal, and every
+    control entry really is the error path it claims to be.
     """
 
     baseline, branch = sides
@@ -453,7 +490,13 @@ def _compare_queries(
                 f"root={root} query={name} variant={variant_name}", left, right, *scratches
             ):
                 ok = False
-            probe = _answered if expect == "ok" else _errored
+            probe = (
+                _answered
+                if expect == "ok"
+                else (lambda result, command=command: _empty(result, command))
+                if expect == "empty"
+                else _errored
+            )
             for label, result in (("baseline", left), ("branch", right)):
                 if not probe(result):
                     satisfied = False
@@ -488,8 +531,9 @@ def _compare_root(
     baseline_analyze = _analyze(baseline, root, baseline_graph)
     branch_analyze = _analyze(branch, root, branch_graph)
     tally.comparisons += 1
-    ok = _compare_processes("analyze", baseline_analyze, branch_analyze, *scratches)
+    ok = _compare_processes(f"root={root} analyze", baseline_analyze, branch_analyze, *scratches)
     if baseline_analyze.returncode or branch_analyze.returncode:
+        print(f"root={root} analyze: FAILED not comparable")
         return False, tally
     tally.comparisons += 1
     if not _row(
@@ -534,14 +578,18 @@ def _compare_root(
         cwd=root,
     )
     tally.comparisons += 1
-    if not _compare_processes("visualize", base_visualize, branch_visualize, *scratches):
+    if not _compare_processes(
+        f"root={root} visualize", base_visualize, branch_visualize, *scratches
+    ):
         ok = False
-    if base_visualize.returncode == 0 and branch_visualize.returncode == 0:
-        tally.comparisons += 1
-        if not _row(
-            f"root={root} artifact=visualize HTML SHA-256", _sha(baseline_html), _sha(branch_html)
-        ):
-            ok = False
+    if base_visualize.returncode or branch_visualize.returncode:
+        print(f"root={root} visualize: FAILED not comparable")
+        return False, tally
+    tally.comparisons += 1
+    if not _row(
+        f"root={root} artifact=visualize HTML SHA-256", _sha(baseline_html), _sha(branch_html)
+    ):
+        ok = False
 
     baseline_selection = baseline_dir / "selection.json"
     branch_selection = branch_dir / "selection.json"
@@ -720,6 +768,58 @@ def _apply_sidecar_step(letter: str, graph: Path) -> None:
         stamp.write_text(f"{'0' * 64}  {graph.name}\n", encoding="utf-8")
 
 
+def _sidecar_bytes(graph: Path) -> bytes | None:
+    stamp = graph.with_name(graph.name + ".sha256")
+    return stamp.read_bytes() if stamp.is_file() else None
+
+
+def _expected_sidecar(graph: Path) -> bytes:
+    return f"{_sha(graph)}\n".encode("ascii")
+
+
+def _check_sidecar_setup(letter: str, root: Path, states: Sequence[tuple[Path, Path]]) -> bool:
+    """Prove that a sidecar scenario actually reached its intended load state."""
+
+    ok = True
+    for side_name, (_, graph) in zip(("baseline", "branch"), states, strict=True):
+        actual = _sidecar_bytes(graph)
+        expected = _expected_sidecar(graph)
+        invalid = (
+            actual is None
+            if letter == "i"
+            else actual != expected
+            if letter == "j"
+            else actual == expected
+        )
+        if invalid:
+            continue
+        print(
+            f"scenario root={root} step={letter} sidecar setup {side_name}: FAILED"
+            f" expected={letter!r} actual={actual!r}",
+            file=sys.stderr,
+        )
+        ok = False
+    return ok
+
+
+def _check_sidecar_stamps(letter: str, root: Path, states: Sequence[tuple[Path, Path]]) -> bool:
+    """Require the query to leave both scenario sidecars truthful and comparable."""
+
+    actual = [_sidecar_bytes(graph) for _, graph in states]
+    ok = _row(f"scenario root={root} step={letter} sidecar bytes", actual[0], actual[1])
+    for side_name, value, (_, graph) in zip(("baseline", "branch"), actual, states, strict=True):
+        expected = _expected_sidecar(graph)
+        if value == expected:
+            continue
+        print(
+            f"scenario root={root} step={letter} sidecar {side_name}: FAILED"
+            f" expected={expected!r} actual={value!r}",
+            file=sys.stderr,
+        )
+        ok = False
+    return ok
+
+
 def _scenario_symbol(workload: RootQueries) -> str:
     """The symbol the scenario query must answer: the root's own ``definitions`` query."""
 
@@ -783,6 +883,8 @@ def _run_scenarios(
                     source.write_bytes(original)
                 elif letter in SIDECAR_STEPS:
                     _apply_sidecar_step(letter, graph)
+            if letter in SIDECAR_STEPS and not _check_sidecar_setup(letter, root, states):
+                ok = False
             left = _scenario_query(
                 sides[0],
                 copies[0],
@@ -804,6 +906,8 @@ def _run_scenarios(
             ):
                 ok = False
             if left.returncode not in (0, 1) or right.returncode not in (0, 1):
+                ok = False
+            if letter in SIDECAR_STEPS and not _check_sidecar_stamps(letter, root, states):
                 ok = False
             # Every step must really answer on both sides: two identical
             # ``no definitions`` outputs would compare IDENTICAL while proving
@@ -975,8 +1079,11 @@ def _root_list(
     )
     optional = [_resolve(path) for path in arguments.optional_root or []]
     keys: list[str | None] = list(arguments.workload or [])
-    if len(keys) > len(optional):
-        raise ValueError(f"{len(keys)} --workload keys for {len(optional)} optional roots")
+    if keys and len(keys) != len(optional):
+        raise ValueError(
+            f"{len(keys)} --workload keys for {len(optional)} optional roots;"
+            " provide either none or exactly one per optional root"
+        )
     keys.extend([None] * (len(optional) - len(keys)))
     return [(path, False, None) for path in required] + [
         (path, True, key) for path, key in zip(optional, keys, strict=True)
