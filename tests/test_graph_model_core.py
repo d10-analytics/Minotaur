@@ -14,6 +14,7 @@ from minotaur.graph_model._parsing import reject_unknown_fields
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.evidence import Evidence, Producer, Rule
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id, verify_node_id
+from minotaur.graph_model.loading import load_graph_bytes
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import (
@@ -774,13 +775,13 @@ def test_extension_model_guard_accepts_json_values_and_is_idempotent() -> None:
     assert serialize(GraphDocument(coordinate_encoding=CoordinateEncoding.UTF_8, nodes=(node,)))
 
 
-def test_extension_integer_boundaries_round_trip_through_model_construction() -> None:
-    """The two values `orjson` decodes as boundary integers remain representable."""
+def test_extension_integer_boundaries_round_trip_through_serialization_and_loading() -> None:
+    """The two values `orjson` decodes as boundary integers survive a wire round trip."""
     document = GraphDocument(
         coordinate_encoding=CoordinateEncoding.UTF_8,
         extensions={"test": {"minimum": -(2**63), "maximum": 2**64 - 1}},
     )
-    round_tripped = GraphDocument.from_dict(document.to_dict())
+    round_tripped = load_graph_bytes(serialize(document)).document
     assert round_tripped.to_dict() == document.to_dict()
 
 

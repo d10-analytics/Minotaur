@@ -370,8 +370,11 @@ def test_schema_verdicts_are_unchanged_for_all_graph_fixtures() -> None:
 def test_format_document_states_the_extension_integer_range() -> None:
     """The extension-value format text must match the decoder's integer range."""
     format_document = (ROOT / "docs/formats/minotaur-graph-v1.md").read_text(encoding="utf-8")
-    assert "extension" in format_document
-    assert "[-2^63, 2^64-1]" in format_document
+    grammar_start = format_document.index("Extension values use a recursive grammar:")
+    grammar_end = format_document.index("\n\n", grammar_start)
+    grammar = format_document[grammar_start:grammar_end]
+    assert "extension object" in grammar
+    assert "[-2^63, 2^64-1]" in grammar
 
 
 def test_extension_schema_identity_and_property_name_pattern_are_pinned() -> None:

@@ -255,7 +255,7 @@ def test_orjson_rejections_surface_as_graph_load_errors(content: bytes) -> None:
 
 
 @pytest.mark.parametrize(
-    ("depth", "skip_schema", "accepted"),
+    ("depth", "trusted", "accepted"),
     [
         (64, False, True),
         (64, True, True),
@@ -270,17 +270,22 @@ def test_orjson_rejections_surface_as_graph_load_errors(content: bytes) -> None:
     ],
 )
 def test_extension_nesting_bounds_surface_as_load_errors(
-    depth: int, skip_schema: bool, accepted: bool
+    depth: int, trusted: bool, accepted: bool, tmp_path: Path
 ) -> None:
-    """The format bound applies before either loader path reaches its own cliff."""
+    """The public trusted and untrusted file paths enforce the format bound."""
     literal = '{"n":' * depth + "0" + "}" * depth
     content = _workflow_with_extension_literal(literal)
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_bytes(content)
+    if trusted:
+        stamp_path(graph_path).write_text(graph_digest(content) + "\n", encoding="utf-8")
     if accepted:
-        loaded = load_graph_bytes(content, _skip_schema=skip_schema)
+        loaded = load_graph_file(graph_path)
         assert loaded.document.extensions is not None
+        assert loaded.validated is not trusted
         return
     with pytest.raises(GraphLoadError) as error:
-        load_graph_bytes(content, _skip_schema=skip_schema)
+        load_graph_file(graph_path)
     assert str(error.value) == "extension nesting at /test/value" + "/n" * 64 + " exceeds 64 levels"
 
 
