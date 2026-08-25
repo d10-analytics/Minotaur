@@ -169,7 +169,35 @@ BMP keys to strings, integers, booleans, null, arrays of extension values, or
 nested extension objects. Fractional values are not part of the v1 format; use
 a scaled integer when exact fractional semantics are needed, and document the
 scale in the extension's contract. Values that do not need arithmetic may be
-represented as strings.
+represented as strings. Extension integers are limited to
+`[-2^63, 2^64-1]`, the range that `orjson` decodes as integers.
+
+Extension metadata has a production nesting limit of 64 containers. The limit
+applies only to recursive JSON objects and arrays inside an `extensions`
+namespace value; it does not limit graph nodes, relationships, graph size,
+call or dependency depth, source nesting, query depth, or planning depth. For
+each namespace, do not count the graph document, its `extensions` object, or
+the namespace object itself. Count every object or array below that namespace:
+
+```json
+{
+  "extensions": {
+    "example": {
+      "settings": {
+        "stages": [
+          {"enabled": true}
+        ]
+      }
+    }
+  }
+}
+```
+
+Here `settings` is container 1, `stages` is container 2, and the object in the
+array is container 3; the `example` namespace object does not count. A value
+with 64 such nested containers is accepted. The 65th is rejected during
+construction and on both graph-loading paths with `extension nesting at
+/<pointer> exceeds 64 levels`.
 
 As of 2026-08-23, v1 constraints are tightened so that extension values cannot
 contain non-integer numbers and extension object keys must remain within the
@@ -198,20 +226,13 @@ contract anyway:
   rejected while decoding, reported as `graph input is not valid JSON: ...`.
 - Lone-surrogate escapes such as `"\ud800"` — likewise rejected while
   decoding with the same prefix.
-- Deeply nested extension objects — rejected as `GraphLoadError` at three
-  bounds, none of them a raw traceback. `orjson` refuses more than 1024
-  nesting levels while decoding (`graph input is not valid JSON: depth limit
-  exceeded`); the standard-library decoder instead recursed until the
-  interpreter's recursion limit and raised `RecursionError`. Before that limit
-  is reached, the recursive validators bound the document further in: the
-  full-validation path (no matching sidecar, or `--validate`) rejects extension
-  nesting past roughly 120 levels because the `extensionValue` schema
-  definition recurses per level, and the trusted path rejects nesting just
-  short of 1000 levels in the extension freeze. Both report
-  `graph input nests deeper than the loader supports (extension objects)`.
-  The exact cliff depends on the surrounding call stack; no v1 document
-  produced by Minotaur approaches any of these depths.
-- Integer literals outside the signed 64-bit range — **not** a decode error.
+- Deeply nested extension objects or arrays — rejected at the deterministic
+  production limit of 64 containers described above, before either load path
+  reaches a stack-dependent validator cliff. `orjson` still rejects JSON that
+  itself exceeds its 1024-level decoder limit (`graph input is not valid JSON:
+  depth limit exceeded`); the loader also retains its `RecursionError` boundary
+  as a safeguard for other recursive validation paths.
+- Integer literals outside `[-2^63, 2^64-1]` — **not** a decode error.
   `orjson` decodes such a literal as a floating-point value. The model layer
   then rejects it as a non-integer, because every place a v1 document may hold
   a number is guarded there: `line` and `character` by `Position`

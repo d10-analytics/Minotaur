@@ -27,7 +27,6 @@ from dataclasses import dataclass, field
 from minotaur.graph_model._parsing import (
     freeze_extensions,
     reject_unknown_fields,
-    reject_unpaired_surrogates,
     serialize_extensions,
     type_error,
 )
@@ -93,7 +92,6 @@ class Relationship:
         # namespaced extension. Invalid kinds (arbitrary unqualified strings)
         # are caught here rather than at rendering time.
         resolve_relationship_kind(self.kind)
-        reject_unpaired_surrogates(self.kind, "relationship 'kind'")
 
         # At least one evidence record is required. A relationship without
         # evidence is an unsupported assertion — Minotaur's contract is

@@ -117,9 +117,15 @@ def _json_pointer(segments: Sequence[str | int]) -> str:
 # not be allowed to serialize an integer that no reader can load back (M-4).
 _INT_MIN = -(2**63)
 _INT_MAX = 2**64 - 1
+_MAX_EXTENSION_DEPTH = 64
 
 
-def _freeze_json(value: object, path: list[str | int] | None = None) -> object:
+def _freeze_json(
+    value: object,
+    path: list[str | int] | None = None,
+    *,
+    container_depth: int = -1,
+) -> object:
     # ``path`` is a mutable stack of segments rather than a pre-rendered string:
     # every extension value on a graph load walks this function, and the pointer
     # text is only ever consumed by a ``raise``.  Pushing and popping a segment
@@ -128,6 +134,10 @@ def _freeze_json(value: object, path: list[str | int] | None = None) -> object:
     if path is None:
         path = []
     if isinstance(value, Mapping):
+        if container_depth > _MAX_EXTENSION_DEPTH:
+            raise ValueError(
+                f"extension nesting at {_json_pointer(path)} exceeds {_MAX_EXTENSION_DEPTH} levels"
+            )
         frozen: dict[object, object] = {}
         for key, item in value.items():
             if not isinstance(key, str):
@@ -148,16 +158,32 @@ def _freeze_json(value: object, path: list[str | int] | None = None) -> object:
                 )
             # A lone surrogate is a BMP code point, so the check above lets it
             # through, yet UTF-8 cannot encode it and ``serialize`` would fail.
-            reject_unpaired_surrogates(key, f"extension key at {_json_pointer([*path, key])}")
+            try:
+                key.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError(
+                    f"extension key {key!r} at {_json_pointer(path)} must not contain "
+                    "unpaired surrogate code points"
+                ) from None
             path.append(key)
-            frozen[key] = _freeze_json(item, path)
+            item_depth = (
+                container_depth + 1 if isinstance(item, Mapping | list | tuple) else container_depth
+            )
+            frozen[key] = _freeze_json(item, path, container_depth=item_depth)
             path.pop()
         return MappingProxyType(frozen)
     if isinstance(value, list | tuple):
+        if container_depth > _MAX_EXTENSION_DEPTH:
+            raise ValueError(
+                f"extension nesting at {_json_pointer(path)} exceeds {_MAX_EXTENSION_DEPTH} levels"
+            )
         frozen_items: list[object] = []
         for index, item in enumerate(value):
             path.append(index)
-            frozen_items.append(_freeze_json(item, path))
+            item_depth = (
+                container_depth + 1 if isinstance(item, Mapping | list | tuple) else container_depth
+            )
+            frozen_items.append(_freeze_json(item, path, container_depth=item_depth))
             path.pop()
         return tuple(frozen_items)
     # Leaves are whitelisted, not blacklisted: the schema's ``extensionValue``
@@ -177,7 +203,13 @@ def _freeze_json(value: object, path: list[str | int] | None = None) -> object:
             f"extension value at {_json_pointer(path)} must be an integer, got float: {value!r}"
         )
     if isinstance(value, str):
-        reject_unpaired_surrogates(value, f"extension value at {_json_pointer(path)}")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError(
+                f"extension value at {_json_pointer(path)} must not contain "
+                "unpaired surrogate code points"
+            ) from None
         return value
     raise ValueError(
         f"extension value at {_json_pointer(path)} must be a string, integer, boolean,"
