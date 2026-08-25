@@ -255,47 +255,39 @@ def test_orjson_rejections_surface_as_graph_load_errors(content: bytes) -> None:
 
 
 @pytest.mark.parametrize(
-    ("depth", "skip_schema", "outcome"),
+    ("depth", "skip_schema", "accepted"),
     [
-        (100, False, "loads"),
-        (150, False, "nests deeper than the loader supports"),
-        (495, True, "loads"),
-        (900, True, "loads"),
-        (1010, True, "nests deeper than the loader supports"),
-        (1100, True, "graph input is not valid JSON: "),
+        (64, False, True),
+        (64, True, True),
+        (65, False, False),
+        (65, True, False),
     ],
     ids=[
-        "untrusted-100",
-        "untrusted-150-schema-bound",
-        "trusted-495",
-        "trusted-900",
-        "trusted-1010-freeze-bound",
-        "trusted-1100-decoder-bound",
+        "untrusted-64",
+        "trusted-64",
+        "untrusted-65",
+        "trusted-65",
     ],
 )
 def test_extension_nesting_bounds_surface_as_load_errors(
-    depth: int, skip_schema: bool, outcome: str
+    depth: int, skip_schema: bool, accepted: bool
 ) -> None:
-    """Every nesting bound is a ``GraphLoadError``, never a raw traceback.
-
-    Three bounds exist and none is the decoder's for realistic input: the
-    recursive ``extensionValue`` schema introduced by this spec bounds the
-    full-validation path at roughly 120 levels (main accepted deeper documents
-    because its schema never descended into extension contents); the extension
-    freeze bounds the trusted path just short of 1000; orjson's fixed 1024
-    limit is only reached on the trusted path.  ``load_graph_bytes`` converts
-    the interpreter's ``RecursionError`` into the load boundary's own error.
-    The exact cliffs depend on the surrounding call stack, so the parameters
-    sit well inside each region rather than on its edge.
-    """
-    literal = "{" + '"n":{' * depth + "}" * depth + "}"
+    """The format bound applies before either loader path reaches its own cliff."""
+    literal = '{"n":' * depth + "0" + "}" * depth
     content = _workflow_with_extension_literal(literal)
-    if outcome == "loads":
+    if accepted:
         loaded = load_graph_bytes(content, _skip_schema=skip_schema)
         assert loaded.document.extensions is not None
         return
-    with pytest.raises(GraphLoadError, match=re.escape(outcome)):
+    with pytest.raises(GraphLoadError) as error:
         load_graph_bytes(content, _skip_schema=skip_schema)
+    assert str(error.value) == "extension nesting at /test/value" + "/n" * 64 + " exceeds 64 levels"
+
+
+def test_decoder_nesting_limit_remains_a_graph_load_error() -> None:
+    """The decoder still reports pathological non-extension JSON nesting cleanly."""
+    with pytest.raises(GraphLoadError, match=r"^graph input is not valid JSON: "):
+        load_graph_bytes(b"[" * 1100 + b"]" * 1100, _skip_schema=True)
 
 
 def _workflow_with_position_line(literal: str) -> bytes:

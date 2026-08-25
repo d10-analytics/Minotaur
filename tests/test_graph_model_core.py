@@ -774,8 +774,47 @@ def test_extension_model_guard_accepts_json_values_and_is_idempotent() -> None:
     assert serialize(GraphDocument(coordinate_encoding=CoordinateEncoding.UTF_8, nodes=(node,)))
 
 
+def test_extension_integer_boundaries_round_trip_through_model_construction() -> None:
+    """The two values `orjson` decodes as boundary integers remain representable."""
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        extensions={"test": {"minimum": -(2**63), "maximum": 2**64 - 1}},
+    )
+    round_tripped = GraphDocument.from_dict(document.to_dict())
+    assert round_tripped.to_dict() == document.to_dict()
+
+
+def _nested_extension_containers(depth: int) -> dict[str, object]:
+    """Build exactly *depth* object containers beneath an extension namespace."""
+    value: object = 0
+    for level in range(depth):
+        value = {f"level-{level}": value}
+    assert isinstance(value, dict)
+    return value
+
+
+@pytest.mark.parametrize(("depth", "accepted"), [(64, True), (65, False)])
+def test_extension_construction_enforces_the_format_nesting_limit(
+    depth: int, accepted: bool
+) -> None:
+    """Only containers below an extension namespace count toward the 64-level limit."""
+    extensions = {"test": {"value": _nested_extension_containers(depth)}}
+    if accepted:
+        node = _extension_test_node(extensions)
+        assert node.to_dict()["extensions"] == extensions
+        return
+    with pytest.raises(
+        ValueError,
+        match=r"^extension nesting at /test/value(?:/level-\d+)* exceeds 64 levels$",
+    ):
+        _extension_test_node(extensions)
+
+
 _UNENCODABLE_EXTENSION_VALUES = [
-    ({"x": {"\ud800": 2}}, "extension key at /x/\ud800 must not contain unpaired surrogate"),
+    (
+        {"x": {"\ud800": 2}},
+        "extension key '\\ud800' at /x must not contain unpaired surrogate",
+    ),
     ({"x": {"s": "\udfff"}}, "extension value at /x/s must not contain unpaired surrogate"),
     ({"x": {"values": ["ok", "\ud800"]}}, "extension value at /x/values/1 must not contain"),
     ({"x": {"s": {1, 2}}}, "extension value at /x/s must be a string, integer, boolean, null"),
@@ -801,6 +840,13 @@ def test_extension_model_guard_rejects_values_the_serializer_cannot_encode(
     """
     with pytest.raises(ValueError, match=re.escape(message)):
         _extension_test_node(extensions)
+
+
+def test_extension_surrogate_key_error_is_utf8_encodable() -> None:
+    """Extension validation errors must remain printable on a UTF-8 terminal."""
+    with pytest.raises(ValueError) as error:
+        _extension_test_node({"x": {"\ud800": 2}})
+    assert str(error.value).encode("utf-8")
 
 
 def _serializable_node() -> Node:

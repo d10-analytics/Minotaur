@@ -356,13 +356,22 @@ def test_schema_verdicts_are_unchanged_for_all_graph_fixtures() -> None:
             "$.nodes[0].location.range.start.character"
         },
     }
-    for fixture_path in _collect_graph_fixtures():
+    fixtures = _collect_graph_fixtures()
+    assert len(fixtures) == 9
+    for fixture_path in fixtures:
         relative = str(fixture_path.relative_to(ROOT))
         errors = sorted(
             error.json_path
             for error in _validator().iter_errors(json.loads(fixture_path.read_text()))
         )
         assert errors == sorted(expected_invalid.get(relative, set())), relative
+
+
+def test_format_document_states_the_extension_integer_range() -> None:
+    """The extension-value format text must match the decoder's integer range."""
+    format_document = (ROOT / "docs/formats/minotaur-graph-v1.md").read_text(encoding="utf-8")
+    assert "extension" in format_document
+    assert "[-2^63, 2^64-1]" in format_document
 
 
 def test_extension_schema_identity_and_property_name_pattern_are_pinned() -> None:
