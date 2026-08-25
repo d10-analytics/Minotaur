@@ -469,9 +469,7 @@ def test_only_decorated_top_level_symbols_get_inward_edges(
     assert (module, decorated, RelationshipKind.REFERENCES.value) in relationships
     assert (module, undecorated, RelationshipKind.REFERENCES.value) not in relationships
     assert not any(node.label == "app.outer.nested" for node in result.document.nodes)
-    assert {
-        key for key in relationships if key[0] == outer
-    } == {
+    assert {key for key in relationships if key[0] == outer} == {
         (outer, decorator, RelationshipKind.REFERENCES.value)
     }
 
