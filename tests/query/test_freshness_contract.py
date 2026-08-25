@@ -113,6 +113,38 @@ def test_parse_failed_file_has_no_changed_or_missing_finding_but_new_file_is_add
     assert set(observed.added) == {broken.name, added.name}
 
 
+def test_query_refresh_returns_one_without_reprinting_parse_diagnostic(
+    tmp_path: Path, capsys
+) -> None:
+    """docs/concepts/freshness.md — `analyze` a file with a parse failure, then edit that file."""  # noqa: E501
+    root = tmp_path / "source"
+    _write(root, "app.py", "def foo():\n    return 1\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    capsys.readouterr()
+
+    _write(root, "broken.py", "def broken(\n")
+    status = cli.main(
+        [
+            "query",
+            "definitions",
+            "foo",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 1
+    assert captured.out == "app.py:1  app.foo  function\n"
+    assert captured.err == (
+        "minotaur: refreshed graph (1 drifted paths)\nminotaur: stale: broken.py\n"
+    )
+    assert "parse-error" not in captured.err
+
+
 def test_graph_without_recorded_selection_refuses_automatic_refresh(tmp_path: Path, capsys) -> None:
     """docs/concepts/freshness.md — Load a graph with no recorded selection and query after source drift."""  # noqa: E501
     root = tmp_path / "source"
