@@ -101,6 +101,11 @@ def _discover_directory(directory: Path, root: Path, include_excluded: bool) -> 
     normalization is also what containment, relative-path, and ordering all
     read, so the root is never trimmed two different ways.
 
+    ``root`` must already be absolute.  This is the same precondition as
+    ``relative_order_key``: the normalized root is its ordering argument, so
+    accepting a relative spelling here would bypass that helper's contract.
+    ``Workspace`` satisfies the precondition for every public call.
+
     Directory entries are pruned by unresolved name, so a symlink living inside
     an excluded or hidden directory is never resolved and never reported.  The
     pre-change implementation judged exclusion only after resolving, so such a
@@ -116,6 +121,8 @@ def _discover_directory(directory: Path, root: Path, include_excluded: bool) -> 
     ``unreferenced --text-fallback`` against this module and is byte-tested,
     so a comment here must not spell the walker's public entry-point name.
     """
+    if not root.is_absolute():
+        raise ValueError(f"root must be absolute: {root}")
     found: list[Path] = []
     # realpath leaves no trailing separator except on the filesystem root, so
     # the normalized text is directly usable as a containment prefix.
