@@ -2,17 +2,33 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import struct
 from pathlib import Path
 
 import pytest
 
-from minotaur.graph_model._parsing import _jcs_serialize, _utf16_sort_key
+import minotaur.graph_model.serialization as serialization_module
+from minotaur.graph_model._parsing import _jcs_serialize
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.serialization import canonicalize, serialize
 
 EXAMPLES = Path(__file__).parents[1] / "examples/synthetic-graphs"
 REPO_ROOT = Path(__file__).parents[1]
+
+
+def _utf16_sort_key(s: str) -> tuple[int, ...]:
+    """Produce a sort key based on UTF-16 code unit values.
+
+    RFC 8785 §3.2.3 specifies that object keys are sorted by comparing
+    their UTF-16 representations code unit by code unit. For BMP characters
+    this is the same as codepoint order, but supplementary characters
+    (U+10000+) are represented as surrogate pairs and sort differently
+    than their codepoint values would suggest.
+    """
+    raw = s.encode("utf-16-le")
+    return struct.unpack(f"<{len(raw) // 2}H", raw)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +107,58 @@ def _oracle_serialize(value: object) -> bytes:
     parts: list[str] = []
     _jcs_encode(value, parts)
     return "".join(parts).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# AC-08 (c): the oracle is pinned to the Baseline bytes
+# ---------------------------------------------------------------------------
+#
+# The oracle only proves the C-encoder composition correct while it stays the
+# code that composition replaced.  Anyone who "fixes" the oracle to agree with
+# the implementation has deleted the proof, so the oracle's source text is
+# pinned to its Baseline bytes and the pin fails before the equality tests do.
+
+_ORACLE_SEGMENT_START = "_JCS_ESCAPE_MAP: dict[str, str] = {"
+_ORACLE_SEGMENT_END = '    return "".join(parts).encode("utf-8")\n'
+
+# SHA-256 of the source text from _ORACLE_SEGMENT_START through
+# _ORACLE_SEGMENT_END inclusive, as it stands at Baseline commit fb63689 —
+# verified byte-identical to the segment in this file (`git diff fb63689 --
+# tests/test_graph_model_serialization.py` produces no hunk inside it).  To
+# recompute after a deliberate retirement of the oracle — never to make a
+# failing pin pass — write the baseline file out and hash the same slice:
+#
+#   git show fb63689:tests/test_graph_model_serialization.py > /tmp/base.py
+#   python -c "import hashlib, pathlib; \
+#       import test_graph_model_serialization as m; \
+#       t = pathlib.Path('/tmp/base.py').read_text(); \
+#       s = t.index(m._ORACLE_SEGMENT_START); \
+#       e = t.index(m._ORACLE_SEGMENT_END, s) + len(m._ORACLE_SEGMENT_END); \
+#       print(hashlib.sha256(t[s:e].encode()).hexdigest())"
+#
+_ORACLE_SEGMENT_SHA256 = "e4726121c36c8c0267e6ced6912dadb3bf343c068cb61493370add75eff1bb88"
+
+
+def _oracle_segment() -> str:
+    """Return this module's oracle source text: escape map through serializer."""
+    text = Path(__file__).read_text(encoding="utf-8")
+    start = text.index(_ORACLE_SEGMENT_START)
+    end = text.index(_ORACLE_SEGMENT_END, start) + len(_ORACLE_SEGMENT_END)
+    return text[start:end]
+
+
+def test_oracle_source_is_byte_unchanged_from_baseline() -> None:
+    """The oracle bodies still hash to their Baseline (fb63689) bytes."""
+    segment = _oracle_segment()
+    # Guard the extraction itself: a truncated slice would hash to something
+    # stable but prove nothing.
+    assert "def _jcs_encode(" in segment
+    assert "def _oracle_serialize(" in segment
+    assert hashlib.sha256(segment.encode("utf-8")).hexdigest() == _ORACLE_SEGMENT_SHA256, (
+        "the JCS oracle was edited; it is the Baseline encoder and is never "
+        "changed to agree with the implementation — if the implementation "
+        "disagrees with it, the implementation is wrong"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -286,24 +354,6 @@ def test_canonicalize_sorts_locations_within_evidence() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_canonicalize_sorts_dict_keys_by_utf16() -> None:
-    source = json.loads((EXAMPLES / "small-workflow.json").read_text(encoding="utf-8"))
-    doc = GraphDocument.from_dict(source)
-    result = canonicalize(doc)
-
-    def check_keys_sorted(obj: object) -> None:
-        if isinstance(obj, dict):
-            keys = list(obj.keys())
-            assert keys == sorted(keys), f"keys not sorted: {keys}"
-            for v in obj.values():
-                check_keys_sorted(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                check_keys_sorted(item)
-
-    check_keys_sorted(result)
-
-
 # ---------------------------------------------------------------------------
 # Canonicalize: no mutation
 # ---------------------------------------------------------------------------
@@ -401,11 +451,6 @@ def test_jcs_array() -> None:
     assert _jcs_serialize([1, "a", True, None]) == b'[1,"a",true,null]'
 
 
-def test_jcs_float_raises() -> None:
-    with pytest.raises(TypeError, match="float"):
-        _jcs_serialize(3.14)
-
-
 def test_jcs_nested_structure() -> None:
     value = {"b": [True, None, {"z": 1, "a": 2}], "a": "hello"}
     result = _jcs_serialize(value)
@@ -418,11 +463,79 @@ def test_jcs_nested_structure() -> None:
 
 
 def _collect_graph_fixtures() -> list[Path]:
-    """Return all valid JSON graph fixtures under tests/ and examples/."""
+    """Return all nine raw JSON graph fixtures under tests/ and examples/."""
     paths: list[Path] = []
     for directory in [REPO_ROOT / "tests", REPO_ROOT / "examples"]:
         paths.extend(sorted(directory.rglob("*.json")))
     return paths
+
+
+# These collectors intentionally represent three different admission
+# boundaries. The raw set feeds the independent JSON encoder and schema
+# sweeps, so it includes every syntactically valid JSON fixture even when a
+# model or semantic check rejects that fixture. The model set feeds
+# ``GraphDocument.from_dict`` and the in-process serializer; it includes the
+# dangling-relationship fixture because model construction does not validate
+# relationship endpoints. The strict-load set feeds ``load_graph_bytes`` and
+# therefore contains only the four example graphs: strict loading validates
+# relationship endpoints and must exclude that dangling fixture. Keeping the
+# sets separate preserves both model-constructible coverage and strict-load
+# coverage without making either consumer claim the wrong admission boundary.
+
+
+def _collect_model_constructible_graph_fixtures() -> list[Path]:
+    """Return the four examples plus the model-constructible dangling graph."""
+    dangling = REPO_ROOT / "tests/fixtures/minotaur-graph-v1/invalid/dangling-relationship.json"
+    examples = sorted((REPO_ROOT / "examples").rglob("*.json"))
+    return examples + [dangling]
+
+
+def _collect_loadable_graph_fixtures() -> list[Path]:
+    """Return the four example graphs accepted by strict graph loading."""
+    return sorted((REPO_ROOT / "examples").rglob("*.json"))
+
+
+@pytest.mark.parametrize(
+    "fixture_path",
+    _collect_model_constructible_graph_fixtures(),
+    ids=lambda p: str(p.relative_to(REPO_ROOT)),
+)
+def test_canonicalize_uses_jcs_code_point_key_order(fixture_path: Path) -> None:
+    source = json.loads(fixture_path.read_text(encoding="utf-8"))
+    document = GraphDocument.from_dict(source)
+    canonical = canonicalize(document)
+    encoded_without_sorting = json.dumps(
+        canonical,
+        sort_keys=False,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    assert encoded_without_sorting == _oracle_serialize(canonical)
+
+
+@pytest.mark.parametrize(
+    "fixture_path",
+    _collect_model_constructible_graph_fixtures(),
+    ids=lambda p: str(p.relative_to(REPO_ROOT)),
+)
+def test_serialize_bypasses_eager_key_sort(
+    fixture_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serialization retains bytes without the public dict-key normalization."""
+    source = json.loads(fixture_path.read_text(encoding="utf-8"))
+    doc = GraphDocument.from_dict(source)
+    expected = _oracle_serialize(canonicalize(doc))
+
+    def fail_eager_key_sort(value: object) -> object:
+        _ = value
+        raise AssertionError("serialize invoked the eager key sort")
+
+    monkeypatch.setattr(serialization_module, "_sort_keys_code_point", fail_eager_key_sort)
+
+    assert serialize(doc) == expected
+    with pytest.raises(AssertionError, match="eager key sort"):
+        canonicalize(doc)
 
 
 @pytest.mark.parametrize(
@@ -441,13 +554,11 @@ def test_oracle_equality_fixtures(fixture_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Non-BMP object keys are absent by construction: R-02 forbids them and the
+# model layer rejects them on every path, so the shapes that used to live here
+# are rejection cases in test_graph_model_core.py's AC-06 matrix, not encoder
+# equality cases. Astral characters in string *values* stay covered below.
 _EDGE_CASES: list[tuple[str, object]] = [
-    # Astral-plane dict keys (non-BMP, surrogate pairs in UTF-16)
-    ("astral_key_musical", {"\U0001d11e": "treble clef"}),
-    ("astral_key_emoji", {"\U0001f600": "grinning"}),
-    # Astral keys in both insertion orders
-    ("astral_two_keys_ab", {"\U0001d11e": 1, "\U0001f600": 2}),
-    ("astral_two_keys_ba", {"\U0001f600": 2, "\U0001d11e": 1}),
     # Private use area U+E000–U+FFFF (BMP, no surrogate pairs)
     ("pua_key_e000", {"": "private use start"}),
     ("pua_key_fffd", {"�": "replacement char"}),
@@ -484,45 +595,39 @@ _EDGE_CASES: list[tuple[str, object]] = [
     ("string_simple", "hello"),
     # Mixed nesting
     ("mixed_deep", {"z": [1, {"b": 2, "a": [True, None, "x"]}, 3], "a": "first"}),
-    # Astral keys over nested containers — the astral path sorts keys itself
-    # rather than delegating to json.dumps(sort_keys=True), so every container
-    # type it recurses through needs coverage.
-    ("astral_nested_dict", {"\U0001d11e": {"z": 1, "a": 2}}),
-    ("astral_nested_list", {"\U0001d11e": [{"z": 1, "a": 2}]}),
-    ("astral_nested_tuple", {"\U0001d11e": ({"z": 1, "a": 2},)}),
-    ("astral_tuple_of_tuples", {"\U0001d11e": (({"z": 1, "a": 2},), ({"y": 3, "b": 4},))}),
-    ("astral_tuple_in_list", {"\U0001d11e": [({"z": 1, "a": 2},)]}),
+    # Astral characters in string values remain unrestricted by R-02, over the
+    # same nested container shapes the encoder recurses through.
+    ("astral_value_nested_dict", {"k": {"z": "\U0001d11e", "a": 2}}),
+    ("astral_value_nested_list", {"k": [{"z": "\U0001d11e", "a": 2}]}),
+    ("astral_value_nested_tuple", {"k": ({"z": "\U0001d11e", "a": 2},)}),
     (
-        "astral_deep_mixed_tree",
+        "astral_value_deep_mixed_tree",
         {
-            "\U0001d11e": [
-                {"z": 1, "\U0001f600": ({"q": 2, "b": [{"n": 1, "m": 2}]},)},
-                ({"y": 3, "a": {"w": 4, "\U0001d11e": 5}},),
+            "k": [
+                {"z": 1, "e": ({"q": "\U0001f600", "b": [{"n": 1, "m": 2}]},)},
+                ({"y": 3, "a": {"w": 4, "v": "\U0001d11e"}},),
             ],
             "b": ({"z": 6, "a": 7},),
         },
     ),
-    # Astral key only at a nested level: the root dict is BMP-keyed, but the
-    # astral path still triggers for the whole document.
-    ("astral_key_only_nested", {"root": ({"\U0001d11e": {"z": 1, "a": 2}, "b": 3},)}),
 ]
 
 
 @pytest.mark.parametrize("name,value", _EDGE_CASES, ids=[c[0] for c in _EDGE_CASES])
 def test_oracle_equality_edge_cases(name: str, value: object) -> None:
-    """Implementation and oracle agree on every edge-case input."""
+    """Implementation and oracle agree on every edge case."""
     _ = name
     assert _jcs_serialize(value) == _oracle_serialize(value)
 
 
 # ---------------------------------------------------------------------------
-# AC-10 (c): Float TypeError — both paths reject floats
+# AC-08 (d): C encoder rejects non-finite floats but accepts finite floats
 # ---------------------------------------------------------------------------
 
 
-def test_float_raises_implementation_top_level() -> None:
-    with pytest.raises(TypeError, match="float"):
-        _jcs_serialize(3.14)
+def test_jcs_non_finite_float_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Out of range float values are not JSON compliant"):
+        _jcs_serialize({"a": float("nan")})
 
 
 def test_float_raises_oracle_top_level() -> None:
@@ -530,19 +635,13 @@ def test_float_raises_oracle_top_level() -> None:
         _oracle_serialize(3.14)
 
 
-def test_float_raises_implementation_nested_dict() -> None:
-    with pytest.raises(TypeError, match="float"):
-        _jcs_serialize({"a": 1.5})
+def test_jcs_finite_float_is_encoded() -> None:
+    assert _jcs_serialize({"a": 1.5}) == b'{"a":1.5}'
 
 
 def test_float_raises_oracle_nested_dict() -> None:
     with pytest.raises(TypeError, match="float"):
         _oracle_serialize({"a": 1.5})
-
-
-def test_float_raises_implementation_nested_list() -> None:
-    with pytest.raises(TypeError, match="float"):
-        _jcs_serialize([1, 2.0, 3])
 
 
 def test_float_raises_oracle_nested_list() -> None:
@@ -556,12 +655,18 @@ def test_float_raises_oracle_nested_list() -> None:
 
 
 def test_no_production_jcs_encode_or_escape_map() -> None:
-    """_jcs_encode and _JCS_ESCAPE_MAP must not appear in src/."""
+    """Removed pure-Python JCS machinery and prechecks must not return to src/."""
     src_dir = REPO_ROOT / "src"
     violations: list[str] = []
     for py_file in sorted(src_dir.rglob("*.py")):
         content = py_file.read_text(encoding="utf-8")
-        for name in ("_jcs_encode", "_JCS_ESCAPE_MAP"):
+        for name in (
+            "_jcs_encode",
+            "_JCS_ESCAPE_MAP",
+            "_check_canonical_input",
+            "_sort_keys_recursive",
+            "_utf16_sort_key",
+        ):
             for lineno, line in enumerate(content.splitlines(), 1):
                 if name in line:
                     rel = py_file.relative_to(REPO_ROOT)

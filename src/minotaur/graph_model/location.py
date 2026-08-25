@@ -15,7 +15,14 @@ import functools
 import re
 from dataclasses import dataclass
 
-from minotaur.graph_model._parsing import reject_unknown_fields, reject_unpaired_surrogates
+from minotaur.graph_model._parsing import (
+    reject_unknown_fields,
+    reject_unpaired_surrogates,
+    type_error,
+)
+
+# Largest integer ``orjson`` still decodes as an ``int`` (unsigned 64-bit max).
+_POSITION_MAX = 2**64 - 1
 
 # Module-level constants for reject_unknown_fields — hoisted from per-call
 # frozenset literals to avoid 118 k+ allocations per graph load (F-13).
@@ -90,10 +97,26 @@ class Position:
         # Enforced at construction, not just at validation time, because a
         # negative position is never structurally meaningful — it cannot be
         # an "unchecked input we'll validate later."
+        if not isinstance(self.line, int) or isinstance(self.line, bool):
+            raise ValueError(
+                f"line must be an integer, got {type(self.line).__name__}: {self.line!r}"
+            )
+        if not isinstance(self.character, int) or isinstance(self.character, bool):
+            raise ValueError(
+                f"character must be an integer, got {type(self.character).__name__}: "
+                f"{self.character!r}"
+            )
         if self.line < 0:
             raise ValueError(f"line must be non-negative, got {self.line}")
         if self.character < 0:
             raise ValueError(f"character must be non-negative, got {self.character}")
+        # ``orjson`` decodes a wider literal as a float, which the wire path
+        # rejects; an in-process value past the bound would serialize to bytes
+        # no reader can load back.
+        if self.line > _POSITION_MAX:
+            raise ValueError(f"line must fit in 64 bits, got {self.line}")
+        if self.character > _POSITION_MAX:
+            raise ValueError(f"character must fit in 64 bits, got {self.character}")
 
     def to_dict(self) -> dict[str, int]:
         return {"line": self.line, "character": self.character}
@@ -140,12 +163,55 @@ class Range:
     start: Position
     end: Position
 
+    def __post_init__(self) -> None:
+        # Model-layer type ownership (R-02): in-process construction and
+        # dataclasses.replace must not be able to hand the serializer a
+        # non-Position endpoint.
+        if not isinstance(self.start, Position):
+            raise type_error("range start", self.start, "a Position")
+        if not isinstance(self.end, Position):
+            raise type_error("range end", self.end, "a Position")
+
     def to_dict(self) -> dict[str, dict[str, int]]:
         return {"start": self.start.to_dict(), "end": self.end.to_dict()}
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Range:
         reject_unknown_fields(data, _RANGE_FIELDS, "range")
+
+        # The usual Position.from_dict path deliberately owns validation and
+        # its error ordering for irregular wire input.  Fully conforming range
+        # dictionaries are common in graph loads, though, and their four
+        # primitive values can be copied directly while still constructing
+        # Position objects below.  Position.__post_init__ therefore remains
+        # the single owner of bool/sign checks; this shortcut only avoids the
+        # repeated dictionary lookups and helper calls for exact plain dicts.
+        # Keep the key-set test exact: the schema constants are upper bounds,
+        # whereas this path may read only these four named values.
+        if type(data) is dict and data.keys() == _MEMO_RANGE_FIELDS:
+            start_data = data["start"]
+            end_data = data["end"]
+            if (
+                type(start_data) is dict
+                and type(end_data) is dict
+                and start_data.keys() == _MEMO_POSITION_FIELDS
+                and end_data.keys() == _MEMO_POSITION_FIELDS
+            ):
+                start_line = start_data["line"]
+                start_character = start_data["character"]
+                end_line = end_data["line"]
+                end_character = end_data["character"]
+                if (
+                    type(start_line) is int
+                    and type(start_character) is int
+                    and type(end_line) is int
+                    and type(end_character) is int
+                ):
+                    return cls(
+                        start=Position(line=start_line, character=start_character),
+                        end=Position(line=end_line, character=end_character),
+                    )
+
         start_data = data.get("start")
         end_data = data.get("end")
         if not isinstance(start_data, dict):
@@ -178,6 +244,10 @@ class Location:
         # (absolute, with traversal components, or empty) is never a valid
         # repository-relative reference. Letting one through would require
         # every downstream consumer to re-check.
+        if not isinstance(self.path, str):
+            raise type_error("location path", self.path, "a string")
+        if not isinstance(self.range, Range):
+            raise type_error("location range", self.range, "a Range")
         if not is_safe_path(self.path):
             raise ValueError(
                 f"path must be a non-empty, repository-relative, slash-separated "

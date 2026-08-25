@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import jsonschema  # type: ignore[import-untyped]
+import orjson
 
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.serialization import canonicalize
@@ -32,7 +33,9 @@ class LoadedGraph:
     ``functools.cached_property`` write through ``__dict__``, which
     ``frozen=True`` does not block.
 
-    ``validated`` is ``True`` when the JSON-schema pass ran on this load.
+    ``validated`` is ``True`` when this load ran both the JSON-schema pass and
+    node-ID verification. A matching sidecar authorizes the trusted fast path,
+    which skips both checks while retaining the remaining semantic checks.
     ``digest`` is the SHA-256 hex digest of the exact bytes that were parsed.
     Both are load provenance, not graph content.
     """
@@ -115,8 +118,17 @@ def load_graph_bytes(
     except UnicodeDecodeError as error:
         raise GraphLoadError(f"graph input is not valid UTF-8: {error}") from None
     try:
-        raw: Any = json.loads(decoded)
-    except json.JSONDecodeError as error:
+        # ``orjson`` is the only decoder (R-05).  It rejects NaN/Infinity, lone
+        # surrogate escapes and nesting beyond 1024 levels outright; an integer
+        # literal wider than 64 bits it decodes as a float instead of raising.
+        # That float is still rejected, one layer down and with that layer's
+        # message: every v1 integer position is a model field guarded by
+        # ``_require_int``/``Position.__post_init__``, and every other v1
+        # number lives in an extension, where ``_freeze_json`` rejects any
+        # float leaf.  No whole-document walk is needed here, and adding one
+        # would cost more than the decoder itself.
+        raw: Any = orjson.loads(decoded)
+    except orjson.JSONDecodeError as error:
         raise GraphLoadError(f"graph input is not valid JSON: {error.msg}") from None
     if not isinstance(raw, dict):
         raise GraphLoadError("graph input must contain a JSON object")
@@ -131,7 +143,19 @@ def load_graph_bytes(
         document = GraphDocument.from_dict(raw)
     except (jsonschema.ValidationError, ValueError) as error:
         raise GraphLoadError(str(error)) from None
-    report: ValidationReport = validate_document(document)
+    except RecursionError:
+        # Both the schema validator and the extension freeze recurse once per
+        # nesting level and reach the interpreter limit before orjson's own
+        # 1024-level guard would.  Surface that as the load boundary's error
+        # rather than a raw traceback (see ``docs/formats/minotaur-graph-v1.md``).
+        raise GraphLoadError(
+            "graph input nests deeper than the loader supports (extension objects)"
+        ) from None
+    # A matching sidecar vouches for these exact bytes having already passed
+    # schema and node-ID validation. Skip only those redundant checks on the
+    # trusted path; endpoint, duplicate, identity-origin, location, and
+    # evidence validation must still run for every load.
+    report: ValidationReport = validate_document(document, verify_node_ids=not _skip_schema)
     if not report.is_valid:
         details = "; ".join(f"{issue.json_pointer}: {issue.message}" for issue in report)
         raise GraphLoadError(f"graph semantic validation failed: {details}")

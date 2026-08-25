@@ -122,6 +122,7 @@ def validate_document(
     document: GraphDocument,
     *,
     source_text_by_path: Mapping[str, str] | None = None,
+    verify_node_ids: bool = True,
 ) -> ValidationReport:
     """Run every semantic check over an already constructed ``GraphDocument``.
 
@@ -132,6 +133,12 @@ def validate_document(
     that is absent from the mapping skips only that location's bounds check;
     every other check still runs. Supplying a non-``str`` value is a caller
     contract error and raises ``TypeError`` rather than producing a finding.
+    ``verify_node_ids`` defaults to ``True`` so direct callers retain the
+    complete semantic contract. A trusted graph-file load may set it to
+    ``False`` when its sidecar matches the exact input bytes: the sidecar
+    vouches for the bytes that were previously validated, so recomputing each
+    node digest would prove nothing new. This switch affects only the digest
+    check; all other semantic checks below remain active.
 
     Finding order is object-major and fixed:
 
@@ -159,7 +166,8 @@ def validate_document(
     seen_node_ids: set[str] = set()
     for index, node in enumerate(document.nodes):
         node_path: IssuePath = ("nodes", index)
-        _check_node_digest(node, node_path, issues)
+        if verify_node_ids:
+            _check_node_digest(node, node_path, issues)
         if node.id in seen_node_ids:
             issues.append(
                 ValidationIssue(

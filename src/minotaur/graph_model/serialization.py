@@ -17,22 +17,51 @@ Ordering rules (accepted 2026-08-16):
     list is normalized.
   - Locations sorted by ``(path, start.line, start.character, end.line,
     end.character)``.
-  - Dict keys sorted by JCS UTF-16 code-unit order (RFC 8785 §3.2.3).
+  - Dict keys sorted by Unicode code point, which equals JCS UTF-16 code-unit
+    order for every format-valid document (RFC 8785 §3.2.3).
 """
 
 from __future__ import annotations
 
 from typing import Any, cast
 
-from minotaur.graph_model._parsing import _jcs_serialize, _sort_keys_recursive
+from minotaur.graph_model._parsing import _jcs_serialize
 from minotaur.graph_model.document import GraphDocument
 
 
 def canonicalize(document: GraphDocument) -> dict[str, object]:
     """Return a canonical dict representation of the document.
 
-    Calls ``document.to_dict()`` then applies canonical ordering to the
-    resulting dict tree. The input document is not mutated.
+    Calls ``document.to_dict()`` then applies canonical array and dict-key
+    ordering to the resulting dict tree. The input document is not mutated.
+    """
+    return cast(dict[str, object], _sort_keys_code_point(_canonical_arrays(document)))
+
+
+def _sort_keys_code_point(value: object) -> object:
+    """Recursively order JSON object keys by Unicode code point.
+
+    Valid graph-model extension keys are restricted to the Basic Multilingual
+    Plane, where this order is identical to RFC 8785's UTF-16 code-unit order.
+    Arrays retain their order because semantic array ordering is performed by
+    ``_canonical_arrays`` before this dict-only normalization.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _sort_keys_code_point(item)
+            for key, item in sorted(value.items(), key=lambda entry: entry[0])
+        }
+    if isinstance(value, list | tuple):
+        return [_sort_keys_code_point(item) for item in value]
+    return value
+
+
+def _canonical_arrays(document: GraphDocument) -> dict[str, object]:
+    """Return a canonical dict with semantic arrays ordered.
+
+    This performs the array ordering shared by the public ``canonicalize``
+    view and the byte serializer. Dict-key ordering belongs to
+    ``canonicalize`` for dict consumers and to ``_jcs_serialize`` for bytes.
     """
     raw = document.to_dict()
     nodes = cast(list[dict[str, Any]], raw["nodes"])
@@ -54,16 +83,18 @@ def canonicalize(document: GraphDocument) -> dict[str, object]:
 
     raw["nodes"] = sorted(nodes, key=lambda n: n["id"])
 
-    return cast(dict[str, object], _sort_keys_recursive(raw))
+    return raw
 
 
 def serialize(document: GraphDocument) -> bytes:
     """Return the canonical JCS UTF-8 byte serialization of the document.
 
-    Equivalent to JCS-serializing the result of ``canonicalize(document)``.
-    Suitable for hashing and byte-level comparison.
+    Semantic arrays are ordered by ``_canonical_arrays``; dict keys are
+    ordered by the JCS encoder. This avoids the public ``canonicalize``
+    dict-key pass while producing the same bytes. Suitable for hashing and
+    byte-level comparison.
     """
-    return _jcs_serialize(canonicalize(document))
+    return _jcs_serialize(_canonical_arrays(document))
 
 
 def _location_sort_key(loc: dict[str, Any]) -> tuple[str, int, int, int, int]:

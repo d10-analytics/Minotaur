@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import json
-import struct
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import cast
+
+
+def type_error(context: str, value: object, expected: str) -> ValueError:
+    """Build the model-layer type rejection shared by every ``__post_init__``.
+
+    ``R-02`` makes the model layer the sole owner of the wire-format invariant
+    on every path, including in-process construction and
+    ``dataclasses.replace``.  The wire parsers type-check before constructing,
+    so these guards are the only thing standing between a hand-built object and
+    a serializer that would happily encode, say, ``"label": 1.5`` into bytes
+    that no reader can reproduce.  Every guard raises ``ValueError`` — the error
+    type the surrounding blocks already use — so a caller's ``except
+    ValueError`` keeps catching the whole class of construction failures.
+    """
+    return ValueError(f"{context} must be {expected}, got {type(value).__name__}")
 
 
 def reject_unpaired_surrogates(value: str, context: str) -> None:
@@ -40,10 +54,14 @@ def hashable_json(value: object) -> object:
 
 def reject_unknown_fields(data: dict[str, object], allowed: frozenset[str], context: str) -> None:
     """Reject fields that the v1 schema does not define for ``context``."""
-    unknown = data.keys() - allowed
-    if unknown:
-        fields = ", ".join(repr(field) for field in sorted(unknown))
-        raise ValueError(f"{context} has unsupported field(s): {fields}")
+    # ``dict_keys`` can compare itself to the allowed set without materializing
+    # a difference set.  Graph loading visits this helper for every model
+    # object, so keep the common, conforming path allocation-free and only
+    # build the set needed to render the diagnostic when a field is unknown.
+    if data.keys() <= allowed:
+        return
+    fields = ", ".join(repr(field) for field in sorted(data.keys() - allowed))
+    raise ValueError(f"{context} has unsupported field(s): {fields}")
 
 
 def validate_extensions(
@@ -52,6 +70,8 @@ def validate_extensions(
     """Validate the v1 extension-object shape shared by all model objects."""
     if extensions is None:
         return
+    if not isinstance(extensions, Mapping):
+        raise type_error("extensions", extensions, "an object")
     for name, value in extensions.items():
         if not isinstance(name, str) or not name:
             raise ValueError("extension names must be non-empty strings")
@@ -69,12 +89,7 @@ def freeze_extensions(
     validate_extensions(extensions)
     if extensions is None:
         return None
-    return MappingProxyType(
-        {
-            name: cast(Mapping[str, object], _freeze_json(value))
-            for name, value in extensions.items()
-        }
-    )
+    return cast(Mapping[str, Mapping[str, object]], _freeze_json(extensions))
 
 
 def serialize_extensions(
@@ -92,12 +107,114 @@ def serialize_extensions(
     return result
 
 
-def _freeze_json(value: object) -> object:
+def _json_pointer(segments: Sequence[str | int]) -> str:
+    """Render accumulated path segments as the JSON-pointer-style error path."""
+    return "".join(f"/{segment}" for segment in segments)
+
+
+# The range ``orjson`` decodes as an ``int``: a literal outside it comes back as
+# a float and is rejected by the model layer, so an in-process document must
+# not be allowed to serialize an integer that no reader can load back (M-4).
+_INT_MIN = -(2**63)
+_INT_MAX = 2**64 - 1
+_MAX_EXTENSION_DEPTH = 64
+
+
+def _freeze_json(
+    value: object,
+    path: list[str | int] | None = None,
+    *,
+    container_depth: int = -1,
+) -> object:
+    # ``path`` is a mutable stack of segments rather than a pre-rendered string:
+    # every extension value on a graph load walks this function, and the pointer
+    # text is only ever consumed by a ``raise``.  Pushing and popping a segment
+    # costs no allocation, whereas the previous eager ``f"{path}/{key}"`` built
+    # one throwaway string per key and per list index on the hot path.
+    if path is None:
+        path = []
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+        if container_depth > _MAX_EXTENSION_DEPTH:
+            raise ValueError(
+                f"extension nesting at {_json_pointer(path)} exceeds {_MAX_EXTENSION_DEPTH} levels"
+            )
+        frozen: dict[object, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                # ``json.dumps`` silently stringifies non-``str`` keys, which
+                # would let an in-process document serialize to bytes whose keys
+                # never round-trip back to the constructed value.
+                raise ValueError(
+                    f"extension object at {_json_pointer(path)} has a non-string key: {key!r}"
+                )
+            if not key:
+                # Mirrors the schema's ``propertyNames.minLength: 1`` on
+                # ``extensionObject`` so the trusted (schema-skipping) path and
+                # the full-validation path reach the same verdict.
+                raise ValueError(f"extension object at {_json_pointer(path)} has an empty key")
+            if max(key) > "\uffff":
+                raise ValueError(
+                    f"extension value at {_json_pointer([*path, key])} has a non-BMP key"
+                )
+            # A lone surrogate is a BMP code point, so the check above lets it
+            # through, yet UTF-8 cannot encode it and ``serialize`` would fail.
+            try:
+                key.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError(
+                    f"extension key {key!r} at {_json_pointer(path)} must not contain "
+                    "unpaired surrogate code points"
+                ) from None
+            path.append(key)
+            item_depth = (
+                container_depth + 1 if isinstance(item, Mapping | list | tuple) else container_depth
+            )
+            frozen[key] = _freeze_json(item, path, container_depth=item_depth)
+            path.pop()
+        return MappingProxyType(frozen)
     if isinstance(value, list | tuple):
-        return tuple(_freeze_json(item) for item in value)
-    return value
+        if container_depth > _MAX_EXTENSION_DEPTH:
+            raise ValueError(
+                f"extension nesting at {_json_pointer(path)} exceeds {_MAX_EXTENSION_DEPTH} levels"
+            )
+        frozen_items: list[object] = []
+        for index, item in enumerate(value):
+            path.append(index)
+            item_depth = (
+                container_depth + 1 if isinstance(item, Mapping | list | tuple) else container_depth
+            )
+            frozen_items.append(_freeze_json(item, path, container_depth=item_depth))
+            path.pop()
+        return tuple(frozen_items)
+    # Leaves are whitelisted, not blacklisted: the schema's ``extensionValue``
+    # admits exactly string | integer | boolean | null, and anything else
+    # (``set``, ``bytes``, ``Decimal`` ...) would only fail later inside the
+    # encoder, after the model claimed to own the invariant.
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if not _INT_MIN <= value <= _INT_MAX:
+            raise ValueError(
+                f"extension value at {_json_pointer(path)} must fit in 64 bits, got {value!r}"
+            )
+        return value
+    if isinstance(value, float):
+        raise ValueError(
+            f"extension value at {_json_pointer(path)} must be an integer, got float: {value!r}"
+        )
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError(
+                f"extension value at {_json_pointer(path)} must not contain "
+                "unpaired surrogate code points"
+            ) from None
+        return value
+    raise ValueError(
+        f"extension value at {_json_pointer(path)} must be a string, integer, boolean,"
+        f" null, array or object, got {type(value).__name__}"
+    )
 
 
 def _thaw_json(value: object) -> object:
@@ -119,95 +236,26 @@ def _thaw_json(value: object) -> object:
 #      trailing zeros after decimal point, no positive exponent sign).
 #   4. No whitespace between tokens.
 #
-# This implementation composes CPython's C ``json`` encoder with a
-# check-only walk (``_check_canonical_input``) that rejects floats (whose
-# C-encoder ``repr`` differs from JCS) and detects non-BMP dict keys
-# (whose code-point sort order differs from JCS's UTF-16 order).
-#
-# Common path (no astral keys, which is every Minotaur-produced graph):
-#   ``json.dumps(value, sort_keys=True, ...)`` — code-point key order
-#   equals UTF-16 order when no key has a surrogate pair.
-#
-# Astral path: ``json.dumps(_sort_keys_recursive(value), sort_keys=False,
-#   ...)`` — the existing UTF-16 walker orders keys, the C encoder keeps
-#   insertion order.
+# The model layer rejects non-integer extension values and non-BMP extension
+# keys before typed output reaches this encoder; this function is not a
+# validation boundary.
 #
 # The previous hand-written encoder now lives in
 # ``tests/test_graph_model_serialization.py`` as the oracle, ensuring
 # byte-identical output.
 
 
-def _check_canonical_input(value: object) -> bool:
-    """Walk *value* checking JCS preconditions; return whether any dict key is non-BMP.
-
-    Raises ``TypeError`` on any ``float`` leaf (JCS float serialization is
-    not implemented in Minotaur v1). Returns ``True`` if any dict key
-    contains a character outside the Basic Multilingual Plane, which
-    requires the astral-key sort path.
-    """
-    has_astral = False
-    stack: list[object] = [value]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, float):
-            raise TypeError(
-                f"JCS serialization does not support {type(current).__name__}; "
-                f"Minotaur v1 does not implement IEEE 754 float serialization"
-            )
-        elif isinstance(current, dict):
-            for key in current:
-                if not has_astral and len(key) != len(key.encode("utf-16-le")) // 2:
-                    has_astral = True
-                stack.append(current[key])
-        elif isinstance(current, list | tuple):
-            stack.extend(current)
-        # str, int, bool, None — no action needed
-    return has_astral
-
-
 def _jcs_serialize(value: object) -> bytes:
-    """Serialize a value to RFC 8785 JCS canonical form.
+    """Serialize typed model output to RFC 8785 JCS UTF-8 bytes.
 
-    Returns UTF-8 bytes because SHA-256 operates on bytes, and JCS defines
-    the canonical encoding as UTF-8.
+    Validation belongs to the model layer; this encoder only performs the
+    canonical JSON encoding and retains the C encoder's non-finite-number
+    guard.
     """
-    has_astral = _check_canonical_input(value)
-    if has_astral:
-        ordered = _sort_keys_recursive(value)
-        return json.dumps(
-            ordered, sort_keys=False, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
-    )
-
-
-def _utf16_sort_key(s: str) -> tuple[int, ...]:
-    """Produce a sort key based on UTF-16 code unit values.
-
-    RFC 8785 §3.2.3 specifies that object keys are sorted by comparing
-    their UTF-16 representations code unit by code unit. For BMP characters
-    this is the same as codepoint order, but supplementary characters
-    (U+10000+) are represented as surrogate pairs and sort differently
-    than their codepoint values would suggest.
-    """
-    raw = s.encode("utf-16-le")
-    return struct.unpack(f"<{len(raw) // 2}H", raw)
-
-
-def _sort_keys_recursive(value: object) -> object:
-    """Recursively sort all dict keys by JCS UTF-16 code-unit order.
-
-    Lists and tuples are both recursed into and returned as lists — JSON has a
-    single array type, so a tuple encodes exactly as a list does. Their element
-    order passes through unchanged: domain-specific array sorting (nodes,
-    relationships, evidence, locations) is the caller's responsibility.
-    """
-    if isinstance(value, dict):
-        return {
-            k: _sort_keys_recursive(v)
-            for k, v in sorted(value.items(), key=lambda item: _utf16_sort_key(item[0]))
-        }
-    if isinstance(value, list | tuple):
-        return [_sort_keys_recursive(item) for item in value]
-    return value
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")

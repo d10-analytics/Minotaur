@@ -74,8 +74,23 @@
     },
     "extensions": {
       "type": "object",
-      "propertyNames": {"minLength": 1},
-      "additionalProperties": {"type": "object"}
+      "propertyNames": {"minLength": 1, "pattern": "^[\\u0000-\\uFFFF]*$"},
+      "additionalProperties": {"$ref": "#/$defs/extensionObject"}
+    },
+    "extensionObject": {
+      "type": "object",
+      "propertyNames": {"minLength": 1, "pattern": "^[\\u0000-\\uFFFF]*$"},
+      "additionalProperties": {"$ref": "#/$defs/extensionValue"}
+    },
+    "extensionValue": {
+      "anyOf": [
+        {"type": "string"},
+        {"type": "integer"},
+        {"type": "boolean"},
+        {"type": "null"},
+        {"type": "array", "items": {"$ref": "#/$defs/extensionValue"}},
+        {"$ref": "#/$defs/extensionObject"}
+      ]
     },
     "producer": {
       "type": "object",

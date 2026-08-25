@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.loading import GraphLoadError, load_graph_bytes
 from minotaur.graph_model.location import Location, Position, Range
 
 EXAMPLE_PATH = Path(__file__).parents[1] / "examples/synthetic-graphs/small-workflow.json"
@@ -48,3 +49,23 @@ def test_parser_rejects_invalid_rfc3339_timestamp() -> None:
 
     with pytest.raises(ValueError, match="valid RFC 3339 UTC timestamp"):
         GraphDocument.from_dict(document)
+
+
+def test_trusted_load_still_rejects_float_extension_values() -> None:
+    document = _example_document()
+    nodes = document["nodes"]
+    assert isinstance(nodes, list)
+    nodes[0]["extensions"] = {"x": {"nested": {"value": 4.0}}}
+
+    with pytest.raises(GraphLoadError, match=r"/x/nested/value"):
+        load_graph_bytes(json.dumps(document).encode(), _skip_schema=True)
+
+
+def test_trusted_load_still_rejects_non_bmp_extension_keys() -> None:
+    document = _example_document()
+    nodes = document["nodes"]
+    assert isinstance(nodes, list)
+    nodes[0]["extensions"] = {"x": {"nested": {"\U0001f600": 1}}}
+
+    with pytest.raises(GraphLoadError, match=r"/x/nested/\U0001f600"):
+        load_graph_bytes(json.dumps(document).encode(), _skip_schema=True)

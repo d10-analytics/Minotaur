@@ -28,6 +28,7 @@ from minotaur.graph_model._parsing import (
     freeze_extensions,
     reject_unknown_fields,
     serialize_extensions,
+    type_error,
 )
 from minotaur.graph_model.evidence import Evidence
 from minotaur.graph_model.identity import is_valid_node_id_format
@@ -64,6 +65,20 @@ class Relationship:
     extensions: Mapping[str, Mapping[str, object]] | None = None
 
     def __post_init__(self) -> None:
+        # Field types first (R-02): in-process construction and
+        # dataclasses.replace() bypass from_dict's wire type checks.
+        if not isinstance(self.source, str):
+            raise type_error("relationship 'source'", self.source, "a string")
+        if not isinstance(self.target, str):
+            raise type_error("relationship 'target'", self.target, "a string")
+        if not isinstance(self.kind, str):
+            raise type_error("relationship 'kind'", self.kind, "a string")
+        if not isinstance(self.evidence, tuple):
+            raise type_error("relationship 'evidence'", self.evidence, "a tuple")
+        for index, record in enumerate(self.evidence):
+            if not isinstance(record, Evidence):
+                raise type_error(f"relationship 'evidence'[{index}]", record, "an Evidence")
+
         if not self.source:
             raise ValueError("relationship 'source' must be non-empty")
         if not self.target:

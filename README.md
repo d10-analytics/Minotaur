@@ -52,13 +52,15 @@ Queries run against any analyzed graph, including the checked-in example:
 ```console
 $ minotaur query callers minotaur.language_interpreter.selection._resolve_target \
     --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
-minotaur/language_interpreter/selection.py:48:20  minotaur.language_interpreter.selection.select_sources
+minotaur/language_interpreter/selection.py:46:20  minotaur.language_interpreter.selection.select_sources
 ```
 
 `--no-refresh` answers from the graph as checked in instead of re-analyzing
 drifted files and rewriting it. See the [query walkthrough](examples/query-walkthrough/)
 for a step-by-step tour with executed output, and the [query reference](docs/guides/query-reference.md)
-for the complete command and freshness details.
+for command options. The [freshness concept](docs/concepts/freshness.md) owns
+the complete order-of-operations contract, including what queries detect and
+what remains intentionally outside the freshness boundary.
 
 Current Python-analysis behavior and limits are described in the
 [Python analysis guide](docs/guides/analyze-python.md).
@@ -138,6 +140,11 @@ beyond that evidence belongs in documentation or, in the future, explicitly
 labeled human-authored annotations.
 
 ## Quick start
+
+If you have an existing editable install (`pip install -e ".[dev]"`) from
+before `orjson` became a required dependency, re-run that same install
+command so `orjson` is pulled in; otherwise `minotaur` commands fail with
+`ModuleNotFoundError: No module named 'orjson'`.
 
 Render an existing canonical graph locally with:
 

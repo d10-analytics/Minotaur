@@ -32,6 +32,7 @@ from minotaur.graph_model._parsing import (
     _jcs_serialize,
     reject_unknown_fields,
     reject_unpaired_surrogates,
+    type_error,
 )
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.provenance import IdentityBasis
@@ -101,6 +102,14 @@ class NodeIdentity:
     resource_key: str | None = None
 
     def __post_init__(self) -> None:
+        # Field types first (R-02): every field below feeds the node-ID
+        # identity input, and in-process construction reaches here without
+        # from_dict's wire type checks.
+        if not isinstance(self.basis, IdentityBasis):
+            raise type_error("identity basis", self.basis, "an IdentityBasis")
+        if not isinstance(self.namespace, str):
+            raise type_error("identity namespace", self.namespace, "a string")
+
         if not self.namespace:
             raise ValueError("identity namespace must be non-empty")
 
@@ -119,6 +128,8 @@ class NodeIdentity:
         for field_name in ("upstream_identifier", "originating_node", "resource_key"):
             value = getattr(self, field_name)
             if field_name in allowed:
+                if value is not None and not isinstance(value, str):
+                    raise type_error(f"identity '{field_name}'", value, "a string")
                 if not value:
                     raise ValueError(
                         f"{self.basis.value} basis requires a non-empty '{field_name}'"

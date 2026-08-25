@@ -26,6 +26,7 @@ from minotaur.graph_model._parsing import (
     reject_unknown_fields,
     reject_unpaired_surrogates,
     serialize_extensions,
+    type_error,
 )
 from minotaur.graph_model.identity import NodeIdentity, is_valid_node_id_format
 from minotaur.graph_model.location import Location, is_safe_path
@@ -103,6 +104,33 @@ class Node:
     extensions: Mapping[str, Mapping[str, object]] | None = None
 
     def __post_init__(self) -> None:
+        # Field types are checked before anything reads them (R-02): from_dict
+        # type-checks the wire, but in-process construction and
+        # dataclasses.replace() reach __post_init__ directly, and an untyped
+        # value here reaches the serializer and compute_node_id unchallenged.
+        if not isinstance(self.id, str):
+            raise type_error("node id", self.id, "a string")
+        if not isinstance(self.identity, NodeIdentity):
+            raise type_error("node identity", self.identity, "a NodeIdentity")
+        if not isinstance(self.node_class, NodeClass):
+            raise type_error("node_class", self.node_class, "a NodeClass")
+        if not isinstance(self.label, str):
+            raise type_error("node label", self.label, "a string")
+        if self.symbol_kind is not None and not isinstance(self.symbol_kind, str):
+            raise type_error("'symbol_kind'", self.symbol_kind, "a string when present")
+        if self.language is not None and not isinstance(self.language, str):
+            raise type_error("language", self.language, "a string when present")
+        if self.location is not None and not isinstance(self.location, Location):
+            raise type_error("'location'", self.location, "a Location when present")
+        if self.path is not None and not isinstance(self.path, str):
+            raise type_error("node path", self.path, "a string when present")
+        if self.reference_text is not None and not isinstance(self.reference_text, str):
+            raise type_error("'reference_text'", self.reference_text, "a string when present")
+        if self.expected_symbol_kind is not None and not isinstance(self.expected_symbol_kind, str):
+            raise type_error(
+                "'expected_symbol_kind'", self.expected_symbol_kind, "a string when present"
+            )
+
         # Wire-format check only — not digest verification.
         if not is_valid_node_id_format(self.id):
             raise ValueError(f"node id must match 'node:sha256:<64 hex chars>', got {self.id!r}")
@@ -132,6 +160,7 @@ class Node:
                 f"node path must be a safe repository-relative path, got {self.path!r}"
             )
         # symbol_kind and path feed the identity input; keep them JCS-encodable.
+        reject_unpaired_surrogates(self.label, "node label")
         if self.symbol_kind is not None:
             reject_unpaired_surrogates(self.symbol_kind, "'symbol_kind'")
         if self.path is not None:

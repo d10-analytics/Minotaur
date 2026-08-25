@@ -164,7 +164,45 @@ optional `import_root_hint` string, and the CLI stores
 `extensions["minotaur"]["selection"]` as the sorted root-relative targets
 supplied to the command (with `.` representing the root). These values are
 freshness and diagnostic metadata, not identity inputs or core graph facts.
-Extension values are flat objects of scalars and arrays.
+Extension values use a recursive grammar: an extension object maps non-empty
+BMP keys to strings, integers, booleans, null, arrays of extension values, or
+nested extension objects. Fractional values are not part of the v1 format; use
+a scaled integer when exact fractional semantics are needed, and document the
+scale in the extension's contract. Values that do not need arithmetic may be
+represented as strings. Extension integers are limited to
+`[-2^63, 2^64-1]`, the range that `orjson` decodes as integers.
+
+Extension metadata has a production nesting limit of 64 containers. The limit
+applies only to recursive JSON objects and arrays inside an `extensions`
+namespace value; it does not limit graph nodes, relationships, graph size,
+call or dependency depth, source nesting, query depth, or planning depth. For
+each namespace, do not count the graph document, its `extensions` object, or
+the namespace object itself. Count every object or array below that namespace:
+
+```json
+{
+  "extensions": {
+    "example": {
+      "settings": {
+        "stages": [
+          {"enabled": true}
+        ]
+      }
+    }
+  }
+}
+```
+
+Here `settings` is container 1, `stages` is container 2, and the object in the
+array is container 3; the `example` namespace object does not count. A value
+with 64 such nested containers is accepted. The 65th is rejected during
+construction and on both graph-loading paths with `extension nesting at
+/<pointer> exceeds 64 levels`.
+
+As of 2026-08-23, v1 constraints are tightened so that extension values cannot
+contain non-integer numbers and extension object keys must remain within the
+Basic Multilingual Plane. The model enforces these rules on every load and
+construction path, while the schema enforces them for third-party wire input.
 
 Array order does not change graph meaning. A canonical serializer sorts nodes
 by ID, relationships by `(source, target, kind)`, locations by path and range,
@@ -172,9 +210,37 @@ and evidence by its JCS representation after locations are normalized.
 
 ## Validation and fixtures
 
-Validation proceeds as parse, JSON Schema validation, model construction,
+Validation proceeds as UTF-8 decode with the required `orjson` runtime
+dependency, JSON Schema validation, model construction,
 semantic validation, and then canonical normalization. Invalid documents are
 not normalized or rendered.
+
+The loader uses `orjson` as its only JSON decoder; it does not fall back to the
+Python standard-library decoder. This keeps every load path on one acceptance
+boundary. `orjson` is therefore a required runtime dependency for any
+installation that loads graph JSON. It differs from the standard-library
+decoder in four ways, all of which reject input that is outside the v1 wire
+contract anyway:
+
+- `NaN`, `Infinity`, and `-Infinity` — accepted by the standard library, but
+  rejected while decoding, reported as `graph input is not valid JSON: ...`.
+- Lone-surrogate escapes such as `"\ud800"` — likewise rejected while
+  decoding with the same prefix.
+- Deeply nested extension objects or arrays — rejected at the deterministic
+  production limit of 64 containers described above, before either load path
+  reaches a stack-dependent validator cliff. `orjson` still rejects JSON that
+  itself exceeds its 1024-level decoder limit (`graph input is not valid JSON:
+  depth limit exceeded`); the loader also retains its `RecursionError` boundary
+  as a safeguard for other recursive validation paths.
+- Integer literals outside `[-2^63, 2^64-1]` — **not** a decode error.
+  `orjson` decodes such a literal as a floating-point value. The model layer
+  then rejects it as a non-integer, because every place a v1 document may hold
+  a number is guarded there: `line` and `character` by `Position`
+  (`'line' must be an integer, got float: ...`), and every extension value at
+  every depth by the extension freeze
+  (`extension value at /<pointer> must be an integer, got float: ...`). The
+  document is rejected either way; the message names the model layer rather
+  than the decoder.
 
 Semantic validation reports every independent finding with a JSON Pointer
 path and one of these codes: `node-id-mismatch`, `node-id-unverifiable`
@@ -214,8 +280,29 @@ characters followed by one newline — the SHA-256 digest of the graph file's
 exact bytes.
 
 The sidecar is a Minotaur-internal acceleration hint. Other consumers may
-ignore it entirely. Its absence or a digest mismatch does not indicate
-corruption; it only means the next user-facing graph-reading command will
-perform a full validation pass instead of a fast trusted load. Neither the
-graph's JSON bytes, its schema, nor its `format_version` are affected by
-sidecar presence or absence.
+ignore it entirely. A matching sidecar lets Minotaur trust that these exact
+bytes carry a correct wire shape and correct node IDs, so a subsequent
+user-facing read skips those two expensive checks while retaining all other
+semantic checks. The two writers establish that differently: a user-facing
+read stamps only after it has fully validated the bytes, whereas `analyze`
+stamps the graph it just serialized without running `validate_document` at
+all — its node IDs are correct by construction, because it computes each one
+with `compute_node_id` from the same document it writes. Its absence or a digest mismatch does not indicate
+corruption; it only means the next read performs the full validation pass
+instead of a fast trusted load. The accepted risk (D-07) is that a graph whose
+contents were altered and whose sidecar was regenerated can bypass node-ID
+recomputation on the trusted path. A matching sidecar is trusted regardless of
+who wrote it: directory write access, not Minotaur authorship, is the trust
+boundary. Use `--validate` for untrusted input. One known instance bounds
+the exposure (review of `spec/trusted-graph-load`, 2026-08-23): a 17-mutation
+fuzz of stamped, schema-violating graphs found 16 rejected identically on the
+trusted path by `from_dict` and `validate_document`; the sole divergence was
+`"language": null`, which the schema rejects but `from_dict` accepts as the
+absent-optional state — benign, but it is the concrete shape the accepted
+risk names.
+
+The first read of an unstamped graph writes an untracked
+`<GRAPH>.sha256` beside it. If a downstream repository commits its graph, it
+should commit the sidecar with it or add `*.json.sha256` to its `.gitignore`.
+Neither the graph's JSON bytes, its schema, nor its `format_version` are
+affected by sidecar presence or absence.

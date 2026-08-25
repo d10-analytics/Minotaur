@@ -10,10 +10,16 @@ Produces a fixed-width table of wall-clock measurements for:
      sidecar, so this query takes the trusted, schema-skipping path — see
      ``_benchmark_query``).
   3. In-process component breakdown of one ``load_graph_file`` call:
-     UTF-8 decode, sidecar read + ``graph_digest``, ``json.loads``,
-     ``GraphDocument.from_dict`` (AC-14), ``validate_document`` (AC-13),
-     ``drift()`` under the same ``--no-refresh`` sequence the query path
-     uses, and the ``GraphIndex.build`` the query path performs.
+     UTF-8 decode, sidecar read + ``graph_digest``, ``orjson.loads``,
+     ``GraphDocument.from_dict`` (AC-14), ``validate_document (trusted)``
+     (AC-13, ``verify_node_ids=False`` — what a stamped load actually pays,
+     matching ``load_graph_bytes``'s ``verify_node_ids=not _skip_schema``),
+     ``validate_document (untrusted)`` (the default, node-ID verifying pass a
+     full-validation load pays), ``drift()`` under the same ``--no-refresh``
+     sequence the query path uses, and the ``GraphIndex.build`` the query path
+     performs.  ``components sum`` adds up the rows the end-to-end trusted
+     query row pays, so the untrusted ``validate_document`` row is measured and
+     printed but excluded from that sum.
   4. ``serialize`` on the loaded document with SHA-256 of output (AC-10)
 
 The script never writes to the caller-supplied ``--graph`` path: analyze and
@@ -32,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import subprocess
 import sys
 import tempfile
@@ -40,12 +45,22 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+import orjson
+
+# ``components sum`` must mirror the end-to-end trusted query row, which runs
+# ``validate_document(document, verify_node_ids=False)``. The untrusted row is
+# measured for visibility (R-06/D-17 label the gate row "trusted") but is not
+# part of that sum.
+_SUM_EXCLUDED_COMPONENTS = frozenset({"validate_document (untrusted)"})
+
 
 class _SubprocessError(Exception):
     """Raised when a benchmarked subprocess exits non-zero."""
 
 
-def _time_subprocess(args: list[str], cwd: Path, repeats: int) -> list[float]:
+def _time_subprocess(
+    args: list[str], cwd: Path, repeats: int, *, query_symbol: str | None = None
+) -> list[float]:
     """Run *args* as a subprocess *repeats* times, returning wall-clock seconds."""
     times: list[float] = []
     for _ in range(repeats):
@@ -59,27 +74,12 @@ def _time_subprocess(args: list[str], cwd: Path, repeats: int) -> list[float]:
                 f"  {' '.join(args)}\n"
                 f"  stderr: {stderr}\n"
             )
+        if query_symbol is not None and result.stdout in (b"", b"no definitions\n"):
+            raise _SubprocessError(
+                f"Query for symbol {query_symbol!r} matched no definitions:\n  {' '.join(args)}\n"
+            )
         times.append(elapsed)
     return times
-
-
-def _find_query_symbol(graph_path: Path) -> str:
-    """Pick a symbol to query from the graph's nodes.
-
-    Prefers 'main' if present, otherwise uses the first symbol-kind node.
-    """
-    raw = json.loads(graph_path.read_bytes())
-    for node in raw.get("nodes", []):
-        identity = node.get("identity", {})
-        if identity.get("symbol") == "main":
-            return "main"
-    # Fall back to any symbol
-    for node in raw.get("nodes", []):
-        identity = node.get("identity", {})
-        symbol = identity.get("symbol")
-        if symbol:
-            return symbol
-    return "main"
 
 
 def _benchmark_analyze(python: str, root: Path, graph_path: Path, repeats: int) -> list[float]:
@@ -116,7 +116,7 @@ def _benchmark_query(
         str(root),
         "--no-refresh",
     ]
-    return _time_subprocess(args, cwd=root, repeats=repeats)
+    return _time_subprocess(args, cwd=root, repeats=repeats, query_symbol=symbol)
 
 
 def _benchmark_components(graph_path: Path, root: Path, repeats: int) -> dict[str, list[float]]:
@@ -136,9 +136,10 @@ def _benchmark_components(graph_path: Path, root: Path, repeats: int) -> dict[st
     components: dict[str, list[float]] = {
         "utf-8 decode": [],
         "sidecar_read+digest": [],
-        "json.loads": [],
+        "orjson.loads": [],
         "GraphDocument.from_dict": [],
-        "validate_document": [],
+        "validate_document (trusted)": [],
+        "validate_document (untrusted)": [],
         "drift (--no-refresh)": [],
         "GraphIndex.build": [],
     }
@@ -160,20 +161,28 @@ def _benchmark_components(graph_path: Path, root: Path, repeats: int) -> dict[st
         _digest = graph_digest(raw_bytes)
         components["sidecar_read+digest"].append(time.perf_counter() - start)
 
-        # json.loads
+        # orjson.loads
         start = time.perf_counter()
-        raw = json.loads(decoded)
-        components["json.loads"].append(time.perf_counter() - start)
+        raw = orjson.loads(decoded)
+        components["orjson.loads"].append(time.perf_counter() - start)
 
         # GraphDocument.from_dict
         start = time.perf_counter()
         document = GraphDocument.from_dict(raw)
         components["GraphDocument.from_dict"].append(time.perf_counter() - start)
 
-        # validate_document
+        # validate_document on the trusted path: load_graph_bytes passes
+        # verify_node_ids=not _skip_schema, so a stamped graph skips the
+        # node-ID digest recomputation (R-08).
         start = time.perf_counter()
-        report = validate_document(document)
-        components["validate_document"].append(time.perf_counter() - start)
+        report = validate_document(document, verify_node_ids=False)
+        components["validate_document (trusted)"].append(time.perf_counter() - start)
+
+        # validate_document on the full-validation path: the default, which
+        # recomputes every node ID.
+        start = time.perf_counter()
+        validate_document(document)
+        components["validate_document (untrusted)"].append(time.perf_counter() - start)
 
         if not report.is_valid:
             sys.stderr.write(f"Warning: graph has {len(report.issues)} validation issues\n")
@@ -262,6 +271,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="repository root for analyze and query commands",
     )
     parser.add_argument(
+        "--symbol",
+        default="main",
+        help="symbol to query in the definitions measurement (default: main)",
+    )
+    parser.add_argument(
         "--repeats",
         type=int,
         default=3,
@@ -281,6 +295,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = arguments.root.resolve()
     repeats = arguments.repeats
     verbose = arguments.verbose
+    symbol = arguments.symbol
     python = sys.executable
 
     if not graph_path.is_file():
@@ -319,7 +334,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
             # 2. query definitions (AC-05), against the freshly analyzed temp graph.
-            symbol = _find_query_symbol(temp_graph_path)
             sys.stderr.write(f"Benchmarking: query definitions {symbol} ...\n")
             query_times = _benchmark_query(python, temp_graph_path, root, symbol, repeats)
             rows.append(
@@ -336,7 +350,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             components = _benchmark_components(temp_graph_path, root, repeats)
             for name, times in components.items():
                 rows.append((name, _median(times), min(times), max(times)))
-            components_sum = sum(_median(times) for times in components.values())
+            components_sum = sum(
+                _median(times)
+                for name, times in components.items()
+                if name not in _SUM_EXCLUDED_COMPONENTS
+            )
             rows.append(("components sum", components_sum, components_sum, components_sum))
 
             # 4. serialize (AC-10)

@@ -127,6 +127,26 @@ def test_validation_is_deterministic_and_leaves_document_unchanged() -> None:
     assert document.to_dict() == before
 
 
+def test_node_id_verification_is_optional_but_defaults_to_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trusted-load switch skips only digest verification.
+
+    Keep the default strict so direct validator callers and the byte-loading
+    path still detect mismatched IDs. The explicit opt-out is the narrow
+    trusted-sidecar contract exercised by the loading tests.
+    """
+
+    def _boom(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("node-ID verification was unexpectedly called")
+
+    monkeypatch.setattr(validation_module, "verify_node_id", _boom)
+
+    with pytest.raises(AssertionError, match="unexpectedly called"):
+        validate_document(_valid_document())
+    assert validate_document(_valid_document(), verify_node_ids=False).is_valid
+
+
 def test_json_pointer_escapes_per_rfc_6901() -> None:
     issue = ValidationIssue(IssueCode.NODE_ID_MISMATCH, ("nodes", 3, "a/b", "c~d"), "m")
 

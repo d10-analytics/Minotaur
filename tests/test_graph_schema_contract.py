@@ -10,7 +10,7 @@ import pytest
 
 from minotaur import cli
 from minotaur.graph_model.document import GraphDocument
-from minotaur.graph_model.loading import _FORMAT_CHECKER, schema
+from minotaur.graph_model.loading import _FORMAT_CHECKER, GraphLoadError, load_graph_bytes, schema
 from minotaur.graph_model.validation import IssueCode, validate_document
 
 ROOT = Path(__file__).parents[1]
@@ -310,3 +310,147 @@ def test_fresh_analyze_output_satisfies_published_v1_schema(tmp_path: Path) -> N
 
     # Sanity: the graph is non-trivial — at least one node was emitted
     assert len(raw["nodes"]) > 0, "analyze produced an empty graph"
+
+
+def _wire_with_extensions(extensions: dict[str, dict[str, object]]) -> dict[str, object]:
+    document = _small_workflow()
+    nodes = _nodes(document)
+    nodes[0]["extensions"] = extensions
+    return document
+
+
+@pytest.mark.parametrize(
+    ("extensions", "instance_path"),
+    [
+        ({"x": {"f": 1.5}}, "On instance['nodes'][0]['extensions']['x']['f']"),
+        ({"\U0001f600": {"f": 1}}, "On instance['nodes'][0]['extensions']"),
+        ({"x": {"\U0001d11e": 1}}, "On instance['nodes'][0]['extensions']['x']"),
+    ],
+)
+def test_schema_rejects_non_integer_or_non_bmp_extension_wire_values(
+    extensions: dict[str, dict[str, object]], instance_path: str
+) -> None:
+    with pytest.raises(GraphLoadError) as error:
+        load_graph_bytes(json.dumps(_wire_with_extensions(extensions)).encode())
+    assert instance_path in str(error.value)
+
+
+def test_model_guard_owns_float_rejection_when_schema_accepts_json_integer() -> None:
+    document = _wire_with_extensions({"x": {"f": 4.0}})
+    _validator().validate(document)
+
+    with pytest.raises(GraphLoadError, match=r"/x/f"):
+        load_graph_bytes(json.dumps(document).encode())
+
+
+def test_schema_verdicts_are_unchanged_for_all_graph_fixtures() -> None:
+    from test_graph_model_serialization import _collect_graph_fixtures
+
+    expected_invalid = {
+        "tests/fixtures/minotaur-graph-v1/invalid/invalid-generated-at.json": {"$.generated_at"},
+        "tests/fixtures/minotaur-graph-v1/invalid/missing-curated-rule.json": {
+            "$.relationships[0].evidence[0]"
+        },
+        "tests/fixtures/minotaur-graph-v1/invalid/unsafe-path.json": {"$.nodes[0].path"},
+        "tests/fixtures/minotaur-graph-v1/invalid/wrong-position-type.json": {
+            "$.nodes[0].location.range.start.character"
+        },
+    }
+    fixtures = _collect_graph_fixtures()
+    assert len(fixtures) == 9
+    for fixture_path in fixtures:
+        relative = str(fixture_path.relative_to(ROOT))
+        errors = sorted(
+            error.json_path
+            for error in _validator().iter_errors(json.loads(fixture_path.read_text()))
+        )
+        assert errors == sorted(expected_invalid.get(relative, set())), relative
+
+
+def test_format_document_states_the_extension_integer_range() -> None:
+    """The extension-value format text must match the decoder's integer range."""
+    format_document = (ROOT / "docs/formats/minotaur-graph-v1.md").read_text(encoding="utf-8")
+    grammar_start = format_document.index("Extension values use a recursive grammar:")
+    grammar_end = format_document.index("\n\n", grammar_start)
+    grammar = format_document[grammar_start:grammar_end]
+    assert "extension object" in grammar
+    assert "[-2^63, 2^64-1]" in grammar
+
+
+def test_extension_schema_identity_and_property_name_pattern_are_pinned() -> None:
+    loaded_schema = schema()
+    assert loaded_schema["$id"] == "urn:minotaur:schemas:minotaur-graph:0.1.0"
+    defs = loaded_schema["$defs"]
+    assert isinstance(defs, dict)
+    assert defs["extensions"] == {
+        "type": "object",
+        "propertyNames": {"minLength": 1, "pattern": "^[\\u0000-\\uFFFF]*$"},
+        "additionalProperties": {"$ref": "#/$defs/extensionObject"},
+    }
+    assert defs["extensionObject"] == {
+        "type": "object",
+        "propertyNames": {"minLength": 1, "pattern": "^[\\u0000-\\uFFFF]*$"},
+        "additionalProperties": {"$ref": "#/$defs/extensionValue"},
+    }
+    assert defs["extensionValue"] == {
+        "anyOf": [
+            {"type": "string"},
+            {"type": "integer"},
+            {"type": "boolean"},
+            {"type": "null"},
+            {"type": "array", "items": {"$ref": "#/$defs/extensionValue"}},
+            {"$ref": "#/$defs/extensionObject"},
+        ]
+    }
+
+    accepted = _small_workflow()
+    accepted["extensions"] = {"a\n": {"value": 1}}
+    _validator().validate(accepted)
+    rejected = _small_workflow()
+    rejected["extensions"] = {"\U0001d11e\n": {"value": 1}}
+    with pytest.raises(jsonschema.ValidationError):
+        _validator().validate(rejected)
+
+
+# ---------------------------------------------------------------------------
+# R-02 / M-2: the trusted path and the schema reach the same verdict on keys
+# ---------------------------------------------------------------------------
+#
+# `extensionObject.propertyNames.minLength: 1` is a schema rule, and the
+# trusted load skips the schema.  Without the matching model-layer rule an
+# empty extension key would be admitted by exactly the path that has no second
+# opinion, so the two layers are asserted to agree case by case.
+
+_KEY_SHAPE_CASES: list[tuple[str, dict[str, dict[str, object]], bool]] = [
+    # (id, extensions, schema-valid?)
+    ("empty_key_nested", {"x": {"": 1}}, False),
+    ("empty_key_deep", {"x": {"y": {"": 1}}}, False),
+    ("empty_key_in_list", {"x": {"values": [{"": 1}]}}, False),
+    ("empty_top_level_name", {"": {"f": 1}}, False),
+    ("non_bmp_key_nested", {"x": {"\U0001d11e": 1}}, False),
+    ("ordinary_key", {"x": {"a": 1}}, True),
+    ("newline_key", {"x": {"a\n": 1}}, True),
+    ("astral_string_value", {"x": {"note": "\U0001d11e"}}, True),
+]
+
+
+@pytest.mark.parametrize(
+    ("extensions", "schema_valid"),
+    [(case[1], case[2]) for case in _KEY_SHAPE_CASES],
+    ids=[case[0] for case in _KEY_SHAPE_CASES],
+)
+def test_extension_key_verdicts_agree_on_trusted_and_full_validation_paths(
+    extensions: dict[str, dict[str, object]], schema_valid: bool
+) -> None:
+    document = _wire_with_extensions(extensions)
+    content = json.dumps(document).encode()
+
+    schema_errors = list(_validator().iter_errors(document))
+    assert bool(schema_errors) is not schema_valid, [e.message for e in schema_errors]
+
+    for skip_schema in (False, True):
+        if schema_valid:
+            load_graph_bytes(content, _skip_schema=skip_schema)
+        else:
+            with pytest.raises(GraphLoadError):
+                load_graph_bytes(content, _skip_schema=skip_schema)

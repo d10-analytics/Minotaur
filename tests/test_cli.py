@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import stat
 import subprocess
 import sys
 import time
+from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -47,6 +47,15 @@ def _run(
 def _paths(output: Path) -> set[str]:
     graph = json.loads(output.read_text(encoding="utf-8"))
     return {node["path"] for node in graph["nodes"] if node["node_class"] == "file"}
+
+
+def _distribution_is_installed() -> bool:
+    """Report whether this interpreter has the Minotaur distribution installed."""
+    try:
+        metadata.distribution("minotaur")
+    except metadata.PackageNotFoundError:
+        return False
+    return True
 
 
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -174,12 +183,22 @@ def test_output_preflight_and_module_console_entry_points_match(tmp_path: Path) 
     refused = _run(root, output, root)
     collision = _run(root, source, source, force=True)
     replaced = _run(root, output, root, force=True)
-    console_script = shutil.which("minotaur")
-    if console_script is None:
+    console_script = Path(sys.executable).with_name("minotaur")
+    if os.name == "nt" and not console_script.is_file():
+        console_script = console_script.with_suffix(".exe")
+    if not console_script.is_file():
+        # When the running interpreter *is* the environment minotaur is
+        # installed into, the console script must exist beside it; a skip
+        # there would silently retire the only entry-point parity proof.
+        if _distribution_is_installed():
+            pytest.fail(
+                f"minotaur is installed in {sys.executable}'s environment"
+                f" but {console_script} is missing"
+            )
         pytest.skip("minotaur console script is not installed")
     console = subprocess.run(
         [
-            console_script,
+            str(console_script),
             "analyze",
             "--root",
             str(root),
@@ -201,6 +220,21 @@ def test_output_preflight_and_module_console_entry_points_match(tmp_path: Path) 
     assert json.loads(output.read_text(encoding="utf-8")) == json.loads(
         (tmp_path / "console.json").read_text(encoding="utf-8")
     )
+
+
+def test_distribution_predicate_distinguishes_an_editable_install_from_an_absent_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The console-script parity guard must follow installation metadata, not import paths."""
+
+    monkeypatch.setattr(metadata, "distribution", lambda name: object())
+    assert _distribution_is_installed()
+
+    def missing_distribution(name: str) -> metadata.Distribution:
+        raise metadata.PackageNotFoundError
+
+    monkeypatch.setattr(metadata, "distribution", missing_distribution)
+    assert not _distribution_is_installed()
 
 
 def test_analyze_skips_clean_graph_and_rewrites_after_content_drift(tmp_path: Path) -> None:

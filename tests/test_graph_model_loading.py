@@ -13,11 +13,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from test_graph_model_serialization import (
+    _collect_loadable_graph_fixtures,
+    _oracle_serialize,
+)
 
 from minotaur import cli
 from minotaur.graph_model.loading import (
@@ -28,6 +33,7 @@ from minotaur.graph_model.loading import (
     load_graph_file,
     stamp_path,
 )
+from minotaur.graph_model.serialization import canonicalize, serialize
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -194,6 +200,177 @@ class TestLazyCanonical:
 
 
 # ---------------------------------------------------------------------------
+# AC-14 and AC-15 proof: the decoder boundary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fixture_path",
+    _collect_loadable_graph_fixtures(),
+    ids=lambda path: str(path.relative_to(Path(__file__).parents[1])),
+)
+def test_strict_load_fixtures_round_trip_through_oracle(fixture_path: Path) -> None:
+    """Every strict-load fixture uses the one decoder and canonical serializer."""
+    content = fixture_path.read_bytes()
+    loaded = load_graph_bytes(content)
+    assert serialize(loaded.document) == _oracle_serialize(canonicalize(loaded.document))
+
+
+def test_python_workflow_graph_round_trips_to_its_committed_bytes() -> None:
+    """The committed canonical workflow graph remains byte-stable after loading."""
+    path = Path(__file__).parents[1] / "examples/python-workflow/minotaur-graph.json"
+    loaded = load_graph_bytes(path.read_bytes())
+    assert serialize(loaded.document) == path.read_bytes()
+
+
+def _workflow_with_extension_literal(literal: str) -> bytes:
+    """Return a valid graph document with a caller-supplied JSON literal."""
+    path = Path(__file__).parents[1] / "examples/synthetic-graphs/small-workflow.json"
+    text = path.read_text(encoding="utf-8")
+    marker = '"relationships":'
+    extension = '"extensions":{"test":{"value":' + literal + "}},"
+    return text.replace(marker, extension + marker, 1).encode()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'{"value":NaN}',
+        b'{"value":Infinity}',
+        b'{"value":-Infinity}',
+        b'{"value":"\\ud800"}',
+        b"[" * 1100 + b"]" * 1100,
+    ],
+    ids=["nan", "infinity", "negative-infinity", "lone-surrogate", "nesting-depth"],
+)
+def test_orjson_rejections_surface_as_graph_load_errors(content: bytes) -> None:
+    """Every form the decoder itself refuses becomes one GraphLoadError.
+
+    The 1024-level nesting limit is `orjson`-specific and has no
+    standard-library equivalent; it must surface through the same boundary
+    rather than escaping as a raw decoder or recursion error.
+    """
+    with pytest.raises(GraphLoadError, match=r"^graph input is not valid JSON: "):
+        load_graph_bytes(content)
+
+
+@pytest.mark.parametrize(
+    ("depth", "trusted", "accepted"),
+    [
+        (64, False, True),
+        (64, True, True),
+        (65, False, False),
+        (65, True, False),
+    ],
+    ids=[
+        "untrusted-64",
+        "trusted-64",
+        "untrusted-65",
+        "trusted-65",
+    ],
+)
+def test_extension_nesting_bounds_surface_as_load_errors(
+    depth: int, trusted: bool, accepted: bool, tmp_path: Path
+) -> None:
+    """The public trusted and untrusted file paths enforce the format bound."""
+    literal = '{"n":' * depth + "0" + "}" * depth
+    content = _workflow_with_extension_literal(literal)
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_bytes(content)
+    if trusted:
+        stamp_path(graph_path).write_text(graph_digest(content) + "\n", encoding="utf-8")
+    if accepted:
+        loaded = load_graph_file(graph_path)
+        assert loaded.document.extensions is not None
+        assert loaded.validated is not trusted
+        return
+    with pytest.raises(GraphLoadError) as error:
+        load_graph_file(graph_path)
+    assert str(error.value) == "extension nesting at /test/value" + "/n" * 64 + " exceeds 64 levels"
+
+
+def test_decoder_nesting_limit_remains_a_graph_load_error() -> None:
+    """The decoder still reports pathological non-extension JSON nesting cleanly."""
+    with pytest.raises(GraphLoadError, match=r"^graph input is not valid JSON: "):
+        load_graph_bytes(b"[" * 1100 + b"]" * 1100, _skip_schema=True)
+
+
+def _workflow_with_position_line(literal: str) -> bytes:
+    """Return the workflow graph with its first `"line"` value replaced."""
+    path = Path(__file__).parents[1] / "examples/synthetic-graphs/small-workflow.json"
+    text = path.read_text(encoding="utf-8")
+    marker = '"line":'
+    index = text.index(marker) + len(marker)
+    end = index
+    while text[end] not in ",}":
+        end += 1
+    return (text[:index] + literal + text[end:]).encode()
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (
+            _workflow_with_extension_literal(str(2**70)),
+            r"extension value at /test/value must be an integer, got float: ",
+        ),
+        (
+            _workflow_with_position_line(str(2**70)),
+            r"'line' must be an integer, got float: ",
+        ),
+    ],
+    ids=["extension-value", "position-line"],
+)
+def test_integers_beyond_64_bits_are_rejected_by_the_model_layer(
+    content: bytes, expected: str
+) -> None:
+    """An oversized integer literal is still rejected — one layer further in.
+
+    `orjson` decodes such a literal as a float rather than raising, so the
+    loader no longer walks the decoded document looking for it. Every place a
+    v1 document may carry a number is guarded by the model layer instead, so
+    the document is rejected with that layer's message rather than
+    "graph input is not valid JSON: integer out of range".
+    """
+    with pytest.raises(GraphLoadError, match=expected):
+        load_graph_bytes(content)
+
+
+def test_loading_performs_no_recursive_walk_over_the_decoded_document() -> None:
+    """The out-of-range integer walk is gone, not merely unused (H-1/M-3)."""
+    source = (Path(__file__).parents[1] / "src/minotaur/graph_model/loading.py").read_text()
+    assert "_contains_out_of_range_integer" not in source
+    assert "integer out of range" not in source
+
+
+def test_invalid_utf8_message_is_unchanged() -> None:
+    with pytest.raises(GraphLoadError, match=r"^graph input is not valid UTF-8: "):
+        load_graph_bytes(b"\xff")
+
+
+def test_json_array_message_is_unchanged() -> None:
+    with pytest.raises(GraphLoadError, match="^graph input must contain a JSON object$"):
+        load_graph_bytes(b"[]")
+
+
+def test_load_boundary_uses_orjson_without_a_decoder_fallback() -> None:
+    source = (Path(__file__).parents[1] / "src/minotaur/graph_model/loading.py").read_text()
+    decode_start = source.index("raw: Any =")
+    decode_end = source.index("if not isinstance(raw, dict):", decode_start)
+    assert "orjson.loads(decoded)" in source[decode_start:decode_end]
+    assert "raw: Any = json.loads" not in source[decode_start:decode_end]
+    assert "json.loads(text)" in source
+
+
+def test_orjson_is_a_declared_runtime_dependency() -> None:
+    # A text match rather than ``tomllib``: that module is 3.11+, and importing
+    # it would drop this whole module from a run on the declared 3.10 floor.
+    text = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    dependencies = text.split("dependencies = [", 1)[1].split("]", 1)[0]
+    assert re.search(r'^\s*"orjson>=[\d.]+",?\s*$', dependencies, re.MULTILINE)
+
+
+# ---------------------------------------------------------------------------
 # Helpers for stamp-aware tests
 # ---------------------------------------------------------------------------
 
@@ -207,6 +384,25 @@ def _stamped_graph(tmp_path: Path) -> tuple[Path, bytes]:
     graph_path.write_bytes(data)
     stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
     return graph_path, data
+
+
+def _stamped_single_node_graph(tmp_path: Path, *, alter_id: bool) -> Path:
+    """Create an isolated graph for the sidecar trust-risk proof.
+
+    The altered node has no relationship endpoint, so a trusted load reaches
+    the node-ID decision instead of failing first on dangling structure. The
+    sidecar is regenerated after the edit to model the documented trust risk.
+    """
+    raw = json.loads(_EXAMPLE_GRAPH.read_text(encoding="utf-8"))
+    raw["nodes"] = [raw["nodes"][0]]
+    raw["relationships"] = []
+    if alter_id:
+        raw["nodes"][0]["id"] = "node:sha256:" + "0" * 64
+    data = json.dumps(raw, separators=(",", ":")).encode("utf-8")
+    graph_path = tmp_path / "single-node.json"
+    graph_path.write_bytes(data)
+    stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+    return graph_path
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +449,37 @@ class TestStampAwareLoader:
         assert loaded.validated is True
         assert loaded.digest == hashlib.sha256(data).hexdigest()
 
+    def test_trusted_load_skips_only_node_id_verification(self, tmp_path: Path) -> None:
+        """A matching stamp skips IDs; missing stamps and ``--validate`` do not."""
+        graph_path, _data = _stamped_graph(tmp_path)
+
+        with patch(
+            "minotaur.graph_model.validation.verify_node_id",
+            side_effect=AssertionError("node-ID verification was called"),
+        ):
+            trusted = load_graph_file(graph_path)
+            assert trusted.validated is False
+
+            stamp_path(graph_path).unlink()
+            with pytest.raises(AssertionError, match="node-ID verification was called"):
+                load_graph_file(graph_path)
+
+            stamp_path(graph_path).write_text(
+                graph_digest(graph_path.read_bytes()) + "\n", encoding="utf-8"
+            )
+            with pytest.raises(AssertionError, match="node-ID verification was called"):
+                load_graph_file(graph_path, validate=True)
+
+    def test_regenerated_sidecar_accepts_altered_id_until_validate(self, tmp_path: Path) -> None:
+        """The documented trusted-sidecar risk is executable and bounded."""
+        graph_path = _stamped_single_node_graph(tmp_path, alter_id=True)
+
+        trusted = load_graph_file(graph_path)
+        assert trusted.validated is False
+
+        with pytest.raises(GraphLoadError, match="does not match the digest recomputed"):
+            load_graph_file(graph_path, validate=True)
+
     def test_load_graph_bytes_always_validates(self) -> None:
         """``load_graph_bytes`` runs the schema seam even for stamped bytes."""
         data = _EXAMPLE_GRAPH.read_bytes()
@@ -272,6 +499,78 @@ class TestStampAwareLoader:
         assert seam_called
         assert loaded.validated is True
         assert loaded.digest == hashlib.sha256(data).hexdigest()
+
+    def test_trusted_load_keeps_relationship_endpoint_validation(self, tmp_path: Path) -> None:
+        """A matching stamp does not suppress non-ID semantic checks."""
+        raw = {
+            "format": "minotaur-graph",
+            "format_version": "0.1.0",
+            "coordinate_encoding": "utf-8",
+            "nodes": [],
+            "relationships": [
+                {
+                    "source": f"node:sha256:{'a' * 64}",
+                    "target": f"node:sha256:{'b' * 64}",
+                    "kind": "contains",
+                    "evidence": [{"provenance": "static-analysis"}],
+                }
+            ],
+        }
+        data = json.dumps(raw).encode("utf-8")
+        graph_path = tmp_path / "dangling-trusted.json"
+        graph_path.write_bytes(data)
+        stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+
+        with pytest.raises(
+            GraphLoadError,
+            match="graph semantic validation failed:.*relationship source",
+        ):
+            load_graph_file(graph_path)
+
+    def test_trusted_load_keeps_duplicate_node_validation(self, tmp_path: Path) -> None:
+        """Skipping digest recomputation does not suppress duplicate detection."""
+        raw = json.loads(_EXAMPLE_GRAPH.read_text(encoding="utf-8"))
+        raw["nodes"][1]["id"] = raw["nodes"][0]["id"]
+        data = json.dumps(raw, separators=(",", ":")).encode("utf-8")
+        graph_path = tmp_path / "duplicate-node-trusted.json"
+        graph_path.write_bytes(data)
+        stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+
+        with pytest.raises(
+            GraphLoadError,
+            match="graph semantic validation failed:.*node id .* already declared",
+        ):
+            load_graph_file(graph_path)
+
+    def test_trusted_load_keeps_location_validation(self, tmp_path: Path) -> None:
+        """Skipping digest recomputation does not suppress range validation."""
+        raw = json.loads(_EXAMPLE_GRAPH.read_text(encoding="utf-8"))
+        raw["nodes"][0]["location"]["range"] = {
+            "start": {"line": 3, "character": 0},
+            "end": {"line": 2, "character": 0},
+        }
+        data = json.dumps(raw, separators=(",", ":")).encode("utf-8")
+        graph_path = tmp_path / "reversed-location-trusted.json"
+        graph_path.write_bytes(data)
+        stamp_path(graph_path).write_text(graph_digest(data) + "\n", encoding="utf-8")
+
+        with pytest.raises(
+            GraphLoadError,
+            match="graph semantic validation failed:.*range end .* precedes start",
+        ):
+            load_graph_file(graph_path)
+
+    def test_validate_flag_keeps_schema_validation_active(self, tmp_path: Path) -> None:
+        """The explicit full-validation escape hatch still runs the schema seam."""
+        graph_path, _data = _stamped_graph(tmp_path)
+        with (
+            patch(
+                "minotaur.graph_model.loading._validate_wire_shape",
+                side_effect=AssertionError("schema seam must run under --validate"),
+            ),
+            pytest.raises(AssertionError, match="schema seam must run under --validate"),
+        ):
+            load_graph_file(graph_path, validate=True)
 
 
 # ---------------------------------------------------------------------------

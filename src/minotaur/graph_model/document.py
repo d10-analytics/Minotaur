@@ -26,7 +26,9 @@ from datetime import datetime
 from minotaur.graph_model._parsing import (
     freeze_extensions,
     reject_unknown_fields,
+    reject_unpaired_surrogates,
     serialize_extensions,
+    type_error,
 )
 from minotaur.graph_model.evidence import Producer
 from minotaur.graph_model.location import Location
@@ -86,6 +88,14 @@ class SourceControl:
     branch: str | None = None
 
     def __post_init__(self) -> None:
+        # `system` needs no separate type guard: the literal comparison below
+        # already rejects every non-"git" value, of any type, with the message
+        # that names the v1 constraint.
+        if self.commit is not None and not isinstance(self.commit, str):
+            raise type_error("git commit", self.commit, "a string when present")
+        if self.branch is not None and not isinstance(self.branch, str):
+            raise type_error("branch", self.branch, "a string when present")
+
         if self.system != "git":
             raise ValueError(f"v1 only supports 'git' source control, got {self.system!r}")
 
@@ -100,6 +110,8 @@ class SourceControl:
 
         if self.branch is not None and not self.branch:
             raise ValueError("branch must be non-empty when present")
+        if self.branch is not None:
+            reject_unpaired_surrogates(self.branch, "branch")
 
     def to_dict(self) -> dict[str, str]:
         result: dict[str, str] = {"system": self.system}
@@ -156,6 +168,33 @@ class GraphDocument:
     extensions: Mapping[str, Mapping[str, object]] | None = None
 
     def __post_init__(self) -> None:
+        # Field types first (R-02): in-process construction and
+        # dataclasses.replace() bypass from_dict's wire type checks.
+        if not isinstance(self.coordinate_encoding, CoordinateEncoding):
+            raise type_error(
+                "coordinate_encoding", self.coordinate_encoding, "a CoordinateEncoding"
+            )
+        if not isinstance(self.nodes, tuple):
+            raise type_error("document 'nodes'", self.nodes, "a tuple")
+        for index, node in enumerate(self.nodes):
+            if not isinstance(node, Node):
+                raise type_error(f"document 'nodes'[{index}]", node, "a Node")
+        if not isinstance(self.relationships, tuple):
+            raise type_error("document 'relationships'", self.relationships, "a tuple")
+        for index, relationship in enumerate(self.relationships):
+            if not isinstance(relationship, Relationship):
+                raise type_error(
+                    f"document 'relationships'[{index}]", relationship, "a Relationship"
+                )
+        if self.generated_by is not None and not isinstance(self.generated_by, Producer):
+            raise type_error("'generated_by'", self.generated_by, "a Producer when present")
+        if self.generated_at is not None and not isinstance(self.generated_at, str):
+            raise type_error("generated_at", self.generated_at, "a string when present")
+        if self.source_control is not None and not isinstance(self.source_control, SourceControl):
+            raise type_error(
+                "'source_control'", self.source_control, "a SourceControl when present"
+            )
+
         if self.generated_at is not None:
             if not _RFC3339_UTC_RE.match(self.generated_at):
                 raise ValueError(

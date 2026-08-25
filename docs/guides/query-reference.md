@@ -35,66 +35,22 @@ common options:
 --graph GRAPH --root ROOT [--no-refresh] [--json]
 ```
 
-If a selected file changes, disappears, or a new supported file appears below
-a recorded directory target, Minotaur performs a full re-analysis of the
-recorded selection and atomically rewrites `GRAPH`. It then answers from the
-new snapshot. A refresh that produced source diagnostics returns exit status
-`1`, just like `analyze`; a successful refresh returns `0`.
+`--no-refresh` answers from the existing graph and reports drift without
+rewriting it; omit it when current source facts are required. `--json` exposes
+the `refreshed` and `stale` fields alongside query results. `context` reads
+current source without refreshing, while `diff` compares graph files and does
+not inspect a source root. For the complete order-of-operations contract,
+including detected and intentionally undetected changes, see
+[Graph freshness and snapshot order](../concepts/freshness.md).
 
-A refresh is never silent. Before rewriting `GRAPH`, Minotaur announces it on
-stderr and lists every drifted root-relative path:
-
-```text
-minotaur: refreshed graph (2 drifted paths)
-minotaur: stale: src/example.py
-minotaur: stale: src/removed.py
-```
-
-If every recorded target has been deleted, the refresh still runs and rewrites
-`GRAPH` as an empty graph, so queries report an empty result at exit `0` rather
-than answering from the prior snapshot; the recorded selection is kept so the
-paths are picked up again if the files return.
-
-`--no-refresh` answers from the existing graph and prints the same one warning
-per drifted path, without the `refreshed graph` line:
-
-```text
-minotaur: stale: src/example.py
-```
-
-This is useful when an agent deliberately needs the prior snapshot. It does
-not make stale facts current. Graphs made before selection metadata was
-recorded cannot be refreshed automatically; analyze them again first.
-
-For a stale `unreferenced --text-fallback --no-refresh` query, Minotaur keeps
-the result graph-only: it does not scan current source text or require selected
-source paths to remain readable. The stale warnings identify why optional
-current-source text mentions are unavailable.
-
-`context` always reads the current source without refreshing the graph. It
-compares the requested file's recorded hash and labels the excerpt when the
-file changed. `diff` compares two graph files and therefore has no source-root
-freshness check.
-
-### First-read validation cost
-
-The first user-facing graph-reading command (`query`, `diff`, or `visualize`)
-that reads a graph Minotaur did not just write — a graph produced before
-sidecar stamping was introduced, a graph from another tool, or one whose
-sidecar was removed — performs a full JSON Schema validation and stamps the
-result. This validation happens once: subsequent reads of the same graph file
-find the stamp and skip schema validation, so they are fast. No manual step is
-required; the first graph-reading command handles it automatically. An
-`analyze` clean-skip deliberately does not create a sidecar, so it is not this
-stamping step.
-
-### `--validate` flag
-
-`callers`, `definitions`, `impact`, `unreferenced`, `context`, `diff`, and
-`visualize` accept `--validate`. When set, the command forces a full JSON
-Schema validation regardless of sidecar state. This is useful for verifying
-graph integrity after external edits or transfers. Without the flag, a matching
-sidecar is sufficient and schema validation is skipped.
+The `--validate` option on graph-reading commands forces full schema and
+node-ID validation even when a matching sidecar would authorize the trusted
+load path. Use it after external graph or sidecar edits; the concept page
+documents the accepted trusted-sidecar risk and the `analyze --force` escape
+hatch for source-selection changes. A pre-sidecar or foreign graph pays that
+full validation once, on the first graph-reading command that touches it; see
+["First-read validation cost"](../concepts/freshness.md#first-read-validation-cost)
+for the exact command list and the sidecar it writes.
 
 ## Query commands
 
@@ -230,6 +186,11 @@ cannot say which one was meant.
 
 JSON records contain `path`, `line`, `symbol`, `kind`, and `text_mention`.
 An empty result prints `no unreferenced symbols` and still exits `0`.
+
+`--text-fallback` is suppressed on a stale graph queried with `--no-refresh`,
+since that mode intentionally answers from graph relationships only; see the
+["stale graph + `--text-fallback` + `--no-refresh`" row](../concepts/freshness.md)
+in the freshness contract.
 
 ### Compare snapshots
 
