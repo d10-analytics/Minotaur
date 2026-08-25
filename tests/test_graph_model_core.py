@@ -229,16 +229,23 @@ def test_controlled_vocabularies_allow_core_and_namespaced_extensions_only() -> 
 def test_kind_resolvers_reject_unpaired_surrogates_before_diagnostics(
     resolve, context: str
 ) -> None:
+    # "\ud800" is a lone high surrogate — valid in a Python str but not
+    # encodable to UTF-8, so interpolating it into an error message would
+    # crash any logger or handler that encodes the exception text.
     with pytest.raises(ValueError) as error:
         resolve("\ud800")
 
     assert str(error.value) == f"{context} must not contain unpaired surrogate code points"
+    # Proves the error text itself is safe to encode — raises UnicodeEncodeError if not.
     str(error.value).encode("utf-8")
 
 
 @pytest.mark.parametrize(
     ("operation", "message"),
     [
+        # Each pair tests one model entry point with "\ud800" (a lone surrogate).
+        # Direct construction exercises __post_init__; dataclasses.replace
+        # exercises the same path but bypasses __init__ keyword validation.
         (
             lambda: Relationship(
                 source="node:sha256:" + "a" * 64,
@@ -289,6 +296,7 @@ def test_model_kind_fields_reject_unpaired_surrogates(operation, message: str) -
         operation()
 
     assert str(error.value) == message
+    # Proves the error text itself is safe to encode — raises UnicodeEncodeError if not.
     str(error.value).encode("utf-8")
 
 
