@@ -202,6 +202,7 @@ def test_controlled_vocabularies_allow_core_and_namespaced_extensions_only() -> 
     assert resolve_symbol_kind("function") == SymbolKind.FUNCTION
     assert resolve_symbol_kind("example.org:template") == "example.org:template"
     assert resolve_relationship_kind("calls") == RelationshipKind.CALLS
+    assert resolve_relationship_kind("example.org:depends") == "example.org:depends"
 
     with pytest.raises(ValueError) as relationship_error:
         resolve_relationship_kind("depends-on")
