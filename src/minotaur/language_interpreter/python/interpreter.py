@@ -490,6 +490,10 @@ def _signature_nodes(
     them here keeps top-level functions and methods consistent with nested ones
     instead of making attribution depend on nesting depth.
 
+    Decorator expressions remain attributed to the decorated function or method
+    for the outward edge to the decorator; ``_decorator_references`` separately
+    records the enclosing scope's inward reference to the decorated symbol.
+
     Annotations count as references for the same reason calls do:
     ``def f(x: Handler)`` is a real dependency on ``Handler``, and an agent
     asking whether a symbol is still used must be told about it before
