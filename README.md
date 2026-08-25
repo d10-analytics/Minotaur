@@ -4,7 +4,9 @@
 > evidence-backed software architecture maps.
 
 Minotaur helps engineers explore how software is structured and which
-relationships can be established from source code. It interprets supported
+relationships can be established from source code. Its purpose and the
+boundary that follows from it are stated in
+[Purpose and boundary](docs/concepts/purpose.md). It interprets supported
 languages, normalizes those facts into one canonical graph, and creates
 portable interactive visualizations.
 
