@@ -160,7 +160,7 @@
     ]
   },
   "src": {
-    "selection": "minotaur",
+    "selection": "minotaur/cli.py",
     "queries": [
       {
         "name": "definitions-many",
