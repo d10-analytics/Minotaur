@@ -322,9 +322,9 @@ def test_every_non_control_query_answers_on_the_committed_fixture_root(
     workload = json.loads((ROOT / "scripts/equivalence_queries.json").read_text())[
         FIXTURE_ROOT.name
     ]
-    controls = sum(1 for item in workload["queries"] if item.get("expect") == "error")
-    assert controls >= 2
-    assert int(answered) == int(expected) - controls, summary
+    non_answers = sum(1 for item in workload["queries"] if item.get("expect") in {"empty", "error"})
+    assert non_answers >= 4
+    assert int(answered) == int(expected) - non_answers, summary
     assert int(expected) == len(workload["queries"]), summary
     assert "DIFFERENT" not in result.stdout
 
@@ -553,8 +553,24 @@ def test_drift_row_survives_a_scratch_path_that_collides_with_the_old_placeholde
     assert "artifact=Drift: IDENTICAL" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("major", "minor", "refused"),
+    [
+        (3, 8, True),
+        (3, 9, True),
+        (3, 10, True),
+        (3, 11, False),
+        (3, 100, False),
+        (4, 0, False),
+    ],
+)
 def test_import_probe_runs_from_each_root_and_refuses_an_old_interpreter(
-    harness: types.ModuleType, baseline_src: Path, monkeypatch: pytest.MonkeyPatch
+    harness: types.ModuleType,
+    baseline_src: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    major: int,
+    minor: int,
+    refused: bool,
 ) -> None:
     """The isolation proof must run in the comparison's own configuration
     (``cwd`` = the root) and reject interpreters that ignore PYTHONSAFEPATH."""
@@ -571,13 +587,132 @@ def test_import_probe_runs_from_each_root_and_refuses_an_old_interpreter(
     assert harness._check_import(side, cwd=baseline_src) is None
     assert seen == [baseline_src]
 
-    def old_python(side, args, *, cwd=None, timeout=300):
+    def reported_python(side, args, *, cwd=None, timeout=300):
         location = str(ROOT / "src" / "minotaur" / "__init__.py").encode()
-        return harness.Completed(0, b"(3, 10)\n" + location, b"")
+        return harness.Completed(0, f"{major} {minor}\n".encode() + location, b"")
 
-    monkeypatch.setattr(harness, "_run", old_python)
+    monkeypatch.setattr(harness, "_run", reported_python)
     error = harness._check_import(side, cwd=baseline_src)
-    assert error is not None and "PYTHONSAFEPATH" in error and "3.11+" in error
+    if refused:
+        assert error is not None and "PYTHONSAFEPATH" in error and "3.11+" in error
+    else:
+        assert error is None
+
+
+def test_an_empty_human_result_is_vacuous_for_an_answering_query(
+    baseline_src: Path, tmp_path: Path
+) -> None:
+    """Matching ``no definitions`` output is not an answered query."""
+
+    root = _source_root(tmp_path)
+    queries = _workload_file(
+        tmp_path,
+        root.name,
+        queries=[
+            {
+                "name": "definitions-empty",
+                "command": "definitions",
+                "args": ["this symbol cannot exist"],
+                "variants": {},
+            }
+        ],
+    )
+    result = _run(
+        "--baseline-src",
+        str(baseline_src),
+        "--branch-src",
+        str(ROOT / "src"),
+        "--queries",
+        str(queries),
+        "--root",
+        str(root),
+    )
+    assert result.returncode == 1
+    assert "query=definitions-empty" in result.stderr
+    assert "VACUOUS expected=ok" in result.stderr
+
+
+def test_an_expected_empty_result_must_be_the_command_literal(
+    baseline_src: Path, tmp_path: Path
+) -> None:
+    root = _source_root(tmp_path)
+    queries = _workload_file(
+        tmp_path,
+        root.name,
+        queries=[
+            {
+                "name": "callers-empty",
+                "command": "callers",
+                "args": ["app.main"],
+                "expect": "empty",
+                "variants": {"no_refresh": True},
+            }
+        ],
+    )
+    result = _run(
+        "--baseline-src",
+        str(baseline_src),
+        "--branch-src",
+        str(ROOT / "src"),
+        "--queries",
+        str(queries),
+        "--root",
+        str(root),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "queries_answered=0/1" in result.stdout
+
+
+def test_visualize_failure_on_both_sides_is_not_comparable(
+    harness: types.ModuleType,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def successful_analyze(side, root, output, *args, **kwargs):
+        output.write_bytes(b"graph")
+        return harness.Completed(0, b"", b"")
+
+    monkeypatch.setattr(harness, "_analyze", successful_analyze)
+    monkeypatch.setattr(
+        harness, "_run", lambda *args, **kwargs: harness.Completed(3, b"", b"broken")
+    )
+    monkeypatch.setattr(harness, "_compare_queries", lambda *args: True)
+    monkeypatch.setattr(harness, "_compare_drift", lambda *args: True)
+    root = tmp_path / "root"
+    ok, tally = harness._compare_root(
+        (
+            harness.Side("baseline", tmp_path / "baseline"),
+            harness.Side("branch", tmp_path / "branch"),
+        ),
+        root,
+        harness.RootQueries(selection=".", queries=[]),
+        tmp_path / "scratch",
+    )
+    output = capsys.readouterr().out
+    assert not ok
+    assert f"root={root} analyze: IDENTICAL" in output
+    assert f"root={root} visualize: FAILED not comparable" in output
+    assert tally.comparisons == 3
+
+
+def test_partial_optional_workload_bindings_are_rejected(harness: types.ModuleType) -> None:
+    arguments = harness._parser().parse_args(
+        [
+            "--baseline-src",
+            "/baseline",
+            "--branch-src",
+            "/branch",
+            "--optional-root",
+            "/first",
+            "--optional-root",
+            "/second",
+            "--workload",
+            "One",
+        ]
+    )
+    with pytest.raises(ValueError, match="1 --workload keys for 2 optional roots"):
+        harness._root_list(arguments, harness.Side("baseline", Path("/baseline")))
 
 
 def test_scenario_symbol_comes_from_the_root_workload(harness: types.ModuleType) -> None:
@@ -612,11 +747,22 @@ def test_committed_workloads_cover_every_d06_root_with_real_error_controls() -> 
 
     data = json.loads((SCRIPT.with_name("equivalence_queries.json")).read_text(encoding="utf-8"))
     assert set(data) == {"equivalence_root", "src", "Onyx"}
+    assert data["src"]["selection"] == "minotaur/cli.py"
     for key, workload in data.items():
         names = {item["name"] for item in workload["queries"]}
         assert "definitions-invalid" not in names, key
         errors = {item["name"] for item in workload["queries"] if item.get("expect") == "error"}
         assert {"context-malformed-site", "impact-negative-depth"} <= errors, key
+        empties = {item["name"] for item in workload["queries"] if item.get("expect") == "empty"}
+        assert {"callers-zero", "definitions-no-match"} <= empties, key
+
+    onyx = data["Onyx"]["queries"]
+    callers_zero = next(item for item in onyx if item["name"] == "callers-zero")
+    assert callers_zero["args"] == ["analysis_io.resolve_analysis_h5_path"]
+    assert callers_zero["expect"] == "empty"
+    for name in ("unreferenced-graph", "unreferenced-text"):
+        item = next(item for item in onyx if item["name"] == name)
+        assert item["args"][0] == "admin_tool"
 
 
 def test_a_run_that_compares_nothing_fails(baseline_src: Path, tmp_path: Path) -> None:
@@ -689,6 +835,28 @@ def test_scenarios_cover_freshness_and_both_sidecar_trust_states(
     assert "step=h-f copies=f" in result.stdout
     assert "step=f graph SHA-256 before/after: IDENTICAL" in result.stdout
     assert "step=g graph SHA-256 before/after: IDENTICAL" in result.stdout
+
+
+def test_sidecar_scenarios_reject_a_step_that_did_not_set_up_its_stamp(
+    harness: types.ModuleType,
+    baseline_src: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The scenario setup itself must be observable, not only its query output."""
+
+    workload = harness._load_queries(SCRIPT.with_name("equivalence_queries.json"))[
+        FIXTURE_ROOT.name
+    ]
+    monkeypatch.setattr(harness, "_apply_sidecar_step", lambda letter, graph: None)
+    ok = harness._run_scenarios(
+        (harness.Side("baseline", baseline_src), harness.Side("branch", ROOT / "src")),
+        [(FIXTURE_ROOT, workload)],
+        tmp_path / "scenarios",
+    )
+    assert not ok
+    assert "step=i sidecar setup" in capsys.readouterr().err
 
 
 def test_sidecar_steps_actually_change_the_stamp(harness: types.ModuleType, tmp_path: Path) -> None:
