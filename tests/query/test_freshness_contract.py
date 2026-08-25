@@ -36,7 +36,7 @@ def _document(output: Path):
 
 
 def test_new_python_outside_recorded_target_is_not_detected(tmp_path: Path) -> None:
-    """Freshness row: a new .py outside recorded targets is intentionally ignored."""
+    """docs/concepts/freshness.md — `analyze` a target, add a new `.py` outside every recorded directory."""  # noqa: E501
     root = tmp_path / "source"
     package = _write(root, "pkg/known.py", "value = 1\n").parent
     output = tmp_path / "graph.json"
@@ -50,7 +50,7 @@ def test_new_python_outside_recorded_target_is_not_detected(tmp_path: Path) -> N
 
 
 def test_non_python_edit_is_not_detected(tmp_path: Path) -> None:
-    """Freshness row: edits to unsupported non-.py files do not create drift."""
+    """docs/concepts/freshness.md — `analyze`, edit a non-`.py` file."""
     root = tmp_path / "source"
     source = _write(root, "app.py", "value = 1\n")
     notes = _write(root, "notes.txt", "before\n")
@@ -65,7 +65,7 @@ def test_non_python_edit_is_not_detected(tmp_path: Path) -> None:
 
 
 def test_excluded_and_hidden_directory_edits_are_not_detected(tmp_path: Path) -> None:
-    """Freshness row: excluded and hidden directories remain outside discovery."""
+    """docs/concepts/freshness.md — `analyze`, then add or edit a file under an excluded or hidden directory that was never explicitly selected."""  # noqa: E501
     root = tmp_path / "source"
     _write(root, "app.py", "value = 1\n")
     output = tmp_path / "graph.json"
@@ -79,7 +79,7 @@ def test_excluded_and_hidden_directory_edits_are_not_detected(tmp_path: Path) ->
 
 
 def test_out_of_root_symlink_edit_is_not_detected(tmp_path: Path) -> None:
-    """Freshness row: a file reached only through an escaping symlink is ignored."""
+    """docs/concepts/freshness.md — `analyze`, edit a file reached only through an out-of-root symlink."""  # noqa: E501
     root = tmp_path / "source"
     outside = tmp_path / "outside"
     _write(root, "app.py", "value = 1\n")
@@ -98,7 +98,7 @@ def test_out_of_root_symlink_edit_is_not_detected(tmp_path: Path) -> None:
 def test_parse_failed_file_has_no_changed_or_missing_finding_but_new_file_is_added(
     tmp_path: Path,
 ) -> None:
-    """Freshness row: parse failures have no hash, while a new directory file is added."""
+    """docs/concepts/freshness.md — `analyze` a file with a parse failure, then edit that file."""
     root = tmp_path / "source"
     broken = _write(root, "broken.py", "def unfinished(\n")
     output = tmp_path / "graph.json"
@@ -114,7 +114,7 @@ def test_parse_failed_file_has_no_changed_or_missing_finding_but_new_file_is_add
 
 
 def test_graph_without_recorded_selection_refuses_automatic_refresh(tmp_path: Path, capsys) -> None:
-    """Freshness row: a graph without selection metadata exits 2 instead of guessing."""
+    """docs/concepts/freshness.md — Load a graph with no recorded selection and query after source drift."""  # noqa: E501
     root = tmp_path / "source"
     source = _write(root, "app.py", "def foo():\n    return 1\n")
     output = tmp_path / "graph.json"
@@ -146,7 +146,7 @@ def test_graph_without_recorded_selection_refuses_automatic_refresh(tmp_path: Pa
 def test_regenerated_sidecar_trusts_hand_edited_graph_until_validate(
     tmp_path: Path, capsys
 ) -> None:
-    """Freshness row: a regenerated sidecar trusts edits that --validate exposes."""
+    """docs/concepts/freshness.md — Hand-edit graph bytes and regenerate its sidecar, then read it."""  # noqa: E501
     root = tmp_path / "source"
     _write(root, "app.py", "def foo():\n    return 1\n")
     output = tmp_path / "graph.json"
@@ -199,8 +199,95 @@ def test_regenerated_sidecar_trusts_hand_edited_graph_until_validate(
     assert "does not match the digest recomputed from its identity" in captured.err
 
 
+def test_stale_sidecar_detects_schema_shape_and_node_identity_but_not_labels(
+    tmp_path: Path, capsys
+) -> None:
+    """docs/concepts/freshness.md — Hand-edit graph bytes and leave the sidecar untouched, then read it."""  # noqa: E501
+    root = tmp_path / "source"
+    _write(root, "app.py", "def foo():\n    return 1\n")
+
+    def graph_with_stale_sidecar(name: str) -> tuple[Path, dict[str, object]]:
+        output = tmp_path / name
+        assert _analyze(root, output, root) == 0
+        raw = json.loads(output.read_text(encoding="utf-8"))
+        stamp_path(output).write_text(f"{graph_digest(output.read_bytes())}\n", encoding="ascii")
+        return output, raw
+
+    label_graph, label_raw = graph_with_stale_sidecar("label.json")
+    label_raw["nodes"][0]["label"] = "hand-edited-label"
+    label_graph.write_text(json.dumps(label_raw), encoding="utf-8")
+    assert (
+        cli.main(
+            [
+                "query",
+                "definitions",
+                "foo",
+                "--graph",
+                str(label_graph),
+                "--root",
+                str(root),
+                "--no-refresh",
+            ]
+        )
+        == 0
+    )
+    label_capture = capsys.readouterr()
+    assert label_capture.err == ""
+    assert (
+        stamp_path(label_graph).read_text(encoding="ascii")
+        == f"{graph_digest(label_graph.read_bytes())}\n"
+    )
+
+    identity_graph, identity_raw = graph_with_stale_sidecar("identity.json")
+    original_id = identity_raw["nodes"][0]["id"]
+    edited_id = "node:sha256:" + "0" * 64
+    identity_raw["nodes"][0]["id"] = edited_id
+    for relationship in identity_raw["relationships"]:
+        if relationship["source"] == original_id:
+            relationship["source"] = edited_id
+        if relationship["target"] == original_id:
+            relationship["target"] = edited_id
+    identity_graph.write_text(json.dumps(identity_raw), encoding="utf-8")
+    assert (
+        cli.main(
+            [
+                "query",
+                "definitions",
+                "foo",
+                "--graph",
+                str(identity_graph),
+                "--root",
+                str(root),
+                "--no-refresh",
+            ]
+        )
+        == 2
+    )
+    assert "does not match the digest recomputed from its identity" in capsys.readouterr().err
+
+    shape_graph, shape_raw = graph_with_stale_sidecar("shape.json")
+    del shape_raw["nodes"][0]["label"]
+    shape_graph.write_text(json.dumps(shape_raw), encoding="utf-8")
+    assert (
+        cli.main(
+            [
+                "query",
+                "definitions",
+                "foo",
+                "--graph",
+                str(shape_graph),
+                "--root",
+                str(root),
+                "--no-refresh",
+            ]
+        )
+        == 2
+    )
+    assert "'label' is a required property" in capsys.readouterr().err
+
+
 def test_query_ignores_selection_mismatch_but_analyze_reconciles_it(tmp_path: Path, capsys) -> None:
-    """Freshness row: query drift ignores targets, while analyze reconciles them."""
+    """docs/concepts/freshness.md — Query a graph whose bytes are clean but its selection metadata differs from the requested analyze targets."""  # noqa: E501
     root = tmp_path / "source"
     selected = _write(root, "selected.py", "def foo():\n    return 1\n")
     package = _write(root, "pkg/other.py", "def bar():\n    return 2\n").parent
@@ -257,7 +344,7 @@ def test_query_ignores_selection_mismatch_but_analyze_reconciles_it(tmp_path: Pa
 def test_edit_after_drift_is_not_detected_between_drift_and_answer(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    """Freshness row: an edit after drift leaves the public answer on the old snapshot."""
+    """docs/concepts/freshness.md — An edit lands after `drift()` and before the answer is printed."""  # noqa: E501
     root = tmp_path / "source"
     source = _write(root, "app.py", "def foo():\n    return 1\n")
     output = tmp_path / "graph.json"
@@ -293,7 +380,7 @@ def test_edit_after_drift_is_not_detected_between_drift_and_answer(
 
 
 def test_diff_does_not_call_source_drift(tmp_path: Path, monkeypatch, capsys) -> None:
-    """Freshness row: diff compares snapshots and never calls the source drift guard."""
+    """docs/concepts/freshness.md — Run `query diff`."""
     root = tmp_path / "source"
     source = _write(root, "app.py", "def foo():\n    return 1\n")
     old = tmp_path / "old.json"
@@ -313,7 +400,7 @@ def test_diff_does_not_call_source_drift(tmp_path: Path, monkeypatch, capsys) ->
 def test_context_does_not_call_source_drift_and_no_refresh_is_a_noop(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    """Freshness row: context ignores drift and its no-refresh flag changes nothing."""
+    """docs/concepts/freshness.md — Run `query context` and Run `query context --no-refresh`."""
     root = tmp_path / "source"
     source = _write(root, "app.py", "def foo():\n    return 1\n")
     output = tmp_path / "graph.json"
@@ -342,3 +429,60 @@ def test_context_does_not_call_source_drift_and_no_refresh_is_a_noop(
     assert cli.main([*common, "--no-refresh"]) == 0
     with_flag = capsys.readouterr()
     assert (with_flag.out, with_flag.err) == (without_flag.out, without_flag.err)
+
+
+def test_visualize_source_root_does_not_call_source_drift(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """docs/concepts/freshness.md — Run `visualize --source-root` after source drift."""
+    root = tmp_path / "source"
+    source = _write(
+        root,
+        "app.py",
+        "def bar():\n    return 1\n\ndef foo():\n    return bar()\n",
+    )
+    graph = tmp_path / "graph.json"
+    html = tmp_path / "graph.html"
+    assert _analyze(root, graph, root) == 0
+    source.write_text(
+        "# current source is stale\n" + source.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("visualize must not call drift")
+
+    monkeypatch.setattr(cli, "drift", fail)
+    assert (
+        cli.main(
+            [
+                "visualize",
+                "--input",
+                str(graph),
+                "--output",
+                str(html),
+                "--source-root",
+                str(root),
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert "current source is stale" in html.read_text(encoding="utf-8")
+
+
+def test_freshness_document_links_and_first_read_anchor_resolve() -> None:
+    """Pins the public links to docs/concepts/freshness.md and its first-read anchor."""
+    repository = Path(__file__).resolve().parents[2]
+    freshness = repository / "docs/concepts/freshness.md"
+    links = {
+        repository / "README.md": "docs/concepts/freshness.md",
+        repository / "docs/guides/query-reference.md": "../concepts/freshness.md",
+        repository / "docs/guides/analyze-python.md": "../concepts/freshness.md",
+    }
+
+    for document, relative_link in links.items():
+        assert relative_link in document.read_text(encoding="utf-8")
+        assert (document.parent / relative_link).resolve() == freshness.resolve()
+    assert "### First-read validation cost" in freshness.read_text(encoding="utf-8")
