@@ -369,6 +369,13 @@ def _analyze_module(
     )
     for statement in module.tree.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _decorator_references(
+                statement,
+                module.module_id,
+                declarations[f"{module.name}.{statement.name}"],
+                module.path,
+                relationships,
+            )
             _calls(
                 statement.body,
                 declarations,
@@ -382,6 +389,13 @@ def _analyze_module(
                 prefix_nodes=_signature_nodes(statement),
             )
         elif isinstance(statement, ast.ClassDef):
+            _decorator_references(
+                statement,
+                module.module_id,
+                declarations[f"{module.name}.{statement.name}"],
+                module.path,
+                relationships,
+            )
             # A class body executes at definition time in the class scope, so
             # its non-method statements (dataclass field defaults, aliases such
             # as `handler = staticmethod(helper)`, descriptor construction) are
@@ -408,6 +422,13 @@ def _analyze_module(
             )
             for member in statement.body:
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    _decorator_references(
+                        member,
+                        declarations[f"{module.name}.{statement.name}"],
+                        declarations[f"{module.name}.{statement.name}.{member.name}"],
+                        module.path,
+                        relationships,
+                    )
                     _calls(
                         member.body,
                         declarations,
@@ -421,6 +442,24 @@ def _analyze_module(
                         statement.name,
                         prefix_nodes=_signature_nodes(member),
                     )
+
+
+def _decorator_references(
+    statement: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    source: str,
+    target: str,
+    path: str,
+    relationships: dict[tuple[str, str, str], list[Location]],
+) -> None:
+    """Record each decorator as an enclosing-scope use of its definition."""
+    for decorator in statement.decorator_list:
+        _append(
+            relationships,
+            source,
+            target,
+            RelationshipKind.REFERENCES.value,
+            _location(path, decorator),
+        )
 
 
 def _class_header_nodes(node: ast.ClassDef) -> tuple[ast.AST, ...]:
