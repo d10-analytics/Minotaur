@@ -202,9 +202,102 @@ def test_controlled_vocabularies_allow_core_and_namespaced_extensions_only() -> 
     assert resolve_symbol_kind("function") == SymbolKind.FUNCTION
     assert resolve_symbol_kind("example.org:template") == "example.org:template"
     assert resolve_relationship_kind("calls") == RelationshipKind.CALLS
+    assert resolve_relationship_kind("example.org:depends") == "example.org:depends"
 
-    with pytest.raises(ValueError, match="namespaced extension"):
+    with pytest.raises(ValueError) as relationship_error:
         resolve_relationship_kind("depends-on")
+    assert str(relationship_error.value) == (
+        "'depends-on' is not a core relationship kind or a valid namespaced extension "
+        "(expected 'namespace:local-name' pattern)"
+    )
+
+    with pytest.raises(ValueError) as symbol_error:
+        resolve_symbol_kind("not-a-kind")
+    assert str(symbol_error.value) == (
+        "'not-a-kind' is not a core symbol_kind or a valid namespaced extension "
+        "(expected 'namespace:local-name' pattern)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("resolve", "context"),
+    [
+        (resolve_relationship_kind, "relationship kind"),
+        (resolve_symbol_kind, "symbol_kind"),
+    ],
+)
+def test_kind_resolvers_reject_unpaired_surrogates_before_diagnostics(
+    resolve, context: str
+) -> None:
+    # "\ud800" is a lone high surrogate — valid in a Python str but not
+    # encodable to UTF-8, so interpolating it into an error message would
+    # crash any logger or handler that encodes the exception text.
+    with pytest.raises(ValueError) as error:
+        resolve("\ud800")
+
+    assert str(error.value) == f"{context} must not contain unpaired surrogate code points"
+    # Proves the error text itself is safe to encode — raises UnicodeEncodeError if not.
+    str(error.value).encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    ("operation", "message"),
+    [
+        # Each pair tests one model entry point with "\ud800" (a lone surrogate).
+        # Direct construction exercises __post_init__; dataclasses.replace
+        # exercises the same path but bypasses __init__ keyword validation.
+        (
+            lambda: Relationship(
+                source="node:sha256:" + "a" * 64,
+                target="node:sha256:" + "b" * 64,
+                kind="\ud800",
+                evidence=(_guard_evidence(),),
+            ),
+            "relationship kind must not contain unpaired surrogate code points",
+        ),
+        (
+            lambda: replace(_guard_relationship(), kind="\ud800"),
+            "relationship kind must not contain unpaired surrogate code points",
+        ),
+        (
+            lambda: Node(
+                id=_guard_node().id,
+                identity=_guard_node().identity,
+                node_class=NodeClass.FILE,
+                label="test.py",
+                path="src/test.py",
+                symbol_kind="\ud800",
+            ),
+            "symbol_kind must not contain unpaired surrogate code points",
+        ),
+        (
+            lambda: replace(_guard_node(), symbol_kind="\ud800"),
+            "symbol_kind must not contain unpaired surrogate code points",
+        ),
+        (
+            lambda: Node(
+                id=_guard_node().id,
+                identity=_guard_node().identity,
+                node_class=NodeClass.FILE,
+                label="test.py",
+                path="src/test.py",
+                expected_symbol_kind="\ud800",
+            ),
+            "symbol_kind must not contain unpaired surrogate code points",
+        ),
+        (
+            lambda: replace(_guard_node(), expected_symbol_kind="\ud800"),
+            "symbol_kind must not contain unpaired surrogate code points",
+        ),
+    ],
+)
+def test_model_kind_fields_reject_unpaired_surrogates(operation, message: str) -> None:
+    with pytest.raises(ValueError) as error:
+        operation()
+
+    assert str(error.value) == message
+    # Proves the error text itself is safe to encode — raises UnicodeEncodeError if not.
+    str(error.value).encode("utf-8")
 
 
 def test_curated_evidence_requires_rule_and_preserves_attribution() -> None:

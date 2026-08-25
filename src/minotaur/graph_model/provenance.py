@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+from minotaur.graph_model._parsing import reject_unpaired_surrogates
+
 # Namespaced extension values use the pattern `namespace:local-name`, where
 # the namespace is a lowercase dotted identifier (like a reversed domain)
 # and the local name is a lowercase kebab identifier. This pattern matches
@@ -229,6 +231,7 @@ def resolve_symbol_kind(value: str) -> SymbolKind | str:
     neither core nor valid extensions — those are schema violations, not
     extension values.
     """
+    reject_unpaired_surrogates(value, "symbol_kind")
     try:
         return SymbolKind(value)
     except ValueError:
@@ -243,6 +246,7 @@ def resolve_symbol_kind(value: str) -> SymbolKind | str:
 
 def resolve_relationship_kind(value: str) -> RelationshipKind | str:
     """Resolve a relationship kind string to its core enum or return it as an extension."""
+    reject_unpaired_surrogates(value, "relationship kind")
     try:
         return RelationshipKind(value)
     except ValueError:
