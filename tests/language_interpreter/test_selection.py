@@ -46,11 +46,12 @@ def _oracle_discover_directory(
     return tuple(sorted(found, key=lambda path: path.relative_to(root).as_posix()))
 
 
-def _oracle_select_sources(root: Path) -> tuple[Path, ...]:
+def _oracle_select_sources(root: Path, targets: tuple[Path, ...] | None = None) -> tuple[Path, ...]:
     selected: dict[str, Path] = {}
-    for candidate in _oracle_discover_directory(root, root, False):
-        if candidate.suffix.lower() == ".py":
-            selected[candidate.relative_to(root).as_posix()] = candidate
+    for target in targets or (root,):
+        for candidate in _oracle_discover_directory(target, root, False):
+            if candidate.suffix.lower() == ".py":
+                selected[candidate.relative_to(root).as_posix()] = candidate
     return tuple(selected[key] for key in sorted(selected))
 
 
@@ -92,7 +93,7 @@ def _make_inside_symlink(root: Path) -> None:
 
 def _make_symlinked_directory(root: Path) -> None:
     _write(root, "real/hidden.py")
-    os.symlink(root / "real", root / "linked")
+    os.symlink(root / "real", root / "a")
 
 
 def _make_symlink_inside_hidden_directory(root: Path) -> None:
@@ -126,50 +127,55 @@ def _make_include_excluded(root: Path) -> None:
     _make_nested_excluded(root)
 
 
-_SHAPES: tuple[tuple[str, Callable[[Path], None], bool], ...] = (
-    ("nested excluded directory", _make_nested_excluded, False),
-    ("hidden file component", _make_hidden_file, False),
-    ("outside symlink", _make_outside_symlink, False),
-    ("inside symlink", _make_inside_symlink, False),
-    ("symlinked directory", _make_symlinked_directory, False),
-    ("symlink inside hidden directory", _make_symlink_inside_hidden_directory, False),
-    ("symlink inside __pycache__", _make_symlink_inside_pycache, False),
-    ("broken symlink", _make_broken_symlink, False),
-    ("non-ASCII names", _make_non_ascii, False),
-    ("empty directory", _make_empty, False),
-    ("include excluded", _make_include_excluded, True),
+_SHAPES: tuple[tuple[str, Callable[[Path], None], str, bool], ...] = (
+    ("nested excluded directory", _make_nested_excluded, ".", False),
+    ("nested excluded directory from a target", _make_nested_excluded, "a", False),
+    ("hidden file component", _make_hidden_file, ".", False),
+    ("outside symlink", _make_outside_symlink, ".", False),
+    ("inside symlink", _make_inside_symlink, ".", False),
+    ("symlinked directory", _make_symlinked_directory, ".", False),
+    ("symlinked directory from a target", _make_symlinked_directory, "a", False),
+    ("symlink inside hidden directory", _make_symlink_inside_hidden_directory, ".", False),
+    ("symlink inside __pycache__", _make_symlink_inside_pycache, ".", False),
+    ("broken symlink", _make_broken_symlink, ".", False),
+    ("non-ASCII names", _make_non_ascii, ".", False),
+    ("empty directory", _make_empty, ".", False),
+    ("include excluded", _make_include_excluded, ".", True),
 )
 
 
 @pytest.mark.parametrize(
-    ("name", "builder", "include_excluded"), _SHAPES, ids=[shape[0] for shape in _SHAPES]
+    ("name", "builder", "target_relative", "include_excluded"),
+    _SHAPES,
+    ids=[shape[0] for shape in _SHAPES],
 )
 def test_discover_directory_matches_verbatim_previous_implementation(
     tmp_path: Path,
     name: str,
     builder: Callable[[Path], None],
+    target_relative: str,
     include_excluded: bool,
 ) -> None:
     del name
     root = tmp_path / "workspace"
     root.mkdir()
     builder(root)
+    target = root / target_relative
 
-    discovered = _discover_directory(root, root, include_excluded)
-    oracle = _oracle_discover_directory(root, root, include_excluded)
+    discovered = _discover_directory(target, root, include_excluded)
+    oracle = _oracle_discover_directory(target, root, include_excluded)
     # Reviewed 2026-08-24: the pre-change walker judged exclusion on the
     # *resolved* path after descending, so a symlink living inside an excluded
     # or hidden directory reported its physical target a second time when the
     # scan started at the root.  Pruning by unresolved name drops that
-    # duplicate; for a root-level scan everything else -- members, order, and
-    # which physical files are reported at all -- is identical, which is what
-    # the `_dedup` equality plus the subsequence check together pin down.  The
-    # subdirectory-target shape, where the link is the only path to the file,
-    # is pinned separately below.
+    # duplicate.  The root rows pin the unchanged root-level result; the
+    # ``root / "a"`` rows apply the same member, order, and deduplication
+    # assertions to a selected subdirectory, including a symlink whose target
+    # remains inside the workspace but outside that selected path.
     assert _dedup(discovered) == _dedup(oracle)
     assert _is_subsequence(discovered, oracle)
-    _, selected = select_sources(root, (root,), default_registry())
-    assert selected.files == _oracle_select_sources(root)
+    _, selected = select_sources(root, (target,), default_registry())
+    assert selected.files == _oracle_select_sources(root, (target,))
 
 
 def test_symlink_inside_excluded_directory_loses_only_its_duplicate(tmp_path: Path) -> None:
@@ -222,6 +228,14 @@ def test_symlink_only_reachable_file_is_dropped_for_a_subdirectory_target(
 def test_relative_order_key_requires_an_absolute_root() -> None:
     with pytest.raises(ValueError, match="root must be absolute"):
         exclusions.relative_order_key(Path("rel/pkg/a.py"), Path("rel"))
+
+
+def test_discover_directory_requires_an_absolute_root(tmp_path: Path) -> None:
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+
+    with pytest.raises(ValueError, match="root must be absolute"):
+        _discover_directory(directory, Path("relative-root"), False)
 
 
 def test_discover_directory_normalizes_an_unresolved_root(tmp_path: Path) -> None:
@@ -335,9 +349,8 @@ def test_shared_exclusion_predicate_controls_both_walkers(
 
 def test_excluded_directory_names_have_one_source_owner() -> None:
     source_root = Path(__file__).parents[2] / "src"
-    marker = '".git", ".mypy_cache", ".pytest_cache", "__pycache__", ".venv", "venv"'
     occurrences = sum(
-        path.read_text(encoding="utf-8").count(marker) for path in source_root.rglob("*.py")
+        '".mypy_cache"' in path.read_text(encoding="utf-8") for path in source_root.rglob("*.py")
     )
     assert occurrences == 1
 

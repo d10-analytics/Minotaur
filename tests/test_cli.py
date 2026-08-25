@@ -9,11 +9,11 @@ import stat
 import subprocess
 import sys
 import time
+from importlib import metadata
 from pathlib import Path
 
 import pytest
 
-import minotaur
 from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file, stamp_path
 
@@ -47,6 +47,15 @@ def _run(
 def _paths(output: Path) -> set[str]:
     graph = json.loads(output.read_text(encoding="utf-8"))
     return {node["path"] for node in graph["nodes"] if node["node_class"] == "file"}
+
+
+def _distribution_is_installed() -> bool:
+    """Report whether this interpreter has the Minotaur distribution installed."""
+    try:
+        metadata.distribution("minotaur")
+    except metadata.PackageNotFoundError:
+        return False
+    return True
 
 
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -181,7 +190,7 @@ def test_output_preflight_and_module_console_entry_points_match(tmp_path: Path) 
         # When the running interpreter *is* the environment minotaur is
         # installed into, the console script must exist beside it; a skip
         # there would silently retire the only entry-point parity proof.
-        if Path(minotaur.__file__).is_relative_to(Path(sys.executable).parents[1]):
+        if _distribution_is_installed():
             pytest.fail(
                 f"minotaur is installed in {sys.executable}'s environment"
                 f" but {console_script} is missing"
@@ -211,6 +220,21 @@ def test_output_preflight_and_module_console_entry_points_match(tmp_path: Path) 
     assert json.loads(output.read_text(encoding="utf-8")) == json.loads(
         (tmp_path / "console.json").read_text(encoding="utf-8")
     )
+
+
+def test_distribution_predicate_distinguishes_an_editable_install_from_an_absent_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The console-script parity guard must follow installation metadata, not import paths."""
+
+    monkeypatch.setattr(metadata, "distribution", lambda name: object())
+    assert _distribution_is_installed()
+
+    def missing_distribution(name: str) -> metadata.Distribution:
+        raise metadata.PackageNotFoundError
+
+    monkeypatch.setattr(metadata, "distribution", missing_distribution)
+    assert not _distribution_is_installed()
 
 
 def test_analyze_skips_clean_graph_and_rewrites_after_content_drift(tmp_path: Path) -> None:
