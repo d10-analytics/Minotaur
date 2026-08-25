@@ -459,6 +459,8 @@ def test_only_decorated_top_level_symbols_get_inward_edges(
     module = _node_id(result, "app")
     decorated = _node_id(result, "app.Decorated")
     undecorated = _node_id(result, "app.undecorated")
+    outer = _node_id(result, "app.outer")
+    decorator = _node_id(result, "app.decorator")
     relationships = {
         (relationship.source, relationship.target, relationship.kind): relationship
         for relationship in result.document.relationships
@@ -466,11 +468,12 @@ def test_only_decorated_top_level_symbols_get_inward_edges(
 
     assert (module, decorated, RelationshipKind.REFERENCES.value) in relationships
     assert (module, undecorated, RelationshipKind.REFERENCES.value) not in relationships
-    assert not any(
-        relationship.target == "app.nested"
-        and relationship.kind == RelationshipKind.REFERENCES.value
-        for relationship in result.document.relationships
-    )
+    assert not any(node.label == "app.outer.nested" for node in result.document.nodes)
+    assert {
+        key for key in relationships if key[0] == outer
+    } == {
+        (outer, decorator, RelationshipKind.REFERENCES.value)
+    }
 
 
 def test_class_bases_and_keywords_are_references_at_every_nesting_level(
