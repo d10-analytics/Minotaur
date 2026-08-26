@@ -153,9 +153,10 @@ def _eligible(
 
 
 def _is_unreferenced(index: GraphIndex, node: Node) -> bool:
-    # Only the symbol's own node is excluded: a decorator on the definition and
-    # a recursive self-call are both attributed to the symbol itself, and
-    # neither makes it used from anywhere else. The ``contains`` container is
+    # Only the symbol's own node is excluded: a recursive self-call is
+    # attributed to the symbol itself and does not make it used from anywhere
+    # else. Decorators are attributed to the enclosing scope, so decoration
+    # counts as use. The ``contains`` container is
     # deliberately *not* excluded. For a method that container is its class,
     # but for a top-level function it is the module node, which is also the
     # attributed source of every module-scope statement — so excluding it

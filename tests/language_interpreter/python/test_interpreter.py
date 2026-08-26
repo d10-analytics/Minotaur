@@ -372,6 +372,160 @@ def test_decorator_load_references_resolve_for_module_and_direct_method_scopes(
     assert method_location.evidence[0].locations[0].range.start.line == 7
 
 
+def test_decorated_definitions_reference_the_enclosing_scope(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "decorators.py",
+        "def handler(target):\n    return target\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "import decorators as pkg\n\n"
+        "@pkg.handler\n"
+        "def decorated():\n    return 1\n\n"
+        "class Runner:\n"
+        "    @pkg.handler\n"
+        "    def run(self):\n"
+        "        return 1\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    runner = _node_id(result, "app.Runner")
+    decorated = _node_id(result, "app.decorated")
+    run = _node_id(result, "app.Runner.run")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    module_edge = relationships[(module, decorated, RelationshipKind.REFERENCES.value)]
+    method_edge = relationships[(runner, run, RelationshipKind.REFERENCES.value)]
+    assert [location.range.start.line for location in module_edge.evidence[0].locations] == [2]
+    assert [location.range.start.line for location in method_edge.evidence[0].locations] == [7]
+
+
+def test_decorated_definition_merges_inward_evidence_and_preserves_outward_edges(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def a(target):\n    return target\n\n"
+        "def b(value):\n    return value\n\n"
+        "@a\n"
+        "@b(1)\n"
+        "def decorated():\n    return 1\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    decorated = _node_id(result, "app.decorated")
+    a = _node_id(result, "app.a")
+    b = _node_id(result, "app.b")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    inward = relationships[(module, decorated, RelationshipKind.REFERENCES.value)]
+    assert [location.range.start.line for location in inward.evidence[0].locations] == [6, 7]
+    assert (decorated, a, RelationshipKind.REFERENCES.value) in relationships
+    assert (decorated, b, RelationshipKind.CALLS.value) in relationships
+
+
+def test_only_decorated_top_level_symbols_get_inward_edges(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def decorator(target):\n    return target\n\n"
+        "@decorator\n"
+        "class Decorated:\n"
+        "    pass\n\n"
+        "def undecorated():\n    pass\n\n"
+        "def outer():\n"
+        "    @decorator\n"
+        "    def nested():\n"
+        "        pass\n"
+        "    return nested\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    decorated = _node_id(result, "app.Decorated")
+    undecorated = _node_id(result, "app.undecorated")
+    outer = _node_id(result, "app.outer")
+    decorator = _node_id(result, "app.decorator")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (module, decorated, RelationshipKind.REFERENCES.value) in relationships
+    assert (module, undecorated, RelationshipKind.REFERENCES.value) not in relationships
+    assert not any(node.label == "app.outer.nested" for node in result.document.nodes)
+    assert {key for key in relationships if key[0] == outer} == {
+        (outer, decorator, RelationshipKind.REFERENCES.value)
+    }
+
+
+def test_same_named_decorated_definitions_each_get_their_own_inward_edge(
+    tmp_path: Path,
+) -> None:
+    # ``_declarations`` keeps only the last node per name, so without a
+    # per-statement target the getter and the overload stubs would have no
+    # inbound edge and the undecorated real ``f`` would carry the stubs'
+    # decorations as evidence.
+    _write(
+        tmp_path,
+        "app.py",
+        "from typing import overload\n\n"
+        "class Box:\n"
+        "    @property\n"
+        "    def value(self):\n"
+        "        return 1\n\n"
+        "    @value.setter\n"
+        "    def value(self, v):\n"
+        "        pass\n\n"
+        "@overload\n"
+        "def f(x: int) -> int: ...\n"
+        "@overload\n"
+        "def f(x: str) -> str: ...\n"
+        "def f(x):\n"
+        "    return x\n\n"
+        "@overload\n"
+        "async def g(): ...\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    box = _node_id(result, "app.Box")
+    inward = {
+        (relationship.source, relationship.target): [
+            location.range.start.line for location in relationship.evidence[0].locations
+        ]
+        for relationship in result.document.relationships
+        if relationship.kind == RelationshipKind.REFERENCES.value
+    }
+    by_line = {
+        node.location.range.start.line: node.id
+        for node in result.document.nodes
+        if node.location is not None and node.label in {"app.Box.value", "app.f", "app.g"}
+    }
+
+    assert inward[(box, by_line[4])] == [3]
+    assert inward[(box, by_line[8])] == [7]
+    assert inward[(module, by_line[12])] == [11]
+    assert inward[(module, by_line[14])] == [13]
+    assert (module, by_line[15]) not in inward
+    assert inward[(module, by_line[19])] == [18]
+
+
 def test_class_bases_and_keywords_are_references_at_every_nesting_level(
     tmp_path: Path,
 ) -> None:

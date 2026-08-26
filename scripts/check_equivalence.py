@@ -27,6 +27,13 @@ Both interpreters must be CPython 3.11 or newer: import isolation rests on
 ``PYTHONSAFEPATH``, which older interpreters ignore, and with the working
 directory set to a source root the branch side would then silently import the
 baseline package instead of its own.
+
+The comparison is byte-for-byte, so it can only ever be run against a baseline
+that is *meant* to give the same answers.  When a change intentionally alters
+what the interpreter records (a new relationship, a corrected attribution),
+the test suite's ``BASELINE_COMMIT`` pin must advance past that change before
+any later branch is measured; the alternative -- teaching the harness which
+differences to forgive -- would erode the very property it exists to prove.
 """
 
 from __future__ import annotations

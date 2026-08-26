@@ -369,6 +369,14 @@ def _analyze_module(
     )
     for statement in module.tree.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _decorator_references(
+                statement,
+                module.module_id,
+                f"{module.name}.{statement.name}",
+                SymbolKind.FUNCTION,
+                module.path,
+                relationships,
+            )
             _calls(
                 statement.body,
                 declarations,
@@ -382,6 +390,14 @@ def _analyze_module(
                 prefix_nodes=_signature_nodes(statement),
             )
         elif isinstance(statement, ast.ClassDef):
+            _decorator_references(
+                statement,
+                module.module_id,
+                f"{module.name}.{statement.name}",
+                SymbolKind.CLASS,
+                module.path,
+                relationships,
+            )
             # A class body executes at definition time in the class scope, so
             # its non-method statements (dataclass field defaults, aliases such
             # as `handler = staticmethod(helper)`, descriptor construction) are
@@ -408,6 +424,14 @@ def _analyze_module(
             )
             for member in statement.body:
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    _decorator_references(
+                        member,
+                        declarations[f"{module.name}.{statement.name}"],
+                        f"{module.name}.{statement.name}.{member.name}",
+                        SymbolKind.METHOD,
+                        module.path,
+                        relationships,
+                    )
                     _calls(
                         member.body,
                         declarations,
@@ -421,6 +445,33 @@ def _analyze_module(
                         statement.name,
                         prefix_nodes=_signature_nodes(member),
                     )
+
+
+def _decorator_references(
+    statement: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    source: str,
+    qualified: str,
+    kind: SymbolKind,
+    path: str,
+    relationships: dict[tuple[str, str, str], list[Location]],
+) -> None:
+    """Record each decorator as an enclosing-scope use of its definition.
+
+    The target is recomputed from ``statement`` rather than looked up by name:
+    ``_declarations`` keeps only the last node for a repeated name, so a
+    ``@property`` getter followed by its ``@x.setter``, or ``@overload`` stubs
+    before the real definition, would otherwise hand every decoration to the
+    last same-named node and leave the earlier ones without any inbound edge.
+    """
+    target = _symbol_node(path, statement, qualified, kind).id
+    for decorator in statement.decorator_list:
+        _append(
+            relationships,
+            source,
+            target,
+            RelationshipKind.REFERENCES.value,
+            _location(path, decorator),
+        )
 
 
 def _class_header_nodes(node: ast.ClassDef) -> tuple[ast.AST, ...]:
@@ -450,6 +501,10 @@ def _signature_nodes(
     ``generic_visit`` and therefore traverses its whole signature; collecting
     them here keeps top-level functions and methods consistent with nested ones
     instead of making attribution depend on nesting depth.
+
+    Decorator expressions remain attributed to the decorated function or method
+    for the outward edge to the decorator; ``_decorator_references`` separately
+    records the enclosing scope's inward reference to the decorated symbol.
 
     Annotations count as references for the same reason calls do:
     ``def f(x: Handler)`` is a real dependency on ``Handler``, and an agent
