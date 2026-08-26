@@ -757,6 +757,10 @@ def test_committed_workloads_cover_every_d06_root_with_real_error_controls() -> 
     data = json.loads((SCRIPT.with_name("equivalence_queries.json")).read_text(encoding="utf-8"))
     assert set(data) == {"equivalence_root", "src", "Onyx"}
     assert data["src"]["selection"] == "minotaur/cli.py"
+    src_callers_zero = next(
+        item for item in data["src"]["queries"] if item["name"] == "callers-zero"
+    )
+    assert src_callers_zero["expect"] == "ok"
     for key, workload in data.items():
         names = {item["name"] for item in workload["queries"]}
         assert "definitions-invalid" not in names, key
