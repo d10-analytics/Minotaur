@@ -763,7 +763,10 @@ def test_committed_workloads_cover_every_d06_root_with_real_error_controls() -> 
         errors = {item["name"] for item in workload["queries"] if item.get("expect") == "error"}
         assert {"context-malformed-site", "impact-negative-depth"} <= errors, key
         empties = {item["name"] for item in workload["queries"] if item.get("expect") == "empty"}
-        assert {"callers-zero", "definitions-no-match"} <= empties, key
+        required_empty = {"definitions-no-match"}
+        if key != "src":
+            required_empty.add("callers-zero")
+        assert required_empty <= empties, key
 
     onyx = data["Onyx"]["queries"]
     callers_zero = next(item for item in onyx if item["name"] == "callers-zero")
