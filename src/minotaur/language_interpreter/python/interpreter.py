@@ -53,6 +53,7 @@ class _Module:
 class _DeclaredSymbol:
     node_id: str
     container_id: str
+    class_declarations: Mapping[str, str] | None = None
 
 
 @dataclass
@@ -328,6 +329,22 @@ def _declarations(
             symbols[statement] = _DeclaredSymbol(node.id, module.module_id)
             nodes.append(node)
             if isinstance(statement, ast.ClassDef):
+                # The module-wide declarations table intentionally models the
+                # name bindings left after the module body executes. Two
+                # ``class C`` statements therefore share qualified labels, and
+                # methods from the later statement overwrite methods from the
+                # earlier one in that table. That is correct for an explicit
+                # global lookup such as ``C.run`` but not for ``self.run``:
+                # an instance remains bound to the exact class object that
+                # created it even when the module name is rebound later.
+                #
+                # Keep one last-wins method table per ClassDef and attach that
+                # same table to the class and all of its direct methods. This
+                # preserves repeated-method behavior within one class while
+                # preventing resolution from crossing between two same-named
+                # class statements.
+                class_declarations: dict[str, str] = {}
+                declared_members: list[tuple[ast.stmt, Node]] = []
                 for member in statement.body:
                     if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         member_name = f"{qualified}.{member.name}"
@@ -335,8 +352,16 @@ def _declarations(
                             module.path, member, member_name, SymbolKind.METHOD
                         )
                         declarations[member_name] = member_node.id
-                        symbols[member] = _DeclaredSymbol(member_node.id, node.id)
+                        class_declarations[member.name] = member_node.id
+                        declared_members.append((member, member_node))
                         nodes.append(member_node)
+                symbols[statement] = _DeclaredSymbol(
+                    node.id, module.module_id, class_declarations
+                )
+                for member, member_node in declared_members:
+                    symbols[member] = _DeclaredSymbol(
+                        member_node.id, node.id, class_declarations
+                    )
     return declarations, symbols, nodes
 
 
@@ -424,7 +449,7 @@ def _analyze_module(
                 relationships,
                 nodes,
                 seen_ids,
-                statement.name,
+                symbols[statement].class_declarations,
                 prefix_nodes=_class_header_nodes(statement),
             )
             for member in statement.body:
@@ -446,7 +471,7 @@ def _analyze_module(
                         relationships,
                         nodes,
                         seen_ids,
-                        statement.name,
+                        symbols[member].class_declarations,
                         prefix_nodes=_signature_nodes(member),
                     )
 
@@ -628,7 +653,7 @@ def _calls(
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
     seen_ids: set[str],
-    class_name: str | None = None,
+    class_declarations: Mapping[str, str] | None = None,
     prefix_nodes: tuple[ast.AST, ...] = (),
 ) -> None:
     visitor = _ScopeCallVisitor()
@@ -638,7 +663,7 @@ def _calls(
         visitor.visit(statement)
     for candidate in visitor.calls:
         text = _expression_text(candidate.func)
-        target = _resolve_call(text, declarations, aliases, module_name, class_name)
+        target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
         location = _location(path, candidate.func)
         if target is None:
             _unresolved(caller, text, location, relationships, nodes, seen_ids)
@@ -646,7 +671,7 @@ def _calls(
             _append(relationships, caller, target, RelationshipKind.CALLS.value, location)
     for reference in visitor.references:
         text = _expression_text(reference)
-        target = _resolve_call(text, declarations, aliases, module_name, class_name)
+        target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
         if target is not None:
             _append(
                 relationships,
@@ -662,14 +687,18 @@ def _resolve_call(
     declarations: dict[str, str],
     aliases: dict[str, str],
     module_name: str,
-    class_name: str | None,
+    class_declarations: Mapping[str, str] | None,
 ) -> str | None:
     if "." not in text:
         target_name = aliases.get(text, f"{module_name}.{text}")
         return declarations.get(target_name)
     head, _, tail = text.partition(".")
-    if head == "self" and class_name is not None:
-        return declarations.get(f"{module_name}.{class_name}.{tail}")
+    if head == "self" and class_declarations is not None:
+        # ``self`` is tied to the class statement that owns the caller, not to
+        # whichever same-named class was assigned to the module name last.
+        # Resolve through that statement's method table so repeated method
+        # names remain last-wins locally without leaking across class objects.
+        return class_declarations.get(tail)
     alias_target_name = aliases.get(head)
     if alias_target_name is not None:
         return declarations.get(f"{alias_target_name}.{tail}")
