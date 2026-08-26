@@ -759,6 +759,78 @@ def test_plain_shadowed_definition_body_and_containment_use_statement_identity(
     assert (second_f.id, first, RelationshipKind.CALLS.value) not in relationships
 
 
+def test_shadowed_definitions_keep_header_and_unresolved_call_attribution(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def first_default():\n"
+        "    return 1\n\n"
+        "def second_default():\n"
+        "    return 2\n\n"
+        "class FirstType:\n"
+        "    pass\n\n"
+        "class SecondType:\n"
+        "    pass\n\n"
+        "def first_decorator(value):\n"
+        "    return value\n\n"
+        "def second_decorator(value):\n"
+        "    return value\n\n"
+        "@first_decorator\n"
+        "def f(value: FirstType = first_default()) -> FirstType:\n"
+        "    return missing_first()\n\n"
+        "@second_decorator\n"
+        "def f(value: SecondType = second_default()) -> SecondType:\n"
+        "    return missing_second()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    first_default = _node_id(result, "app.first_default")
+    second_default = _node_id(result, "app.second_default")
+    first_type = _node_id(result, "app.FirstType")
+    second_type = _node_id(result, "app.SecondType")
+    first_decorator = _node_id(result, "app.first_decorator")
+    second_decorator = _node_id(result, "app.second_decorator")
+    first_f, second_f = sorted(
+        _nodes(result, "app.f"), key=lambda node: node.location.range.start.line
+    )
+    unresolved = {
+        node.reference_text: node
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    first_missing = unresolved["missing_first"]
+    second_missing = unresolved["missing_second"]
+    assert set(unresolved) == {"missing_first", "missing_second"}
+    assert first_missing.identity.originating_node == first_f.id
+    assert second_missing.identity.originating_node == second_f.id
+
+    # Defaults produce calls; decorators and annotations produce references.
+    assert (first_f.id, first_default, RelationshipKind.CALLS.value) in relationships
+    assert (second_f.id, second_default, RelationshipKind.CALLS.value) in relationships
+    assert (first_f.id, first_type, RelationshipKind.REFERENCES.value) in relationships
+    assert (second_f.id, second_type, RelationshipKind.REFERENCES.value) in relationships
+    assert (first_f.id, first_decorator, RelationshipKind.REFERENCES.value) in relationships
+    assert (second_f.id, second_decorator, RelationshipKind.REFERENCES.value) in relationships
+    assert (first_f.id, first_missing.id, RelationshipKind.REFERENCES.value) in relationships
+    assert (second_f.id, second_missing.id, RelationshipKind.REFERENCES.value) in relationships
+
+    assert (first_f.id, second_default, RelationshipKind.CALLS.value) not in relationships
+    assert (second_f.id, first_default, RelationshipKind.CALLS.value) not in relationships
+    assert (first_f.id, second_type, RelationshipKind.REFERENCES.value) not in relationships
+    assert (second_f.id, first_type, RelationshipKind.REFERENCES.value) not in relationships
+    assert (first_f.id, second_decorator, RelationshipKind.REFERENCES.value) not in relationships
+    assert (second_f.id, first_decorator, RelationshipKind.REFERENCES.value) not in relationships
+    assert (first_f.id, second_missing.id, RelationshipKind.REFERENCES.value) not in relationships
+    assert (second_f.id, first_missing.id, RelationshipKind.REFERENCES.value) not in relationships
+
+
 def test_class_bases_and_keywords_are_references_at_every_nesting_level(
     tmp_path: Path,
 ) -> None:
