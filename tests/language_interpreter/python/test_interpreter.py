@@ -474,6 +474,58 @@ def test_only_decorated_top_level_symbols_get_inward_edges(
     }
 
 
+def test_same_named_decorated_definitions_each_get_their_own_inward_edge(
+    tmp_path: Path,
+) -> None:
+    # ``_declarations`` keeps only the last node per name, so without a
+    # per-statement target the getter and the overload stubs would have no
+    # inbound edge and the undecorated real ``f`` would carry the stubs'
+    # decorations as evidence.
+    _write(
+        tmp_path,
+        "app.py",
+        "from typing import overload\n\n"
+        "class Box:\n"
+        "    @property\n"
+        "    def value(self):\n"
+        "        return 1\n\n"
+        "    @value.setter\n"
+        "    def value(self, v):\n"
+        "        pass\n\n"
+        "@overload\n"
+        "def f(x: int) -> int: ...\n"
+        "@overload\n"
+        "def f(x: str) -> str: ...\n"
+        "def f(x):\n"
+        "    return x\n\n"
+        "@overload\n"
+        "async def g(): ...\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    box = _node_id(result, "app.Box")
+    inward = {
+        (relationship.source, relationship.target): [
+            location.range.start.line for location in relationship.evidence[0].locations
+        ]
+        for relationship in result.document.relationships
+        if relationship.kind == RelationshipKind.REFERENCES.value
+    }
+    by_line = {
+        node.location.range.start.line: node.id
+        for node in result.document.nodes
+        if node.location is not None and node.label in {"app.Box.value", "app.f", "app.g"}
+    }
+
+    assert inward[(box, by_line[4])] == [3]
+    assert inward[(box, by_line[8])] == [7]
+    assert inward[(module, by_line[12])] == [11]
+    assert inward[(module, by_line[14])] == [13]
+    assert (module, by_line[15]) not in inward
+    assert inward[(module, by_line[19])] == [18]
+
+
 def test_class_bases_and_keywords_are_references_at_every_nesting_level(
     tmp_path: Path,
 ) -> None:
