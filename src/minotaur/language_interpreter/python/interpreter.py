@@ -49,6 +49,12 @@ class _Module:
     module_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _DeclaredSymbol:
+    node_id: str
+    container_id: str
+
+
 @dataclass
 class _ImportTally:
     """Counts of import statements that did or did not resolve in the workspace.
@@ -216,13 +222,11 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
 
     module_by_name = {module.name: module for module in modules}
     declarations: dict[str, str] = {}
-    declarations_by_path: dict[str, dict[str, str]] = {}
-    containers: dict[str, str] = {}
+    symbols_by_path: dict[str, dict[ast.stmt, _DeclaredSymbol]] = {}
     for module in modules:
-        declared, declared_containers, declared_nodes = _declarations(module)
+        declared, symbols, declared_nodes = _declarations(module)
         declarations.update(declared)
-        declarations_by_path[module.path] = declared
-        containers.update(declared_containers)
+        symbols_by_path[module.path] = symbols
         nodes.extend(declared_nodes)
 
     relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
@@ -235,9 +239,8 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         _analyze_module(
             module,
             module_by_name,
-            declarations_by_path[module.path],
+            symbols_by_path[module.path],
             declarations,
-            containers,
             relationships,
             nodes,
             seen_ids,
@@ -310,9 +313,11 @@ def _module_node(module: _Module) -> Node:
     )
 
 
-def _declarations(module: _Module) -> tuple[dict[str, str], dict[str, str], list[Node]]:
+def _declarations(
+    module: _Module,
+) -> tuple[dict[str, str], dict[ast.stmt, _DeclaredSymbol], list[Node]]:
     declarations: dict[str, str] = {module.name: module.module_id}
-    containers: dict[str, str] = {}
+    symbols: dict[ast.stmt, _DeclaredSymbol] = {}
     nodes: list[Node] = []
     for statement in module.tree.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -320,7 +325,7 @@ def _declarations(module: _Module) -> tuple[dict[str, str], dict[str, str], list
             kind = SymbolKind.CLASS if isinstance(statement, ast.ClassDef) else SymbolKind.FUNCTION
             node = _symbol_node(module.path, statement, qualified, kind)
             declarations[qualified] = node.id
-            containers[qualified] = module.module_id
+            symbols[statement] = _DeclaredSymbol(node.id, module.module_id)
             nodes.append(node)
             if isinstance(statement, ast.ClassDef):
                 for member in statement.body:
@@ -330,28 +335,30 @@ def _declarations(module: _Module) -> tuple[dict[str, str], dict[str, str], list
                             module.path, member, member_name, SymbolKind.METHOD
                         )
                         declarations[member_name] = member_node.id
-                        containers[member_name] = node.id
+                        symbols[member] = _DeclaredSymbol(member_node.id, node.id)
                         nodes.append(member_node)
-    return declarations, containers, nodes
+    return declarations, symbols, nodes
 
 
 def _analyze_module(
     module: _Module,
     modules: dict[str, _Module],
-    local_declarations: dict[str, str],
+    symbols: dict[ast.stmt, _DeclaredSymbol],
     declarations: dict[str, str],
-    containers: dict[str, str],
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
     seen_ids: set[str],
     tally: _ImportTally,
 ) -> None:
     aliases = _imports(module, modules, relationships, nodes, seen_ids, tally)
-    for qualified, node_id in local_declarations.items():
-        container = containers.get(qualified)
-        if container is None:
-            continue
-        _append(relationships, container, node_id, RelationshipKind.CONTAINS.value, None)
+    for symbol in symbols.values():
+        _append(
+            relationships,
+            symbol.container_id,
+            symbol.node_id,
+            RelationshipKind.CONTAINS.value,
+            None,
+        )
     _calls(
         [
             statement
@@ -372,8 +379,7 @@ def _analyze_module(
             _decorator_references(
                 statement,
                 module.module_id,
-                f"{module.name}.{statement.name}",
-                SymbolKind.FUNCTION,
+                symbols[statement].node_id,
                 module.path,
                 relationships,
             )
@@ -383,7 +389,7 @@ def _analyze_module(
                 aliases,
                 module.name,
                 module.path,
-                declarations[f"{module.name}.{statement.name}"],
+                symbols[statement].node_id,
                 relationships,
                 nodes,
                 seen_ids,
@@ -393,8 +399,7 @@ def _analyze_module(
             _decorator_references(
                 statement,
                 module.module_id,
-                f"{module.name}.{statement.name}",
-                SymbolKind.CLASS,
+                symbols[statement].node_id,
                 module.path,
                 relationships,
             )
@@ -415,7 +420,7 @@ def _analyze_module(
                 aliases,
                 module.name,
                 module.path,
-                declarations[f"{module.name}.{statement.name}"],
+                symbols[statement].node_id,
                 relationships,
                 nodes,
                 seen_ids,
@@ -426,9 +431,8 @@ def _analyze_module(
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     _decorator_references(
                         member,
-                        declarations[f"{module.name}.{statement.name}"],
-                        f"{module.name}.{statement.name}.{member.name}",
-                        SymbolKind.METHOD,
+                        symbols[statement].node_id,
+                        symbols[member].node_id,
                         module.path,
                         relationships,
                     )
@@ -438,7 +442,7 @@ def _analyze_module(
                         aliases,
                         module.name,
                         module.path,
-                        declarations[f"{module.name}.{statement.name}.{member.name}"],
+                        symbols[member].node_id,
                         relationships,
                         nodes,
                         seen_ids,
@@ -450,20 +454,15 @@ def _analyze_module(
 def _decorator_references(
     statement: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
     source: str,
-    qualified: str,
-    kind: SymbolKind,
+    target: str,
     path: str,
     relationships: dict[tuple[str, str, str], list[Location]],
 ) -> None:
     """Record each decorator as an enclosing-scope use of its definition.
 
-    The target is recomputed from ``statement`` rather than looked up by name:
-    ``_declarations`` keeps only the last node for a repeated name, so a
-    ``@property`` getter followed by its ``@x.setter``, or ``@overload`` stubs
-    before the real definition, would otherwise hand every decoration to the
-    last same-named node and leave the earlier ones without any inbound edge.
+    ``target`` is the node created for this exact statement. Name-based lookup
+    is intentionally avoided because repeated definitions have distinct nodes.
     """
-    target = _symbol_node(path, statement, qualified, kind).id
     for decorator in statement.decorator_list:
         _append(
             relationships,
@@ -608,14 +607,15 @@ def declarations_for_module(modules: dict[str, _Module], reference: str) -> str 
         return None
     if not member:
         return module.module_id
+    resolved: str | None = None
     for statement in module.tree.body:
         if (
             isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
             and statement.name == member
         ):
             kind = SymbolKind.CLASS if isinstance(statement, ast.ClassDef) else SymbolKind.FUNCTION
-            return _symbol_node(module.path, statement, f"{module.name}.{member}", kind).id
-    return None
+            resolved = _symbol_node(module.path, statement, f"{module.name}.{member}", kind).id
+    return resolved
 
 
 def _calls(
