@@ -32,6 +32,10 @@ def _node_id(result: AnalysisResult, label: str) -> str:
     return next(node.id for node in document.nodes if node.label == label)
 
 
+def _nodes(result: AnalysisResult, label: str) -> list:
+    return [node for node in result.document.nodes if node.label == label]
+
+
 def test_python_interpreter_establishes_containment_imports_and_direct_calls(
     tmp_path: Path,
 ) -> None:
@@ -524,6 +528,228 @@ def test_same_named_decorated_definitions_each_get_their_own_inward_edge(
     assert inward[(module, by_line[14])] == [13]
     assert (module, by_line[15]) not in inward
     assert inward[(module, by_line[19])] == [18]
+
+
+def test_repeated_property_definitions_keep_body_and_containment_attribution(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def getter_helper():\n"
+        "    return 1\n\n"
+        "def setter_helper():\n"
+        "    return 2\n\n"
+        "class Box:\n"
+        "    @property\n"
+        "    def value(self):\n"
+        "        return getter_helper()\n\n"
+        "    @value.setter\n"
+        "    def value(self, value):\n"
+        "        return setter_helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    box = _node_id(result, "app.Box")
+    getter_helper = _node_id(result, "app.getter_helper")
+    setter_helper = _node_id(result, "app.setter_helper")
+    value_nodes = sorted(
+        _nodes(result, "app.Box.value"), key=lambda node: node.location.range.start.line
+    )
+    getter, setter = (node.id for node in value_nodes)
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (box, getter, RelationshipKind.CONTAINS.value) in relationships
+    assert (box, setter, RelationshipKind.CONTAINS.value) in relationships
+    getter_call = relationships[(getter, getter_helper, RelationshipKind.CALLS.value)]
+    setter_call = relationships[(setter, setter_helper, RelationshipKind.CALLS.value)]
+    assert getter_call.evidence[0].locations[0].range.start.line == 9
+    assert setter_call.evidence[0].locations[0].range.start.line == 13
+
+
+def test_overload_stubs_and_real_definition_keep_distinct_attribution(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "from typing import overload\n\n"
+        "def helper():\n"
+        "    return 1\n\n"
+        "@overload\n"
+        "def f(value: int) -> int: ...\n\n"
+        "@overload\n"
+        "def f(value: str) -> str: ...\n\n"
+        "def f(value):\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    helper = _node_id(result, "app.helper")
+    f_nodes = sorted(_nodes(result, "app.f"), key=lambda node: node.location.range.start.line)
+    stub_one, stub_two, implementation = f_nodes
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    for node in f_nodes:
+        assert (module, node.id, RelationshipKind.CONTAINS.value) in relationships
+    assert (
+        module,
+        stub_one.id,
+        RelationshipKind.REFERENCES.value,
+    ) in relationships
+    assert (
+        module,
+        stub_two.id,
+        RelationshipKind.REFERENCES.value,
+    ) in relationships
+    assert (module, implementation.id, RelationshipKind.REFERENCES.value) not in relationships
+    assert (implementation.id, helper, RelationshipKind.CALLS.value) in relationships
+
+
+def test_duplicate_classes_keep_direct_methods_and_decorator_sources_separate(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def first():\n"
+        "    return 1\n\n"
+        "def second():\n"
+        "    return 2\n\n"
+        "def mark(value):\n"
+        "    return value\n\n"
+        "@mark\n"
+        "class Thing:\n"
+        "    def run(self):\n"
+        "        return first()\n\n"
+        "@mark\n"
+        "class Thing:\n"
+        "    @mark\n"
+        "    def run(self):\n"
+        "        return second()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    first = _node_id(result, "app.first")
+    second = _node_id(result, "app.second")
+    mark = _node_id(result, "app.mark")
+    classes = sorted(_nodes(result, "app.Thing"), key=lambda node: node.location.range.start.line)
+    methods = sorted(
+        _nodes(result, "app.Thing.run"), key=lambda node: node.location.range.start.line
+    )
+    first_class, second_class = classes
+    first_method, second_method = methods
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (module, first_class.id, RelationshipKind.CONTAINS.value) in relationships
+    assert (module, second_class.id, RelationshipKind.CONTAINS.value) in relationships
+    assert (first_class.id, first_method.id, RelationshipKind.CONTAINS.value) in relationships
+    assert (second_class.id, second_method.id, RelationshipKind.CONTAINS.value) in relationships
+    assert (first_method.id, first, RelationshipKind.CALLS.value) in relationships
+    assert (second_method.id, second, RelationshipKind.CALLS.value) in relationships
+    assert (module, first_class.id, RelationshipKind.REFERENCES.value) in relationships
+    assert (module, second_class.id, RelationshipKind.REFERENCES.value) in relationships
+    assert (second_class.id, second_method.id, RelationshipKind.REFERENCES.value) in relationships
+    assert (first_class.id, mark, RelationshipKind.REFERENCES.value) in relationships
+    assert (second_class.id, mark, RelationshipKind.REFERENCES.value) in relationships
+
+
+def test_unique_definition_graph_relationships_remain_unchanged(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def alpha():\n    return beta()\n\ndef beta():\n    return 1\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    alpha = _node_id(result, "app.alpha")
+    beta = _node_id(result, "app.beta")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (module, alpha, RelationshipKind.CONTAINS.value) in relationships
+    assert (module, beta, RelationshipKind.CONTAINS.value) in relationships
+    call = relationships[(alpha, beta, RelationshipKind.CALLS.value)]
+    assert call.evidence[0].locations[0].range.start.line == 1
+
+
+def test_from_import_targets_last_same_named_definition(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "library.py",
+        "def helper():\n    return 1\n\ndef helper():\n    return 2\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\ndef caller():\n    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    app_module = _node_id(result, "app")
+    caller = _node_id(result, "app.caller")
+    helper_nodes = sorted(
+        _nodes(result, "library.helper"), key=lambda node: node.location.range.start.line
+    )
+    first_helper, final_helper = helper_nodes
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (app_module, final_helper.id, RelationshipKind.IMPORTS.value) in relationships
+    assert (app_module, first_helper.id, RelationshipKind.IMPORTS.value) not in relationships
+    assert (caller, final_helper.id, RelationshipKind.CALLS.value) in relationships
+    assert (caller, first_helper.id, RelationshipKind.CALLS.value) not in relationships
+
+
+def test_plain_shadowed_definition_body_and_containment_use_statement_identity(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def first():\n"
+        "    return 1\n\n"
+        "def second():\n"
+        "    return 2\n\n"
+        "def f():\n"
+        "    return first()\n\n"
+        "def f():\n"
+        "    return second()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    first = _node_id(result, "app.first")
+    second = _node_id(result, "app.second")
+    f_nodes = sorted(_nodes(result, "app.f"), key=lambda node: node.location.range.start.line)
+    first_f, second_f = f_nodes
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    assert (module, first_f.id, RelationshipKind.CONTAINS.value) in relationships
+    assert (module, second_f.id, RelationshipKind.CONTAINS.value) in relationships
+    assert (first_f.id, first, RelationshipKind.CALLS.value) in relationships
+    assert (second_f.id, second, RelationshipKind.CALLS.value) in relationships
+    assert (first_f.id, second, RelationshipKind.CALLS.value) not in relationships
+    assert (second_f.id, first, RelationshipKind.CALLS.value) not in relationships
 
 
 def test_class_bases_and_keywords_are_references_at_every_nesting_level(
