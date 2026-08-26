@@ -672,6 +672,44 @@ def test_duplicate_classes_keep_direct_methods_and_decorator_sources_separate(
     assert (second_class.id, mark, RelationshipKind.REFERENCES.value) in relationships
 
 
+def test_duplicate_classes_resolve_self_calls_within_each_class_statement(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Thing:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def run(self):\n"
+        "        return self.helper()\n\n"
+        "class Thing:\n"
+        "    def helper(self):\n"
+        "        return 2\n"
+        "    def run(self):\n"
+        "        return self.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helpers = sorted(
+        _nodes(result, "app.Thing.helper"), key=lambda node: node.location.range.start.line
+    )
+    runs = sorted(_nodes(result, "app.Thing.run"), key=lambda node: node.location.range.start.line)
+    first_helper, second_helper = helpers
+    first_run, second_run = runs
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind): relationship
+        for relationship in result.document.relationships
+    }
+
+    first_call = relationships[(first_run.id, first_helper.id, RelationshipKind.CALLS.value)]
+    second_call = relationships[(second_run.id, second_helper.id, RelationshipKind.CALLS.value)]
+    assert (first_run.id, second_helper.id, RelationshipKind.CALLS.value) not in relationships
+    assert (second_run.id, first_helper.id, RelationshipKind.CALLS.value) not in relationships
+    assert first_call.evidence[0].locations[0].range.start.line == 4
+    assert second_call.evidence[0].locations[0].range.start.line == 10
+
+
 def test_unique_definition_graph_relationships_remain_unchanged(tmp_path: Path) -> None:
     _write(
         tmp_path,
