@@ -267,7 +267,10 @@ def test_renderer_keeps_resolved_reference_edges_from_analyzed_source(tmp_path: 
         (labels[relationship.source], labels[relationship.target])
         for relationship in loaded.document.relationships
         if relationship.kind == "references"
-    ] == [("src.fixture", "src.fixture.handler")]
+    ] == [
+        ("src.fixture", "src.fixture.handler"),
+        ("src.fixture.register", "callback"),
+    ]
 
     presentation = build_presentation(
         loaded.canonical, prepare_excerpts(loaded.canonical, tmp_path)
@@ -284,4 +287,7 @@ def test_renderer_keeps_resolved_reference_edges_from_analyzed_source(tmp_path: 
         (embedded_labels[relationship["source"]], embedded_labels[relationship["target"]])
         for relationship in graph["relationships"]
         if relationship["kind"] == "references"
-    ] == [("src.fixture", "src.fixture.handler")]
+    ] == [
+        ("src.fixture", "src.fixture.handler"),
+        ("src.fixture.register", "callback"),
+    ]
