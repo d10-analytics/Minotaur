@@ -355,6 +355,31 @@ def test_unreferenced_counts_module_scope_call_and_callback_registration(
     assert captured.out == "wiring.py:10  wiring.orphan  function\n"
 
 
+def test_unreferenced_counts_decorator_registration_as_module_scope_use(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def register(callback):\n"
+        "    pass\n\n"
+        "@register\n"
+        "def handler():\n"
+        "    pass\n\n"
+        "def orphan():\n"
+        "    pass\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(["query", "unreferenced", "--graph", str(graph), "--root", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "app.py:8  app.orphan  function\n"
+    assert "app.handler" not in captured.out
+
+
 def test_unreferenced_counts_a_call_from_a_sibling_method(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
