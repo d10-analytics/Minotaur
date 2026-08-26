@@ -25,8 +25,9 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # whenever the interpreter *intentionally* changes what it records; otherwise
 # every later branch is measured against semantics it is not meant to
 # reproduce.  History: fb63689 (trusted graph load) -> 54a2657 (decorator
-# application recorded as an enclosing-scope reference).
-BASELINE_COMMIT = "54a2657"
+# application recorded as an enclosing-scope reference) -> 4980c8b
+# (same-name definition attribution semantics).
+BASELINE_COMMIT = "4980c8b"
 
 
 @pytest.fixture(scope="session")
