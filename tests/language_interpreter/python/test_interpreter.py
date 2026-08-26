@@ -566,6 +566,7 @@ def test_repeated_property_definitions_keep_body_and_containment_attribution(
     assert (box, setter, RelationshipKind.CONTAINS.value) in relationships
     getter_call = relationships[(getter, getter_helper, RelationshipKind.CALLS.value)]
     setter_call = relationships[(setter, setter_helper, RelationshipKind.CALLS.value)]
+    assert (setter, getter_helper, RelationshipKind.CALLS.value) not in relationships
     assert getter_call.evidence[0].locations[0].range.start.line == 9
     assert setter_call.evidence[0].locations[0].range.start.line == 13
 
@@ -579,8 +580,11 @@ def test_overload_stubs_and_real_definition_keep_distinct_attribution(
         "from typing import overload\n\n"
         "def helper():\n"
         "    return 1\n\n"
+        "def helper_c():\n"
+        "    return 2\n\n"
         "@overload\n"
-        "def f(value: int) -> int: ...\n\n"
+        "def f(value: int) -> int:\n"
+        "    return helper_c()\n\n"
         "@overload\n"
         "def f(value: str) -> str: ...\n\n"
         "def f(value):\n"
@@ -590,6 +594,7 @@ def test_overload_stubs_and_real_definition_keep_distinct_attribution(
     result = analyze_python_workspace(tmp_path)
     module = _node_id(result, "app")
     helper = _node_id(result, "app.helper")
+    helper_c = _node_id(result, "app.helper_c")
     f_nodes = sorted(_nodes(result, "app.f"), key=lambda node: node.location.range.start.line)
     stub_one, stub_two, implementation = f_nodes
     relationships = {
@@ -611,6 +616,8 @@ def test_overload_stubs_and_real_definition_keep_distinct_attribution(
     ) in relationships
     assert (module, implementation.id, RelationshipKind.REFERENCES.value) not in relationships
     assert (implementation.id, helper, RelationshipKind.CALLS.value) in relationships
+    assert (stub_one.id, helper_c, RelationshipKind.CALLS.value) in relationships
+    assert (implementation.id, helper_c, RelationshipKind.CALLS.value) not in relationships
 
 
 def test_duplicate_classes_keep_direct_methods_and_decorator_sources_separate(
