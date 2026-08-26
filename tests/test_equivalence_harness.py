@@ -26,8 +26,9 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # every later branch is measured against semantics it is not meant to
 # reproduce.  History: fb63689 (trusted graph load) -> 54a2657 (decorator
 # application recorded as an enclosing-scope reference) -> 4980c8b
-# (same-name definition attribution semantics).
-BASELINE_COMMIT = "4980c8b"
+# (same-name definition attribution semantics) -> 3e70c17 (same-named classes
+# keep self-call resolution within their own class statement).
+BASELINE_COMMIT = "3e70c17"
 
 
 @pytest.fixture(scope="session")
