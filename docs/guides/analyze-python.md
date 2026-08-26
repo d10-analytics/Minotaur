@@ -92,6 +92,10 @@ so a base class used only through subclassing is not reported as unreferenced.
 Nested function definitions do not become separate symbol nodes, and methods
 of nested classes remain outside this slice.
 
+Repeated direct declarations with the same name in one scope remain separate
+nodes, and each node receives its own header and body relationships. Name-based
+calls, loads, and imports resolve to the last definition of that name.
+
 The interpreter also records resolvable non-call references as `references`
 relationships. For example, passing a function as `register(handler)` or
 accessing `button.clicked.connect(self.on_click)` records the resolved target

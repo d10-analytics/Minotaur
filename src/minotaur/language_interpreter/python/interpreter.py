@@ -49,6 +49,13 @@ class _Module:
     module_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _DeclaredSymbol:
+    node_id: str
+    container_id: str
+    class_declarations: Mapping[str, str] | None = None
+
+
 @dataclass
 class _ImportTally:
     """Counts of import statements that did or did not resolve in the workspace.
@@ -216,13 +223,11 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
 
     module_by_name = {module.name: module for module in modules}
     declarations: dict[str, str] = {}
-    declarations_by_path: dict[str, dict[str, str]] = {}
-    containers: dict[str, str] = {}
+    symbols_by_path: dict[str, dict[ast.stmt, _DeclaredSymbol]] = {}
     for module in modules:
-        declared, declared_containers, declared_nodes = _declarations(module)
+        declared, symbols, declared_nodes = _declarations(module)
         declarations.update(declared)
-        declarations_by_path[module.path] = declared
-        containers.update(declared_containers)
+        symbols_by_path[module.path] = symbols
         nodes.extend(declared_nodes)
 
     relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
@@ -235,9 +240,8 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         _analyze_module(
             module,
             module_by_name,
-            declarations_by_path[module.path],
+            symbols_by_path[module.path],
             declarations,
-            containers,
             relationships,
             nodes,
             seen_ids,
@@ -310,9 +314,11 @@ def _module_node(module: _Module) -> Node:
     )
 
 
-def _declarations(module: _Module) -> tuple[dict[str, str], dict[str, str], list[Node]]:
+def _declarations(
+    module: _Module,
+) -> tuple[dict[str, str], dict[ast.stmt, _DeclaredSymbol], list[Node]]:
     declarations: dict[str, str] = {module.name: module.module_id}
-    containers: dict[str, str] = {}
+    symbols: dict[ast.stmt, _DeclaredSymbol] = {}
     nodes: list[Node] = []
     for statement in module.tree.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -320,9 +326,25 @@ def _declarations(module: _Module) -> tuple[dict[str, str], dict[str, str], list
             kind = SymbolKind.CLASS if isinstance(statement, ast.ClassDef) else SymbolKind.FUNCTION
             node = _symbol_node(module.path, statement, qualified, kind)
             declarations[qualified] = node.id
-            containers[qualified] = module.module_id
+            symbols[statement] = _DeclaredSymbol(node.id, module.module_id)
             nodes.append(node)
             if isinstance(statement, ast.ClassDef):
+                # The module-wide declarations table intentionally models the
+                # name bindings left after the module body executes. Two
+                # ``class C`` statements therefore share qualified labels, and
+                # methods from the later statement overwrite methods from the
+                # earlier one in that table. That is correct for an explicit
+                # global lookup such as ``C.run`` but not for ``self.run``:
+                # an instance remains bound to the exact class object that
+                # created it even when the module name is rebound later.
+                #
+                # Keep one last-wins method table per ClassDef and attach that
+                # same table to the class and all of its direct methods. This
+                # preserves repeated-method behavior within one class while
+                # preventing resolution from crossing between two same-named
+                # class statements.
+                class_declarations: dict[str, str] = {}
+                declared_members: list[tuple[ast.stmt, Node]] = []
                 for member in statement.body:
                     if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         member_name = f"{qualified}.{member.name}"
@@ -330,28 +352,34 @@ def _declarations(module: _Module) -> tuple[dict[str, str], dict[str, str], list
                             module.path, member, member_name, SymbolKind.METHOD
                         )
                         declarations[member_name] = member_node.id
-                        containers[member_name] = node.id
+                        class_declarations[member.name] = member_node.id
+                        declared_members.append((member, member_node))
                         nodes.append(member_node)
-    return declarations, containers, nodes
+                symbols[statement] = _DeclaredSymbol(node.id, module.module_id, class_declarations)
+                for member, member_node in declared_members:
+                    symbols[member] = _DeclaredSymbol(member_node.id, node.id, class_declarations)
+    return declarations, symbols, nodes
 
 
 def _analyze_module(
     module: _Module,
     modules: dict[str, _Module],
-    local_declarations: dict[str, str],
+    symbols: dict[ast.stmt, _DeclaredSymbol],
     declarations: dict[str, str],
-    containers: dict[str, str],
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
     seen_ids: set[str],
     tally: _ImportTally,
 ) -> None:
     aliases = _imports(module, modules, relationships, nodes, seen_ids, tally)
-    for qualified, node_id in local_declarations.items():
-        container = containers.get(qualified)
-        if container is None:
-            continue
-        _append(relationships, container, node_id, RelationshipKind.CONTAINS.value, None)
+    for symbol in symbols.values():
+        _append(
+            relationships,
+            symbol.container_id,
+            symbol.node_id,
+            RelationshipKind.CONTAINS.value,
+            None,
+        )
     _calls(
         [
             statement
@@ -372,8 +400,7 @@ def _analyze_module(
             _decorator_references(
                 statement,
                 module.module_id,
-                f"{module.name}.{statement.name}",
-                SymbolKind.FUNCTION,
+                symbols[statement].node_id,
                 module.path,
                 relationships,
             )
@@ -383,7 +410,7 @@ def _analyze_module(
                 aliases,
                 module.name,
                 module.path,
-                declarations[f"{module.name}.{statement.name}"],
+                symbols[statement].node_id,
                 relationships,
                 nodes,
                 seen_ids,
@@ -393,8 +420,7 @@ def _analyze_module(
             _decorator_references(
                 statement,
                 module.module_id,
-                f"{module.name}.{statement.name}",
-                SymbolKind.CLASS,
+                symbols[statement].node_id,
                 module.path,
                 relationships,
             )
@@ -415,20 +441,19 @@ def _analyze_module(
                 aliases,
                 module.name,
                 module.path,
-                declarations[f"{module.name}.{statement.name}"],
+                symbols[statement].node_id,
                 relationships,
                 nodes,
                 seen_ids,
-                statement.name,
+                symbols[statement].class_declarations,
                 prefix_nodes=_class_header_nodes(statement),
             )
             for member in statement.body:
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     _decorator_references(
                         member,
-                        declarations[f"{module.name}.{statement.name}"],
-                        f"{module.name}.{statement.name}.{member.name}",
-                        SymbolKind.METHOD,
+                        symbols[statement].node_id,
+                        symbols[member].node_id,
                         module.path,
                         relationships,
                     )
@@ -438,11 +463,11 @@ def _analyze_module(
                         aliases,
                         module.name,
                         module.path,
-                        declarations[f"{module.name}.{statement.name}.{member.name}"],
+                        symbols[member].node_id,
                         relationships,
                         nodes,
                         seen_ids,
-                        statement.name,
+                        symbols[member].class_declarations,
                         prefix_nodes=_signature_nodes(member),
                     )
 
@@ -450,20 +475,15 @@ def _analyze_module(
 def _decorator_references(
     statement: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
     source: str,
-    qualified: str,
-    kind: SymbolKind,
+    target: str,
     path: str,
     relationships: dict[tuple[str, str, str], list[Location]],
 ) -> None:
     """Record each decorator as an enclosing-scope use of its definition.
 
-    The target is recomputed from ``statement`` rather than looked up by name:
-    ``_declarations`` keeps only the last node for a repeated name, so a
-    ``@property`` getter followed by its ``@x.setter``, or ``@overload`` stubs
-    before the real definition, would otherwise hand every decoration to the
-    last same-named node and leave the earlier ones without any inbound edge.
+    ``target`` is the node created for this exact statement. Name-based lookup
+    is intentionally avoided because repeated definitions have distinct nodes.
     """
-    target = _symbol_node(path, statement, qualified, kind).id
     for decorator in statement.decorator_list:
         _append(
             relationships,
@@ -608,14 +628,15 @@ def declarations_for_module(modules: dict[str, _Module], reference: str) -> str 
         return None
     if not member:
         return module.module_id
+    resolved: str | None = None
     for statement in module.tree.body:
         if (
             isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
             and statement.name == member
         ):
             kind = SymbolKind.CLASS if isinstance(statement, ast.ClassDef) else SymbolKind.FUNCTION
-            return _symbol_node(module.path, statement, f"{module.name}.{member}", kind).id
-    return None
+            resolved = _symbol_node(module.path, statement, f"{module.name}.{member}", kind).id
+    return resolved
 
 
 def _calls(
@@ -628,7 +649,7 @@ def _calls(
     relationships: dict[tuple[str, str, str], list[Location]],
     nodes: list[Node],
     seen_ids: set[str],
-    class_name: str | None = None,
+    class_declarations: Mapping[str, str] | None = None,
     prefix_nodes: tuple[ast.AST, ...] = (),
 ) -> None:
     visitor = _ScopeCallVisitor()
@@ -638,7 +659,7 @@ def _calls(
         visitor.visit(statement)
     for candidate in visitor.calls:
         text = _expression_text(candidate.func)
-        target = _resolve_call(text, declarations, aliases, module_name, class_name)
+        target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
         location = _location(path, candidate.func)
         if target is None:
             _unresolved(caller, text, location, relationships, nodes, seen_ids)
@@ -646,7 +667,7 @@ def _calls(
             _append(relationships, caller, target, RelationshipKind.CALLS.value, location)
     for reference in visitor.references:
         text = _expression_text(reference)
-        target = _resolve_call(text, declarations, aliases, module_name, class_name)
+        target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
         if target is not None:
             _append(
                 relationships,
@@ -662,14 +683,18 @@ def _resolve_call(
     declarations: dict[str, str],
     aliases: dict[str, str],
     module_name: str,
-    class_name: str | None,
+    class_declarations: Mapping[str, str] | None,
 ) -> str | None:
     if "." not in text:
         target_name = aliases.get(text, f"{module_name}.{text}")
         return declarations.get(target_name)
     head, _, tail = text.partition(".")
-    if head == "self" and class_name is not None:
-        return declarations.get(f"{module_name}.{class_name}.{tail}")
+    if head == "self" and class_declarations is not None:
+        # ``self`` is tied to the class statement that owns the caller, not to
+        # whichever same-named class was assigned to the module name last.
+        # Resolve through that statement's method table so repeated method
+        # names remain last-wins locally without leaking across class objects.
+        return class_declarations.get(tail)
     alias_target_name = aliases.get(head)
     if alias_target_name is not None:
         return declarations.get(f"{alias_target_name}.{tail}")
