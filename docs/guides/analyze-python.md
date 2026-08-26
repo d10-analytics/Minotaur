@@ -78,10 +78,11 @@ in its non-method statements — a dataclass `field(default_factory=make_config)
 `handler = staticmethod(helper)`, a class-level signal or callback table — are
 attributed to the class itself; methods keep their own scope. A definition's
 decorators, default arguments, and annotations are evaluated outside its body.
-The decorator expressions themselves are attributed to the function or method
-they belong to, while each decorator also records a reference from the
-enclosing module or class to the decorated symbol. Decoration therefore counts
-as a use: a never-called symbol wrapped by a decorator is not reported by
+The decorator expressions themselves are attributed to the definition they
+belong to, while each decorator also records a reference from the enclosing
+module or class to the decorated symbol. This applies equally to decorated
+functions, methods, and classes. Decoration therefore counts as a use: a
+never-called symbol wrapped by a decorator is not reported by
 `query unreferenced`. Annotations count because `def f(x: Handler)` is a real
 dependency on `Handler`: an agent asking whether a symbol is still used must
 see it before deleting that symbol. Class headers are treated the same way: the
