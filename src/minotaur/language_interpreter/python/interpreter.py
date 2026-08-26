@@ -665,10 +665,13 @@ def _calls(
             _unresolved(caller, text, location, relationships, nodes, seen_ids)
         else:
             _append(relationships, caller, target, RelationshipKind.CALLS.value, location)
+    unresolved_references: list[tuple[str, Location]] = []
+    resolved_texts: set[str] = set()
     for reference in visitor.references:
         text = _expression_text(reference)
         target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
         if target is not None:
+            resolved_texts.add(text)
             _append(
                 relationships,
                 caller,
@@ -676,6 +679,12 @@ def _calls(
                 RelationshipKind.REFERENCES.value,
                 _location(path, reference),
             )
+        else:
+            unresolved_references.append((text, _location(path, reference)))
+    for text, location in unresolved_references:
+        if any(resolved_text.startswith(text + ".") for resolved_text in resolved_texts):
+            continue
+        _unresolved(caller, text, location, relationships, nodes, seen_ids)
 
 
 def _resolve_call(
