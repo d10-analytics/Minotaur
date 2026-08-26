@@ -190,7 +190,7 @@
         "args": [
           "minotaur.graph_model.validation.ValidationReport.is_valid"
         ],
-        "expect": "empty",
+        "expect": "ok",
         "variants": {
           "no_refresh": true
         }
