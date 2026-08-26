@@ -372,7 +372,8 @@ def _analyze_module(
             _decorator_references(
                 statement,
                 module.module_id,
-                declarations[f"{module.name}.{statement.name}"],
+                f"{module.name}.{statement.name}",
+                SymbolKind.FUNCTION,
                 module.path,
                 relationships,
             )
@@ -392,7 +393,8 @@ def _analyze_module(
             _decorator_references(
                 statement,
                 module.module_id,
-                declarations[f"{module.name}.{statement.name}"],
+                f"{module.name}.{statement.name}",
+                SymbolKind.CLASS,
                 module.path,
                 relationships,
             )
@@ -425,7 +427,8 @@ def _analyze_module(
                     _decorator_references(
                         member,
                         declarations[f"{module.name}.{statement.name}"],
-                        declarations[f"{module.name}.{statement.name}.{member.name}"],
+                        f"{module.name}.{statement.name}.{member.name}",
+                        SymbolKind.METHOD,
                         module.path,
                         relationships,
                     )
@@ -447,11 +450,20 @@ def _analyze_module(
 def _decorator_references(
     statement: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
     source: str,
-    target: str,
+    qualified: str,
+    kind: SymbolKind,
     path: str,
     relationships: dict[tuple[str, str, str], list[Location]],
 ) -> None:
-    """Record each decorator as an enclosing-scope use of its definition."""
+    """Record each decorator as an enclosing-scope use of its definition.
+
+    The target is recomputed from ``statement`` rather than looked up by name:
+    ``_declarations`` keeps only the last node for a repeated name, so a
+    ``@property`` getter followed by its ``@x.setter``, or ``@overload`` stubs
+    before the real definition, would otherwise hand every decoration to the
+    last same-named node and leave the earlier ones without any inbound edge.
+    """
+    target = _symbol_node(path, statement, qualified, kind).id
     for decorator in statement.decorator_list:
         _append(
             relationships,
