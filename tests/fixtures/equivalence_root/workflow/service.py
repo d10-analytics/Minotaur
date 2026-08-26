@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from workflow.util import summarize
 
 
+@dataclass(frozen=True)
 class Service:
     """Run a fixed number of steps and report their values."""
 
     name: str
-
-    def __init__(self, name: str) -> None:
-        self.name = name
 
     def run(self, steps: int) -> list[int]:
         """Return one value per step."""

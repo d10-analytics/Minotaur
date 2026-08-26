@@ -20,7 +20,13 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # compared against.  The harness's provenance guard refuses plain copies and
 # refuses two clean worktrees sharing a HEAD, so the baseline side must be a
 # real worktree pinned to a commit other than the branch under test.
-BASELINE_COMMIT = "fb63689"
+#
+# The harness demands byte-identical answers, so this pin must move forward
+# whenever the interpreter *intentionally* changes what it records; otherwise
+# every later branch is measured against semantics it is not meant to
+# reproduce.  History: fb63689 (trusted graph load) -> 54a2657 (decorator
+# application recorded as an enclosing-scope reference).
+BASELINE_COMMIT = "54a2657"
 
 
 @pytest.fixture(scope="session")
