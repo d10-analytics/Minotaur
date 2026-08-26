@@ -355,13 +355,9 @@ def _declarations(
                         class_declarations[member.name] = member_node.id
                         declared_members.append((member, member_node))
                         nodes.append(member_node)
-                symbols[statement] = _DeclaredSymbol(
-                    node.id, module.module_id, class_declarations
-                )
+                symbols[statement] = _DeclaredSymbol(node.id, module.module_id, class_declarations)
                 for member, member_node in declared_members:
-                    symbols[member] = _DeclaredSymbol(
-                        member_node.id, node.id, class_declarations
-                    )
+                    symbols[member] = _DeclaredSymbol(member_node.id, node.id, class_declarations)
     return declarations, symbols, nodes
 
 
