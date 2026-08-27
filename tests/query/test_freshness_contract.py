@@ -49,8 +49,37 @@ def test_new_python_outside_recorded_target_is_not_detected(tmp_path: Path) -> N
     assert observed.added == ()
 
 
-def test_non_python_edit_is_not_detected(tmp_path: Path) -> None:
-    """docs/concepts/freshness.md — `analyze`, edit a non-`.py` file."""
+def test_javascript_edit_is_detected_and_refreshed(tmp_path: Path, capsys) -> None:
+    """docs/concepts/freshness.md — edit a tracked `.js` file, then query."""
+    root = tmp_path / "source"
+    source = _write(root, "app.js", "function value() {}\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    capsys.readouterr()
+
+    source.write_text("function value() { return 1; }\n", encoding="utf-8")
+
+    status = cli.main(
+        [
+            "query",
+            "definitions",
+            "value",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == "app.js:1  app.value  function\n"
+    assert captured.err == (
+        "minotaur: refreshed graph (1 drifted paths)\nminotaur: stale: app.js\n"
+    )
+
+
+def test_unsupported_extension_edit_is_not_detected(tmp_path: Path) -> None:
+    """docs/concepts/freshness.md — `analyze`, edit an unsupported extension."""
     root = tmp_path / "source"
     source = _write(root, "app.py", "value = 1\n")
     notes = _write(root, "notes.txt", "before\n")
@@ -505,9 +534,10 @@ def test_visualize_source_root_does_not_call_source_drift(
 
 
 def test_freshness_document_links_and_first_read_anchor_resolve() -> None:
-    """Pins the public links to docs/concepts/freshness.md and its first-read anchor."""
+    """Pin freshness, language-guide, and interpreter-guide documentation contracts."""
     repository = Path(__file__).resolve().parents[2]
     freshness = repository / "docs/concepts/freshness.md"
+    javascript = repository / "docs/guides/analyze-javascript.md"
     links = {
         repository / "README.md": "docs/concepts/freshness.md",
         repository / "docs/guides/query-reference.md": "../concepts/freshness.md",
@@ -518,3 +548,38 @@ def test_freshness_document_links_and_first_read_anchor_resolve() -> None:
         assert relative_link in document.read_text(encoding="utf-8")
         assert (document.parent / relative_link).resolve() == freshness.resolve()
     assert "### First-read validation cost" in freshness.read_text(encoding="utf-8")
+
+    readme = (repository / "README.md").read_text(encoding="utf-8")
+    freshness_text = freshness.read_text(encoding="utf-8")
+    python_guide = (repository / "docs/guides/analyze-python.md").read_text(encoding="utf-8")
+    assert "docs/guides/analyze-javascript.md" in readme
+    assert "currently `.py` only" not in readme
+    assert "does not yet include C#, JavaScript" not in readme
+    assert "Non-Python edit" not in freshness_text
+    assert "registry currently has one `.py` registration" not in freshness_text
+    assert "pure `.js` selection boundary" in python_guide
+
+    interpreter_guide = (repository / "docs/guides/create-a-language-interpreter.md").read_text(
+        encoding="utf-8"
+    )
+    registration = (
+        '".example",\n    analyze_example_language_files,\n    namespace="minotaur-example"'
+    )
+    assert registration in interpreter_guide
+    assert "JavaScript" not in interpreter_guide
+
+    javascript_text = javascript.read_text(encoding="utf-8")
+    assert "## Supported declarations" in javascript_text
+    assert "## Supported module imports" in javascript_text
+    assert "## Unsupported module syntax" in javascript_text
+    assert "## Explicit exclusions" in javascript_text
+    assert "import { helper as localHelper } from './lib.js';" in javascript_text
+    assert "all-or-nothing" in javascript_text
+    assert "minotaur_python_scope_resolution" in javascript_text
+    inbound_links = {
+        repository / "README.md": "docs/guides/analyze-javascript.md",
+        repository / "docs/guides/query-reference.md": "analyze-javascript.md",
+    }
+    for document, relative_link in inbound_links.items():
+        assert relative_link in document.read_text(encoding="utf-8")
+        assert (document.parent / relative_link).resolve() == javascript.resolve()
