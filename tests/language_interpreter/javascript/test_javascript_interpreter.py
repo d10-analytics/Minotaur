@@ -254,6 +254,27 @@ def test_object_property_function_bodies_are_deferred_but_iife_values_are_walked
     assert {"hidden", "hiddenArrow", "hiddenComputed", "hiddenMethod"}.isdisjoint(texts)
 
 
+def test_computed_callable_keys_defer_bodies_but_iife_and_calls_execute(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "const object = {"
+                "[function() { hiddenFunctionKey(); }]: value(), "
+                "[() => hiddenArrowKey()]: value(), "
+                "[(function() { executedKey(); })()]: value(), "
+                "[ordinaryKey()]: value()"
+                "};\n"
+            )
+        },
+    )
+    texts = {
+        node.reference_text for node in result.document.nodes if node.reference_text is not None
+    }
+    assert {"executedKey", "ordinaryKey", "value"} <= texts
+    assert {"hiddenFunctionKey", "hiddenArrowKey"}.isdisjoint(texts)
+
+
 def test_destructured_parameter_defaults_are_walked_without_binding_uses(tmp_path):
     result = _analyze(
         tmp_path,
