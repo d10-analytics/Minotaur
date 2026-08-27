@@ -443,10 +443,12 @@ def _imports(
             for specifier in getattr(statement, "specifiers", ()):
                 exported = _property_name(getattr(specifier, "exported", None))
                 local = _property_name(getattr(specifier, "local", None))
-                name = exported or local
+                local_name = exported or local
                 anchor = getattr(specifier, "exported", None) or getattr(specifier, "local", None)
-                if name is not None and anchor is not None:
-                    _unsupported(module, f"export#{name}", anchor, relationships, nodes, seen)
+                if local_name is not None and anchor is not None:
+                    _unsupported(
+                        module, f"export#{local_name}", anchor, relationships, nodes, seen
+                    )
 
 
 def _expressions(
