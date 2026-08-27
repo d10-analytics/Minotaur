@@ -612,22 +612,30 @@ def test_line_index_keeps_large_javascript_conversion_linear(tmp_path):
 
 
 def test_raw_javascript_digest_matches_python_for_identical_bytes(tmp_path):
-    source = b"\xef\xbb\xbfexport function helper() {}\r\n"
+    bom_source = b'\xef\xbb\xbfvalue = "\xf0\x9f\x98\x80";\r\n'
+    source = b'value = "\xf0\x9f\x98\x80";\r\n'
     js_path = tmp_path / "app.js"
     py_path = tmp_path / "app.py"
+    bom_path = tmp_path / "bom.js"
+    bom_path.write_bytes(bom_source)
     js_path.write_bytes(source)
-    py_path.write_bytes(b"def helper():\r\n    return None\r\n")
-    js_result = analyze_javascript_files(Workspace(tmp_path), (js_path,))
+    py_path.write_bytes(source)
+    js_result = analyze_javascript_files(Workspace(tmp_path), (js_path, bom_path))
     py_result = analyze_python_files(Workspace(tmp_path), (py_path,))
     js_file = _node(js_result, "app.js")
+    bom_file = _node(js_result, "bom.js")
     py_file = next(node for node in py_result.document.nodes if node.label == "app.py")
     assert (
         js_file.extensions["minotaur-javascript"]["content_sha256"]
         == hashlib.sha256(source).hexdigest()
     )
     assert (
+        bom_file.extensions["minotaur-javascript"]["content_sha256"]
+        == hashlib.sha256(bom_source).hexdigest()
+    )
+    assert (
         py_file.extensions["minotaur-python"]["content_sha256"]
-        == hashlib.sha256(py_path.read_bytes()).hexdigest()
+        == js_file.extensions["minotaur-javascript"]["content_sha256"]
     )
 
 
