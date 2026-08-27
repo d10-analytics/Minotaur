@@ -245,7 +245,7 @@ def _collect_declarations(
         name = statement.id.name
         kind = SymbolKind.FUNCTION if typ == "FunctionDeclaration" else SymbolKind.CLASS
         node = _symbol_node(
-            path, statement, f"{path.removesuffix('.js')}.{name}", kind, export_kind, line_index
+            path, statement, f"{_without_js_suffix(path)}.{name}", kind, export_kind, line_index
         )
         binding = _Binding(name, node.id, _start(statement))
         bindings[name] = binding
@@ -294,7 +294,7 @@ def _collect_declarations(
             node = _symbol_node(
                 path,
                 declarator,
-                f"{path.removesuffix('.js')}.{name}",
+                f"{_without_js_suffix(path)}.{name}",
                 SymbolKind.FUNCTION,
                 export_kind,
                 line_index,
@@ -326,7 +326,7 @@ def _module_node(module: _Module) -> Node:
         id=module.module_id,
         identity=identity,
         node_class=NodeClass.SYMBOL,
-        label=module.path.removesuffix(".js"),
+        label=_without_js_suffix(module.path),
         symbol_kind=SymbolKind.MODULE.value,
         language="javascript",
         location=_full_location(module.path, module.line_index),
@@ -435,6 +435,18 @@ def _imports(
                     nodes,
                     seen,
                 )
+        elif typ == "ExportNamedDeclaration":
+            # Local export lists are intentionally unsupported.  Keep the
+            # unsupported operation visible at its exported identifier rather
+            # than silently dropping it, just as source-backed export lists
+            # are represented by ``<source>#<name>`` facts above.
+            for specifier in getattr(statement, "specifiers", ()):
+                exported = _property_name(getattr(specifier, "exported", None))
+                local = _property_name(getattr(specifier, "local", None))
+                name = exported or local
+                anchor = getattr(specifier, "exported", None) or getattr(specifier, "local", None)
+                if name is not None and anchor is not None:
+                    _unsupported(module, f"export#{name}", anchor, relationships, nodes, seen)
 
 
 def _expressions(
@@ -487,7 +499,7 @@ def _expressions(
                         relationships,
                         nodes,
                         seen,
-                        shadows=program_shadows | _scope_shadows(getattr(member, "value", member)),
+                        shadows=program_shadows,
                         skip_declaration=True,
                     )
         elif node is not None and getattr(declaration, "type", None) in {
@@ -516,7 +528,7 @@ def _expressions(
                     relationships,
                     nodes,
                     seen,
-                    shadows=program_shadows | _scope_shadows(declaration),
+                    shadows=program_shadows,
                     skip_declaration=True,
                 )
         elif getattr(statement, "type", None) not in {
@@ -573,6 +585,18 @@ def _walk(
         # Declaration identifiers are not uses. Their executable bodies remain
         # attributed to the enclosing emitted owner for nested declarations.
         if typ == "ClassDeclaration":
+            # A superclass expression executes while the class is evaluated,
+            # so its uses belong to the emitted class symbol.
+            _walk(
+                getattr(node, "superClass", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+            )
             body = getattr(getattr(node, "body", None), "body", ())
             for child in body:
                 if getattr(child, "type", None) == "MethodDefinition":
@@ -598,7 +622,28 @@ def _walk(
                     # field initialization and dispatch need runtime semantics.
                     continue
         else:
+            # Parameter initializers execute under the function owner before
+            # the body.  Only parameters preceding an initializer are in
+            # scope there; the body receives the complete function scope.
+            parameter_shadows = set(shadows)
+            for parameter in getattr(node, "params", ()) or ():
+                if getattr(parameter, "type", None) == "AssignmentPattern":
+                    _walk(
+                        getattr(parameter, "right", None),
+                        owner,
+                        module,
+                        bindings,
+                        relationships,
+                        nodes,
+                        seen,
+                        parameter_shadows,
+                    )
+                parameter_shadows.update(_bound_names(parameter))
             nested_shadows = set(shadows) | _scope_shadows(node)
+            if typ == "FunctionExpression" and getattr(node, "id", None) is not None:
+                # A named function expression's name is a private recursive
+                # binding visible in its body, not a module-level reference.
+                nested_shadows.add(str(node.id.name))
             _walk(
                 getattr(node, "body", None),
                 owner,
@@ -792,6 +837,15 @@ def _walk(
         return
     if typ in {"Property", "MethodDefinition"}:
         if typ == "Property" and getattr(node, "method", False):
+            return
+        if typ == "Property" and getattr(getattr(node, "value", None), "type", None) in {
+            "FunctionExpression",
+            "ArrowFunctionExpression",
+        }:
+            # A function-valued object property is deferred until runtime and
+            # has no stable emitted owner.  An immediately evaluated property
+            # expression (for example an IIFE) is a CallExpression instead and
+            # remains walkable below.
             return
         _walk(
             getattr(node, "value", None),
@@ -1067,7 +1121,7 @@ def _start(node: Any) -> int:
 
 
 def _relative_target(path: str, specifier: str) -> str | None:
-    if not specifier.startswith(("./", "../")) or not specifier.endswith(".js"):
+    if not specifier.startswith(("./", "../")) or not specifier.lower().endswith(".js"):
         return None
     parts = path.split("/")[:-1]
     for segment in specifier.split("/"):
@@ -1080,3 +1134,8 @@ def _relative_target(path: str, specifier: str) -> str | None:
         else:
             parts.append(segment)
     return "/".join(parts)
+
+
+def _without_js_suffix(path: str) -> str:
+    """Strip a registered JavaScript suffix without changing path spelling."""
+    return path[:-3] if path.lower().endswith(".js") else path
