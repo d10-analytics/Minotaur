@@ -152,7 +152,10 @@ def test_javascript_selection_dispatches_and_mixed_selection_is_rejected(
 
     assert javascript.returncode == 0, javascript.stderr
     graph = json.loads(output.read_text(encoding="utf-8"))
+    validated = load_graph_file(output).document
     assert graph["generated_by"]["name"] == "minotaur-javascript"
+    assert validated.generated_by.name == "minotaur-javascript"
+    assert any(node.path == "app.js" for node in validated.nodes)
     assert {node["path"] for node in graph["nodes"] if node["node_class"] == "file"} == {"app.js"}
 
     _write(root, "helper.py", "def helper():\n    return 1\n")
