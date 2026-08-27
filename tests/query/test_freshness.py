@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file
-from minotaur.query.freshness import drift
+from minotaur.query.freshness import content_sha256, drift
 
 
 def _write(root: Path, relative: str, content: str) -> Path:
@@ -98,6 +99,54 @@ def test_drift_reports_changed_missing_and_directory_additions(tmp_path: Path) -
     assert observed.missing == ("pkg/missing.py",)
     assert observed.added == ("pkg/added.py",)
     assert added.exists()
+
+
+def test_content_sha256_resolves_python_javascript_and_unknown_extensions(
+    tmp_path: Path,
+) -> None:
+    python_root = tmp_path / "python"
+    python_source = _write(python_root, "app.py", "value = 1\n")
+    python_graph = tmp_path / "python.json"
+    assert _analyze(python_root, python_graph, python_root) == 0
+    python_node = next(
+        node for node in load_graph_file(python_graph).document.nodes if node.path == "app.py"
+    )
+
+    javascript_root = tmp_path / "javascript"
+    javascript_source = _write(javascript_root, "app.js", "const value = 1;\n")
+    javascript_graph = tmp_path / "javascript.json"
+    assert _analyze(javascript_root, javascript_graph, javascript_root) == 0
+    javascript_node = next(
+        node for node in load_graph_file(javascript_graph).document.nodes if node.path == "app.js"
+    )
+
+    assert content_sha256(python_node) == hashlib.sha256(python_source.read_bytes()).hexdigest()
+    assert (
+        content_sha256(javascript_node)
+        == hashlib.sha256(javascript_source.read_bytes()).hexdigest()
+    )
+    assert content_sha256(replace(javascript_node, path="app.txt")) is None
+
+
+def test_javascript_drift_reports_all_file_freshness_dimensions(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    changed = _write(root, "pkg/changed.js", "const value = 1;\n")
+    missing = _write(root, "pkg/missing.js", "const value = 2;\n")
+    output = tmp_path / "graph.json"
+
+    assert _analyze(root, output, root / "pkg") == 0
+    graph = load_graph_file(output).document
+    assert drift(graph, root).is_clean
+
+    changed.write_text("const value = 4;\n", encoding="utf-8")
+    missing.unlink()
+    _write(root, "pkg/added.js", "const value = 5;\n")
+
+    observed = drift(graph, root)
+
+    assert observed.changed == ("pkg/changed.js",)
+    assert observed.missing == ("pkg/missing.js",)
+    assert observed.added == ("pkg/added.js",)
 
 
 def test_query_refresh_removes_deleted_direct_selection_and_preserves_metadata(

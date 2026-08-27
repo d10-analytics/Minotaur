@@ -94,6 +94,33 @@ def test_context_json_contains_same_bounded_lines_and_stale_state(
     assert result[0]["lines"][1] == {"line": 4, "target": True, "text": "changed = 4"}
 
 
+def test_javascript_context_reports_fresh_then_stale(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    source = _write(root, "app.js", "const first = 1;\nconst second = 2;\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+
+    command = [
+        "query",
+        "context",
+        "--graph",
+        str(graph),
+        "--root",
+        str(root),
+        "--site",
+        "app.js:2",
+        "--json",
+    ]
+    assert cli.main(command) == 0
+    assert json.loads(capsys.readouterr().out)["results"][0]["stale"] is False
+
+    source.write_text("const first = 1;\nconst second = 3;\n", encoding="utf-8")
+    assert cli.main(command) == 0
+    assert json.loads(capsys.readouterr().out)["results"][0]["stale"] is True
+
+
 def test_context_rejects_unknown_or_out_of_range_sites(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

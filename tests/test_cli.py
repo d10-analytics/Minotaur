@@ -141,6 +141,38 @@ def test_non_empty_python_selection_keeps_python_producer(tmp_path: Path) -> Non
     assert graph["generated_by"]["name"] == "minotaur-python"
 
 
+def test_javascript_selection_dispatches_and_mixed_selection_is_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.js", "export function app() {}\n")
+    output = tmp_path / "javascript.json"
+
+    javascript = _run(root, output, root)
+
+    assert javascript.returncode == 0, javascript.stderr
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert graph["generated_by"]["name"] == "minotaur-javascript"
+    assert {node["path"] for node in graph["nodes"] if node["node_class"] == "file"} == {"app.js"}
+
+    _write(root, "helper.py", "def helper():\n    return 1\n")
+    mixed_status = cli.main(
+        [
+            "analyze",
+            "--root",
+            str(root),
+            "--output",
+            str(tmp_path / "mixed.json"),
+            str(root),
+        ]
+    )
+
+    assert mixed_status == 2
+    assert capsys.readouterr().err.strip() == (
+        "minotaur: error: selected files require unsupported multi-interpreter graph composition"
+    )
+
+
 def test_selection_containment_exclusions_and_direct_overrides(tmp_path: Path) -> None:
     root = tmp_path / "source"
     _write(root, "visible.py", "pass\n")
