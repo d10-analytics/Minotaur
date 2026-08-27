@@ -474,6 +474,35 @@ def test_module_and_lexical_shadowing_cover_parameters_patterns_and_catches(tmp_
     assert not any(node.reference_text == "target" for node in result.document.nodes)
 
 
+def test_loop_scope_boundaries_preserve_outer_resolution_and_var_function_scope(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function target() {}\n"
+                "function letLoop() { target(); for (let target of values) { "
+                "target(); } target(); }\n"
+                "function varBlock() { target(); { var target = 1; } target(); }\n"
+            )
+        },
+    )
+    target = _node(result, "app.target")
+    let_loop = _node(result, "app.letLoop")
+    var_block = _node(result, "app.varBlock")
+    target_calls = [
+        edge for edge in _edges(result, RelationshipKind.CALLS.value) if edge.target == target.id
+    ]
+    let_loop_calls = [edge for edge in target_calls if edge.source == let_loop.id]
+    var_block_calls = [edge for edge in target_calls if edge.source == var_block.id]
+    # A for-header let binding is limited to the loop; the outer calls still
+    # resolve to the module declaration.
+    assert len(let_loop_calls) == 1
+    assert len(let_loop_calls[0].evidence[0].locations) == 2
+    # A var binding in a nested block belongs to the enclosing function scope.
+    assert not var_block_calls
+    assert any(node.reference_text == "values" for node in result.document.nodes)
+
+
 def test_lexical_module_bindings_and_unsupported_import_locals_are_suppressed(tmp_path):
     result = _analyze(
         tmp_path,
