@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -64,6 +65,144 @@ def test_esm_declarations_imports_calls_and_metadata(tmp_path):
         and edge.kind == RelationshipKind.CALLS.value
         for edge in result.document.relationships
     )
+
+
+def test_declaration_kinds_containment_and_anonymous_default_exclusion(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function top() {}\n"
+                "class Thing { constructor() {} run() {} }\n"
+                "const arrow = () => {};\n"
+                "export default function namedDefault() {}\n"
+                "export default () => {};\n"
+            )
+        },
+    )
+    labels = {node.label for node in result.document.nodes}
+    assert {
+        "app.top",
+        "app.Thing",
+        "app.Thing.constructor",
+        "app.Thing.run",
+        "app.arrow",
+        "app.namedDefault",
+    } <= labels
+    assert not any(label.endswith("<anonymous>") for label in labels)
+    app = _node(result, "app")
+    thing = _node(result, "app.Thing")
+    method = _node(result, "app.Thing.run")
+    contains = {(edge.source, edge.target, edge.kind) for edge in result.document.relationships}
+    assert (app.id, thing.id, RelationshipKind.CONTAINS.value) in contains
+    assert (thing.id, method.id, RelationshipKind.CONTAINS.value) in contains
+    assert (app.id, method.id, RelationshipKind.CONTAINS.value) not in contains
+
+
+def test_calls_callback_references_and_unbound_uses_have_precise_kinds(tmp_path):
+    source_line = "function use() { helper(); consume(helper); missing(); unknown; }"
+    result = _analyze(
+        tmp_path,
+        {"app.js": (f"function helper() {{}}\n{source_line}\n")},
+    )
+    helper = _node(result, "app.helper")
+    use = _node(result, "app.use")
+    calls = [
+        edge for edge in result.document.relationships if edge.kind == RelationshipKind.CALLS.value
+    ]
+    references = [
+        edge
+        for edge in result.document.relationships
+        if edge.kind == RelationshipKind.REFERENCES.value
+    ]
+    assert any(edge.source == use.id and edge.target == helper.id for edge in calls)
+    call = next(edge for edge in calls if edge.target == helper.id)
+    location = call.evidence[0].locations[0]
+    assert location.path == "app.js"
+    assert location.range.start.character == len(
+        source_line[: source_line.index("helper")].encode()
+    )
+    assert any(edge.source == use.id and edge.target == helper.id for edge in references)
+    unresolved = {
+        node.reference_text: node for node in result.document.nodes if node.reference_text
+    }
+    assert {"missing", "unknown", "consume"} <= unresolved.keys()
+    assert not any(
+        edge.target == unresolved["missing"].id and edge.kind == RelationshipKind.CALLS.value
+        for edge in result.document.relationships
+    )
+
+
+def test_named_and_default_export_resolution_and_full_validation(tmp_path):
+    source = "export function named() {}\nexport default function fallback() {}\n"
+    result = _analyze(
+        tmp_path,
+        {
+            "lib.js": source,
+            "app.js": (
+                "import { named } from './lib.js';\n"
+                "import fallback from './lib.js';\n"
+                "named(); fallback();\n"
+            ),
+        },
+    )
+    named = _node(result, "lib.named")
+    fallback = _node(result, "lib.fallback")
+    assert named.extensions["minotaur-javascript"]["export_kind"] == "named"
+    assert fallback.extensions["minotaur-javascript"]["export_kind"] == "default"
+    app = _node(result, "app")
+    assert any(
+        edge.source == app.id
+        and edge.target == named.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in result.document.relationships
+    )
+    assert any(node.reference_text == "./lib.js#default" for node in result.document.nodes)
+    source_by_path = {"lib.js": source, "app.js": (tmp_path / "app.js").read_text()}
+    assert validate_document(result.document, source_text_by_path=source_by_path).is_valid
+
+
+def test_parse_and_read_failures_have_no_nodes_or_relationships_from_failed_path(
+    tmp_path, monkeypatch
+):
+    result = _analyze(tmp_path, {"broken.js": "return;", "good.js": "export function good() {};"})
+    broken_ids = {node.id for node in result.document.nodes if node.label.startswith("broken")}
+    assert not broken_ids
+    assert all(
+        edge.source not in broken_ids and edge.target not in broken_ids
+        for edge in result.document.relationships
+    )
+    bad = tmp_path / "unreadable.js"
+    bad.write_text("export function lost() {};", encoding="utf-8")
+    good = tmp_path / "sibling.js"
+    good.write_text("export function kept() {};", encoding="utf-8")
+    original = type(bad).read_bytes
+
+    def read_bytes(path):
+        if path == bad:
+            raise OSError("synthetic read failure")
+        return original(path)
+
+    monkeypatch.setattr(type(bad), "read_bytes", read_bytes)
+    read_result = analyze_javascript_files(Workspace(tmp_path), (bad, good))
+    failed_ids = {
+        node.id for node in read_result.document.nodes if node.label.startswith("unreadable")
+    }
+    assert not failed_ids
+    assert all(
+        edge.source not in failed_ids and edge.target not in failed_ids
+        for edge in read_result.document.relationships
+    )
+
+
+def test_interpreter_records_first_slice_exclusion_rationale():
+    source = (
+        Path(__file__).parents[3] / "src/minotaur/language_interpreter/javascript/interpreter.py"
+    )
+    text = source.read_text(encoding="utf-8")
+    assert "Object-literal methods" in text
+    assert "``this``" in text
+    assert "class fields" in text
 
 
 def test_utf8_ranges_validate_and_serialization_is_order_independent(tmp_path):
