@@ -377,6 +377,22 @@ def test_format_document_states_the_extension_integer_range() -> None:
     assert "[-2^63, 2^64-1]" in grammar
 
 
+def test_format_document_pins_javascript_digest_and_shared_selection_metadata() -> None:
+    """The graph-format reference documents both registered producer namespaces."""
+    format_document = (ROOT / "docs/formats/minotaur-graph-v1.md").read_text(encoding="utf-8")
+    javascript_start = format_document.index(
+        "The JavaScript analyzer emits a separate producer extension"
+    )
+    javascript_end = format_document.index(
+        "\nExtension values use a recursive grammar:", javascript_start
+    )
+    javascript = format_document[javascript_start:javascript_end]
+    assert 'extensions["minotaur-javascript"]["content_sha256"]' in javascript
+    assert 'extensions["minotaur"]["selection"]' in javascript
+    assert "exact source bytes" in javascript
+    assert "imports_resolved" not in javascript
+
+
 def test_extension_schema_identity_and_property_name_pattern_are_pinned() -> None:
     loaded_schema = schema()
     assert loaded_schema["$id"] == "urn:minotaur:schemas:minotaur-graph:0.1.0"

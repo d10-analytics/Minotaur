@@ -76,7 +76,11 @@ Add an `InterpreterRegistration` in `default_registry()` in
 normalized file extension with the selected-file function:
 
 ```python
-InterpreterRegistration(".example", analyze_example_language_files)
+InterpreterRegistration(
+    ".example",
+    analyze_example_language_files,
+    namespace="minotaur-example",
+)
 ```
 
 Extensions are case-insensitive and must be unique. A duplicate is rejected

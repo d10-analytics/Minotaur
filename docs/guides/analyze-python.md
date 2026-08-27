@@ -1,8 +1,9 @@
 # Current Python analysis
 
 Minotaur provides a bounded analyzer for Python source structure. The
-language-neutral CLI selects files by registered extension; this release
-registers Python for `.py` files only.
+language-neutral CLI selects files by registered extension. This page covers
+the Python registration for `.py` files; the separate JavaScript guide covers
+the pure `.js` selection boundary.
 
 Analysis records source bytes and the selected targets for later freshness
 checks. See [Graph freshness and snapshot order](../concepts/freshness.md) for
@@ -117,8 +118,8 @@ The output uses the canonical Minotaur wire contract described in the
 [Minotaur graph format reference](../formats/minotaur-graph-v1.md).
 
 For freshness checks, each file node carries the lowercase SHA-256 digest of
-its exact source bytes in the producer extension
-`extensions["minotaur-python"]["content_sha256"]`. The analyze command also
+its exact source bytes in its registered producer extension;
+Python uses `extensions["minotaur-python"]["content_sha256"]`. The analyze command also
 records its sorted root-relative input targets in the document extension
 `extensions["minotaur"]["selection"]`. The analyzer records import resolution
 counts in the document extension `extensions["minotaur-python"]`:

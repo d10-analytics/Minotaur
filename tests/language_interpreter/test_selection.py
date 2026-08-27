@@ -12,7 +12,11 @@ import pytest
 
 from minotaur.language_interpreter import exclusions, selection
 from minotaur.language_interpreter.python.discovery import discover_python_files
-from minotaur.language_interpreter.registry import default_registry
+from minotaur.language_interpreter.registry import (
+    InterpreterRegistration,
+    InterpreterRegistry,
+    default_registry,
+)
 from minotaur.language_interpreter.selection import _discover_directory, select_sources
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -125,6 +129,37 @@ def _make_empty(root: Path) -> None:
 
 def _make_include_excluded(root: Path) -> None:
     _make_nested_excluded(root)
+
+
+def test_registry_normalization_preserves_namespace_and_defaults() -> None:
+    def analyze(workspace: Workspace, files: tuple[Path, ...]) -> object:
+        del workspace, files
+        return object()
+
+    custom = InterpreterRegistration(".JS", analyze, namespace="custom-js")
+    registry = InterpreterRegistry((custom,))
+    normalized = registry.registration_for(Path("source.js"))
+
+    assert normalized is not None
+    assert normalized.extension == ".js"
+    assert normalized.namespace == "custom-js"
+    assert normalized.analyze_files is analyze
+
+    python = default_registry().registration_for(Path("source.py"))
+    javascript = default_registry().registration_for(Path("source.js"))
+    assert python is not None and python.namespace == "minotaur-python"
+    assert javascript is not None and javascript.namespace == "minotaur-javascript"
+
+
+def test_selection_discovers_javascript_files(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write(root, "app.js", "function app() {}\n")
+    _write(root, "ignored.txt", "not source\n")
+
+    _, selected = select_sources(root, (root,), default_registry())
+
+    assert selected.files == (root / "app.js",)
 
 
 _SHAPES: tuple[tuple[str, Callable[[Path], None], str, bool], ...] = (

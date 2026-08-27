@@ -28,8 +28,9 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # application recorded as an enclosing-scope reference) -> 4980c8b
 # (same-name definition attribution semantics) -> 3e70c17 (same-named classes
 # keep self-call resolution within their own class statement) -> 68df533
-# (unresolved non-call reference emission).
-BASELINE_COMMIT = "68df533"
+# (unresolved non-call reference emission) -> 7043ae2 (neutral producer for
+# empty selections).
+BASELINE_COMMIT = "7043ae2"
 
 
 @pytest.fixture(scope="session")

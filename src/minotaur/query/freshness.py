@@ -93,14 +93,16 @@ def _file_nodes(document: GraphDocument) -> dict[str, Node]:
 
 
 def content_sha256(node: Node) -> str | None:
-    """Return the recorded ``minotaur-python`` content hash, if any.
+    """Return the recorded producer content hash for a registered path.
 
     Shared by ``drift`` and ``query.context``, which both need the same
     recorded-hash lookup: one to compare against the current workspace, the
     other to decide whether a comparison is possible at all.
     """
     extensions = node.extensions or {}
-    language = extensions.get("minotaur-python", {})
+    registration = default_registry().registration_for(Path(node.path)) if node.path else None
+    namespace = registration.namespace if registration else None
+    language = extensions.get(namespace, {}) if namespace else {}
     digest = language.get("content_sha256")
     return digest if isinstance(digest, str) else None
 

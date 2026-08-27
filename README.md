@@ -28,7 +28,8 @@ it remains a visual placeholder until that browser-backed capture is refreshed.
 Minotaur is in early development. Its current implementation includes:
 
 - a versioned canonical graph schema, tested graph model, and semantic validator;
-- a bounded native Python analyzer and selected-path CLI (currently `.py` only);
+- bounded native Python and JavaScript analyzers behind the selected-path CLI
+  (each invocation selects one language: `.py` or `.js`);
 - fixed agent-facing graph queries for callers, definitions, impact,
   unreferenced symbols, snapshot diffs, and source context;
 - a self-contained HTML explorer with filters, themes, source excerpts, and
@@ -36,8 +37,8 @@ Minotaur is in early development. Its current implementation includes:
 
 ## Query workflow
 
-The query workflow has two steps: analyze Python source to build a graph, then
-ask focused questions against that snapshot. For example,
+The query workflow has two steps: analyze supported source to build a graph,
+then ask focused questions against that snapshot. For example,
 `minotaur analyze --root src --output graph.json src` records the structure and
 source evidence that later queries can navigate without importing or executing
 the project.
@@ -66,6 +67,8 @@ what remains intentionally outside the freshness boundary.
 
 Current Python-analysis behavior and limits are described in the
 [Python analysis guide](docs/guides/analyze-python.md).
+JavaScript selection and analysis boundaries are described in the
+[JavaScript analysis guide](docs/guides/analyze-javascript.md).
 
 ## Local-first and privacy-conscious
 
@@ -86,8 +89,8 @@ Language interpreters examine source workspaces directly and produce graph
 facts from the language they understand. Each interpreter owns its language
 semantics, resolution limits, source locations, and evidence.
 
-Python is the first implemented interpreter. C#, JavaScript, and other
-languages are future extensions, not current compatibility claims. See
+Python and JavaScript are the implemented interpreters. C# and other languages
+are future extensions, not current compatibility claims. See
 [Create a language interpreter](docs/guides/create-a-language-interpreter.md)
 for the selected-file API and registration convention for new languages.
 
@@ -182,15 +185,15 @@ invocations retain the current Git metadata in normal analysis output.
 Open the generated [standalone HTML explorer](examples/python-workflow/minotaur-graph.html)
 locally with `file://`; it does not require a server or network connection.
 
-It does not yet include C#, JavaScript, automatic runtime tracing, or broad
-compatibility with third-party graph formats.
+It does not yet include C#, automatic runtime tracing, or broad compatibility
+with third-party graph formats.
 
 ## Repository layout
 
 ```text
 src/minotaur/
   graph_model/             # Canonical graph contract and graph operations
-  language_interpreter/    # Native source-language analysis; Python first
+  language_interpreter/    # Native source-language analysis; Python and JavaScript
   graph_visualizer/        # Interactive HTML and future static views
 
 schemas/minotaur-graph/    # Versioned public graph schema

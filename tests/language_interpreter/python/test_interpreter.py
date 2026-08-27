@@ -21,6 +21,7 @@ from minotaur.graph_model.validation import IssueCode, validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
 from minotaur.language_interpreter.python.interpreter import _calls
+from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
 
@@ -1151,3 +1152,24 @@ def test_unresolved_dedup_completes_25000_sites_within_three_seconds(tmp_path: P
     ]
     assert len(unresolved) == site_count
     assert elapsed <= 3.0, f"analyze took {elapsed:.2f}s, expected <= 3.0s"
+
+
+def test_python_module_location_uses_shared_index_without_moving_trailing_end(
+    tmp_path: Path,
+) -> None:
+    source = "def helper():\n    return 1\n"
+    _write(tmp_path, "app.py", source)
+    result = analyze_python_workspace(tmp_path)
+    module = next(node for node in result.document.nodes if node.label == "app")
+    assert module.location is not None
+    assert module.location.range.end == LineIndex(source).end_position()
+    assert module.location.range.end.line == 1
+    assert module.location.range.end.character == len(b"    return 1")
+
+
+def test_python_form_feed_source_stays_valid_under_shared_line_rules(tmp_path: Path) -> None:
+    source = "value = 1\f\n"
+    _write(tmp_path, "app.py", source)
+    result = analyze_python_workspace(tmp_path)
+    assert result.diagnostics == ()
+    assert validate_document(result.document, source_text_by_path={"app.py": source}).is_valid

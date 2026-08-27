@@ -32,9 +32,10 @@ from minotaur.graph_model.relationship import Relationship
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.python.discovery import discover_python_files
 from minotaur.language_interpreter.python.parsing import parse_python
+from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
-_NAMESPACE = "minotaur-python"
+NAMESPACE = "minotaur-python"
 _PRODUCER = Producer(name="minotaur-python")
 
 
@@ -45,6 +46,7 @@ class _Module:
     is_package: bool
     tree: ast.Module
     source: str
+    line_index: LineIndex
     file_id: str
     module_id: str
 
@@ -215,7 +217,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
                 )
             )
             continue
-        module = _make_module(relative, parsed.tree, source)
+        module = _make_module(relative, parsed.tree, source, LineIndex(source))
         modules.append(module)
         nodes.extend(
             (_file_node(relative, hashlib.sha256(content).hexdigest()), _module_node(module))
@@ -270,12 +272,12 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
     )
 
 
-def _make_module(path: str, tree: ast.Module, source: str) -> _Module:
+def _make_module(path: str, tree: ast.Module, source: str, line_index: LineIndex) -> _Module:
     name = _module_name(path)
-    file_identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
+    file_identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
     file_id = compute_node_id(file_identity, node_class=NodeClass.FILE.value, path=path)
-    module_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
-    location = _module_location(path, source)
+    module_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
+    location = _module_location(path, line_index)
     module_id = compute_node_id(
         module_identity,
         node_class=NodeClass.SYMBOL.value,
@@ -283,12 +285,19 @@ def _make_module(path: str, tree: ast.Module, source: str) -> _Module:
         location=location,
     )
     return _Module(
-        path, name, path.rsplit("/", 1)[-1] == "__init__.py", tree, source, file_id, module_id
+        path,
+        name,
+        path.rsplit("/", 1)[-1] == "__init__.py",
+        tree,
+        source,
+        line_index,
+        file_id,
+        module_id,
     )
 
 
 def _file_node(path: str, content_sha256: str) -> Node:
-    identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
     return Node(
         id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=path),
         identity=identity,
@@ -301,8 +310,8 @@ def _file_node(path: str, content_sha256: str) -> Node:
 
 
 def _module_node(module: _Module) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
-    location = _module_location(module.path, module.source)
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
+    location = _module_location(module.path, module.line_index)
     return Node(
         id=module.module_id,
         identity=identity,
@@ -718,7 +727,7 @@ def _unresolved(
     nodes: list[Node],
     seen_ids: set[str],
 ) -> None:
-    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, _NAMESPACE, originating_node=origin)
+    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, NAMESPACE, originating_node=origin)
     node_id = compute_node_id(
         identity,
         node_class=NodeClass.UNRESOLVED_REFERENCE.value,
@@ -742,7 +751,7 @@ def _unresolved(
 
 
 def _symbol_node(path: str, statement: ast.AST, label: str, kind: SymbolKind) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
     location = _location(path, statement)
     return Node(
         id=compute_node_id(
@@ -799,15 +808,8 @@ def _relative_module(
     return ".".join(base)
 
 
-def _module_location(path: str, source: str) -> Location:
-    lines = source.splitlines(keepends=True)
-    if not lines:
-        return Location(path, Range(Position(0, 0), Position(0, 0)))
-    last = lines[-1]
-    return Location(
-        path,
-        Range(Position(0, 0), Position(len(lines) - 1, len(last.encode("utf-8").rstrip(b"\r\n")))),
-    )
+def _module_location(path: str, line_index: LineIndex) -> Location:
+    return Location(path, Range(Position(0, 0), line_index.end_position()))
 
 
 def _location(path: str, node: ast.AST) -> Location:

@@ -12,17 +12,17 @@ literal because agents commonly parse these messages and JSON fields.
 
 | Sequence | Detected? | Mechanism (function and file) | Observable (stderr / JSON field / exit code) | Guard or escape hatch |
 | --- | --- | --- | --- | --- |
-| `analyze`, edit a tracked `.py`, then query | yes | `drift.changed` in `minotaur/query/freshness.py` (AC-03 scenario (a)) | `minotaur: refreshed graph (N drifted paths)`; `minotaur: stale: <path>`; JSON `refreshed: true`, `stale: [<path>]`; exit `0` when no diagnostics | Re-run `analyze --force` when the intended selection also changed |
+| `analyze`, edit a tracked supported source (`.py` or `.js`), then query | yes | `drift.changed` in `minotaur/query/freshness.py` (AC-03 scenario (a)) | `minotaur: refreshed graph (N drifted paths)`; `minotaur: stale: <path>`; JSON `refreshed: true`, `stale: [<path>]`; exit `0` when no diagnostics | Re-run `analyze --force` when the intended selection also changed |
 | `analyze`, delete a tracked file, then query | yes | `drift.missing` in `minotaur/query/freshness.py` (AC-03 scenario (d)) | The same refresh and stale lines; JSON `stale`; exit `0` when the replacement analysis is clean | Recreate the file or analyze the desired targets again |
-| `analyze` a directory, add a `.py` below that recorded directory, then query | yes | `_added_files` and `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (c)) | `minotaur: refreshed graph (N drifted paths)`; `minotaur: stale: <path>`; JSON `refreshed: true`; exit `0` when clean | Analyze a different target set if the new file is intentionally out of scope |
+| `analyze` a directory, add a supported source (`.py` or `.js`) below that recorded directory, then query | yes | `_added_files` and `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (c)) | `minotaur: refreshed graph (N drifted paths)`; `minotaur: stale: <path>`; JSON `refreshed: true`; exit `0` when clean | Analyze a different target set if the new file is intentionally out of scope |
 | `analyze`, rename a tracked file, then query | yes | `drift.missing` plus `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (e)) | Both root-relative paths are reported as `minotaur: stale: <path>`; JSON `stale` contains both; exit `0` when clean | Analyze the renamed target explicitly if it is now outside the recorded directory |
 | `analyze`, switch branches so selected bytes differ, then query | yes | `drift.changed` in `minotaur/query/freshness.py` (same changed-byte observable as AC-03 scenario (a)) | Refresh and stale diagnostics name the changed paths; JSON has `refreshed: true`; exit `0` when clean | Treat the resulting graph as the new branch snapshot |
 | `analyze`, edit a tracked `.py`, then query with `--no-refresh` | yes, without refreshing | `drift.changed` in `minotaur/query/freshness.py` and the `no_refresh` branch of `_load_and_refresh_graph` in `minotaur/cli.py` (AC-03 scenario (b)) | `minotaur: stale: <path>` with no refreshed line; JSON `refreshed: false`, `stale: [<path>]`; exit `0` — a saved graph carries no diagnostics, so `--no-refresh` never exits `1`; only a refresh whose re-analysis emitted diagnostics does | Omit `--no-refresh` when current facts are required |
 | `analyze`, edit a tracked `.py`, then `unreferenced --text-fallback --no-refresh` | yes, but the fallback text scan is also suppressed | `stale_graph = query.no_refresh and not observed.is_clean` gates `text_fallback=query.text_fallback and not stale_graph` in `_run_unreferenced` (`minotaur/cli.py:360`, `:380`) | Same `minotaur: stale: <path>` line and JSON `stale`; the result is graph-relationships-only even though `--text-fallback` was passed, and no `[text-mention]` marks appear (AC-18: `tests/query/test_unreferenced.py::test_unreferenced_no_refresh_uses_deleted_graph_path_without_text_reads`) | Omit `--no-refresh` (or drop `--text-fallback`, which would have no effect anyway) when a current-source text scan is required |
 | `analyze`, then `touch` a tracked file without changing bytes | no drift | `hashlib.sha256` comparison in `drift` (`minotaur/query/freshness.py`; AC-03 scenario (f)) | No stderr freshness line; JSON `refreshed: false`, `stale: []`; exit `0` | Change the bytes or use `analyze --force` if a new snapshot is required for another reason |
 | `analyze`, edit a tracked file, then restore identical bytes | no drift | Byte comparison in `drift` (`minotaur/query/freshness.py`; AC-03 scenario (g)) | No refresh or stale diagnostic; JSON `stale: []`; exit `0` | None is needed: the snapshot is byte-current again |
-| `analyze` a target, add a new `.py` outside every recorded directory | no | `_added_files` only walks `recorded_selection` in `minotaur/query/freshness.py` (AC-18: `test_new_python_outside_recorded_target_is_not_detected`) | No refresh; JSON `refreshed: false`, `stale: []`; exit `0` | Analyze the containing directory or file explicitly |
-| `analyze`, edit a non-`.py` file | no | The registry selects only supported extensions; no file node reaches `drift` (`minotaur/language_interpreter/registry.py`; AC-18: `test_non_python_edit_is_not_detected`) | No refresh; JSON `stale: []`; exit `0` | Analyze the supported source that consumes the data, if appropriate |
+| `analyze` a target, add a new supported source outside every recorded directory | no | `_added_files` only walks `recorded_selection` in `minotaur/query/freshness.py` (AC-18: `test_new_python_outside_recorded_target_is_not_detected`) | No refresh; JSON `refreshed: false`, `stale: []`; exit `0` | Analyze the containing directory or file explicitly |
+| `analyze`, edit a file with an unsupported extension | no | The registry selects only registered extensions; no file node reaches `drift` (`minotaur/language_interpreter/registry.py`; AC-18: `test_unsupported_extension_edit_is_not_detected`) | No refresh; JSON `stale: []`; exit `0` | Analyze the supported source that consumes the data, if appropriate |
 | `analyze`, then add or edit a file under an excluded or hidden directory that was never explicitly selected | no | `_is_excluded` in `minotaur/language_interpreter/selection.py` prevents discovery (AC-18: `test_excluded_and_hidden_directory_edits_are_not_detected`) | No refresh; JSON `refreshed: false`, `stale: []`; exit `0` | Explicitly select the excluded target when it is intentionally in scope |
 | `analyze`, edit a file reached only through an out-of-root symlink | no | `select_sources` resolves and rejects the escape in `minotaur/language_interpreter/selection.py` (AC-18: `test_out_of_root_symlink_edit_is_not_detected`) | No refresh; JSON `stale: []`; exit `0` | Analyze a root that contains the resolved file, or copy it inside the root |
 | `analyze` a file with a parse failure, then edit that file | no `changed`/`missing` finding | `interpreter.py` omits the failed file node after `SyntaxError`; `drift` can compare no recorded hash (AC-18: `test_parse_failed_file_has_no_changed_or_missing_finding_but_new_file_is_added`) | `changed` and `missing` remain empty for that file; a query still refreshes when the file appears in `added`; its re-analysis returns exit `1`, but does not re-print the parse diagnostic | Run `analyze` to see the parse diagnostic, then fix the parse error; a new supported file below a recorded directory is reported as `added` |
@@ -42,11 +42,12 @@ literal because agents commonly parse these messages and JSON fields.
 
 ## Row notes
 
-### Tracked edit
+### Tracked supported-source edit
 
-The file node stores bytes, so changing a tracked Python file is the ordinary
-refresh case. The refresh announcement comes before the per-path diagnostics,
-which lets a caller distinguish a rewritten graph from a stale answer.
+The file node stores bytes, so changing a tracked supported source is the
+ordinary refresh case. The refresh announcement comes before the per-path
+diagnostics, which lets a caller distinguish a rewritten graph from a stale
+answer.
 
 ### Tracked deletion
 
@@ -102,11 +103,11 @@ The recorded target list is an explicit scope boundary. A repository-wide
 query cannot accidentally start analyzing unrelated new source merely because
 it happens to share the same root directory.
 
-### Non-Python edit
+### Unsupported extension edit
 
-The registry currently has one `.py` registration. An unsupported file has no
-file node and cannot become a source-freshness finding until a supported
-interpreter owns its extension.
+The registry owns `.py` and `.js` files. An unsupported file has no file node
+and cannot become a source-freshness finding until a registered interpreter
+owns its extension.
 
 ### Excluded or hidden directory
 
@@ -195,14 +196,16 @@ behavior change.
 
 ## Tracked edits and refresh
 
-For a tracked supported file, `drift` resolves the query root, hashes current
-bytes, and compares them with the file node's recorded
-`extensions["minotaur-python"]["content_sha256"]`. Missing files and new files
-under recorded directory targets use separate `missing` and `added` sets. The
-query refresh path reports the sorted union before re-analyzing, so an agent can
-see exactly why the answer changed. If that refresh encounters a source
-diagnostic, it returns exit code `1`; the query does not re-print the analysis
-diagnostic, so run `analyze` to see it. A clean replacement returns `0`.
+For a tracked supported file, `drift` resolves the query root, looks up the
+registered interpreter for its extension, hashes current bytes, and compares
+them with that producer's recorded `content_sha256` extension value (for
+example, `extensions["minotaur-javascript"]["content_sha256"]`). Missing files
+and new files under recorded directory targets use separate `missing` and
+`added` sets. The query refresh path reports the sorted union before
+re-analyzing, so an agent can see exactly why the answer changed. If that
+refresh encounters a source diagnostic, it returns exit code `1`; the query
+does not re-print the analysis diagnostic, so run `analyze` to see it. A clean
+replacement returns `0`.
 
 The `--no-refresh` escape hatch leaves the graph on disk and answers from its
 old facts. It still prints one `minotaur: stale: <path>` line per drifted path,
