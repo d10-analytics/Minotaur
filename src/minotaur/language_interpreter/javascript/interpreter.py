@@ -641,6 +641,78 @@ def _walk(
             catch_shadows,
         )
         return
+    if typ == "ForStatement":
+        loop_shadows = set(shadows)
+        init = getattr(node, "init", None)
+        if getattr(init, "type", None) == "VariableDeclaration" and getattr(init, "kind", None) in {
+            "let",
+            "const",
+        }:
+            for declarator in getattr(init, "declarations", ()):
+                loop_shadows.update(_bound_names(getattr(declarator, "id", None)))
+        _walk(init, owner, module, bindings, relationships, nodes, seen, shadows)
+        _walk(
+            getattr(node, "test", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            loop_shadows,
+        )
+        _walk(
+            getattr(node, "update", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            loop_shadows,
+        )
+        _walk(
+            getattr(node, "body", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            loop_shadows,
+        )
+        return
+    if typ in {"ForInStatement", "ForOfStatement"}:
+        loop_shadows = set(shadows)
+        left = getattr(node, "left", None)
+        if getattr(left, "type", None) == "VariableDeclaration" and getattr(left, "kind", None) in {
+            "let",
+            "const",
+        }:
+            for declarator in getattr(left, "declarations", ()):
+                loop_shadows.update(_bound_names(getattr(declarator, "id", None)))
+        _walk(left, owner, module, bindings, relationships, nodes, seen, shadows)
+        _walk(
+            getattr(node, "right", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+        )
+        _walk(
+            getattr(node, "body", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            loop_shadows,
+        )
+        return
     if typ == "CallExpression":
         callee = getattr(node, "callee", None)
         if getattr(callee, "type", None) == "Import":
@@ -739,7 +811,9 @@ def _scope_shadows(node: Any) -> set[str]:
     for parameter in getattr(node, "params", ()) or ():
         names.update(_bound_names(parameter))
 
-    def collect(current: Any, *, allow_root_block: bool = False) -> None:
+    def collect(
+        current: Any, *, allow_root_block: bool = False, in_for_header: bool = False
+    ) -> None:
         if not hasattr(current, "type"):
             return
         typ = current.type
@@ -751,9 +825,25 @@ def _scope_shadows(node: Any) -> set[str]:
             return  # catch parameters belong to the catch block's scope
         if typ == "BlockStatement" and not allow_root_block:
             return  # block lexical declarations belong to that block only
-        if typ == "VariableDeclarator":
-            identifier = getattr(current, "id", None)
-            names.update(_bound_names(identifier))
+
+        if typ == "VariableDeclaration":
+            if not (in_for_header and getattr(current, "kind", None) != "var"):
+                for declarator in getattr(current, "declarations", ()):
+                    names.update(_bound_names(getattr(declarator, "id", None)))
+                    collect(getattr(declarator, "init", None))
+            return
+
+        if typ in {"ForStatement", "ForInStatement", "ForOfStatement"}:
+            for field_name, value in vars(current).items():
+                if field_name == "type":
+                    continue
+                if isinstance(value, list):
+                    for child in value:
+                        collect(child, in_for_header=field_name in {"init", "left"})
+                else:
+                    collect(value, in_for_header=field_name in {"init", "left"})
+            return
+
         for value in vars(current).values():
             if isinstance(value, list):
                 for child in value:
@@ -761,13 +851,45 @@ def _scope_shadows(node: Any) -> set[str]:
             else:
                 collect(value)
 
-    root_body = getattr(node, "body", None)
-    for value in vars(node).values():
-        if isinstance(value, list):
-            for child in value:
-                collect(child, allow_root_block=child is root_body)
-        else:
-            collect(value, allow_root_block=value is root_body)
+    body = getattr(node, "body", None)
+    if isinstance(body, list):
+        for statement in body:
+            collect(statement)
+    elif body is not None:
+        collect(body, allow_root_block=True)
+
+    def collect_function_vars(current: Any) -> None:
+        if not hasattr(current, "type"):
+            return
+        typ = current.type
+        if (
+            typ
+            in {
+                "FunctionDeclaration",
+                "FunctionExpression",
+                "ArrowFunctionExpression",
+                "ClassDeclaration",
+            }
+            and current is not node
+        ):
+            return
+        if typ == "VariableDeclaration" and getattr(current, "kind", None) == "var":
+            for declarator in getattr(current, "declarations", ()):
+                names.update(_bound_names(getattr(declarator, "id", None)))
+        for value in vars(current).values():
+            if isinstance(value, list):
+                for child in value:
+                    collect_function_vars(child)
+            else:
+                collect_function_vars(value)
+
+    if getattr(node, "type", None) in {
+        "Program",
+        "FunctionDeclaration",
+        "FunctionExpression",
+        "ArrowFunctionExpression",
+    }:
+        collect_function_vars(node)
     return names
 
 
