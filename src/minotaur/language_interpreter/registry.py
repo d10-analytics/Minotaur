@@ -72,9 +72,7 @@ def default_registry() -> InterpreterRegistry:
     """
     return InterpreterRegistry(
         (
-            InterpreterRegistration(
-                ".py", analyze_python_files, namespace=PYTHON_NAMESPACE
-            ),
+            InterpreterRegistration(".py", analyze_python_files, namespace=PYTHON_NAMESPACE),
             InterpreterRegistration(
                 ".js", analyze_javascript_files, namespace=JAVASCRIPT_NAMESPACE
             ),
