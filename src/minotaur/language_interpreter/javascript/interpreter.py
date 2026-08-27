@@ -502,27 +502,18 @@ def _expressions(
                         shadows=program_shadows,
                         skip_declaration=True,
                     )
-        elif node is not None and getattr(declaration, "type", None) in {
-            "FunctionDeclaration",
-            "VariableDeclaration",
-        }:
-            body = getattr(declaration, "body", None)
-            if body is None and getattr(declaration, "type", None) == "VariableDeclaration":
-                for dec in getattr(declaration, "declarations", ()):
-                    _walk(
-                        getattr(dec, "init", None),
-                        owner,
-                        module,
-                        top_bindings,
-                        relationships,
-                        nodes,
-                        seen,
-                        skip_declaration=True,
-                    )
-            else:
+        elif getattr(declaration, "type", None) == "VariableDeclaration":
+            # Each callable declarator is an emitted owner of its initializer
+            # and body.  Other declarators in the same statement remain
+            # module-owned executable expressions.
+            for dec in getattr(declaration, "declarations", ()):
+                declarator_node = getattr(dec, "_minotaur_node", None)
+                declarator_owner = (
+                    declarator_node.id if declarator_node is not None else module.module_id
+                )
                 _walk(
-                    declaration,
-                    owner,
+                    getattr(dec, "init", None),
+                    declarator_owner,
                     module,
                     top_bindings,
                     relationships,
@@ -531,6 +522,18 @@ def _expressions(
                     shadows=program_shadows,
                     skip_declaration=True,
                 )
+        elif node is not None and getattr(declaration, "type", None) == "FunctionDeclaration":
+            _walk(
+                declaration,
+                owner,
+                module,
+                top_bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows=program_shadows,
+                skip_declaration=True,
+            )
         elif getattr(statement, "type", None) not in {
             "ImportDeclaration",
             "ExportAllDeclaration",
@@ -623,10 +626,16 @@ def _walk(
                     continue
         else:
             # Parameter initializers execute under the function owner before
-            # the body.  Only parameters preceding an initializer are in
-            # scope there; the body receives the complete function scope.
+            # the body.  All formal names shadow outer bindings for every
+            # initializer (including later names); traversal remains in source
+            # order so evidence locations stay deterministic.
+            parameters = getattr(node, "params", ()) or ()
             parameter_shadows = set(shadows)
-            for parameter in getattr(node, "params", ()) or ():
+            for parameter in parameters:
+                parameter_shadows.update(_bound_names(parameter))
+            if typ == "FunctionExpression" and getattr(node, "id", None) is not None:
+                parameter_shadows.add(str(node.id.name))
+            for parameter in parameters:
                 _walk_parameter_defaults(
                     parameter,
                     owner,
@@ -637,7 +646,6 @@ def _walk(
                     seen,
                     parameter_shadows,
                 )
-                parameter_shadows.update(_bound_names(parameter))
             nested_shadows = set(shadows) | _scope_shadows(node)
             if typ == "FunctionExpression" and getattr(node, "id", None) is not None:
                 # A named function expression's name is a private recursive
