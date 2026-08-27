@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "jsonschema>=4.20",
     "orjson>=3.9",
+    "esprima2",
 ]
 
 [project.optional-dependencies]

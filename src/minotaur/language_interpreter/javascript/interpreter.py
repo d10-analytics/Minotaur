@@ -1,0 +1,848 @@
+"""Bounded, source-only JavaScript-to-Minotaur interpretation.
+
+The first slice intentionally emits only top-level declarations, direct class
+methods, and evidence for bare identifier uses.  Object-literal methods are
+excluded because they have no stable owning symbol without property-chain
+resolution; ``this`` and class fields are excluded because their dispatch and
+initialization are runtime-sensitive.  Nested declarations similarly retain
+the enclosing emitted owner rather than inventing a second identity grain.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+# BSD-2-Clause vendoring backup: esprima2 is pure Python (~3k lines), so it can
+# be vendored if this dependency ever becomes unavailable or unmaintained.
+import esprima  # type: ignore[import-untyped]
+
+from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.evidence import Evidence, Producer
+from minotaur.graph_model.identity import NodeIdentity, compute_node_id
+from minotaur.graph_model.location import Location, Position, Range
+from minotaur.graph_model.node import Node
+from minotaur.graph_model.provenance import (
+    CoordinateEncoding,
+    IdentityBasis,
+    NodeClass,
+    Provenance,
+    RelationshipKind,
+    SymbolKind,
+)
+from minotaur.graph_model.relationship import Relationship
+from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.workspace import Workspace
+
+_NAMESPACE = "minotaur-javascript"
+_PRODUCER = Producer(name="minotaur-javascript")
+
+
+@dataclass(frozen=True, slots=True)
+class _Module:
+    path: str
+    source: str
+    tree: Any
+    file_id: str
+    module_id: str
+    bindings: dict[str, _Binding]
+    exports: dict[str, _Binding]
+    declaration_nodes: tuple[Node, ...]
+    method_containments: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Binding:
+    name: str
+    node_id: str
+    position: int
+
+
+def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
+    """Analyze selected JavaScript files, retaining valid sibling results."""
+    diagnostics: list[Diagnostic] = []
+    modules: list[_Module] = []
+    for path in sorted(files, key=lambda p: p.relative_to(workspace.root).as_posix()):
+        relative = path.relative_to(workspace.root).as_posix()
+        try:
+            content = path.read_bytes()
+            source = content.decode("utf-8")
+        except (OSError, UnicodeError) as error:
+            diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
+            continue
+        try:
+            tree = esprima.parseModule(
+                source, options={"loc": True, "range": True, "tolerant": True}
+            )
+        except Exception as error:
+            diagnostics.append(
+                Diagnostic(
+                    DiagnosticCode.PARSE_ERROR,
+                    relative,
+                    str(error),
+                    _error_location(relative, source, error),
+                )
+            )
+            continue
+        errors = getattr(tree, "errors", ()) or ()
+        if errors:
+            parse_error = errors[0]
+            diagnostics.append(
+                Diagnostic(
+                    DiagnosticCode.PARSE_ERROR,
+                    relative,
+                    str(parse_error),
+                    _error_location(relative, source, parse_error),
+                )
+            )
+            continue
+        _annotate_source(tree, source)
+        modules.append(_make_module(relative, source, tree, hashlib.sha256(content).hexdigest()))
+
+    by_path = {module.path: module for module in modules}
+    nodes: list[Node] = []
+    for module in modules:
+        nodes.extend((_file_node(module), _module_node(module), *module.declaration_nodes))
+    relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
+    seen_unresolved: set[str] = set()
+    for module in modules:
+        _append(
+            relationships, module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
+        )
+        for declaration_node in module.declaration_nodes:
+            if declaration_node.symbol_kind != SymbolKind.METHOD.value:
+                _append(
+                    relationships,
+                    module.module_id,
+                    declaration_node.id,
+                    RelationshipKind.CONTAINS.value,
+                    None,
+                )
+        for class_id, method_id in module.method_containments:
+            _append(relationships, class_id, method_id, RelationshipKind.CONTAINS.value, None)
+        _imports(module, by_path, relationships, nodes, seen_unresolved)
+    for module in modules:
+        _expressions(module, by_path, relationships, nodes, seen_unresolved)
+
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=tuple(nodes),
+        relationships=tuple(
+            _relationship(key, locations) for key, locations in relationships.items()
+        ),
+        generated_by=_PRODUCER,
+    )
+    return AnalysisResult(document, tuple(diagnostics))
+
+
+def _make_module(path: str, source: str, tree: Any, digest: str) -> _Module:
+    file_identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
+    file_id = compute_node_id(file_identity, node_class=NodeClass.FILE.value, path=path)
+    module_location = _full_location(path, source)
+    module_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    module_id = compute_node_id(
+        module_identity,
+        node_class=NodeClass.SYMBOL.value,
+        symbol_kind=SymbolKind.MODULE.value,
+        location=module_location,
+    )
+    bindings: dict[str, _Binding] = {}
+    exports: dict[str, _Binding] = {}
+    declaration_nodes: list[Node] = []
+    method_containments: list[tuple[str, str]] = []
+    for statement in getattr(tree, "body", ()):
+        declaration = getattr(statement, "declaration", None)
+        export_kind = None
+        if getattr(statement, "type", None) == "ExportNamedDeclaration":
+            if declaration is not None:
+                export_kind = "named"
+                _collect_declarations(
+                    path,
+                    module_id,
+                    declaration,
+                    bindings,
+                    exports,
+                    export_kind,
+                    declaration_nodes,
+                    method_containments,
+                )
+            continue
+        if getattr(statement, "type", None) == "ExportDefaultDeclaration":
+            if (
+                declaration is not None
+                and getattr(declaration, "type", None)
+                in {
+                    "FunctionDeclaration",
+                    "ClassDeclaration",
+                }
+                and getattr(declaration, "id", None) is not None
+            ):
+                _collect_declarations(
+                    path,
+                    module_id,
+                    declaration,
+                    bindings,
+                    exports,
+                    "default",
+                    declaration_nodes,
+                    method_containments,
+                )
+            continue
+        _collect_declarations(
+            path,
+            module_id,
+            statement,
+            bindings,
+            exports,
+            export_kind,
+            declaration_nodes,
+            method_containments,
+        )
+    return _Module(
+        path,
+        source,
+        tree,
+        file_id,
+        module_id,
+        bindings,
+        exports,
+        tuple(declaration_nodes),
+        tuple(method_containments),
+    )
+
+
+def _collect_declarations(
+    path: str,
+    module_id: str,
+    statement: Any,
+    bindings: dict[str, _Binding],
+    exports: dict[str, _Binding],
+    export_kind: str | None,
+    declaration_nodes: list[Node],
+    method_containments: list[tuple[str, str]],
+) -> None:
+    typ = getattr(statement, "type", None)
+    if (
+        typ in {"FunctionDeclaration", "ClassDeclaration"}
+        and getattr(statement, "id", None) is not None
+    ):
+        name = statement.id.name
+        kind = SymbolKind.FUNCTION if typ == "FunctionDeclaration" else SymbolKind.CLASS
+        node = _symbol_node(
+            path, statement, f"{path.removesuffix('.js')}.{name}", kind, export_kind
+        )
+        binding = _Binding(name, node.id, _start(statement))
+        bindings[name] = binding
+        declaration_nodes.append(node)
+        if export_kind == "named":
+            exports[name] = binding
+        # Methods are only direct children of an emitted class.
+        if typ == "ClassDeclaration":
+            class_label = node.label
+            for member in getattr(getattr(statement, "body", None), "body", ()):
+                if getattr(member, "type", None) != "MethodDefinition":
+                    continue
+                key = getattr(member, "key", None)
+                method_name = _property_name(key)
+                if method_name is None:
+                    continue
+                method = _symbol_node(
+                    path, member, f"{class_label}.{method_name}", SymbolKind.METHOD, None
+                )
+                # Class methods are contained by the class, never by module.
+                bindings.setdefault(
+                    f"\x00method:{method.id}", _Binding(method_name, method.id, _start(member))
+                )
+                declaration_nodes.append(method)
+                method_containments.append((node.id, method.id))
+                member._minotaur_node = method
+            statement._minotaur_node = node
+        else:
+            statement._minotaur_node = node
+        return
+    if typ == "VariableDeclaration":
+        for declarator in getattr(statement, "declarations", ()):
+            init = getattr(declarator, "init", None)
+            if getattr(init, "type", None) not in {"FunctionExpression", "ArrowFunctionExpression"}:
+                continue
+            identifier = getattr(declarator, "id", None)
+            if getattr(identifier, "type", None) != "Identifier":
+                continue
+            assert identifier is not None
+            name = str(identifier.name)
+            node = _symbol_node(
+                path,
+                declarator,
+                f"{path.removesuffix('.js')}.{name}",
+                SymbolKind.FUNCTION,
+                export_kind,
+            )
+            binding = _Binding(name, node.id, _start(declarator))
+            bindings[name] = binding
+            if export_kind == "named":
+                exports[name] = binding
+            declaration_nodes.append(node)
+            declarator._minotaur_node = node
+
+
+def _file_node(module: _Module) -> Node:
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
+    return Node(
+        id=module.file_id,
+        identity=identity,
+        node_class=NodeClass.FILE,
+        label=module.path,
+        path=module.path,
+        language="javascript",
+        extensions={_NAMESPACE: {"content_sha256": _content_hash(module.source)}},
+    )
+
+
+def _module_node(module: _Module) -> Node:
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    return Node(
+        id=module.module_id,
+        identity=identity,
+        node_class=NodeClass.SYMBOL,
+        label=module.path.removesuffix(".js"),
+        symbol_kind=SymbolKind.MODULE.value,
+        language="javascript",
+        location=_full_location(module.path, module.source),
+    )
+
+
+def _symbol_node(
+    path: str, statement: Any, label: str, kind: SymbolKind, export_kind: str | None
+) -> Node:
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    location = _node_location(path, statement)
+    extensions = {_NAMESPACE: {"export_kind": export_kind}} if export_kind else None
+    return Node(
+        id=compute_node_id(
+            identity, node_class=NodeClass.SYMBOL.value, symbol_kind=kind.value, location=location
+        ),
+        identity=identity,
+        node_class=NodeClass.SYMBOL,
+        label=label,
+        symbol_kind=kind.value,
+        language="javascript",
+        location=location,
+        extensions=extensions,
+    )
+
+
+def _imports(
+    module: _Module,
+    modules: dict[str, _Module],
+    relationships: dict[tuple[str, str, str], list[Location]],
+    nodes: list[Node],
+    seen: set[str],
+) -> None:
+    for statement in getattr(module.tree, "body", ()):
+        typ = getattr(statement, "type", None)
+        if typ == "ImportDeclaration":
+            source = _literal_text(getattr(statement, "source", None))
+            specifiers = getattr(statement, "specifiers", ())
+            if not specifiers:
+                _unsupported(
+                    module, f"{source}#side-effect", statement.source, relationships, nodes, seen
+                )
+                continue
+            target = _relative_target(module.path, source)
+            target_module = modules.get(target) if target else None
+            if target_module is not None:
+                _append(
+                    relationships,
+                    module.module_id,
+                    target_module.module_id,
+                    RelationshipKind.IMPORTS.value,
+                    _node_location(module.path, statement),
+                )
+            for specifier in specifiers:
+                st = getattr(specifier, "type", None)
+                imported = (
+                    "default"
+                    if st == "ImportDefaultSpecifier"
+                    else "*"
+                    if st == "ImportNamespaceSpecifier"
+                    else _property_name(getattr(specifier, "imported", None))
+                )
+                local = _property_name(getattr(specifier, "local", None))
+                if (
+                    st == "ImportSpecifier"
+                    and target_module is not None
+                    and imported in target_module.exports
+                ):
+                    if local:
+                        imported_binding = _Binding(
+                            local, target_module.exports[imported].node_id, _start(specifier)
+                        )
+                        previous = module.bindings.get(local)
+                        if previous is None or imported_binding.position >= previous.position:
+                            module.bindings[local] = imported_binding
+                else:
+                    _unsupported(
+                        module,
+                        f"{source}#{imported}",
+                        getattr(specifier, "imported", None)
+                        or getattr(specifier, "local", None)
+                        or statement.source,
+                        relationships,
+                        nodes,
+                        seen,
+                    )
+        elif typ == "ExportAllDeclaration":
+            source = _literal_text(getattr(statement, "source", None))
+            _unsupported(module, f"{source}#*", statement.source, relationships, nodes, seen)
+        elif typ == "ExportNamedDeclaration" and getattr(statement, "source", None) is not None:
+            source = _literal_text(statement.source)
+            for specifier in getattr(statement, "specifiers", ()):
+                name = _property_name(getattr(specifier, "exported", None)) or "*"
+                _unsupported(
+                    module,
+                    f"{source}#{name}",
+                    getattr(specifier, "exported", None) or statement.source,
+                    relationships,
+                    nodes,
+                    seen,
+                )
+
+
+def _expressions(
+    module: _Module,
+    modules: dict[str, _Module],
+    relationships: dict[tuple[str, str, str], list[Location]],
+    nodes: list[Node],
+    seen: set[str],
+) -> None:
+    top_bindings = {
+        name: binding
+        for name, binding in module.bindings.items()
+        if not name.startswith("\x00method:")
+    }
+    for statement in getattr(module.tree, "body", ()):
+        owner = module.module_id
+        declaration = (
+            getattr(statement, "declaration", None)
+            if getattr(statement, "type", None)
+            in {"ExportNamedDeclaration", "ExportDefaultDeclaration"}
+            else statement
+        )
+        node = getattr(declaration, "_minotaur_node", None)
+        if node is not None:
+            owner = node.id
+        if getattr(declaration, "type", None) == "ClassDeclaration":
+            # Class headers and non-method executable class body are class-owned.
+            _walk(
+                declaration,
+                owner,
+                module,
+                top_bindings,
+                relationships,
+                nodes,
+                seen,
+                skip_declaration=True,
+            )
+            for member in getattr(getattr(declaration, "body", None), "body", ()):
+                method_node = getattr(member, "_minotaur_node", None)
+                if method_node is not None:
+                    _walk(
+                        getattr(member, "value", member),
+                        method_node.id,
+                        module,
+                        top_bindings,
+                        relationships,
+                        nodes,
+                        seen,
+                        shadows=_scope_shadows(getattr(member, "value", member)),
+                        skip_declaration=True,
+                    )
+        elif node is not None and getattr(declaration, "type", None) in {
+            "FunctionDeclaration",
+            "VariableDeclaration",
+        }:
+            body = getattr(declaration, "body", None)
+            if body is None and getattr(declaration, "type", None) == "VariableDeclaration":
+                for dec in getattr(declaration, "declarations", ()):
+                    _walk(
+                        getattr(dec, "init", None),
+                        owner,
+                        module,
+                        top_bindings,
+                        relationships,
+                        nodes,
+                        seen,
+                        skip_declaration=True,
+                    )
+            else:
+                _walk(
+                    declaration,
+                    owner,
+                    module,
+                    top_bindings,
+                    relationships,
+                    nodes,
+                    seen,
+                    shadows=_scope_shadows(declaration),
+                    skip_declaration=True,
+                )
+        elif getattr(statement, "type", None) not in {
+            "ImportDeclaration",
+            "ExportAllDeclaration",
+            "ExportNamedDeclaration",
+            "ExportDefaultDeclaration",
+        }:
+            _walk(statement, owner, module, top_bindings, relationships, nodes, seen)
+
+
+def _walk(
+    node: Any,
+    owner: str,
+    module: _Module,
+    bindings: dict[str, _Binding],
+    relationships: dict[tuple[str, str, str], list[Location]],
+    nodes: list[Node],
+    seen: set[str],
+    shadows: set[str] | None = None,
+    skip_declaration: bool = False,
+    in_callee: bool = False,
+) -> None:
+    if node is None or not hasattr(node, "type"):
+        return
+    typ = node.type
+    shadows = shadows or set()
+    if typ == "Identifier":
+        if in_callee or node.name in shadows:
+            return
+        target = bindings.get(node.name)
+        location = _node_location(module.path, node)
+        if target is not None:
+            _append(
+                relationships, owner, target.node_id, RelationshipKind.REFERENCES.value, location
+            )
+        else:
+            _unresolved(owner, node.name, location, relationships, nodes, seen)
+        return
+    if typ in {
+        "FunctionDeclaration",
+        "ClassDeclaration",
+        "FunctionExpression",
+        "ArrowFunctionExpression",
+    }:
+        # Declaration identifiers are not uses. Their executable bodies remain
+        # attributed to the enclosing emitted owner for nested declarations.
+        if typ == "ClassDeclaration":
+            body = getattr(getattr(node, "body", None), "body", ())
+            for child in body:
+                if getattr(child, "type", None) != "MethodDefinition":
+                    _walk(child, owner, module, bindings, relationships, nodes, seen, shadows)
+        else:
+            nested_shadows = set(shadows) | _scope_shadows(node)
+            _walk(
+                getattr(node, "body", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                nested_shadows,
+            )
+        return
+    if typ == "VariableDeclaration":
+        for declarator in getattr(node, "declarations", ()):
+            _walk(
+                getattr(declarator, "init", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+            )
+        return
+    if typ == "CallExpression":
+        callee = getattr(node, "callee", None)
+        if getattr(callee, "type", None) == "Import":
+            literal = (
+                _literal_text(getattr(node, "arguments", [None])[0])
+                if getattr(node, "arguments", ())
+                else None
+            )
+            text = f"{literal}#dynamic" if literal is not None else "import()"
+            _unsupported(module, text, node, relationships, nodes, seen, owner=owner)
+        elif getattr(callee, "type", None) == "Identifier":
+            location = _node_location(module.path, callee)
+            assert callee is not None
+            callee_name = str(callee.name)
+            if callee_name not in shadows:
+                target = bindings.get(callee_name)
+                if target is not None:
+                    _append(
+                        relationships, owner, target.node_id, RelationshipKind.CALLS.value, location
+                    )
+                else:
+                    _unresolved(owner, callee_name, location, relationships, nodes, seen)
+        # Member dispatch and IIFE callee forms are deliberately outside the
+        # direct bare-identifier contract; their arguments remain ordinary
+        # executable expressions.
+        for argument in getattr(node, "arguments", ()):
+            _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
+        return
+    if typ == "NewExpression":
+        # Constructor/member dispatch is runtime-sensitive and is not a CALLS
+        # fact in this slice.  Constructor arguments still contain uses.
+        for argument in getattr(node, "arguments", ()):
+            _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
+        return
+    if typ == "MemberExpression":
+        _walk(
+            getattr(node, "object", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+        )
+        if getattr(node, "computed", False):
+            _walk(
+                getattr(node, "property", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+            )
+        return
+    if typ in {"Property", "MethodDefinition"}:
+        _walk(
+            getattr(node, "value", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+        )
+        if getattr(node, "computed", False):
+            _walk(
+                getattr(node, "key", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+            )
+        return
+    for value in vars(node).values():
+        if isinstance(value, list):
+            for item in value:
+                _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
+        else:
+            _walk(value, owner, module, bindings, relationships, nodes, seen, shadows)
+
+
+def _scope_shadows(node: Any) -> set[str]:
+    names: set[str] = {
+        parameter.name
+        for parameter in getattr(node, "params", ())
+        if getattr(parameter, "type", None) == "Identifier"
+    }
+
+    def collect(current: Any) -> None:
+        if not hasattr(current, "type"):
+            return
+        typ = current.type
+        if typ in {"FunctionDeclaration", "ClassDeclaration"}:
+            if current is not node and getattr(current, "id", None) is not None:
+                names.add(str(current.id.name))
+            return  # nested scope's locals do not shadow this scope
+        if typ == "VariableDeclarator":
+            identifier = getattr(current, "id", None)
+            if getattr(identifier, "type", None) == "Identifier":
+                assert identifier is not None
+                names.add(str(identifier.name))
+        for value in vars(current).values():
+            if isinstance(value, list):
+                for child in value:
+                    collect(child)
+            else:
+                collect(value)
+
+    for value in vars(node).values():
+        if isinstance(value, list):
+            for child in value:
+                collect(child)
+        else:
+            collect(value)
+    return names
+
+
+def _unsupported(
+    module: _Module,
+    text: str,
+    anchor: Any,
+    relationships: dict[tuple[str, str, str], list[Location]],
+    nodes: list[Node],
+    seen: set[str],
+    owner: str | None = None,
+) -> None:
+    _unresolved(
+        owner or module.module_id,
+        text,
+        _node_location(module.path, anchor),
+        relationships,
+        nodes,
+        seen,
+    )
+
+
+def _unresolved(
+    origin: str,
+    text: str,
+    location: Location,
+    relationships: dict[tuple[str, str, str], list[Location]],
+    nodes: list[Node],
+    seen: set[str],
+) -> None:
+    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, _NAMESPACE, originating_node=origin)
+    node_id = compute_node_id(
+        identity,
+        node_class=NodeClass.UNRESOLVED_REFERENCE.value,
+        location=location,
+        reference_text=text,
+    )
+    if node_id not in seen:
+        seen.add(node_id)
+        nodes.append(
+            Node(
+                id=node_id,
+                identity=identity,
+                node_class=NodeClass.UNRESOLVED_REFERENCE,
+                label=text,
+                reference_text=text,
+                language="javascript",
+                location=location,
+            )
+        )
+    _append(relationships, origin, node_id, RelationshipKind.REFERENCES.value, location)
+
+
+def _relationship(key: tuple[str, str, str], locations: list[Location]) -> Relationship:
+    return Relationship(
+        source=key[0],
+        target=key[1],
+        kind=key[2],
+        evidence=(
+            Evidence(
+                Provenance.STATIC_ANALYSIS,
+                producer=_PRODUCER,
+                locations=tuple(dict.fromkeys(locations)),
+            ),
+        ),
+    )
+
+
+def _append(
+    relationships: dict[tuple[str, str, str], list[Location]],
+    source: str,
+    target: str,
+    kind: str,
+    location: Location | None,
+) -> None:
+    if location is not None:
+        relationships[(source, target, kind)].append(location)
+    else:
+        relationships.setdefault((source, target, kind), [])
+
+
+def _node_location(path: str, node: Any) -> Location:
+    start, end = getattr(node, "range", (0, 0))
+    return _range_location(path, getattr(node, "_minotaur_source", ""), start, end)
+
+
+def _annotate_source(node: Any, source: str) -> None:
+    """Attach source text to parser nodes for byte-accurate locations."""
+    if not hasattr(node, "type"):
+        return
+    node._minotaur_source = source
+    for value in vars(node).values():
+        if isinstance(value, list):
+            for child in value:
+                _annotate_source(child, source)
+        else:
+            _annotate_source(value, source)
+
+
+def _full_location(path: str, source: str) -> Location:
+    return _range_location(path, source, 0, len(source))
+
+
+def _range_location(path: str, source: str, start: int, end: int) -> Location:
+    # Most callers need source text; node carries no source, so this fallback
+    # is replaced by the source-aware wrapper below.
+    lines = source.splitlines(keepends=True)
+    if not lines:
+        return Location(path, Range(Position(0, 0), Position(0, 0)))
+
+    def pos(offset: int) -> Position:
+        before = source[:offset]
+        line = before.count("\n")
+        column = len(before.rsplit("\n", 1)[-1].encode("utf-8"))
+        return Position(line, column)
+
+    return Location(path, Range(pos(start), pos(end)))
+
+
+def _error_location(path: str, source: str, error: Any) -> Location | None:
+    index = getattr(error, "index", None)
+    if index is None:
+        line = getattr(error, "lineNumber", None)
+        column = getattr(error, "column", None)
+        if line is None:
+            return None
+        index = sum(
+            len(line_text) for line_text in source.splitlines(keepends=True)[: line - 1]
+        ) + max((column or 1) - 1, 0)
+    return _range_location(path, source, index, index)
+
+
+def _literal_text(node: Any) -> str:
+    value = getattr(node, "value", None)
+    return str(value) if value is not None else ""
+
+
+def _property_name(node: Any) -> str | None:
+    if node is None:
+        return None
+    value = getattr(node, "name", None)
+    if value is not None:
+        return str(value)
+    value = getattr(node, "value", None)
+    return str(value) if isinstance(value, (str, int, float)) else None
+
+
+def _start(node: Any) -> int:
+    return getattr(node, "range", (0, 0))[0]
+
+
+def _relative_target(path: str, specifier: str) -> str | None:
+    if not specifier.startswith("./") or not specifier.endswith(".js"):
+        return None
+    parent = path.rsplit("/", 1)[0] if "/" in path else ""
+    return f"{parent}/{specifier[2:]}" if parent else specifier[2:]
+
+
+def _content_hash(source: str) -> str:
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
