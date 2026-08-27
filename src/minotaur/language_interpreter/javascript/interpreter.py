@@ -650,7 +650,7 @@ def _walk(
         }:
             for declarator in getattr(init, "declarations", ()):
                 loop_shadows.update(_bound_names(getattr(declarator, "id", None)))
-        _walk(init, owner, module, bindings, relationships, nodes, seen, shadows)
+        _walk(init, owner, module, bindings, relationships, nodes, seen, loop_shadows)
         _walk(
             getattr(node, "test", None),
             owner,
@@ -712,6 +712,23 @@ def _walk(
             seen,
             loop_shadows,
         )
+        return
+    if typ == "SwitchStatement":
+        _walk(
+            getattr(node, "discriminant", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+        )
+        switch_shadows = set(shadows)
+        for case in getattr(node, "cases", ()):
+            switch_shadows.update(_scope_shadows(case))
+        for case in getattr(node, "cases", ()):
+            _walk(case, owner, module, bindings, relationships, nodes, seen, switch_shadows)
         return
     if typ == "CallExpression":
         callee = getattr(node, "callee", None)
@@ -825,6 +842,8 @@ def _scope_shadows(node: Any) -> set[str]:
             return  # catch parameters belong to the catch block's scope
         if typ == "BlockStatement" and not allow_root_block:
             return  # block lexical declarations belong to that block only
+        if typ == "SwitchStatement":
+            return  # switch lexical declarations belong to the switch only
 
         if typ == "VariableDeclaration":
             if not (in_for_header and getattr(current, "kind", None) != "var"):
@@ -852,6 +871,8 @@ def _scope_shadows(node: Any) -> set[str]:
                 collect(value)
 
     body = getattr(node, "body", None)
+    if body is None and getattr(node, "type", None) == "SwitchCase":
+        body = getattr(node, "consequent", None)
     if isinstance(body, list):
         for statement in body:
             collect(statement)
