@@ -10,7 +10,7 @@ from minotaur.graph_model import validation as validation_module
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.evidence import Evidence, Producer, Rule
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
-from minotaur.graph_model.location import Location, Position, Range
+from minotaur.graph_model.location import Location, Position, Range, encoded_length, split_lines
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import (
     CoordinateEncoding,
@@ -441,6 +441,13 @@ def test_form_feed_and_unicode_separators_do_not_split_lines() -> None:
     document = GraphDocument(coordinate_encoding=CoordinateEncoding.UTF_32, nodes=(inside,))
 
     assert validate_document(document, source_text_by_path={CALLEE_PATH: text}).is_valid
+
+
+def test_public_location_helpers_define_shared_line_break_and_encoding_rules() -> None:
+    assert split_lines("a\rb\r\nc\nd\f") == ["a", "b", "c", "d\f"]
+    assert encoded_length("é😀", CoordinateEncoding.UTF_8) == 6
+    assert encoded_length("é😀", CoordinateEncoding.UTF_16) == 3
+    assert encoded_length("é😀", CoordinateEncoding.UTF_32) == 2
 
 
 @pytest.mark.parametrize(

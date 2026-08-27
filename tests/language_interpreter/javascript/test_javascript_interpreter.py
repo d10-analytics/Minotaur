@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 from pathlib import Path
 
+import esprima
 import pytest
 
-pytest.importorskip("esprima")
-
+from minotaur.graph_model.location import encoded_length, split_lines
 from minotaur.graph_model.provenance import CoordinateEncoding, NodeClass, RelationshipKind
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_model.validation import validate_document
 from minotaur.language_interpreter.contract import DiagnosticCode
 from minotaur.language_interpreter.javascript import analyze_javascript_files
+from minotaur.language_interpreter.python import analyze_python_files
 from minotaur.language_interpreter.workspace import Workspace
 
 
@@ -31,6 +33,16 @@ def _node(result, label):
 
 def _edges(result, kind):
     return [edge for edge in result.document.relationships if edge.kind == kind]
+
+
+def test_esprima_dependency_is_installed_and_esm_parses(tmp_path):
+    assert esprima.__name__ == "esprima"
+    assert importlib.metadata.version("esprima2") == "6.0.0"
+    result = _analyze(
+        tmp_path,
+        {"app.js": "export { value } from './lib.js';\nimport { value } from './lib.js';\n"},
+    )
+    assert result.diagnostics == ()
 
 
 def test_esm_declarations_imports_calls_and_metadata(tmp_path):
@@ -80,23 +92,35 @@ def test_declaration_kinds_containment_and_anonymous_default_exclusion(tmp_path)
             )
         },
     )
-    labels = {node.label for node in result.document.nodes}
-    assert {
-        "app.top",
-        "app.Thing",
-        "app.Thing.constructor",
-        "app.Thing.run",
-        "app.arrow",
-        "app.namedDefault",
-    } <= labels
-    assert not any(label.endswith("<anonymous>") for label in labels)
+    symbols = {
+        (node.label, node.symbol_kind)
+        for node in result.document.nodes
+        if node.symbol_kind is not None
+    }
+    assert symbols == {
+        ("app", "module"),
+        ("app.top", "function"),
+        ("app.Thing", "class"),
+        ("app.Thing.constructor", "method"),
+        ("app.Thing.run", "method"),
+        ("app.arrow", "function"),
+        ("app.namedDefault", "function"),
+    }
     app = _node(result, "app")
     thing = _node(result, "app.Thing")
     method = _node(result, "app.Thing.run")
     contains = {(edge.source, edge.target, edge.kind) for edge in result.document.relationships}
-    assert (app.id, thing.id, RelationshipKind.CONTAINS.value) in contains
-    assert (thing.id, method.id, RelationshipKind.CONTAINS.value) in contains
-    assert (app.id, method.id, RelationshipKind.CONTAINS.value) not in contains
+    file_node = _node(result, "app.js")
+    assert {
+        (file_node.id, app.id, RelationshipKind.CONTAINS.value),
+        (app.id, _node(result, "app.top").id, RelationshipKind.CONTAINS.value),
+        (app.id, thing.id, RelationshipKind.CONTAINS.value),
+        (app.id, _node(result, "app.arrow").id, RelationshipKind.CONTAINS.value),
+        (app.id, _node(result, "app.namedDefault").id, RelationshipKind.CONTAINS.value),
+        (thing.id, _node(result, "app.Thing.constructor").id, RelationshipKind.CONTAINS.value),
+        (thing.id, method.id, RelationshipKind.CONTAINS.value),
+    } == contains
+    assert not any("<anonymous>" in node.label for node in result.document.nodes)
 
 
 def test_calls_callback_references_and_unbound_uses_have_precise_kinds(tmp_path):
@@ -205,8 +229,33 @@ def test_interpreter_records_first_slice_exclusion_rationale():
     assert "class fields" in text
 
 
+def test_excluded_object_methods_this_and_class_fields_emit_no_facts(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "const object = { method() { objectTarget(); } };\n"
+                "class Thing { field = fieldTarget; static staticField = staticTarget; "
+                "run() { return this.field; } }\n"
+            )
+        },
+    )
+    excluded = {"method", "field", "staticField", "objectTarget", "fieldTarget", "staticTarget"}
+    assert not any(any(name in node.label for name in excluded) for node in result.document.nodes)
+    assert not any(
+        any(name in endpoint for name in excluded)
+        for edge in result.document.relationships
+        for endpoint in (edge.source, edge.target)
+    )
+    assert not any(
+        node.reference_text in excluded
+        for node in result.document.nodes
+        if node.reference_text is not None
+    )
+
+
 def test_utf8_ranges_validate_and_serialization_is_order_independent(tmp_path):
-    source = 'const emoji = "😀";\nfunction outer() { missing(); }\n'
+    source = 'const emoji = "😀"; function outer() { missing(); }\n'
     first = _analyze(tmp_path, {"app.js": source, "lib.js": "export const helper = () => {};"})
     app_path = tmp_path / "app.js"
     lib_path = tmp_path / "lib.js"
@@ -214,12 +263,19 @@ def test_utf8_ranges_validate_and_serialization_is_order_independent(tmp_path):
     assert serialize(first.document) == serialize(second.document)
     function = _node(first, "app.outer")
     unresolved = _node(first, "missing")
-    assert function.location.range.start.line == 1
-    assert function.location.range.start.character == 0
-    assert unresolved.location.range.start.line == 1
-    line = source.splitlines()[1]
-    assert unresolved.location.range.start.character == len(
-        line[: line.index("missing")].encode("utf-8")
+    function_prefix = source.index("function")
+    missing_prefix = source.index("missing")
+    assert function.location.range.start.line == 0
+    assert function.location.range.start.character == len(source[:function_prefix].encode("utf-8"))
+    assert unresolved.location.range.start.line == 0
+    assert unresolved.location.range.start.character == len(source[:missing_prefix].encode("utf-8"))
+    assert function.location.range.start.character != function_prefix
+    assert (
+        function.location.range.start.character
+        != len(source[:function_prefix].encode("utf-16-le")) // 2
+    )
+    assert unresolved.location.range.end.character == len(
+        source[: missing_prefix + 7].encode("utf-8")
     )
     assert validate_document(first.document, source_text_by_path={"app.js": source}).is_valid
 
@@ -358,7 +414,7 @@ def test_unsupported_imports_are_explicit_unresolved_facts(tmp_path):
         for node in result.document.nodes
         if node.node_class is NodeClass.UNRESOLVED_REFERENCE
     }
-    assert {
+    assert texts == {
         "./lib.js#default",
         "package#*",
         "package#default",
@@ -368,5 +424,232 @@ def test_unsupported_imports_are_explicit_unresolved_facts(tmp_path):
         "./lib.js#ghost",
         "./lib.js#helper",
         "./lib.js#dynamic",
-    } <= texts
+    }
+    module = _node(result, "app")
+    unresolved = {
+        node.id: node
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    for node in unresolved.values():
+        references = [
+            edge
+            for edge in result.document.relationships
+            if edge.target == node.id and edge.kind == RelationshipKind.REFERENCES.value
+        ]
+        assert references
+        assert all(edge.source == module.id for edge in references)
+        assert all(node.location in edge.evidence[0].locations for edge in references)
+    assert not any(
+        edge.target in unresolved and edge.kind == RelationshipKind.IMPORTS.value
+        for edge in result.document.relationships
+    )
     assert not _edges(result, RelationshipKind.CALLS.value)
+
+
+def test_module_and_lexical_shadowing_cover_parameters_patterns_and_catches(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function target() {}\n"
+                "function outer(target) { target(); { const target = value; target(); } "
+                "target(); }\n"
+                "function blockScope() { target(); { const target = value; target(); } "
+                "target(); }\n"
+                "function destructured({ target }) { target(); }\n"
+                "function local() { const { target } = value; target(); }\n"
+                "function caught() { try { value(); } catch (target) { target(); } target(); }\n"
+            )
+        },
+    )
+    target_nodes = [node for node in result.document.nodes if node.label == "app.target"]
+    assert len(target_nodes) == 1
+    target_id = target_nodes[0].id
+    calls = [
+        edge for edge in _edges(result, RelationshipKind.CALLS.value) if edge.target == target_id
+    ]
+    assert len(calls) == 2  # blockScope and caught each have an unshadowed use
+    assert sum(len(edge.evidence[0].locations) for edge in calls) == 3
+    assert not any(node.reference_text == "target" for node in result.document.nodes)
+
+
+def test_lexical_module_bindings_and_unsupported_import_locals_are_suppressed(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "const total = 1; function f() { report(total); }\n"
+                "import value from './lib.js'; value(); value;\n"
+                "function target() {} function caller() { target(); }\n"
+            ),
+            "lib.js": "export function helper() {}\n",
+        },
+    )
+    texts = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert texts == {"report", "./lib.js#default"}
+    caller = _node(result, "app.caller")
+    target = _node(result, "app.target")
+    assert any(
+        edge.source == caller.id
+        and edge.target == target.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in result.document.relationships
+    )
+
+
+def test_member_bases_are_references_and_iife_bodies_are_walked_once(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "lib.js": "export function api() {}\nexport function target() {}\n",
+            "app.js": (
+                "import { api, target } from './lib.js';\n"
+                "api.run(); const h = api.run; ghost.run();\n"
+                "target(); (function () { hidden(); })();\n"
+            ),
+        },
+    )
+    api = _node(result, "lib.api")
+    app = _node(result, "app")
+    api_refs = [
+        edge
+        for edge in _edges(result, RelationshipKind.REFERENCES.value)
+        if edge.source == app.id and edge.target == api.id
+    ]
+    assert len(api_refs) == 1
+    assert len(api_refs[0].evidence[0].locations) == 2
+    assert not any(node.reference_text == "run" for node in result.document.nodes)
+    ghost = [node for node in result.document.nodes if node.reference_text == "ghost"]
+    assert len(ghost) == 1
+    assert (
+        sum(
+            edge.target == ghost[0].id and edge.kind == RelationshipKind.REFERENCES.value
+            for edge in result.document.relationships
+        )
+        == 1
+    )
+    hidden = _node(result, "hidden")
+    assert any(
+        edge.source == app.id and edge.target == hidden.id for edge in result.document.relationships
+    )
+    target = _node(result, "lib.target")
+    target_edges = [
+        edge
+        for edge in result.document.relationships
+        if edge.target == target.id and edge.source == app.id
+    ]
+    assert [(edge.kind) for edge in target_edges] == [RelationshipKind.CALLS.value]
+
+
+def test_relative_parent_imports_resolve_and_root_escape_is_unresolved(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "src/app.js": (
+                "import { helper } from '../lib/util.js';\n"
+                "import { helper as outside } from '../../outside.js';\n"
+                "helper(); outside;\n"
+            ),
+            "lib/util.js": "export function helper() {}\n",
+        },
+    )
+    app = _node(result, "src/app")
+    util = _node(result, "lib/util")
+    helper = _node(result, "lib/util.helper")
+    imports = _edges(result, RelationshipKind.IMPORTS.value)
+    assert [(edge.source, edge.target) for edge in imports] == [(app.id, util.id)]
+    assert any(
+        edge.source == app.id
+        and edge.target == helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in result.document.relationships
+    )
+    outside = _node(result, "../../outside.js#helper")
+    assert not any(
+        edge.target == outside.id and edge.kind == RelationshipKind.IMPORTS.value
+        for edge in imports
+    )
+    assert any(
+        edge.source == app.id and edge.target == outside.id
+        for edge in result.document.relationships
+    )
+
+
+@pytest.mark.parametrize("source", ["export function ok() {}\r", "export function ok() {}\r\n"])
+def test_cr_and_crlf_documents_are_valid_under_source_text_validation(tmp_path, source):
+    result = _analyze(tmp_path, {"app.js": source})
+    assert result.diagnostics == ()
+    assert validate_document(result.document, source_text_by_path={"app.js": source}).is_valid
+
+
+def test_cr_only_parse_error_uses_shared_line_index(tmp_path):
+    source = "function ok() {}\rfunction {"
+    result = _analyze(tmp_path, {"broken.js": source})
+    diagnostic = next(d for d in result.diagnostics if d.code is DiagnosticCode.PARSE_ERROR)
+    assert diagnostic.location is not None
+    assert diagnostic.location.range.start.line == 1
+
+
+@pytest.mark.slow
+def test_line_index_keeps_large_javascript_conversion_linear(tmp_path):
+    """A 350 KB file converts in <=3 seconds (observed 1.54s on this runner)."""
+    import time
+
+    source = "".join(f"function f{i}() {{ missing(); }}\n" for i in range(12_000))
+    assert len(source) > 350_000
+    path = tmp_path / "large.js"
+    path.write_text(source, encoding="utf-8")
+    start = time.perf_counter()
+    result = analyze_javascript_files(Workspace(tmp_path), (path,))
+    elapsed = time.perf_counter() - start
+    assert result.diagnostics == ()
+    assert elapsed <= 3.0, f"analyze took {elapsed:.2f}s, expected <= 3.0s"
+
+
+def test_raw_javascript_digest_matches_python_for_identical_bytes(tmp_path):
+    source = b"\xef\xbb\xbfexport function helper() {}\r\n"
+    js_path = tmp_path / "app.js"
+    py_path = tmp_path / "app.py"
+    js_path.write_bytes(source)
+    py_path.write_bytes(b"def helper():\r\n    return None\r\n")
+    js_result = analyze_javascript_files(Workspace(tmp_path), (js_path,))
+    py_result = analyze_python_files(Workspace(tmp_path), (py_path,))
+    js_file = _node(js_result, "app.js")
+    py_file = next(node for node in py_result.document.nodes if node.label == "app.py")
+    assert (
+        js_file.extensions["minotaur-javascript"]["content_sha256"]
+        == hashlib.sha256(source).hexdigest()
+    )
+    assert (
+        py_file.extensions["minotaur-python"]["content_sha256"]
+        == hashlib.sha256(py_path.read_bytes()).hexdigest()
+    )
+
+
+def test_public_line_helpers_have_one_shared_break_and_encoding_rule():
+    assert split_lines("a\rb\r\nc\nd\f") == ["a", "b", "c", "d\f"]
+    assert encoded_length("é😀", CoordinateEncoding.UTF_8) == 6
+    assert encoded_length("é😀", CoordinateEncoding.UTF_16) == 3
+    assert encoded_length("é😀", CoordinateEncoding.UTF_32) == 2
+
+
+@pytest.mark.parametrize(
+    ("source", "end_line", "end_character"),
+    [
+        ("const value = 'one😀'\n", 0, 23),
+        ("const value = 'one😀'", 0, 23),
+        ("const value = 'one😀'\r\n", 0, 23),
+    ],
+)
+def test_javascript_module_location_ends_at_last_content_line(
+    tmp_path, source, end_line, end_character
+):
+    result = _analyze(tmp_path, {"app.js": source})
+    module = _node(result, "app")
+    assert module.location.range.end.line == end_line
+    assert module.location.range.end.character == end_character
