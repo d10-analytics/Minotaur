@@ -409,6 +409,59 @@ def test_all_parameter_bindings_shadow_defaults_and_computed_pattern_keys(tmp_pa
         )
 
 
+def test_nested_array_rest_assignment_and_late_computed_bindings_shadow_defaults(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function key() {}\n"
+                "function objectValue() {}\n"
+                "function arrayValue() {}\n"
+                "function restValue() {}\n"
+                "function assignedValue() {}\n"
+                "const callback = ({ [key]: objectValue = externalObject, "
+                "nested: [arrayValue = externalArray, ...restValue] } = {}, "
+                "assignedValue = assignedValue(), key = {}) => {};\n"
+                "key(); objectValue(); arrayValue(); restValue(); assignedValue();\n"
+            )
+        },
+    )
+    module = _node(result, "app")
+    callback = _node(result, "app.callback")
+    module_targets = {
+        _node(result, f"app.{name}").id
+        for name in ("key", "objectValue", "arrayValue", "restValue", "assignedValue")
+    }
+    assert not any(
+        edge.source == callback.id
+        and edge.target in module_targets
+        and edge.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+        for edge in result.document.relationships
+    )
+    unresolved = {
+        node.reference_text: node
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert set(unresolved) == {"externalObject", "externalArray"}
+    assert all(
+        any(
+            edge.source == callback.id
+            and edge.target == unresolved[text].id
+            and edge.kind == RelationshipKind.REFERENCES.value
+            for edge in result.document.relationships
+        )
+        for text in ("externalObject", "externalArray")
+    )
+    for target_id in module_targets:
+        assert any(
+            edge.source == module.id
+            and edge.target == target_id
+            and edge.kind == RelationshipKind.CALLS.value
+            for edge in result.document.relationships
+        )
+
+
 def test_local_export_lists_emit_module_owned_unresolved_facts_including_aliases(tmp_path):
     source = "function helper() {}\nexport { helper, helper as publicName };\n"
     result = _analyze(tmp_path, {"app.js": source})
