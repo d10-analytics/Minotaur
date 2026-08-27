@@ -196,6 +196,51 @@ def test_parameter_defaults_and_class_superclass_expressions_keep_emitted_owners
     )
 
 
+def test_callable_variable_declarators_own_initializer_facts_independently(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function shared() {}\n"
+                "const arrow = () => { shared(); arrowMissing(); }, "
+                "named = function namedLocal() { shared; namedMissing(); }, "
+                "value = sibling();\n"
+            )
+        },
+    )
+    module = _node(result, "app")
+    shared = _node(result, "app.shared")
+    arrow = _node(result, "app.arrow")
+    named = _node(result, "app.named")
+    shared_calls = [
+        edge for edge in _edges(result, RelationshipKind.CALLS.value) if edge.target == shared.id
+    ]
+    shared_references = [
+        edge
+        for edge in _edges(result, RelationshipKind.REFERENCES.value)
+        if edge.target == shared.id
+    ]
+    assert {(edge.source, edge.target) for edge in shared_calls} == {(arrow.id, shared.id)}
+    assert {(edge.source, edge.target) for edge in shared_references} == {(named.id, shared.id)}
+    unresolved = {
+        node.reference_text: node
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    for text, owner in {
+        "arrowMissing": arrow.id,
+        "namedMissing": named.id,
+        "sibling": module.id,
+    }.items():
+        edges = [
+            edge
+            for edge in _edges(result, RelationshipKind.REFERENCES.value)
+            if edge.target == unresolved[text].id
+        ]
+        assert len(edges) == 1
+        assert edges[0].source == owner
+
+
 def test_named_function_expression_name_shadows_module_binding_only_in_its_body(tmp_path):
     result = _analyze(
         tmp_path,
@@ -295,6 +340,73 @@ def test_destructured_parameter_defaults_are_walked_without_binding_uses(tmp_pat
     assert not any(
         node.reference_text in {"x", "first", "second"} for node in result.document.nodes
     )
+
+
+def test_all_parameter_bindings_shadow_defaults_and_computed_pattern_keys(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function later() {}\n"
+                "function keyModule() {}\n"
+                "function recursive() {}\n"
+                "function f(first = later(), later = externalF()) {}\n"
+                "function nested({ [keyModule]: value = externalNested } = {}, keyModule = {}) {}\n"
+                "const named = function recursive(value = recursive()) {};\n"
+                "later(); keyModule(); recursive();\n"
+            )
+        },
+    )
+    module = _node(result, "app")
+    f = _node(result, "app.f")
+    nested = _node(result, "app.nested")
+    named = _node(result, "app.named")
+    later = _node(result, "app.later")
+    key_module = _node(result, "app.keyModule")
+    recursive = _node(result, "app.recursive")
+    assert not any(
+        edge.source == f.id
+        and edge.target == later.id
+        and edge.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+        for edge in result.document.relationships
+    )
+    assert not any(
+        edge.source == nested.id
+        and edge.target == key_module.id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in result.document.relationships
+    )
+    assert not any(
+        edge.source == named.id
+        and edge.target == recursive.id
+        and edge.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+        for edge in result.document.relationships
+    )
+    unresolved = {
+        node.reference_text: node
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert {"externalF", "externalNested"} <= unresolved.keys()
+    assert any(
+        edge.source == f.id
+        and edge.target == unresolved["externalF"].id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in result.document.relationships
+    )
+    assert any(
+        edge.source == nested.id
+        and edge.target == unresolved["externalNested"].id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in result.document.relationships
+    )
+    for target in (later, key_module, recursive):
+        assert any(
+            edge.source == module.id
+            and edge.target == target.id
+            and edge.kind == RelationshipKind.CALLS.value
+            for edge in result.document.relationships
+        )
 
 
 def test_local_export_lists_emit_module_owned_unresolved_facts_including_aliases(tmp_path):
