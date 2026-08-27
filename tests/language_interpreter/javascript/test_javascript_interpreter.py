@@ -503,6 +503,25 @@ def test_loop_scope_boundaries_preserve_outer_resolution_and_var_function_scope(
     assert any(node.reference_text == "values" for node in result.document.nodes)
 
 
+def test_var_in_nested_block_shadows_module_binding_for_enclosing_function(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function target() {}\n"
+                "function varBlock() { target(); { var target = 1; } target(); }\n"
+            )
+        },
+    )
+    target = _node(result, "app.target")
+    var_block = _node(result, "app.varBlock")
+    assert not [
+        edge
+        for edge in _edges(result, RelationshipKind.CALLS.value)
+        if edge.source == var_block.id and edge.target == target.id
+    ]
+
+
 def test_lexical_module_bindings_and_unsupported_import_locals_are_suppressed(tmp_path):
     result = _analyze(
         tmp_path,
