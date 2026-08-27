@@ -522,6 +522,48 @@ def test_var_in_nested_block_shadows_module_binding_for_enclosing_function(tmp_p
     ]
 
 
+def test_for_initializer_and_switch_lexical_scopes_do_not_leak(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function target() {}\n"
+                "function loopInitializer() { for (let target = target; ok; next()) { "
+                "target(); } target(); }\n"
+                "function switchScope() { target(); switch (selector) { case 1: "
+                "let target = 1; target(); break; } target(); }\n"
+            )
+        },
+    )
+    target = _node(result, "app.target")
+    loop_initializer = _node(result, "app.loopInitializer")
+    switch_scope = _node(result, "app.switchScope")
+    target_calls = [
+        edge for edge in _edges(result, RelationshipKind.CALLS.value) if edge.target == target.id
+    ]
+    loop_calls = [edge for edge in target_calls if edge.source == loop_initializer.id]
+    switch_calls = [edge for edge in target_calls if edge.source == switch_scope.id]
+    loop_target_references = [
+        edge
+        for edge in _edges(result, RelationshipKind.REFERENCES.value)
+        if edge.source == loop_initializer.id and edge.target == target.id
+    ]
+    # The loop binding is in scope for its initializer (TDZ), body, test, and
+    # update; only the call after the loop resolves to the module declaration.
+    assert len(loop_calls) == 1
+    assert len(loop_calls[0].evidence[0].locations) == 1
+    assert not loop_target_references
+    # A switch lexical declaration covers the switch, not its enclosing
+    # function; calls before and after it still resolve.
+    assert len(switch_calls) == 1
+    assert len(switch_calls[0].evidence[0].locations) == 2
+    assert {node.reference_text for node in result.document.nodes if node.reference_text} >= {
+        "ok",
+        "next",
+        "selector",
+    }
+
+
 def test_lexical_module_bindings_and_unsupported_import_locals_are_suppressed(tmp_path):
     result = _analyze(
         tmp_path,
