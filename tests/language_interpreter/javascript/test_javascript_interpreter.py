@@ -176,9 +176,7 @@ def test_parameter_defaults_and_class_superclass_expressions_keep_emitted_owners
     base = _node(result, "app.Base")
     factory = _node(result, "app.factory")
     helper_calls = [
-        edge
-        for edge in _edges(result, RelationshipKind.CALLS.value)
-        if edge.target == helper.id
+        edge for edge in _edges(result, RelationshipKind.CALLS.value) if edge.target == helper.id
     ]
     assert {(edge.source, edge.target) for edge in helper_calls} == {
         (use.id, helper.id),
@@ -223,6 +221,13 @@ def test_named_function_expression_name_shadows_module_binding_only_in_its_body(
         and edge.kind == RelationshipKind.CALLS.value
         for edge in result.document.relationships
     )
+    assert not any(
+        edge.source == callback.id
+        and edge.target == helper.id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in result.document.relationships
+    )
+    assert not any(node.reference_text == "helper" for node in result.document.nodes)
     assert any(node.reference_text == "outside" for node in result.document.nodes)
 
 
@@ -234,18 +239,41 @@ def test_object_property_function_bodies_are_deferred_but_iife_values_are_walked
                 "const object = {"
                 "deferred: function() { hidden(); }, "
                 "arrow: () => hiddenArrow(), "
+                "[key()]: function() { hiddenComputed(); }, "
+                "[methodKey()]() { hiddenMethod(); }, "
                 "eager: (function() { eager(); })()"
                 "};\n"
             )
         },
     )
     texts = {
-        node.reference_text
-        for node in result.document.nodes
-        if node.reference_text is not None
+        node.reference_text for node in result.document.nodes if node.reference_text is not None
     }
     assert "eager" in texts
-    assert {"hidden", "hiddenArrow"}.isdisjoint(texts)
+    assert {"key", "methodKey", "eager"} <= texts
+    assert {"hidden", "hiddenArrow", "hiddenComputed", "hiddenMethod"}.isdisjoint(texts)
+
+
+def test_destructured_parameter_defaults_are_walked_without_binding_uses(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function helper() {}\n"
+                "function f({ x = helper() } = {}) {}\n"
+                "function nested([first, { second = helper() }] = []) {}\n"
+            )
+        },
+    )
+    helper = _node(result, "app.helper")
+    owners = {_node(result, "app.f").id, _node(result, "app.nested").id}
+    calls = [
+        edge for edge in _edges(result, RelationshipKind.CALLS.value) if edge.target == helper.id
+    ]
+    assert {edge.source for edge in calls} == owners
+    assert not any(
+        node.reference_text in {"x", "first", "second"} for node in result.document.nodes
+    )
 
 
 def test_local_export_lists_emit_module_owned_unresolved_facts_including_aliases(tmp_path):
@@ -269,16 +297,22 @@ def test_local_export_lists_emit_module_owned_unresolved_facts_including_aliases
         location = matching[0].evidence[0].locations[0]
         assert location == node.location
     export_line = source.splitlines()[1]
-    assert export_line[
-        unresolved["export#helper"].location.range.start.character : unresolved[
-            "export#helper"
-        ].location.range.end.character
-    ] == "helper"
-    assert export_line[
-        unresolved["export#publicName"].location.range.start.character : unresolved[
-            "export#publicName"
-        ].location.range.end.character
-    ] == "publicName"
+    assert (
+        export_line[
+            unresolved["export#helper"].location.range.start.character : unresolved[
+                "export#helper"
+            ].location.range.end.character
+        ]
+        == "helper"
+    )
+    assert (
+        export_line[
+            unresolved["export#publicName"].location.range.start.character : unresolved[
+                "export#publicName"
+            ].location.range.end.character
+        ]
+        == "publicName"
+    )
 
 
 def test_uppercase_javascript_suffixes_have_canonical_labels_and_resolve_imports(tmp_path):
