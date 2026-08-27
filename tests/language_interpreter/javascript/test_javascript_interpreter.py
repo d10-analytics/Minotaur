@@ -156,6 +156,162 @@ def test_calls_callback_references_and_unbound_uses_have_precise_kinds(tmp_path)
     )
 
 
+def test_parameter_defaults_and_class_superclass_expressions_keep_emitted_owners(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function helper() {}\n"
+                "function use(value = helper()) {}\n"
+                "function factory(value) {}\n"
+                "class Base {}\n"
+                "class Child extends factory(Base) { run(value = helper()) {} }\n"
+            )
+        },
+    )
+    helper = _node(result, "app.helper")
+    use = _node(result, "app.use")
+    run = _node(result, "app.Child.run")
+    child = _node(result, "app.Child")
+    base = _node(result, "app.Base")
+    factory = _node(result, "app.factory")
+    helper_calls = [
+        edge
+        for edge in _edges(result, RelationshipKind.CALLS.value)
+        if edge.target == helper.id
+    ]
+    assert {(edge.source, edge.target) for edge in helper_calls} == {
+        (use.id, helper.id),
+        (run.id, helper.id),
+    }
+    assert any(
+        edge.source == child.id
+        and edge.target == factory.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in result.document.relationships
+    )
+    assert any(
+        edge.source == child.id
+        and edge.target == base.id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in result.document.relationships
+    )
+
+
+def test_named_function_expression_name_shadows_module_binding_only_in_its_body(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function helper() {}\n"
+                "const callback = function helper() { helper(); outside(); };\n"
+                "helper();\n"
+            )
+        },
+    )
+    helper = _node(result, "app.helper")
+    callback = _node(result, "app.callback")
+    assert any(
+        edge.source == _node(result, "app").id
+        and edge.target == helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in result.document.relationships
+    )
+    assert not any(
+        edge.source == callback.id
+        and edge.target == helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in result.document.relationships
+    )
+    assert any(node.reference_text == "outside" for node in result.document.nodes)
+
+
+def test_object_property_function_bodies_are_deferred_but_iife_values_are_walked(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "const object = {"
+                "deferred: function() { hidden(); }, "
+                "arrow: () => hiddenArrow(), "
+                "eager: (function() { eager(); })()"
+                "};\n"
+            )
+        },
+    )
+    texts = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.reference_text is not None
+    }
+    assert "eager" in texts
+    assert {"hidden", "hiddenArrow"}.isdisjoint(texts)
+
+
+def test_local_export_lists_emit_module_owned_unresolved_facts_including_aliases(tmp_path):
+    source = "function helper() {}\nexport { helper, helper as publicName };\n"
+    result = _analyze(tmp_path, {"app.js": source})
+    module = _node(result, "app")
+    unresolved = {
+        node.reference_text: node
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert {"export#helper", "export#publicName"} <= unresolved.keys()
+    for text in ("export#helper", "export#publicName"):
+        node = unresolved[text]
+        matching = [
+            edge
+            for edge in _edges(result, RelationshipKind.REFERENCES.value)
+            if edge.source == module.id and edge.target == node.id
+        ]
+        assert len(matching) == 1
+        location = matching[0].evidence[0].locations[0]
+        assert location == node.location
+    export_line = source.splitlines()[1]
+    assert export_line[
+        unresolved["export#helper"].location.range.start.character : unresolved[
+            "export#helper"
+        ].location.range.end.character
+    ] == "helper"
+    assert export_line[
+        unresolved["export#publicName"].location.range.start.character : unresolved[
+            "export#publicName"
+        ].location.range.end.character
+    ] == "publicName"
+
+
+def test_uppercase_javascript_suffixes_have_canonical_labels_and_resolve_imports(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "src/app.JS": "import { helper } from '../lib.JS';\nhelper();\n",
+            "lib.JS": "export function helper() {}\n",
+        },
+    )
+    app = _node(result, "src/app")
+    lib = _node(result, "lib")
+    helper = _node(result, "lib.helper")
+    assert (
+        _node(result, "src/app.JS").extensions["minotaur-javascript"]["content_sha256"]
+        == hashlib.sha256(b"import { helper } from '../lib.JS';\nhelper();\n").hexdigest()
+    )
+    assert _node(result, "src/app.JS").label == "src/app.JS"
+    assert _node(result, "lib.JS").label == "lib.JS"
+    assert any(
+        edge.source == app.id
+        and edge.target == lib.id
+        and edge.kind == RelationshipKind.IMPORTS.value
+        for edge in result.document.relationships
+    )
+    assert any(
+        edge.source == app.id
+        and edge.target == helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in result.document.relationships
+    )
+
+
 def test_named_and_default_export_resolution_and_full_validation(tmp_path):
     source = "export function named() {}\nexport default function fallback() {}\n"
     result = _analyze(
