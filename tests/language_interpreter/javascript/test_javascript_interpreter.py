@@ -96,6 +96,18 @@ def test_malformed_file_is_all_or_nothing(tmp_path):
     assert _node(result, "good.ok")
 
 
+def test_tolerant_returned_error_is_all_or_nothing(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {"broken.js": "return;", "good.js": "export function kept() {};"},
+    )
+    assert any(
+        d.code is DiagnosticCode.PARSE_ERROR and d.path == "broken.js" for d in result.diagnostics
+    )
+    assert not any(node.label.startswith("broken") for node in result.document.nodes)
+    assert _node(result, "good.kept")
+
+
 def test_injected_read_error_discards_only_the_failed_file(tmp_path, monkeypatch):
     bad = tmp_path / "bad.js"
     good = tmp_path / "good.js"
@@ -140,6 +152,50 @@ def test_later_binding_wins_and_lexical_shadow_suppresses_use(tmp_path):
     assert not any(node.reference_text == "target" for node in result.document.nodes)
 
 
+def test_nested_class_methods_keep_enclosing_owner_and_fields_are_excluded(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function outer() { class Inner { method() { nestedMissing(); } "
+                "field = fieldMissing; static staticField = staticMissing; } }"
+            )
+        },
+    )
+    outer = _node(result, "app.outer")
+    unresolved = [node for node in result.document.nodes if node.reference_text == "nestedMissing"]
+    assert unresolved
+    assert any(
+        edge.source == outer.id
+        and edge.target == unresolved[0].id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in result.document.relationships
+    )
+    assert not any(
+        node.reference_text in {"fieldMissing", "staticMissing"} for node in result.document.nodes
+    )
+    assert not any(node.label == "app.outer.Inner.method" for node in result.document.nodes)
+
+
+def test_dynamic_import_is_module_owned_and_nonstatic_argument_is_not_a_reference(tmp_path):
+    result = _analyze(tmp_path, {"app.js": "function outer() { import(specifier); }"})
+    module = _node(result, "app")
+    outer = _node(result, "app.outer")
+    dynamic = _node(result, "import()")
+    assert dynamic.reference_text == "import()"
+    assert any(
+        edge.source == module.id
+        and edge.target == dynamic.id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in result.document.relationships
+    )
+    assert not any(
+        edge.source == outer.id and edge.target == dynamic.id
+        for edge in result.document.relationships
+    )
+    assert not any(node.reference_text == "specifier" for node in result.document.nodes)
+
+
 def test_unsupported_imports_are_explicit_unresolved_facts(tmp_path):
     result = _analyze(
         tmp_path,
@@ -147,9 +203,13 @@ def test_unsupported_imports_are_explicit_unresolved_facts(tmp_path):
             "app.js": (
                 "import value from './lib.js';\n"
                 "import * as ns from 'package';\n"
+                "import bare from 'package';\n"
+                "import { extensionless } from './lib';\n"
                 "import './setup.js';\n"
                 "import { missing } from './lib.js';\n"
+                "import { ghost } from './lib.js';\n"
                 "import('./lib.js');\n"
+                "export { helper } from './lib.js';\n"
             ),
             "lib.js": "export const value = 1;\n",
         },
@@ -162,8 +222,12 @@ def test_unsupported_imports_are_explicit_unresolved_facts(tmp_path):
     assert {
         "./lib.js#default",
         "package#*",
+        "package#default",
+        "./lib#extensionless",
         "./setup.js#side-effect",
         "./lib.js#missing",
+        "./lib.js#ghost",
+        "./lib.js#helper",
         "./lib.js#dynamic",
     } <= texts
     assert not _edges(result, RelationshipKind.CALLS.value)
