@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from minotaur.language_interpreter.contract import AnalysisResult
+from minotaur.language_interpreter.javascript import NAMESPACE as JAVASCRIPT_NAMESPACE
+from minotaur.language_interpreter.javascript import analyze_javascript_files
+from minotaur.language_interpreter.python import NAMESPACE as PYTHON_NAMESPACE
 from minotaur.language_interpreter.python import analyze_python_files
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -27,6 +30,7 @@ class InterpreterRegistration:
 
     extension: str
     analyze_files: AnalyzeFiles
+    namespace: str = field(kw_only=True)
 
 
 class InterpreterRegistry:
@@ -43,7 +47,7 @@ class InterpreterRegistry:
             extension = _normalize_extension(registration.extension)
             if extension in by_extension:
                 raise ValueError(f"duplicate interpreter registration for {extension}")
-            by_extension[extension] = InterpreterRegistration(extension, registration.analyze_files)
+            by_extension[extension] = replace(registration, extension=extension)
         self._by_extension = by_extension
 
     def registration_for(self, path: Path) -> InterpreterRegistration | None:
@@ -66,7 +70,16 @@ def default_registry() -> InterpreterRegistry:
     makes it available to the existing ``analyze`` command without adding a
     language switch or a parallel command-line workflow.
     """
-    return InterpreterRegistry((InterpreterRegistration(".py", analyze_python_files),))
+    return InterpreterRegistry(
+        (
+            InterpreterRegistration(
+                ".py", analyze_python_files, namespace=PYTHON_NAMESPACE
+            ),
+            InterpreterRegistration(
+                ".js", analyze_javascript_files, namespace=JAVASCRIPT_NAMESPACE
+            ),
+        )
+    )
 
 
 def _normalize_extension(extension: str) -> str:

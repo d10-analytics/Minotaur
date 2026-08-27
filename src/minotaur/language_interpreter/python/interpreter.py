@@ -35,7 +35,7 @@ from minotaur.language_interpreter.python.parsing import parse_python
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
-_NAMESPACE = "minotaur-python"
+NAMESPACE = "minotaur-python"
 _PRODUCER = Producer(name="minotaur-python")
 
 
@@ -274,9 +274,9 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
 
 def _make_module(path: str, tree: ast.Module, source: str, line_index: LineIndex) -> _Module:
     name = _module_name(path)
-    file_identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
+    file_identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
     file_id = compute_node_id(file_identity, node_class=NodeClass.FILE.value, path=path)
-    module_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    module_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
     location = _module_location(path, line_index)
     module_id = compute_node_id(
         module_identity,
@@ -297,7 +297,7 @@ def _make_module(path: str, tree: ast.Module, source: str, line_index: LineIndex
 
 
 def _file_node(path: str, content_sha256: str) -> Node:
-    identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
     return Node(
         id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=path),
         identity=identity,
@@ -310,7 +310,7 @@ def _file_node(path: str, content_sha256: str) -> Node:
 
 
 def _module_node(module: _Module) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
     location = _module_location(module.path, module.line_index)
     return Node(
         id=module.module_id,
@@ -727,7 +727,7 @@ def _unresolved(
     nodes: list[Node],
     seen_ids: set[str],
 ) -> None:
-    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, _NAMESPACE, originating_node=origin)
+    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, NAMESPACE, originating_node=origin)
     node_id = compute_node_id(
         identity,
         node_class=NodeClass.UNRESOLVED_REFERENCE.value,
@@ -751,7 +751,7 @@ def _unresolved(
 
 
 def _symbol_node(path: str, statement: ast.AST, label: str, kind: SymbolKind) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
     location = _location(path, statement)
     return Node(
         id=compute_node_id(

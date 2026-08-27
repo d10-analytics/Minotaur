@@ -38,7 +38,7 @@ from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, D
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
-_NAMESPACE = "minotaur-javascript"
+NAMESPACE = "minotaur-javascript"
 _PRODUCER = Producer(name="minotaur-javascript")
 
 
@@ -145,10 +145,10 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
 
 
 def _make_module(path: str, source: str, tree: Any, digest: str, line_index: LineIndex) -> _Module:
-    file_identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
+    file_identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
     file_id = compute_node_id(file_identity, node_class=NodeClass.FILE.value, path=path)
     module_location = _full_location(path, line_index)
-    module_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    module_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
     module_id = compute_node_id(
         module_identity,
         node_class=NodeClass.SYMBOL.value,
@@ -308,7 +308,7 @@ def _collect_declarations(
 
 
 def _file_node(module: _Module) -> Node:
-    identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
     return Node(
         id=module.file_id,
         identity=identity,
@@ -316,12 +316,12 @@ def _file_node(module: _Module) -> Node:
         label=module.path,
         path=module.path,
         language="javascript",
-        extensions={_NAMESPACE: {"content_sha256": module.digest}},
+        extensions={NAMESPACE: {"content_sha256": module.digest}},
     )
 
 
 def _module_node(module: _Module) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
     return Node(
         id=module.module_id,
         identity=identity,
@@ -341,9 +341,9 @@ def _symbol_node(
     export_kind: str | None,
     line_index: LineIndex,
 ) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
     location = _node_location(path, statement, line_index)
-    extensions = {_NAMESPACE: {"export_kind": export_kind}} if export_kind else None
+    extensions = {NAMESPACE: {"export_kind": export_kind}} if export_kind else None
     return Node(
         id=compute_node_id(
             identity, node_class=NodeClass.SYMBOL.value, symbol_kind=kind.value, location=location
@@ -963,7 +963,7 @@ def _unresolved(
     nodes: list[Node],
     seen: set[str],
 ) -> None:
-    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, _NAMESPACE, originating_node=origin)
+    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, NAMESPACE, originating_node=origin)
     node_id = compute_node_id(
         identity,
         node_class=NodeClass.UNRESOLVED_REFERENCE.value,
