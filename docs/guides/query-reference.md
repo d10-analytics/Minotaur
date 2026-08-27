@@ -293,3 +293,5 @@ reflection, generated code, and configuration-dependent behavior remain
 outside the graph's static claims. For Python-specific selection, nested-scope
 attribution, hashes, and reference limits, see
 [`analyze-python.md`](analyze-python.md).
+For the corresponding JavaScript selection boundary and static facts, see
+[`analyze-javascript.md`](analyze-javascript.md).
