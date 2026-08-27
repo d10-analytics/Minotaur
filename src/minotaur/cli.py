@@ -727,7 +727,7 @@ def _dispatch(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
         return AnalysisResult(
             GraphDocument(
                 coordinate_encoding=CoordinateEncoding.UTF_8,
-                generated_by=Producer(name="minotaur-python"),
+                generated_by=Producer(name="minotaur"),
             )
         )
     if len(grouped) != 1:
