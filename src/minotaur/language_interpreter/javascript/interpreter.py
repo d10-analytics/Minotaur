@@ -590,6 +590,19 @@ def _walk(
         for child in getattr(node, "body", ()):
             _walk(child, owner, module, bindings, relationships, nodes, seen, block_shadows)
         return
+    if typ == "CatchClause":
+        catch_shadows = set(shadows) | _bound_names(getattr(node, "param", None))
+        _walk(
+            getattr(node, "body", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            catch_shadows,
+        )
+        return
     if typ == "CallExpression":
         callee = getattr(node, "callee", None)
         if getattr(callee, "type", None) == "Import":
@@ -680,11 +693,9 @@ def _walk(
 
 
 def _scope_shadows(node: Any) -> set[str]:
-    names: set[str] = {
-        parameter.name
-        for parameter in (getattr(node, "params", ()) or ())
-        if getattr(parameter, "type", None) == "Identifier"
-    }
+    names: set[str] = set()
+    for parameter in getattr(node, "params", ()) or ():
+        names.update(_bound_names(parameter))
 
     def collect(current: Any, *, allow_root_block: bool = False) -> None:
         if not hasattr(current, "type"):
@@ -694,13 +705,13 @@ def _scope_shadows(node: Any) -> set[str]:
             if current is not node and getattr(current, "id", None) is not None:
                 names.add(str(current.id.name))
             return  # nested scope's locals do not shadow this scope
+        if typ == "CatchClause":
+            return  # catch parameters belong to the catch block's scope
         if typ == "BlockStatement" and not allow_root_block:
             return  # block lexical declarations belong to that block only
         if typ == "VariableDeclarator":
             identifier = getattr(current, "id", None)
-            if getattr(identifier, "type", None) == "Identifier":
-                assert identifier is not None
-                names.add(str(identifier.name))
+            names.update(_bound_names(identifier))
         for value in vars(current).values():
             if isinstance(value, list):
                 for child in value:
@@ -716,6 +727,28 @@ def _scope_shadows(node: Any) -> set[str]:
         else:
             collect(value, allow_root_block=value is root_body)
     return names
+
+
+def _bound_names(pattern: Any) -> set[str]:
+    """Return identifier bindings introduced by a JS binding pattern."""
+    if pattern is None or not hasattr(pattern, "type"):
+        return set()
+    typ = pattern.type
+    if typ == "Identifier":
+        return {str(pattern.name)}
+    if typ in {"RestElement", "AssignmentPattern"}:
+        return _bound_names(getattr(pattern, "argument", None) or getattr(pattern, "left", None))
+    if typ == "ArrayPattern":
+        names: set[str] = set()
+        for element in getattr(pattern, "elements", ()) or ():
+            names.update(_bound_names(element))
+        return names
+    if typ == "ObjectPattern":
+        names = set()
+        for property_node in getattr(pattern, "properties", ()) or ():
+            names.update(_bound_names(getattr(property_node, "value", None)))
+        return names
+    return set()
 
 
 def _unsupported(
