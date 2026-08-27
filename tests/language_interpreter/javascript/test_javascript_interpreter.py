@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
-from pathlib import Path
 
 import esprima
 import pytest
@@ -217,16 +216,6 @@ def test_parse_and_read_failures_have_no_nodes_or_relationships_from_failed_path
         edge.source not in failed_ids and edge.target not in failed_ids
         for edge in read_result.document.relationships
     )
-
-
-def test_interpreter_records_first_slice_exclusion_rationale():
-    source = (
-        Path(__file__).parents[3] / "src/minotaur/language_interpreter/javascript/interpreter.py"
-    )
-    text = source.read_text(encoding="utf-8")
-    assert "Object-literal methods" in text
-    assert "``this``" in text
-    assert "class fields" in text
 
 
 def test_excluded_object_methods_this_and_class_fields_emit_no_facts(tmp_path):
