@@ -122,11 +122,23 @@ def test_valid_selection_with_no_registered_files_writes_empty_canonical_graph(
         "coordinate_encoding": "utf-8",
         "format": "minotaur-graph",
         "format_version": "0.1.0",
-        "generated_by": {"name": "minotaur-python"},
+        "generated_by": {"name": "minotaur"},
         "extensions": {"minotaur": {"selection": ["."]}},
         "nodes": [],
         "relationships": [],
     }
+
+
+def test_non_empty_python_selection_keeps_python_producer(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "value = 1\n")
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root)
+
+    assert completed.returncode == 0, completed.stderr
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert graph["generated_by"]["name"] == "minotaur-python"
 
 
 def test_selection_containment_exclusions_and_direct_overrides(tmp_path: Path) -> None:
