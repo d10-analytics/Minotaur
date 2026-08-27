@@ -30,6 +30,7 @@ def test_callers_prints_each_call_site_and_matching_unresolved_reference(
         "from pkg.mod import target\n"
         "def caller():\n"
         "    unknown.target()\n"
+        "    callback = unknown.target\n"
         "    target()\n"
         "    target()\n",
     )
@@ -67,9 +68,10 @@ def test_callers_prints_each_call_site_and_matching_unresolved_reference(
 
     assert status == 0
     assert captured.out.splitlines() == [
-        "use.py:4:5  use.caller",
         "use.py:5:5  use.caller",
+        "use.py:6:5  use.caller",
         "use.py:3:5  unknown.target [unresolved]",
+        "use.py:4:16  unknown.target [unresolved]",
     ]
 
 

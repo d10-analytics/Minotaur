@@ -27,8 +27,9 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # reproduce.  History: fb63689 (trusted graph load) -> 54a2657 (decorator
 # application recorded as an enclosing-scope reference) -> 4980c8b
 # (same-name definition attribution semantics) -> 3e70c17 (same-named classes
-# keep self-call resolution within their own class statement).
-BASELINE_COMMIT = "3e70c17"
+# keep self-call resolution within their own class statement) -> 68df533
+# (unresolved non-call reference emission).
+BASELINE_COMMIT = "68df533"
 
 
 @pytest.fixture(scope="session")
@@ -756,13 +757,20 @@ def test_committed_workloads_cover_every_d06_root_with_real_error_controls() -> 
     data = json.loads((SCRIPT.with_name("equivalence_queries.json")).read_text(encoding="utf-8"))
     assert set(data) == {"equivalence_root", "src", "Onyx"}
     assert data["src"]["selection"] == "minotaur/cli.py"
+    src_callers_zero = next(
+        item for item in data["src"]["queries"] if item["name"] == "callers-zero"
+    )
+    assert src_callers_zero["expect"] == "ok"
     for key, workload in data.items():
         names = {item["name"] for item in workload["queries"]}
         assert "definitions-invalid" not in names, key
         errors = {item["name"] for item in workload["queries"] if item.get("expect") == "error"}
         assert {"context-malformed-site", "impact-negative-depth"} <= errors, key
         empties = {item["name"] for item in workload["queries"] if item.get("expect") == "empty"}
-        assert {"callers-zero", "definitions-no-match"} <= empties, key
+        required_empty = {"definitions-no-match"}
+        if key != "src":
+            required_empty.add("callers-zero")
+        assert required_empty <= empties, key
 
     onyx = data["Onyx"]["queries"]
     callers_zero = next(item for item in onyx if item["name"] == "callers-zero")

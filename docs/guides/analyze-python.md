@@ -101,10 +101,14 @@ relationships. For example, passing a function as `register(handler)` or
 accessing `button.clicked.connect(self.on_click)` records the resolved target
 and the load's source location. The function of a `Call` is represented by the
 `calls` relationship instead of an extra `references` relationship. An
-unresolved non-call load is omitted; unresolved calls and imports retain their
-explicit unresolved-reference nodes. This asymmetry keeps graphs useful for
-callback discovery without creating a node for every unresolved attribute
-access.
+unresolved non-call load produces the same explicit `unresolved-reference`
+node and `references` relationship as an unresolved call or import. When an
+outer attribute chain resolves, its recursive base loads are suppressed because
+they are resolution artifacts rather than genuinely missing references; for
+example, a resolved `self.method` does not also report bare `self` as
+unresolved. The callable expression of a `Call` does not produce a duplicate
+non-call reference, while loads in its arguments remain eligible. Calls,
+imports, and non-call loads therefore all preserve unresolved facts explicitly.
 
 Import, call, and reference relationships include source-location evidence so
 a consumer can identify the site that established the relationship.

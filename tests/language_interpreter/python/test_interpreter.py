@@ -5,19 +5,22 @@ Language-specific interpreter tests live beneath ``tests/language_interpreter``.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import pytest
 
 from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file
-from minotaur.graph_model.provenance import NodeClass, RelationshipKind
+from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipKind
 from minotaur.graph_model.validation import IssueCode, validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
+from minotaur.language_interpreter.python.interpreter import _calls
 from minotaur.language_interpreter.workspace import Workspace
 
 
@@ -307,12 +310,68 @@ def test_attribute_and_nested_load_references_preserve_call_and_unresolved_bound
     assert {location.range.start.line for location in handler_locations} == {12, 14}
 
     unresolved = {
-        node.reference_text
+        node.reference_text: node
         for node in result.document.nodes
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
-    assert "unknown" not in unresolved
-    assert "unknown.attr" not in unresolved
+    assert set(unresolved) == {"unknown", "unknown.attr"}
+    unresolved_nodes = [
+        node
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+        and node.reference_text in {"unknown", "unknown.attr"}
+    ]
+    by_location = {
+        (
+            node.reference_text,
+            node.location.range.start.line,
+            node.location.range.start.character,
+        ): node
+        for node in unresolved_nodes
+        if node.location is not None
+    }
+    assert set(by_location) == {
+        ("unknown", 15, 18),
+        ("unknown.attr", 16, 23),
+        ("unknown", 16, 23),
+    }
+    for node in by_location.values():
+        assert node.identity.originating_node == configure
+        assert node.language == "python"
+        assert node.location is not None
+        reference = next(
+            relationship
+            for relationship in result.document.relationships
+            if relationship.source == configure
+            and relationship.target == node.id
+            and relationship.kind == RelationshipKind.REFERENCES.value
+        )
+        assert reference.evidence[0].provenance == Provenance.STATIC_ANALYSIS
+        assert reference.evidence[0].locations == (node.location,)
+    assert "self" not in unresolved
+    assert "self.on_click" not in unresolved
+    assert validate_document(result.document).is_valid
+
+
+def test_resolved_attribute_chain_suppresses_all_unresolved_bases() -> None:
+    statements = ast.parse("value = a.b.c\n").body
+    relationships = defaultdict(list)
+    nodes = []
+
+    _calls(
+        statements,
+        {"app.a.b.c": "resolved-target"},
+        {},
+        "app",
+        "app.py",
+        "origin",
+        relationships,
+        nodes,
+        set(),
+    )
+
+    assert set(relationships) == {("origin", "resolved-target", RelationshipKind.REFERENCES.value)}
+    assert not [node for node in nodes if node.node_class == NodeClass.UNRESOLVED_REFERENCE]
 
 
 def test_load_argument_in_nested_call_func_is_still_a_reference(tmp_path: Path) -> None:
@@ -473,9 +532,13 @@ def test_only_decorated_top_level_symbols_get_inward_edges(
     assert (module, decorated, RelationshipKind.REFERENCES.value) in relationships
     assert (module, undecorated, RelationshipKind.REFERENCES.value) not in relationships
     assert not any(node.label == "app.outer.nested" for node in result.document.nodes)
-    assert {key for key in relationships if key[0] == outer} == {
-        (outer, decorator, RelationshipKind.REFERENCES.value)
-    }
+    assert (outer, decorator, RelationshipKind.REFERENCES.value) in relationships
+    nested = next(
+        node
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "nested"
+    )
+    assert (outer, nested.id, RelationshipKind.REFERENCES.value) in relationships
 
 
 def test_same_named_decorated_definitions_each_get_their_own_inward_edge(
@@ -817,9 +880,11 @@ def test_shadowed_definitions_keep_header_and_unresolved_call_attribution(
         "    return value\n\n"
         "@first_decorator\n"
         "def f(value: FirstType = first_default()) -> FirstType:\n"
+        "    unknown_first\n"
         "    return missing_first()\n\n"
         "@second_decorator\n"
         "def f(value: SecondType = second_default()) -> SecondType:\n"
+        "    unknown_second\n"
         "    return missing_second()\n",
     )
 
@@ -845,9 +910,19 @@ def test_shadowed_definitions_keep_header_and_unresolved_call_attribution(
 
     first_missing = unresolved["missing_first"]
     second_missing = unresolved["missing_second"]
-    assert set(unresolved) == {"missing_first", "missing_second"}
+    first_unknown = unresolved["unknown_first"]
+    second_unknown = unresolved["unknown_second"]
+    assert set(unresolved) == {
+        "missing_first",
+        "missing_second",
+        "unknown_first",
+        "unknown_second",
+        "value",
+    }
     assert first_missing.identity.originating_node == first_f.id
     assert second_missing.identity.originating_node == second_f.id
+    assert first_unknown.identity.originating_node == first_f.id
+    assert second_unknown.identity.originating_node == second_f.id
 
     # Defaults produce calls; decorators and annotations produce references.
     assert (first_f.id, first_default, RelationshipKind.CALLS.value) in relationships
@@ -867,6 +942,8 @@ def test_shadowed_definitions_keep_header_and_unresolved_call_attribution(
     assert (second_f.id, first_decorator, RelationshipKind.REFERENCES.value) not in relationships
     assert (first_f.id, second_missing.id, RelationshipKind.REFERENCES.value) not in relationships
     assert (second_f.id, first_missing.id, RelationshipKind.REFERENCES.value) not in relationships
+    assert (first_f.id, second_unknown.id, RelationshipKind.REFERENCES.value) not in relationships
+    assert (second_f.id, first_unknown.id, RelationshipKind.REFERENCES.value) not in relationships
 
 
 def test_class_bases_and_keywords_are_references_at_every_nesting_level(
