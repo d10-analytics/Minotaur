@@ -80,10 +80,12 @@ the later supported top-level binding wins in source order.
 ## Unsupported module syntax
 
 Default, namespace, side-effect, bare, extensionless, re-export, dynamic, and
-missing-target imports are not resolved. Unsupported import/export syntax is
-still represented by one explicit unresolved reference owned by the importing
-module. Its stable text uses forms such as `./lib.js#default`,
-`package#*`, `./lib.js#side-effect`, or `./lib.js#dynamic`. Unsupported syntax
+missing-target imports are not resolved. Each unsupported import/export
+operation is represented by an explicit unresolved reference owned by the
+importing module. A local export list emits one fact per specifier; its stable
+text is `export#<exported-name>`, so `export { helper as publicName }` emits
+`export#publicName`. Other stable forms include `./lib.js#default`,
+`package#*`, `./lib.js#side-effect`, and `./lib.js#dynamic`. Unsupported syntax
 never creates a `calls` edge or an unresolved-node `imports` edge.
 
 ## Malformed files and diagnostics
