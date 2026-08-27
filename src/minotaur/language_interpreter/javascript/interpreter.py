@@ -537,8 +537,28 @@ def _walk(
         if typ == "ClassDeclaration":
             body = getattr(getattr(node, "body", None), "body", ())
             for child in body:
-                if getattr(child, "type", None) != "MethodDefinition":
+                if getattr(child, "type", None) == "MethodDefinition":
+                    if getattr(node, "_minotaur_node", None) is not None:
+                        continue
+                    value = getattr(child, "value", None)
+                    _walk(
+                        value,
+                        owner,
+                        module,
+                        bindings,
+                        relationships,
+                        nodes,
+                        seen,
+                        set(shadows) | _scope_shadows(value),
+                    )
+                elif getattr(child, "type", None) == "StaticBlock":
+                    # Static blocks execute, but class-field and static-field
+                    # initializers are intentionally excluded from this slice.
                     _walk(child, owner, module, bindings, relationships, nodes, seen, shadows)
+                else:
+                    # PropertyDefinition/FieldDefinition nodes are excluded:
+                    # field initialization and dispatch need runtime semantics.
+                    continue
         else:
             nested_shadows = set(shadows) | _scope_shadows(node)
             _walk(
@@ -565,16 +585,22 @@ def _walk(
                 shadows,
             )
         return
+    if typ == "BlockStatement":
+        block_shadows = set(shadows) | _scope_shadows(node)
+        for child in getattr(node, "body", ()):
+            _walk(child, owner, module, bindings, relationships, nodes, seen, block_shadows)
+        return
     if typ == "CallExpression":
         callee = getattr(node, "callee", None)
         if getattr(callee, "type", None) == "Import":
             literal = (
-                _literal_text(getattr(node, "arguments", [None])[0])
+                _static_literal_text(getattr(node, "arguments", [None])[0])
                 if getattr(node, "arguments", ())
                 else None
             )
             text = f"{literal}#dynamic" if literal is not None else "import()"
-            _unsupported(module, text, node, relationships, nodes, seen, owner=owner)
+            _unsupported(module, text, node, relationships, nodes, seen, owner=module.module_id)
+            return
         elif getattr(callee, "type", None) == "Identifier":
             location = _node_location(module.path, callee)
             assert callee is not None
@@ -656,11 +682,11 @@ def _walk(
 def _scope_shadows(node: Any) -> set[str]:
     names: set[str] = {
         parameter.name
-        for parameter in getattr(node, "params", ())
+        for parameter in (getattr(node, "params", ()) or ())
         if getattr(parameter, "type", None) == "Identifier"
     }
 
-    def collect(current: Any) -> None:
+    def collect(current: Any, *, allow_root_block: bool = False) -> None:
         if not hasattr(current, "type"):
             return
         typ = current.type
@@ -668,6 +694,8 @@ def _scope_shadows(node: Any) -> set[str]:
             if current is not node and getattr(current, "id", None) is not None:
                 names.add(str(current.id.name))
             return  # nested scope's locals do not shadow this scope
+        if typ == "BlockStatement" and not allow_root_block:
+            return  # block lexical declarations belong to that block only
         if typ == "VariableDeclarator":
             identifier = getattr(current, "id", None)
             if getattr(identifier, "type", None) == "Identifier":
@@ -680,12 +708,13 @@ def _scope_shadows(node: Any) -> set[str]:
             else:
                 collect(value)
 
+    root_body = getattr(node, "body", None)
     for value in vars(node).values():
         if isinstance(value, list):
             for child in value:
-                collect(child)
+                collect(child, allow_root_block=child is root_body)
         else:
-            collect(value)
+            collect(value, allow_root_block=value is root_body)
     return names
 
 
@@ -821,6 +850,14 @@ def _error_location(path: str, source: str, error: Any) -> Location | None:
 def _literal_text(node: Any) -> str:
     value = getattr(node, "value", None)
     return str(value) if value is not None else ""
+
+
+def _static_literal_text(node: Any) -> str | None:
+    """Return only a literal string value; identifiers are dynamic."""
+    value = getattr(node, "value", None)
+    if getattr(node, "type", None) != "Literal" or not isinstance(value, str):
+        return None
+    return value
 
 
 def _property_name(node: Any) -> str | None:
