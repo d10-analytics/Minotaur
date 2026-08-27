@@ -20,6 +20,7 @@ from minotaur.graph_model._parsing import (
     reject_unpaired_surrogates,
     type_error,
 )
+from minotaur.graph_model.provenance import CoordinateEncoding
 
 # Largest integer ``orjson`` still decodes as an ``int`` (unsigned 64-bit max).
 _POSITION_MAX = 2**64 - 1
@@ -70,6 +71,30 @@ _MEMO_LOCATION_FIELDS = frozenset({"path", "range"})
 # where \\. is JSON-escaped \.  (literal dot in regex). In a Python raw
 # string the equivalent is \. without the extra backslash.
 _SAFE_PATH_RE = re.compile(r"^(?!/)(?!.*//)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*\\)[^\x00]+$")
+
+# CRLF must be tried before CR so "\r\n" is one terminator, not two.
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+
+
+def split_lines(text: str) -> list[str]:
+    """Split text on the LF, CRLF, and CR line terminators.
+
+    Unlike :meth:`str.splitlines`, this deliberately does not split on other
+    Unicode control characters. A trailing terminator contributes a final
+    empty line, matching the source-position contract.
+    """
+    return _LINE_BREAK_RE.split(text)
+
+
+def encoded_length(line: str, encoding: CoordinateEncoding) -> int:
+    """Return a line's length in the document coordinate encoding."""
+    if encoding == CoordinateEncoding.UTF_8:
+        return len(line.encode("utf-8", "surrogatepass"))
+    if encoding == CoordinateEncoding.UTF_16:
+        return len(line.encode("utf-16-le", "surrogatepass")) // 2
+    if encoding == CoordinateEncoding.UTF_32:
+        return len(line)
+    raise ValueError(f"unhandled coordinate encoding: {encoding}")  # pragma: no cover
 
 
 def is_safe_path(path: str) -> bool:

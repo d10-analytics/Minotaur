@@ -35,6 +35,7 @@ from minotaur.graph_model.provenance import (
 )
 from minotaur.graph_model.relationship import Relationship
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
 _NAMESPACE = "minotaur-javascript"
@@ -46,12 +47,15 @@ class _Module:
     path: str
     source: str
     tree: Any
+    line_index: LineIndex
     file_id: str
     module_id: str
+    digest: str
     bindings: dict[str, _Binding]
     exports: dict[str, _Binding]
     declaration_nodes: tuple[Node, ...]
     method_containments: tuple[tuple[str, str], ...]
+    unsupported_import_locals: set[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +77,7 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
         except (OSError, UnicodeError) as error:
             diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
             continue
+        line_index = LineIndex(source)
         try:
             tree = esprima.parseModule(
                 source, options={"loc": True, "range": True, "tolerant": True}
@@ -83,7 +88,7 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
                     DiagnosticCode.PARSE_ERROR,
                     relative,
                     str(error),
-                    _error_location(relative, source, error),
+                    _error_location(relative, line_index, error),
                 )
             )
             continue
@@ -95,12 +100,13 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
                     DiagnosticCode.PARSE_ERROR,
                     relative,
                     str(parse_error),
-                    _error_location(relative, source, parse_error),
+                    _error_location(relative, line_index, parse_error),
                 )
             )
             continue
-        _annotate_source(tree, source)
-        modules.append(_make_module(relative, source, tree, hashlib.sha256(content).hexdigest()))
+        modules.append(
+            _make_module(relative, source, tree, hashlib.sha256(content).hexdigest(), line_index)
+        )
 
     by_path = {module.path: module for module in modules}
     nodes: list[Node] = []
@@ -138,10 +144,10 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
     return AnalysisResult(document, tuple(diagnostics))
 
 
-def _make_module(path: str, source: str, tree: Any, digest: str) -> _Module:
+def _make_module(path: str, source: str, tree: Any, digest: str, line_index: LineIndex) -> _Module:
     file_identity = NodeIdentity(IdentityBasis.FILE_PATH, _NAMESPACE)
     file_id = compute_node_id(file_identity, node_class=NodeClass.FILE.value, path=path)
-    module_location = _full_location(path, source)
+    module_location = _full_location(path, line_index)
     module_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
     module_id = compute_node_id(
         module_identity,
@@ -168,6 +174,7 @@ def _make_module(path: str, source: str, tree: Any, digest: str) -> _Module:
                     export_kind,
                     declaration_nodes,
                     method_containments,
+                    line_index,
                 )
             continue
         if getattr(statement, "type", None) == "ExportDefaultDeclaration":
@@ -189,6 +196,7 @@ def _make_module(path: str, source: str, tree: Any, digest: str) -> _Module:
                     "default",
                     declaration_nodes,
                     method_containments,
+                    line_index,
                 )
             continue
         _collect_declarations(
@@ -200,17 +208,21 @@ def _make_module(path: str, source: str, tree: Any, digest: str) -> _Module:
             export_kind,
             declaration_nodes,
             method_containments,
+            line_index,
         )
     return _Module(
         path,
         source,
         tree,
+        line_index,
         file_id,
         module_id,
+        digest,
         bindings,
         exports,
         tuple(declaration_nodes),
         tuple(method_containments),
+        set(),
     )
 
 
@@ -223,6 +235,7 @@ def _collect_declarations(
     export_kind: str | None,
     declaration_nodes: list[Node],
     method_containments: list[tuple[str, str]],
+    line_index: LineIndex,
 ) -> None:
     typ = getattr(statement, "type", None)
     if (
@@ -232,7 +245,7 @@ def _collect_declarations(
         name = statement.id.name
         kind = SymbolKind.FUNCTION if typ == "FunctionDeclaration" else SymbolKind.CLASS
         node = _symbol_node(
-            path, statement, f"{path.removesuffix('.js')}.{name}", kind, export_kind
+            path, statement, f"{path.removesuffix('.js')}.{name}", kind, export_kind, line_index
         )
         binding = _Binding(name, node.id, _start(statement))
         bindings[name] = binding
@@ -250,7 +263,12 @@ def _collect_declarations(
                 if method_name is None:
                     continue
                 method = _symbol_node(
-                    path, member, f"{class_label}.{method_name}", SymbolKind.METHOD, None
+                    path,
+                    member,
+                    f"{class_label}.{method_name}",
+                    SymbolKind.METHOD,
+                    None,
+                    line_index,
                 )
                 # Class methods are contained by the class, never by module.
                 bindings.setdefault(
@@ -279,6 +297,7 @@ def _collect_declarations(
                 f"{path.removesuffix('.js')}.{name}",
                 SymbolKind.FUNCTION,
                 export_kind,
+                line_index,
             )
             binding = _Binding(name, node.id, _start(declarator))
             bindings[name] = binding
@@ -297,7 +316,7 @@ def _file_node(module: _Module) -> Node:
         label=module.path,
         path=module.path,
         language="javascript",
-        extensions={_NAMESPACE: {"content_sha256": _content_hash(module.source)}},
+        extensions={_NAMESPACE: {"content_sha256": module.digest}},
     )
 
 
@@ -310,15 +329,20 @@ def _module_node(module: _Module) -> Node:
         label=module.path.removesuffix(".js"),
         symbol_kind=SymbolKind.MODULE.value,
         language="javascript",
-        location=_full_location(module.path, module.source),
+        location=_full_location(module.path, module.line_index),
     )
 
 
 def _symbol_node(
-    path: str, statement: Any, label: str, kind: SymbolKind, export_kind: str | None
+    path: str,
+    statement: Any,
+    label: str,
+    kind: SymbolKind,
+    export_kind: str | None,
+    line_index: LineIndex,
 ) -> Node:
     identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, _NAMESPACE)
-    location = _node_location(path, statement)
+    location = _node_location(path, statement, line_index)
     extensions = {_NAMESPACE: {"export_kind": export_kind}} if export_kind else None
     return Node(
         id=compute_node_id(
@@ -359,7 +383,7 @@ def _imports(
                     module.module_id,
                     target_module.module_id,
                     RelationshipKind.IMPORTS.value,
-                    _node_location(module.path, statement),
+                    _node_location(module.path, statement, module.line_index),
                 )
             for specifier in specifiers:
                 st = getattr(specifier, "type", None)
@@ -384,6 +408,8 @@ def _imports(
                         if previous is None or imported_binding.position >= previous.position:
                             module.bindings[local] = imported_binding
                 else:
+                    if local:
+                        module.unsupported_import_locals.add(local)
                     _unsupported(
                         module,
                         f"{source}#{imported}",
@@ -423,6 +449,9 @@ def _expressions(
         for name, binding in module.bindings.items()
         if not name.startswith("\x00method:")
     }
+    program_shadows = (
+        _scope_shadows(module.tree) | module.unsupported_import_locals
+    ) - module.bindings.keys()
     for statement in getattr(module.tree, "body", ()):
         owner = module.module_id
         declaration = (
@@ -444,6 +473,7 @@ def _expressions(
                 relationships,
                 nodes,
                 seen,
+                shadows=program_shadows,
                 skip_declaration=True,
             )
             for member in getattr(getattr(declaration, "body", None), "body", ()):
@@ -457,7 +487,7 @@ def _expressions(
                         relationships,
                         nodes,
                         seen,
-                        shadows=_scope_shadows(getattr(member, "value", member)),
+                        shadows=program_shadows | _scope_shadows(getattr(member, "value", member)),
                         skip_declaration=True,
                     )
         elif node is not None and getattr(declaration, "type", None) in {
@@ -486,7 +516,7 @@ def _expressions(
                     relationships,
                     nodes,
                     seen,
-                    shadows=_scope_shadows(declaration),
+                    shadows=program_shadows | _scope_shadows(declaration),
                     skip_declaration=True,
                 )
         elif getattr(statement, "type", None) not in {
@@ -495,7 +525,16 @@ def _expressions(
             "ExportNamedDeclaration",
             "ExportDefaultDeclaration",
         }:
-            _walk(statement, owner, module, top_bindings, relationships, nodes, seen)
+            _walk(
+                statement,
+                owner,
+                module,
+                top_bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows=program_shadows,
+            )
 
 
 def _walk(
@@ -508,17 +547,16 @@ def _walk(
     seen: set[str],
     shadows: set[str] | None = None,
     skip_declaration: bool = False,
-    in_callee: bool = False,
 ) -> None:
     if node is None or not hasattr(node, "type"):
         return
     typ = node.type
     shadows = shadows or set()
     if typ == "Identifier":
-        if in_callee or node.name in shadows:
+        if node.name in shadows:
             return
         target = bindings.get(node.name)
-        location = _node_location(module.path, node)
+        location = _node_location(module.path, node, module.line_index)
         if target is not None:
             _append(
                 relationships, owner, target.node_id, RelationshipKind.REFERENCES.value, location
@@ -615,7 +653,7 @@ def _walk(
             _unsupported(module, text, node, relationships, nodes, seen, owner=module.module_id)
             return
         elif getattr(callee, "type", None) == "Identifier":
-            location = _node_location(module.path, callee)
+            location = _node_location(module.path, callee, module.line_index)
             assert callee is not None
             callee_name = str(callee.name)
             if callee_name not in shadows:
@@ -626,9 +664,11 @@ def _walk(
                     )
                 else:
                     _unresolved(owner, callee_name, location, relationships, nodes, seen)
+        else:
+            _walk(callee, owner, module, bindings, relationships, nodes, seen, shadows)
         # Member dispatch and IIFE callee forms are deliberately outside the
-        # direct bare-identifier contract; their arguments remain ordinary
-        # executable expressions.
+        # direct bare-identifier call contract; their bases and bodies remain
+        # ordinary executable expressions.
         for argument in getattr(node, "arguments", ()):
             _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
         return
@@ -763,7 +803,7 @@ def _unsupported(
     _unresolved(
         owner or module.module_id,
         text,
-        _node_location(module.path, anchor),
+        _node_location(module.path, anchor, module.line_index),
         relationships,
         nodes,
         seen,
@@ -829,55 +869,29 @@ def _append(
         relationships.setdefault((source, target, kind), [])
 
 
-def _node_location(path: str, node: Any) -> Location:
+def _node_location(path: str, node: Any, line_index: LineIndex) -> Location:
     start, end = getattr(node, "range", (0, 0))
-    return _range_location(path, getattr(node, "_minotaur_source", ""), start, end)
+    return Location(
+        path,
+        Range(line_index.position(start), line_index.position(end)),
+    )
 
 
-def _annotate_source(node: Any, source: str) -> None:
-    """Attach source text to parser nodes for byte-accurate locations."""
-    if not hasattr(node, "type"):
-        return
-    node._minotaur_source = source
-    for value in vars(node).values():
-        if isinstance(value, list):
-            for child in value:
-                _annotate_source(child, source)
-        else:
-            _annotate_source(value, source)
+def _full_location(path: str, line_index: LineIndex) -> Location:
+    return Location(path, Range(Position(0, 0), line_index.end_position()))
 
 
-def _full_location(path: str, source: str) -> Location:
-    return _range_location(path, source, 0, len(source))
-
-
-def _range_location(path: str, source: str, start: int, end: int) -> Location:
-    # Most callers need source text; node carries no source, so this fallback
-    # is replaced by the source-aware wrapper below.
-    lines = source.splitlines(keepends=True)
-    if not lines:
-        return Location(path, Range(Position(0, 0), Position(0, 0)))
-
-    def pos(offset: int) -> Position:
-        before = source[:offset]
-        line = before.count("\n")
-        column = len(before.rsplit("\n", 1)[-1].encode("utf-8"))
-        return Position(line, column)
-
-    return Location(path, Range(pos(start), pos(end)))
-
-
-def _error_location(path: str, source: str, error: Any) -> Location | None:
+def _error_location(path: str, line_index: LineIndex, error: Any) -> Location | None:
     index = getattr(error, "index", None)
     if index is None:
         line = getattr(error, "lineNumber", None)
         column = getattr(error, "column", None)
         if line is None:
             return None
-        index = sum(
-            len(line_text) for line_text in source.splitlines(keepends=True)[: line - 1]
-        ) + max((column or 1) - 1, 0)
-    return _range_location(path, source, index, index)
+        if line > len(line_index.line_starts):
+            return None
+        index = line_index.line_starts[line - 1] + max((column or 1) - 1, 0)
+    return Location(path, Range(line_index.position(index), line_index.position(index)))
 
 
 def _literal_text(node: Any) -> str:
@@ -908,11 +922,16 @@ def _start(node: Any) -> int:
 
 
 def _relative_target(path: str, specifier: str) -> str | None:
-    if not specifier.startswith("./") or not specifier.endswith(".js"):
+    if not specifier.startswith(("./", "../")) or not specifier.endswith(".js"):
         return None
-    parent = path.rsplit("/", 1)[0] if "/" in path else ""
-    return f"{parent}/{specifier[2:]}" if parent else specifier[2:]
-
-
-def _content_hash(source: str) -> str:
-    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+    parts = path.split("/")[:-1]
+    for segment in specifier.split("/"):
+        if segment == ".":
+            continue
+        if segment == "..":
+            if not parts:
+                return None
+            parts.pop()
+        else:
+            parts.append(segment)
+    return "/".join(parts)

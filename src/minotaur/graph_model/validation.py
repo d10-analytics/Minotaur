@@ -26,14 +26,13 @@ Design rules that every check here obeys:
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
 
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.identity import verify_node_id
-from minotaur.graph_model.location import Location, Position
+from minotaur.graph_model.location import Location, Position, encoded_length, split_lines
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import (
     CoordinateEncoding,
@@ -46,9 +45,6 @@ from minotaur.graph_model.relationship import Relationship
 # A wire-format path into the document: field names and array indices in the
 # order they would be traversed in the JSON, e.g. ("relationships", 2, "source").
 IssuePath = tuple[str | int, ...]
-
-# CRLF must be tried before CR so "\r\n" is one terminator, not two.
-_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 
 
 class IssueCode(str, Enum):
@@ -422,7 +418,7 @@ class _SourceLines:
         text = self._source.get(path)
         if text is None:
             return None
-        lengths = tuple(_encoded_length(line, self._encoding) for line in _split_lines(text))
+        lengths = tuple(encoded_length(line, self._encoding) for line in split_lines(text))
         self._cache[path] = lengths
         return lengths
 
@@ -436,37 +432,3 @@ def _check_source_text_contract(source_text_by_path: Mapping[str, str] | None) -
                 f"source_text_by_path[{path!r}] must be str (decoded Unicode text), "
                 f"got {type(text).__name__}"
             )
-
-
-def _split_lines(text: str) -> list[str]:
-    """Split source text into logical lines on LF, CRLF, or CR only.
-
-    ``str.splitlines()`` is deliberately not used: it also splits on
-    \\v, \\f, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029, which no editor,
-    LSP server, or compiler treats as line terminators, so positions
-    produced by those tools would disagree with the validator.
-
-    A line's content excludes its terminator, and a trailing terminator
-    yields a final empty line, so ``"a\\n"`` is two lines (``"a"`` and
-    ``""``) and the position ``(1, 0)`` is valid. A range that spans a
-    newline therefore ends at ``(line + 1, 0)`` rather than at a character
-    offset past the visible end of the previous line.
-    """
-    return _LINE_BREAK_RE.split(text)
-
-
-def _encoded_length(line: str, encoding: CoordinateEncoding) -> int:
-    """Length of one line in the units the document's coordinate encoding counts.
-
-    ``surrogatepass`` keeps a lone surrogate (possible in text decoded with
-    a permissive error handler) countable instead of raising; the position
-    contract only requires offsets to be in bounds, not on code-point
-    boundaries.
-    """
-    if encoding == CoordinateEncoding.UTF_8:
-        return len(line.encode("utf-8", "surrogatepass"))
-    if encoding == CoordinateEncoding.UTF_16:
-        return len(line.encode("utf-16-le", "surrogatepass")) // 2
-    if encoding == CoordinateEncoding.UTF_32:
-        return len(line)
-    raise ValueError(f"unhandled coordinate encoding: {encoding}")  # pragma: no cover
