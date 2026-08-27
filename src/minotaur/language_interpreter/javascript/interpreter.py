@@ -702,6 +702,8 @@ def _walk(
             )
         return
     if typ in {"Property", "MethodDefinition"}:
+        if typ == "Property" and getattr(node, "method", False):
+            return
         _walk(
             getattr(node, "value", None),
             owner,
