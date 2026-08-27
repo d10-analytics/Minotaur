@@ -446,9 +446,7 @@ def _imports(
                 local_name = exported or local
                 anchor = getattr(specifier, "exported", None) or getattr(specifier, "local", None)
                 if local_name is not None and anchor is not None:
-                    _unsupported(
-                        module, f"export#{local_name}", anchor, relationships, nodes, seen
-                    )
+                    _unsupported(module, f"export#{local_name}", anchor, relationships, nodes, seen)
 
 
 def _expressions(
@@ -629,17 +627,16 @@ def _walk(
             # scope there; the body receives the complete function scope.
             parameter_shadows = set(shadows)
             for parameter in getattr(node, "params", ()) or ():
-                if getattr(parameter, "type", None) == "AssignmentPattern":
-                    _walk(
-                        getattr(parameter, "right", None),
-                        owner,
-                        module,
-                        bindings,
-                        relationships,
-                        nodes,
-                        seen,
-                        parameter_shadows,
-                    )
+                _walk_parameter_defaults(
+                    parameter,
+                    owner,
+                    module,
+                    bindings,
+                    relationships,
+                    nodes,
+                    seen,
+                    parameter_shadows,
+                )
                 parameter_shadows.update(_bound_names(parameter))
             nested_shadows = set(shadows) | _scope_shadows(node)
             if typ == "FunctionExpression" and getattr(node, "id", None) is not None:
@@ -837,10 +834,23 @@ def _walk(
                 shadows,
             )
         return
-    if typ in {"Property", "MethodDefinition"}:
-        if typ == "Property" and getattr(node, "method", False):
+    if typ == "Property":
+        if getattr(node, "computed", False):
+            # Computed keys execute while the object is created even when the
+            # associated function value is deferred.
+            _walk(
+                getattr(node, "key", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+            )
+        if getattr(node, "method", False):
             return
-        if typ == "Property" and getattr(getattr(node, "value", None), "type", None) in {
+        if getattr(getattr(node, "value", None), "type", None) in {
             "FunctionExpression",
             "ArrowFunctionExpression",
         }:
@@ -859,9 +869,72 @@ def _walk(
             seen,
             shadows,
         )
-        if getattr(node, "computed", False):
-            _walk(
-                getattr(node, "key", None),
+        return
+    for value in vars(node).values():
+        if isinstance(value, list):
+            for item in value:
+                _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
+        else:
+            _walk(value, owner, module, bindings, relationships, nodes, seen, shadows)
+
+
+def _walk_parameter_defaults(
+    pattern: Any,
+    owner: str,
+    module: _Module,
+    bindings: dict[str, _Binding],
+    relationships: dict[tuple[str, str, str], list[Location]],
+    nodes: list[Node],
+    seen: set[str],
+    shadows: set[str],
+) -> None:
+    """Walk executable defaults nested in a function binding pattern."""
+    if pattern is None or not hasattr(pattern, "type"):
+        return
+    typ = pattern.type
+    if typ == "AssignmentPattern":
+        # The binding being initialized is already shadowing outer names, but
+        # its nested pattern is not a use and must be traversed separately.
+        default_shadows = set(shadows) | _bound_names(getattr(pattern, "left", None))
+        _walk(
+            getattr(pattern, "right", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            default_shadows,
+        )
+        _walk_parameter_defaults(
+            getattr(pattern, "left", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+        )
+        shadows.update(_bound_names(getattr(pattern, "left", None)))
+        return
+    if typ == "RestElement":
+        _walk_parameter_defaults(
+            getattr(pattern, "argument", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+        )
+        shadows.update(_bound_names(getattr(pattern, "argument", None)))
+        return
+    if typ == "ArrayPattern":
+        for element in getattr(pattern, "elements", ()) or ():
+            _walk_parameter_defaults(
+                element,
                 owner,
                 module,
                 bindings,
@@ -870,13 +943,33 @@ def _walk(
                 seen,
                 shadows,
             )
+            shadows.update(_bound_names(element))
         return
-    for value in vars(node).values():
-        if isinstance(value, list):
-            for item in value:
-                _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
-        else:
-            _walk(value, owner, module, bindings, relationships, nodes, seen, shadows)
+    if typ == "ObjectPattern":
+        for property_node in getattr(pattern, "properties", ()) or ():
+            if getattr(property_node, "computed", False):
+                _walk(
+                    getattr(property_node, "key", None),
+                    owner,
+                    module,
+                    bindings,
+                    relationships,
+                    nodes,
+                    seen,
+                    shadows,
+                )
+            value = getattr(property_node, "value", None)
+            _walk_parameter_defaults(
+                value,
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+            )
+            shadows.update(_bound_names(value))
 
 
 def _scope_shadows(node: Any) -> set[str]:
