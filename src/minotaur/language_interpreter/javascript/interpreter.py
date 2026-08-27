@@ -836,24 +836,14 @@ def _walk(
         return
     if typ == "Property":
         if getattr(node, "computed", False):
-            # Computed keys execute while the object is created even when the
-            # associated function value is deferred.
-            _walk(
-                getattr(node, "key", None),
-                owner,
-                module,
-                bindings,
-                relationships,
-                nodes,
-                seen,
-                shadows,
-            )
+            # Computed keys execute while the object is created unless the key
+            # itself is a deferred callable value.
+            key = getattr(node, "key", None)
+            if not _is_deferred_callable(key):
+                _walk(key, owner, module, bindings, relationships, nodes, seen, shadows)
         if getattr(node, "method", False):
             return
-        if getattr(getattr(node, "value", None), "type", None) in {
-            "FunctionExpression",
-            "ArrowFunctionExpression",
-        }:
+        if _is_deferred_callable(getattr(node, "value", None)):
             # A function-valued object property is deferred until runtime and
             # has no stable emitted owner.  An immediately evaluated property
             # expression (for example an IIFE) is a CallExpression instead and
@@ -876,6 +866,11 @@ def _walk(
                 _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
         else:
             _walk(value, owner, module, bindings, relationships, nodes, seen, shadows)
+
+
+def _is_deferred_callable(node: Any) -> bool:
+    """Whether a callable expression has no execution-time owner here."""
+    return getattr(node, "type", None) in {"FunctionExpression", "ArrowFunctionExpression"}
 
 
 def _walk_parameter_defaults(
