@@ -55,6 +55,27 @@ def test_read_and_parse_reports_parse_failure_and_continues(tmp_path: Path) -> N
     assert diagnostics[0].location == location
 
 
+def test_read_and_parse_reports_decode_error_and_continues(tmp_path: Path) -> None:
+    broken = tmp_path / "a-broken.py"
+    valid = tmp_path / "b-valid.py"
+    broken.write_bytes(b"\xff")
+    valid.write_bytes(b"valid")
+    parsed_relatives: list[str] = []
+
+    def parse(source: str, relative: str) -> str:
+        parsed_relatives.append(relative)
+        return source
+
+    sources, diagnostics = read_and_parse(Workspace(tmp_path), [broken, valid], parse)
+
+    assert sources == [ParsedSource("b-valid.py", b"valid", "valid", "valid")]
+    assert parsed_relatives == ["b-valid.py"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0].code is DiagnosticCode.SOURCE_READ_ERROR
+    assert diagnostics[0].path == "a-broken.py"
+    assert diagnostics[0].location is None
+
+
 def test_parsed_source_is_frozen() -> None:
     source = ParsedSource("file.py", b"pass", "pass", object())
 
