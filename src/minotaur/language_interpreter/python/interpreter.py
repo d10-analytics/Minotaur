@@ -144,19 +144,23 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_bound_names: list[frozenset[str]] = []
         self._scope_global_names: list[frozenset[str]] = []
         self._scope_shadow_names: list[frozenset[str]] = []
+        self._scope_receiver_disabled: list[bool] = []
         self.call_bound_names: dict[ast.Call, frozenset[str]] = {}
         self.call_global_names: dict[ast.Call, frozenset[str]] = {}
         self.call_shadow_names: dict[ast.Call, frozenset[str]] = {}
+        self.call_receiver_disabled: dict[ast.Call, bool] = {}
         self.reference_bound_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_global_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_shadow_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
+        self.reference_receiver_disabled: dict[ast.Name | ast.Attribute, bool] = {}
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
-        bound_names, global_names, shadow_names = self._scope_names()
+        bound_names, global_names, shadow_names, receiver_disabled = self._scope_names()
         self.call_bound_names[node] = bound_names
         self.call_global_names[node] = global_names
         self.call_shadow_names[node] = shadow_names
+        self.call_receiver_disabled[node] = receiver_disabled
         # The callable expression is represented by the calls relationship;
         # suppress only its immediate head. Interior expressions (subscript
         # keys, conditionals, and f-string values) remain ordinary loads.
@@ -187,19 +191,20 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
-        bound_names, global_names, shadow_names = self._scope_names()
+        bound_names, global_names, shadow_names, receiver_disabled = self._scope_names()
         if isinstance(node.ctx, ast.Load) and node.id not in bound_names:
             self.references.append(node)
             self.reference_bound_names[node] = bound_names
             self.reference_global_names[node] = global_names
             self.reference_shadow_names[node] = shadow_names
+            self.reference_receiver_disabled[node] = receiver_disabled
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
         self._visit_definition_header(node)
         self._pop_scope()
         bound_names = _bound_names(node)
-        self._push_scope(bound_names, _global_names(node), bound_names)
+        self._push_scope(bound_names, _global_names(node), bound_names, receiver_disabled=True)
         for statement in node.body:
             self.visit(statement)
         self._pop_scope()
@@ -209,7 +214,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._visit_definition_header(node)
         self._pop_scope()
         bound_names = _bound_names(node)
-        self._push_scope(bound_names, _global_names(node), bound_names)
+        self._push_scope(bound_names, _global_names(node), bound_names, receiver_disabled=True)
         for statement in node.body:
             self.visit(statement)
         self._pop_scope()
@@ -225,7 +230,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             if kw_default is not None:
                 self.visit(kw_default)
         bound_names = frozenset(_argument_names(node.args))
-        self._push_scope(bound_names, frozenset(), bound_names)
+        self._push_scope(bound_names, frozenset(), bound_names, receiver_disabled=True)
         self.visit(node.body)
         self._pop_scope()
 
@@ -273,17 +278,22 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         bound_names: frozenset[str],
         global_names: frozenset[str],
         shadow_names: frozenset[str],
+        receiver_disabled: bool = False,
     ) -> None:
         self._scope_bound_names.append(bound_names)
         self._scope_global_names.append(global_names)
         self._scope_shadow_names.append(shadow_names)
+        self._scope_receiver_disabled.append(receiver_disabled)
 
     def _pop_scope(self) -> None:
         self._scope_bound_names.pop()
         self._scope_global_names.pop()
         self._scope_shadow_names.pop()
+        self._scope_receiver_disabled.pop()
 
-    def _scope_names(self) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    def _scope_names(
+        self,
+    ) -> tuple[frozenset[str], frozenset[str], frozenset[str], bool]:
         bound_names: set[str] = set()
         global_names: set[str] = set()
         seen_names: set[str] = set()
@@ -299,7 +309,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     global_names.add(name)
                     seen_names.add(name)
         shadow_names = frozenset().union(*self._scope_shadow_names)
-        return frozenset(bound_names), frozenset(global_names), shadow_names | global_names
+        return (
+            frozenset(bound_names),
+            frozenset(global_names),
+            shadow_names | global_names,
+            any(self._scope_receiver_disabled),
+        )
 
     def visit_TypeAlias(self, node: ast.AST) -> None:
         # PEP 695 type parameters are scoped to the alias expression only;
@@ -333,12 +348,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         head = _expression_text(node).partition(".")[0]
-        bound_names, global_names, shadow_names = self._scope_names()
+        bound_names, global_names, shadow_names, receiver_disabled = self._scope_names()
         if isinstance(node.ctx, ast.Load) and head not in bound_names:
             self.references.append(node)
             self.reference_bound_names[node] = bound_names
             self.reference_global_names[node] = global_names
             self.reference_shadow_names[node] = shadow_names
+            self.reference_receiver_disabled[node] = receiver_disabled
         # Record only the outermost attribute in a chain. Non-attribute,
         # non-name bases still need traversal so names in e.g. obj[key].attr
         # remain visible.
@@ -1060,9 +1076,13 @@ def _calls(
             bound_names=bound_names,
             receiver_name=(
                 None
-                if context.receiver_name in visitor.call_shadow_names[candidate]
+                if (
+                    visitor.call_receiver_disabled[candidate]
+                    or context.receiver_name in visitor.call_shadow_names[candidate]
+                )
                 else context.receiver_name
             ),
+            static_method=context.static_method and not visitor.call_receiver_disabled[candidate],
         )
         target = _resolve_call(text, call_context, class_declarations)
         location = _location(context.path, candidate.func)
@@ -1073,7 +1093,11 @@ def _calls(
             target is None
             and head in call_context.bound_names
             and head != call_context.receiver_name
-            and not (call_context.static_method and head in {"self", "cls"})
+            and not (
+                call_context.static_method
+                and head in {"self", "cls"}
+                and head not in visitor.call_shadow_names[candidate]
+            )
         ):
             # A local or parameter call is dynamic. This also intentionally
             # wins over a module import alias shadowed by the local binding.
@@ -1106,9 +1130,14 @@ def _calls(
             - visitor.reference_global_names[reference],
             receiver_name=(
                 None
-                if context.receiver_name in visitor.reference_shadow_names[reference]
+                if (
+                    visitor.reference_receiver_disabled[reference]
+                    or context.receiver_name in visitor.reference_shadow_names[reference]
+                )
                 else context.receiver_name
             ),
+            static_method=context.static_method
+            and not visitor.reference_receiver_disabled[reference],
         )
         target = _resolve_call(text, reference_context, class_declarations)
         head = text.partition(".")[0]
