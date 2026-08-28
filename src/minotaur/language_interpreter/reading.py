@@ -52,7 +52,7 @@ def read_and_parse(
         relative = path.relative_to(workspace.root).as_posix()
         try:
             content = path.read_bytes()
-            source = content.decode("utf-8")
+            source = content.decode("utf-8-sig")
         except (OSError, UnicodeError) as error:
             diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
             continue
