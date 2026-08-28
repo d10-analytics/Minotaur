@@ -697,6 +697,28 @@ def test_nested_global_overrides_an_inherited_local_binder(tmp_path: Path) -> No
     }
 
 
+def test_nested_global_overrides_an_inherited_local_for_reference(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    helper = 1\n"
+        "    def inner():\n"
+        "        global helper\n"
+        "        return helper\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "library.helper")
+    assert (outer, helper, RelationshipKind.REFERENCES.value) in {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
 def test_pep695_type_parameters_are_bound(tmp_path: Path) -> None:
     _write(
