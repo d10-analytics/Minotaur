@@ -376,7 +376,7 @@ def _analyze_module(
     emitter: NodeEmitter,
     tally: _ImportTally,
 ) -> None:
-    aliases = _imports(module, modules, relationships, nodes, emitter, tally)
+    aliases = _imports(module, modules, declarations, relationships, nodes, emitter, tally)
     for symbol in symbols.values():
         relationships.add(
             symbol.container_id,
@@ -557,6 +557,7 @@ def _signature_nodes(
 def _imports(
     module: _Module,
     modules: dict[str, _Module],
+    declarations: dict[str, str],
     relationships: RelationshipAccumulator,
     nodes: list[Node],
     emitter: NodeEmitter,
@@ -592,7 +593,7 @@ def _imports(
             target_module = modules.get(base) if base is not None else None
             for alias in statement.names:
                 reference = f"{base}.{alias.name}" if base else alias.name
-                resolved_target = declarations_for_module(modules, reference)
+                resolved_target = declarations.get(reference)
                 if resolved_target is None:
                     tally.note_unresolved(reference, modules)
                     emitter.unresolved(
@@ -614,34 +615,6 @@ def _imports(
             if target_module is not None and base is not None:
                 aliases.setdefault(base.rsplit(".", 1)[-1], base)
     return aliases
-
-
-def declarations_for_module(modules: dict[str, _Module], reference: str) -> str | None:
-    """Resolve a module or its top-level declaration without importing it."""
-    direct_module = modules.get(reference)
-    if direct_module is not None:
-        return direct_module.module_id
-    module_name, _, member = reference.rpartition(".")
-    module = modules.get(module_name)
-    if module is None:
-        return None
-    if not member:
-        return module.module_id
-    resolved: str | None = None
-    for statement in module.tree.body:
-        if (
-            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and statement.name == member
-        ):
-            kind = SymbolKind.CLASS if isinstance(statement, ast.ClassDef) else SymbolKind.FUNCTION
-            resolved = symbol_node(
-                f"{module.name}.{member}",
-                kind,
-                _location(module.path, statement),
-                NAMESPACE,
-                "python",
-            ).id
-    return resolved
 
 
 def _calls(
