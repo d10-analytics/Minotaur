@@ -719,6 +719,69 @@ def test_nested_global_overrides_an_inherited_local_for_reference(tmp_path: Path
     }
 
 
+def test_nested_global_does_not_override_same_named_comprehension_target(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    def inner():\n"
+        "        global helper\n"
+        "        return [helper() for helper in unknown]\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "library.helper")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert (outer, helper, RelationshipKind.CALLS.value) not in relationships
+    assert unresolved == {"unknown"}
+
+
+def test_nested_class_body_global_overrides_enclosing_local_with_control(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    helper = 1\n"
+        "    class Global:\n"
+        "        global helper\n"
+        "        helper()\n"
+        "    class Local:\n"
+        "        helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "library.helper")
+    calls = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+    ]
+
+    assert len(calls) == 1
+    assert {location.range.start.line for location in calls[0].evidence[0].locations} == {6}
+
+
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
 def test_pep695_type_parameters_are_bound(tmp_path: Path) -> None:
     _write(
