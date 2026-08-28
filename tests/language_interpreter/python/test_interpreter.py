@@ -728,6 +728,7 @@ def test_nested_global_does_not_override_same_named_comprehension_target(
         "app.py",
         "from library import helper\n\n"
         "def outer():\n"
+        "    helper = 1\n"
         "    def inner():\n"
         "        global helper\n"
         "        return [helper() for helper in unknown]\n",
