@@ -363,6 +363,33 @@ class _BindingCollector(ast.NodeVisitor):
             for statement in case.body:
                 self.visit(statement)
 
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, (node.key, node.value))
+
+    def _visit_comprehension(
+        self,
+        generators: list[ast.comprehension],
+        result_expressions: tuple[ast.expr, ...],
+    ) -> None:
+        for generator in generators:
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        # Comprehension targets belong to the implicit comprehension scope.
+        # Assignment expressions are visited above and therefore retain their
+        # enclosing-function binding behavior.
+        for expression in result_expressions:
+            self.visit(expression)
+
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if node.name is not None:
             self.names.add(node.name)
@@ -1019,9 +1046,7 @@ def _calls(
         text = _expression_text(reference)
         reference_context = replace(
             context,
-            bound_names=(
-                context.bound_names | visitor.reference_bound_names[reference]
-            )
+            bound_names=(context.bound_names | visitor.reference_bound_names[reference])
             - visitor.reference_global_names[reference],
             receiver_name=(
                 None
