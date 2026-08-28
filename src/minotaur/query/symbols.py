@@ -51,6 +51,11 @@ class DefinitionRecord:
         }
 
 
+def label_bare_name(label: str) -> str:
+    """Return the final declaration-name segment from a qualified label."""
+    return label.rsplit(".", 1)[-1]
+
+
 def callers(index: GraphIndex, qualified_name: str) -> tuple[CallerRecord, ...]:
     """Return resolved call sites and matching unresolved references.
 
@@ -95,7 +100,7 @@ def definitions(index: GraphIndex, bare_name: str) -> tuple[DefinitionRecord, ..
     matches = [
         node
         for node in index.symbols()
-        if node.label.rsplit(".", 1)[-1] == bare_name and node.location is not None
+        if label_bare_name(node.label) == bare_name and node.location is not None
     ]
     duplicate = len(matches) > 1
     records: list[DefinitionRecord] = []

@@ -3,12 +3,47 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 from minotaur.language_interpreter.contract import AnalysisResult
+from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
 from minotaur.language_interpreter.example_language.discovery import (
     discover_example_language_files,
 )
+from minotaur.language_interpreter.paths import resolve_relative
+from minotaur.language_interpreter.reading import (
+    ParsedSource,
+    ParseFailure,
+    read_and_parse,
+)
 from minotaur.language_interpreter.workspace import Workspace
+
+NAMESPACE = "minotaur-example"
+LANGUAGE = "example_language"
+
+
+def _parse_example_language(source: str, relative: str) -> Any:
+    """Parse one example_language file, raising ParseFailure on bad input."""
+    del source, relative
+    raise ParseFailure("replace with the language-specific parser")
+
+
+def _emit_example_language_facts(
+    parsed: ParsedSource,
+    nodes: list[Any],
+    relationships: RelationshipAccumulator,
+    emitter: NodeEmitter,
+) -> None:
+    """Replace this scaffold with tested language-specific AST traversal.
+
+    Build declaration nodes with ``symbol_node(...)`` and append them to
+    ``nodes``. Use ``emitter.unresolved(...)`` for references that cannot be
+    resolved statically, and add established edges through ``relationships``.
+    Language-specific relative-name parsing belongs here; pass its split base
+    and ascent count to ``resolve_relative(...)`` for the root-escape guard.
+    """
+    del parsed, nodes, relationships, emitter
 
 
 def analyze_example_language_workspace(root: Path) -> AnalysisResult:
@@ -27,5 +62,13 @@ def analyze_example_language_files(
     root. Replace this stub with tested language-specific static analysis
     before registering `.example` in ``default_registry()``.
     """
-    del workspace, files
+    # This is the intended shared-mechanism wiring for a copied interpreter.
+    # Replace the parser and emitter scaffold, then return an AnalysisResult.
+    sources, diagnostics = read_and_parse(workspace, files, _parse_example_language)
+    nodes: list[Any] = []
+    relationships = RelationshipAccumulator()
+    emitter = NodeEmitter(NAMESPACE, LANGUAGE)
+    for parsed in sources:
+        _emit_example_language_facts(parsed, nodes, relationships, emitter)
+    del diagnostics, relationships, emitter
     raise NotImplementedError("implement tested example_language static analysis before registration")

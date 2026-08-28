@@ -25,7 +25,14 @@ from minotaur.graph_model.serialization import serialize
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import build_presentation
 from minotaur.graph_visualizer.source import prepare_excerpts
-from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
+from minotaur.language_interpreter.contract import (
+    IMPORT_ROOT_HINT,
+    IMPORTS_RESOLVED,
+    IMPORTS_ROOT_MISMATCHED,
+    IMPORTS_UNRESOLVED,
+    AnalysisResult,
+    Diagnostic,
+)
 from minotaur.language_interpreter.registry import InterpreterRegistration, default_registry
 from minotaur.language_interpreter.selection import SelectionError, select_sources
 from minotaur.language_interpreter.workspace import Workspace
@@ -187,9 +194,9 @@ def _warn_unresolved_imports(document: GraphDocument, root: Path) -> None:
     total = mismatched = 0
     hint: str | None = None
     for value in (document.extensions or {}).values():
-        total += _count(value.get("imports_resolved")) + _count(value.get("imports_unresolved"))
-        mismatched += _count(value.get("imports_root_mismatched"))
-        candidate = value.get("import_root_hint")
+        total += _count(value.get(IMPORTS_RESOLVED)) + _count(value.get(IMPORTS_UNRESOLVED))
+        mismatched += _count(value.get(IMPORTS_ROOT_MISMATCHED))
+        candidate = value.get(IMPORT_ROOT_HINT)
         if hint is None and isinstance(candidate, str) and candidate:
             hint = candidate
     if total == 0 or mismatched / total < _ROOT_MISMATCH_WARNING_RATIO:

@@ -1,22 +1,21 @@
 """Bounded static Python-to-Minotaur interpreter.
 
-The v1 slice deliberately establishes only declarations, containment, local
-and workspace-module imports, and direct calls with a statically known target.
-Everything else is preserved as an unresolved reference; no runtime claim is
-made and no source code is executed or imported.
+The v1 slice emits declarations and containment, local and workspace-module
+imports, direct calls, references (including decorator and base-class
+references), and unresolved references. No runtime claim is made and no source
+code is executed or imported.
 """
 
 from __future__ import annotations
 
 import ast
 import hashlib
-from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from minotaur.graph_model.document import GraphDocument
-from minotaur.graph_model.evidence import Evidence, Producer
+from minotaur.graph_model.evidence import Producer
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node
@@ -24,14 +23,21 @@ from minotaur.graph_model.provenance import (
     CoordinateEncoding,
     IdentityBasis,
     NodeClass,
-    Provenance,
     RelationshipKind,
     SymbolKind,
 )
-from minotaur.graph_model.relationship import Relationship
-from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.accumulation import RelationshipAccumulator
+from minotaur.language_interpreter.contract import (
+    IMPORT_ROOT_HINT,
+    IMPORTS_RESOLVED,
+    IMPORTS_ROOT_MISMATCHED,
+    IMPORTS_UNRESOLVED,
+    AnalysisResult,
+)
+from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
+from minotaur.language_interpreter.paths import resolve_relative
 from minotaur.language_interpreter.python.discovery import discover_python_files
-from minotaur.language_interpreter.python.parsing import parse_python
+from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -47,6 +53,7 @@ class _Module:
     tree: ast.Module
     source: str
     line_index: LineIndex
+    location: Location
     file_id: str
     module_id: str
 
@@ -75,12 +82,17 @@ class _ImportTally:
     unresolved: int = 0
     root_mismatched: int = 0
     prefixes: dict[str, int] = field(default_factory=dict)
-    _suffixes: dict[str, str] | None = None
+    _suffixes: dict[str, str] = field(init=False)
 
-    def note_unresolved(self, name: str, modules: Mapping[str, object]) -> None:
+    def __init__(self, modules: Mapping[str, object]) -> None:
+        self.resolved = 0
+        self.unresolved = 0
+        self.root_mismatched = 0
+        self.prefixes = {}
+        self._suffixes = _module_suffixes(modules)
+
+    def note_unresolved(self, name: str) -> None:
         self.unresolved += 1
-        if self._suffixes is None:
-            self._suffixes = _module_suffixes(modules)
         prefix = self._suffixes.get(name)
         if prefix is None and "." in name:
             # ``from pkg.mod import symbol``: the module part is what must match.
@@ -142,12 +154,6 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
             self.references.append(node)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.generic_visit(node)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self.generic_visit(node)
-
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         # A nested class body executes while the enclosing scope is active, but
         # methods of that class execute in their own scope and remain outside
@@ -159,9 +165,6 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         for statement in node.body:
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.visit(statement)
-
-    def visit_Lambda(self, node: ast.Lambda) -> None:
-        self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
@@ -193,34 +196,18 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
     layer: API callers may supply arbitrary order, but graph bytes and emitted
     diagnostics must not change merely because argument order changed.
     """
-    diagnostics: list[Diagnostic] = []
     modules: list[_Module] = []
     nodes: list[Node] = []
 
-    for file_path in sorted(files, key=lambda path: path.relative_to(workspace.root).as_posix()):
-        relative = file_path.relative_to(workspace.root).as_posix()
-        try:
-            content = file_path.read_bytes()
-            source = content.decode("utf-8")
-        except (OSError, UnicodeError) as error:
-            diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
-            continue
-        try:
-            parsed = parse_python(source, relative)
-        except SyntaxError as error:
-            diagnostics.append(
-                Diagnostic(
-                    DiagnosticCode.PARSE_ERROR,
-                    relative,
-                    error.msg,
-                    _syntax_location(relative, error),
-                )
-            )
-            continue
-        module = _make_module(relative, parsed.tree, source, LineIndex(source))
+    sources, diagnostics = read_and_parse(workspace, files, _parse_python)
+    for parsed in sources:
+        module = _make_module(parsed.relative, parsed.tree, parsed.source, LineIndex(parsed.source))
         modules.append(module)
         nodes.extend(
-            (_file_node(relative, hashlib.sha256(content).hexdigest()), _module_node(module))
+            (
+                _file_node(parsed.relative, hashlib.sha256(parsed.content).hexdigest()),
+                _module_node(module),
+            )
         )
 
     module_by_name = {module.name: module for module in modules}
@@ -232,13 +219,11 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         symbols_by_path[module.path] = symbols
         nodes.extend(declared_nodes)
 
-    relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
-    tally = _ImportTally()
-    seen_ids: set[str] = set()
+    relationships = RelationshipAccumulator()
+    tally = _ImportTally(module_by_name)
+    emitter = NodeEmitter(NAMESPACE, "python")
     for module in modules:
-        _append(
-            relationships, module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
-        )
+        relationships.add(module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None)
         _analyze_module(
             module,
             module_by_name,
@@ -246,7 +231,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             declarations,
             relationships,
             nodes,
-            seen_ids,
+            emitter,
             tally,
         )
 
@@ -254,17 +239,15 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         GraphDocument(
             coordinate_encoding=CoordinateEncoding.UTF_8,
             nodes=tuple(nodes),
-            relationships=tuple(
-                _relationship(key, locations) for key, locations in relationships.items()
-            ),
+            relationships=relationships.documents(_PRODUCER),
             generated_by=_PRODUCER,
             # Flat keys: extension namespaces hold scalar-valued objects.
             extensions={
-                "minotaur-python": {
-                    "imports_resolved": tally.resolved,
-                    "imports_unresolved": tally.unresolved,
-                    "imports_root_mismatched": tally.root_mismatched,
-                    **({"import_root_hint": tally.root_hint} if tally.root_hint else {}),
+                NAMESPACE: {
+                    IMPORTS_RESOLVED: tally.resolved,
+                    IMPORTS_UNRESOLVED: tally.unresolved,
+                    IMPORTS_ROOT_MISMATCHED: tally.root_mismatched,
+                    **({IMPORT_ROOT_HINT: tally.root_hint} if tally.root_hint else {}),
                 }
             },
         ),
@@ -291,6 +274,7 @@ def _make_module(path: str, tree: ast.Module, source: str, line_index: LineIndex
         tree,
         source,
         line_index,
+        location,
         file_id,
         module_id,
     )
@@ -305,13 +289,12 @@ def _file_node(path: str, content_sha256: str) -> Node:
         label=path,
         path=path,
         language="python",
-        extensions={"minotaur-python": {"content_sha256": content_sha256}},
+        extensions={NAMESPACE: {"content_sha256": content_sha256}},
     )
 
 
 def _module_node(module: _Module) -> Node:
     identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
-    location = _module_location(module.path, module.line_index)
     return Node(
         id=module.module_id,
         identity=identity,
@@ -319,7 +302,7 @@ def _module_node(module: _Module) -> Node:
         label=module.name,
         symbol_kind=SymbolKind.MODULE.value,
         language="python",
-        location=location,
+        location=module.location,
     )
 
 
@@ -333,7 +316,13 @@ def _declarations(
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             qualified = f"{module.name}.{statement.name}"
             kind = SymbolKind.CLASS if isinstance(statement, ast.ClassDef) else SymbolKind.FUNCTION
-            node = _symbol_node(module.path, statement, qualified, kind)
+            node = symbol_node(
+                qualified,
+                kind,
+                _location(module.path, statement),
+                NAMESPACE,
+                "python",
+            )
             declarations[qualified] = node.id
             symbols[statement] = _DeclaredSymbol(node.id, module.module_id)
             nodes.append(node)
@@ -357,8 +346,12 @@ def _declarations(
                 for member in statement.body:
                     if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         member_name = f"{qualified}.{member.name}"
-                        member_node = _symbol_node(
-                            module.path, member, member_name, SymbolKind.METHOD
+                        member_node = symbol_node(
+                            member_name,
+                            SymbolKind.METHOD,
+                            _location(module.path, member),
+                            NAMESPACE,
+                            "python",
                         )
                         declarations[member_name] = member_node.id
                         class_declarations[member.name] = member_node.id
@@ -375,15 +368,14 @@ def _analyze_module(
     modules: dict[str, _Module],
     symbols: dict[ast.stmt, _DeclaredSymbol],
     declarations: dict[str, str],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen_ids: set[str],
+    emitter: NodeEmitter,
     tally: _ImportTally,
 ) -> None:
-    aliases = _imports(module, modules, relationships, nodes, seen_ids, tally)
+    aliases = _imports(module, modules, declarations, relationships, nodes, emitter, tally)
     for symbol in symbols.values():
-        _append(
-            relationships,
+        relationships.add(
             symbol.container_id,
             symbol.node_id,
             RelationshipKind.CONTAINS.value,
@@ -402,7 +394,7 @@ def _analyze_module(
         module.module_id,
         relationships,
         nodes,
-        seen_ids,
+        emitter,
     )
     for statement in module.tree.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -422,7 +414,7 @@ def _analyze_module(
                 symbols[statement].node_id,
                 relationships,
                 nodes,
-                seen_ids,
+                emitter,
                 prefix_nodes=_signature_nodes(statement),
             )
         elif isinstance(statement, ast.ClassDef):
@@ -453,7 +445,7 @@ def _analyze_module(
                 symbols[statement].node_id,
                 relationships,
                 nodes,
-                seen_ids,
+                emitter,
                 symbols[statement].class_declarations,
                 prefix_nodes=_class_header_nodes(statement),
             )
@@ -475,7 +467,7 @@ def _analyze_module(
                         symbols[member].node_id,
                         relationships,
                         nodes,
-                        seen_ids,
+                        emitter,
                         symbols[member].class_declarations,
                         prefix_nodes=_signature_nodes(member),
                     )
@@ -486,7 +478,7 @@ def _decorator_references(
     source: str,
     target: str,
     path: str,
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
 ) -> None:
     """Record each decorator as an enclosing-scope use of its definition.
 
@@ -494,8 +486,7 @@ def _decorator_references(
     is intentionally avoided because repeated definitions have distinct nodes.
     """
     for decorator in statement.decorator_list:
-        _append(
-            relationships,
+        relationships.add(
             source,
             target,
             RelationshipKind.REFERENCES.value,
@@ -563,9 +554,10 @@ def _signature_nodes(
 def _imports(
     module: _Module,
     modules: dict[str, _Module],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    declarations: dict[str, str],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen_ids: set[str],
+    emitter: NodeEmitter,
     tally: _ImportTally,
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
@@ -574,19 +566,17 @@ def _imports(
             for alias in statement.names:
                 target = modules.get(alias.name)
                 if target is None:
-                    tally.note_unresolved(alias.name, modules)
-                    _unresolved(
+                    tally.note_unresolved(alias.name)
+                    emitter.unresolved(
                         module.module_id,
                         alias.name,
                         _location(module.path, statement),
-                        relationships,
                         nodes,
-                        seen_ids,
+                        relationships,
                     )
                 else:
                     tally.resolved += 1
-                    _append(
-                        relationships,
+                    relationships.add(
                         module.module_id,
                         target.module_id,
                         RelationshipKind.IMPORTS.value,
@@ -600,21 +590,19 @@ def _imports(
             target_module = modules.get(base) if base is not None else None
             for alias in statement.names:
                 reference = f"{base}.{alias.name}" if base else alias.name
-                resolved_target = declarations_for_module(modules, reference)
+                resolved_target = declarations.get(reference)
                 if resolved_target is None:
-                    tally.note_unresolved(reference, modules)
-                    _unresolved(
+                    tally.note_unresolved(reference)
+                    emitter.unresolved(
                         module.module_id,
                         reference,
                         _location(module.path, statement),
-                        relationships,
                         nodes,
-                        seen_ids,
+                        relationships,
                     )
                 else:
                     tally.resolved += 1
-                    _append(
-                        relationships,
+                    relationships.add(
                         module.module_id,
                         resolved_target,
                         RelationshipKind.IMPORTS.value,
@@ -626,28 +614,6 @@ def _imports(
     return aliases
 
 
-def declarations_for_module(modules: dict[str, _Module], reference: str) -> str | None:
-    """Resolve a module or its top-level declaration without importing it."""
-    direct_module = modules.get(reference)
-    if direct_module is not None:
-        return direct_module.module_id
-    module_name, _, member = reference.rpartition(".")
-    module = modules.get(module_name)
-    if module is None:
-        return None
-    if not member:
-        return module.module_id
-    resolved: str | None = None
-    for statement in module.tree.body:
-        if (
-            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and statement.name == member
-        ):
-            kind = SymbolKind.CLASS if isinstance(statement, ast.ClassDef) else SymbolKind.FUNCTION
-            resolved = _symbol_node(module.path, statement, f"{module.name}.{member}", kind).id
-    return resolved
-
-
 def _calls(
     statements: list[ast.stmt],
     declarations: dict[str, str],
@@ -655,9 +621,9 @@ def _calls(
     module_name: str,
     path: str,
     caller: str,
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen_ids: set[str],
+    emitter: NodeEmitter,
     class_declarations: Mapping[str, str] | None = None,
     prefix_nodes: tuple[ast.AST, ...] = (),
 ) -> None:
@@ -671,9 +637,9 @@ def _calls(
         target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
         location = _location(path, candidate.func)
         if target is None:
-            _unresolved(caller, text, location, relationships, nodes, seen_ids)
+            emitter.unresolved(caller, text, location, nodes, relationships)
         else:
-            _append(relationships, caller, target, RelationshipKind.CALLS.value, location)
+            relationships.add(caller, target, RelationshipKind.CALLS.value, location)
     unresolved_references: list[tuple[str, Location]] = []
     resolved_texts: set[str] = set()
     for reference in visitor.references:
@@ -681,8 +647,7 @@ def _calls(
         target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
         if target is not None:
             resolved_texts.add(text)
-            _append(
-                relationships,
+            relationships.add(
                 caller,
                 target,
                 RelationshipKind.REFERENCES.value,
@@ -693,7 +658,7 @@ def _calls(
     for text, location in unresolved_references:
         if any(resolved_text.startswith(text + ".") for resolved_text in resolved_texts):
             continue
-        _unresolved(caller, text, location, relationships, nodes, seen_ids)
+        emitter.unresolved(caller, text, location, nodes, relationships)
 
 
 def _resolve_call(
@@ -719,72 +684,6 @@ def _resolve_call(
     return declarations.get(f"{module_name}.{text}")
 
 
-def _unresolved(
-    origin: str,
-    text: str,
-    location: Location,
-    relationships: dict[tuple[str, str, str], list[Location]],
-    nodes: list[Node],
-    seen_ids: set[str],
-) -> None:
-    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, NAMESPACE, originating_node=origin)
-    node_id = compute_node_id(
-        identity,
-        node_class=NodeClass.UNRESOLVED_REFERENCE.value,
-        location=location,
-        reference_text=text,
-    )
-    if node_id not in seen_ids:
-        seen_ids.add(node_id)
-        nodes.append(
-            Node(
-                id=node_id,
-                identity=identity,
-                node_class=NodeClass.UNRESOLVED_REFERENCE,
-                label=text,
-                reference_text=text,
-                language="python",
-                location=location,
-            )
-        )
-    _append(relationships, origin, node_id, RelationshipKind.REFERENCES.value, location)
-
-
-def _symbol_node(path: str, statement: ast.AST, label: str, kind: SymbolKind) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
-    location = _location(path, statement)
-    return Node(
-        id=compute_node_id(
-            identity, node_class=NodeClass.SYMBOL.value, symbol_kind=kind.value, location=location
-        ),
-        identity=identity,
-        node_class=NodeClass.SYMBOL,
-        label=label,
-        symbol_kind=kind.value,
-        language="python",
-        location=location,
-    )
-
-
-def _relationship(key: tuple[str, str, str], locations: list[Location]) -> Relationship:
-    unique = tuple(dict.fromkeys(locations))
-    evidence = Evidence(Provenance.STATIC_ANALYSIS, producer=_PRODUCER, locations=unique)
-    return Relationship(source=key[0], target=key[1], kind=key[2], evidence=(evidence,))
-
-
-def _append(
-    relationships: dict[tuple[str, str, str], list[Location]],
-    source: str,
-    target: str,
-    kind: str,
-    location: Location | None,
-) -> None:
-    if location is not None:
-        relationships[(source, target, kind)].append(location)
-    else:
-        relationships.setdefault((source, target, kind), [])
-
-
 def _module_name(path: str) -> str:
     parts = path.removesuffix(".py").split("/")
     if parts[-1] == "__init__":
@@ -800,7 +699,7 @@ def _relative_module(
     parts = current.split(".")
     if not is_package:
         parts.pop()
-    if level > len(parts):
+    if resolve_relative(tuple(parts), level) is None:
         return None
     base = parts[: len(parts) - level + 1]
     if imported:
@@ -826,6 +725,14 @@ def _syntax_location(path: str, error: SyntaxError) -> Location | None:
     line = error.lineno - 1
     column = max((error.offset or 1) - 1, 0)
     return Location(path, Range(Position(line, column), Position(line, column)))
+
+
+def _parse_python(source: str, relative: str) -> ast.Module:
+    """Parse Python source and normalize syntax failures for the reader."""
+    try:
+        return ast.parse(source, filename=relative)
+    except SyntaxError as error:
+        raise ParseFailure(error.msg, _syntax_location(relative, error)) from error
 
 
 def _expression_text(expression: ast.expr) -> str:

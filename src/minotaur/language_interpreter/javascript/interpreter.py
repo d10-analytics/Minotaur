@@ -11,7 +11,6 @@ the enclosing emitted owner rather than inventing a second identity grain.
 from __future__ import annotations
 
 import hashlib
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +20,7 @@ from typing import Any
 import esprima  # type: ignore[import-untyped]
 
 from minotaur.graph_model.document import GraphDocument
-from minotaur.graph_model.evidence import Evidence, Producer
+from minotaur.graph_model.evidence import Producer
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node
@@ -29,12 +28,14 @@ from minotaur.graph_model.provenance import (
     CoordinateEncoding,
     IdentityBasis,
     NodeClass,
-    Provenance,
     RelationshipKind,
     SymbolKind,
 )
-from minotaur.graph_model.relationship import Relationship
-from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.accumulation import RelationshipAccumulator
+from minotaur.language_interpreter.contract import AnalysisResult
+from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
+from minotaur.language_interpreter.paths import resolve_relative
+from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -67,78 +68,45 @@ class _Binding:
 
 def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
     """Analyze selected JavaScript files, retaining valid sibling results."""
-    diagnostics: list[Diagnostic] = []
     modules: list[_Module] = []
-    for path in sorted(files, key=lambda p: p.relative_to(workspace.root).as_posix()):
-        relative = path.relative_to(workspace.root).as_posix()
-        try:
-            content = path.read_bytes()
-            source = content.decode("utf-8")
-        except (OSError, UnicodeError) as error:
-            diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
-            continue
-        line_index = LineIndex(source)
-        try:
-            tree = esprima.parseModule(
-                source, options={"loc": True, "range": True, "tolerant": True}
-            )
-        except Exception as error:
-            diagnostics.append(
-                Diagnostic(
-                    DiagnosticCode.PARSE_ERROR,
-                    relative,
-                    str(error),
-                    _error_location(relative, line_index, error),
-                )
-            )
-            continue
-        errors = getattr(tree, "errors", ()) or ()
-        if errors:
-            parse_error = errors[0]
-            diagnostics.append(
-                Diagnostic(
-                    DiagnosticCode.PARSE_ERROR,
-                    relative,
-                    str(parse_error),
-                    _error_location(relative, line_index, parse_error),
-                )
-            )
-            continue
+    sources, diagnostics = read_and_parse(workspace, files, _parse_javascript)
+    for parsed in sources:
         modules.append(
-            _make_module(relative, source, tree, hashlib.sha256(content).hexdigest(), line_index)
+            _make_module(
+                parsed.relative,
+                parsed.source,
+                parsed.tree,
+                hashlib.sha256(parsed.content).hexdigest(),
+                LineIndex(parsed.source),
+            )
         )
 
     by_path = {module.path: module for module in modules}
     nodes: list[Node] = []
     for module in modules:
         nodes.extend((_file_node(module), _module_node(module), *module.declaration_nodes))
-    relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
-    seen_unresolved: set[str] = set()
+    relationships = RelationshipAccumulator()
+    emitter = NodeEmitter(NAMESPACE, "javascript")
     for module in modules:
-        _append(
-            relationships, module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
-        )
+        relationships.add(module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None)
         for declaration_node in module.declaration_nodes:
             if declaration_node.symbol_kind != SymbolKind.METHOD.value:
-                _append(
-                    relationships,
+                relationships.add(
                     module.module_id,
                     declaration_node.id,
                     RelationshipKind.CONTAINS.value,
                     None,
                 )
         for class_id, method_id in module.method_containments:
-            _append(relationships, class_id, method_id, RelationshipKind.CONTAINS.value, None)
-        _imports(module, by_path, relationships, nodes, seen_unresolved)
+            relationships.add(class_id, method_id, RelationshipKind.CONTAINS.value, None)
+        _imports(module, by_path, relationships, nodes, emitter)
     for module in modules:
-        _expressions(module, by_path, relationships, nodes, seen_unresolved)
+        _expressions(module, by_path, relationships, nodes, emitter)
 
     document = GraphDocument(
         coordinate_encoding=CoordinateEncoding.UTF_8,
         nodes=tuple(nodes),
-        relationships=tuple(
-            _relationship(key, locations) for key, locations in relationships.items()
-        ),
+        relationships=relationships.documents(_PRODUCER),
         generated_by=_PRODUCER,
     )
     return AnalysisResult(document, tuple(diagnostics))
@@ -244,8 +212,13 @@ def _collect_declarations(
     ):
         name = statement.id.name
         kind = SymbolKind.FUNCTION if typ == "FunctionDeclaration" else SymbolKind.CLASS
-        node = _symbol_node(
-            path, statement, f"{_without_js_suffix(path)}.{name}", kind, export_kind, line_index
+        node = symbol_node(
+            f"{_without_js_suffix(path)}.{name}",
+            kind,
+            _node_location(path, statement, line_index),
+            NAMESPACE,
+            "javascript",
+            {NAMESPACE: {"export_kind": export_kind}} if export_kind else None,
         )
         binding = _Binding(name, node.id, _start(statement))
         bindings[name] = binding
@@ -262,13 +235,12 @@ def _collect_declarations(
                 method_name = _property_name(key)
                 if method_name is None:
                     continue
-                method = _symbol_node(
-                    path,
-                    member,
+                method = symbol_node(
                     f"{class_label}.{method_name}",
                     SymbolKind.METHOD,
-                    None,
-                    line_index,
+                    _node_location(path, member, line_index),
+                    NAMESPACE,
+                    "javascript",
                 )
                 # Class methods are contained by the class, never by module.
                 bindings.setdefault(
@@ -291,13 +263,13 @@ def _collect_declarations(
                 continue
             assert identifier is not None
             name = str(identifier.name)
-            node = _symbol_node(
-                path,
-                declarator,
+            node = symbol_node(
                 f"{_without_js_suffix(path)}.{name}",
                 SymbolKind.FUNCTION,
-                export_kind,
-                line_index,
+                _node_location(path, declarator, line_index),
+                NAMESPACE,
+                "javascript",
+                {NAMESPACE: {"export_kind": export_kind}} if export_kind else None,
             )
             binding = _Binding(name, node.id, _start(declarator))
             bindings[name] = binding
@@ -333,37 +305,12 @@ def _module_node(module: _Module) -> Node:
     )
 
 
-def _symbol_node(
-    path: str,
-    statement: Any,
-    label: str,
-    kind: SymbolKind,
-    export_kind: str | None,
-    line_index: LineIndex,
-) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
-    location = _node_location(path, statement, line_index)
-    extensions = {NAMESPACE: {"export_kind": export_kind}} if export_kind else None
-    return Node(
-        id=compute_node_id(
-            identity, node_class=NodeClass.SYMBOL.value, symbol_kind=kind.value, location=location
-        ),
-        identity=identity,
-        node_class=NodeClass.SYMBOL,
-        label=label,
-        symbol_kind=kind.value,
-        language="javascript",
-        location=location,
-        extensions=extensions,
-    )
-
-
 def _imports(
     module: _Module,
     modules: dict[str, _Module],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen: set[str],
+    emitter: NodeEmitter,
 ) -> None:
     for statement in getattr(module.tree, "body", ()):
         typ = getattr(statement, "type", None)
@@ -372,14 +319,13 @@ def _imports(
             specifiers = getattr(statement, "specifiers", ())
             if not specifiers:
                 _unsupported(
-                    module, f"{source}#side-effect", statement.source, relationships, nodes, seen
+                    module, f"{source}#side-effect", statement.source, relationships, nodes, emitter
                 )
                 continue
             target = _relative_target(module.path, source)
             target_module = modules.get(target) if target else None
             if target_module is not None:
-                _append(
-                    relationships,
+                relationships.add(
                     module.module_id,
                     target_module.module_id,
                     RelationshipKind.IMPORTS.value,
@@ -418,11 +364,11 @@ def _imports(
                         or statement.source,
                         relationships,
                         nodes,
-                        seen,
+                        emitter,
                     )
         elif typ == "ExportAllDeclaration":
             source = _literal_text(getattr(statement, "source", None))
-            _unsupported(module, f"{source}#*", statement.source, relationships, nodes, seen)
+            _unsupported(module, f"{source}#*", statement.source, relationships, nodes, emitter)
         elif typ == "ExportNamedDeclaration" and getattr(statement, "source", None) is not None:
             source = _literal_text(statement.source)
             for specifier in getattr(statement, "specifiers", ()):
@@ -433,7 +379,7 @@ def _imports(
                     getattr(specifier, "exported", None) or statement.source,
                     relationships,
                     nodes,
-                    seen,
+                    emitter,
                 )
         elif typ == "ExportNamedDeclaration":
             # Local export lists are intentionally unsupported.  Keep the
@@ -446,15 +392,17 @@ def _imports(
                 local_name = exported or local
                 anchor = getattr(specifier, "exported", None) or getattr(specifier, "local", None)
                 if local_name is not None and anchor is not None:
-                    _unsupported(module, f"export#{local_name}", anchor, relationships, nodes, seen)
+                    _unsupported(
+                        module, f"export#{local_name}", anchor, relationships, nodes, emitter
+                    )
 
 
 def _expressions(
     module: _Module,
     modules: dict[str, _Module],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen: set[str],
+    emitter: NodeEmitter,
 ) -> None:
     top_bindings = {
         name: binding
@@ -484,7 +432,7 @@ def _expressions(
                 top_bindings,
                 relationships,
                 nodes,
-                seen,
+                emitter,
                 shadows=program_shadows,
                 skip_declaration=True,
             )
@@ -498,7 +446,7 @@ def _expressions(
                         top_bindings,
                         relationships,
                         nodes,
-                        seen,
+                        emitter,
                         shadows=program_shadows,
                         skip_declaration=True,
                     )
@@ -518,7 +466,7 @@ def _expressions(
                     top_bindings,
                     relationships,
                     nodes,
-                    seen,
+                    emitter,
                     shadows=program_shadows,
                     skip_declaration=True,
                 )
@@ -530,7 +478,7 @@ def _expressions(
                 top_bindings,
                 relationships,
                 nodes,
-                seen,
+                emitter,
                 shadows=program_shadows,
                 skip_declaration=True,
             )
@@ -547,7 +495,7 @@ def _expressions(
                 top_bindings,
                 relationships,
                 nodes,
-                seen,
+                emitter,
                 shadows=program_shadows,
             )
 
@@ -557,9 +505,9 @@ def _walk(
     owner: str,
     module: _Module,
     bindings: dict[str, _Binding],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen: set[str],
+    seen: NodeEmitter,
     shadows: set[str] | None = None,
     skip_declaration: bool = False,
 ) -> None:
@@ -573,11 +521,9 @@ def _walk(
         target = bindings.get(node.name)
         location = _node_location(module.path, node, module.line_index)
         if target is not None:
-            _append(
-                relationships, owner, target.node_id, RelationshipKind.REFERENCES.value, location
-            )
+            relationships.add(owner, target.node_id, RelationshipKind.REFERENCES.value, location)
         else:
-            _unresolved(owner, node.name, location, relationships, nodes, seen)
+            seen.unresolved(owner, node.name, location, nodes, relationships)
         return
     if typ in {
         "FunctionDeclaration",
@@ -800,11 +746,9 @@ def _walk(
             if callee_name not in shadows:
                 target = bindings.get(callee_name)
                 if target is not None:
-                    _append(
-                        relationships, owner, target.node_id, RelationshipKind.CALLS.value, location
-                    )
+                    relationships.add(owner, target.node_id, RelationshipKind.CALLS.value, location)
                 else:
-                    _unresolved(owner, callee_name, location, relationships, nodes, seen)
+                    seen.unresolved(owner, callee_name, location, nodes, relationships)
         else:
             _walk(callee, owner, module, bindings, relationships, nodes, seen, shadows)
         # Member dispatch and IIFE callee forms are deliberately outside the
@@ -886,9 +830,9 @@ def _walk_parameter_defaults(
     owner: str,
     module: _Module,
     bindings: dict[str, _Binding],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen: set[str],
+    seen: NodeEmitter,
     shadows: set[str],
 ) -> None:
     """Walk executable defaults nested in a function binding pattern."""
@@ -1092,78 +1036,18 @@ def _unsupported(
     module: _Module,
     text: str,
     anchor: Any,
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen: set[str],
+    emitter: NodeEmitter,
     owner: str | None = None,
 ) -> None:
-    _unresolved(
+    emitter.unresolved(
         owner or module.module_id,
         text,
         _node_location(module.path, anchor, module.line_index),
-        relationships,
         nodes,
-        seen,
+        relationships,
     )
-
-
-def _unresolved(
-    origin: str,
-    text: str,
-    location: Location,
-    relationships: dict[tuple[str, str, str], list[Location]],
-    nodes: list[Node],
-    seen: set[str],
-) -> None:
-    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, NAMESPACE, originating_node=origin)
-    node_id = compute_node_id(
-        identity,
-        node_class=NodeClass.UNRESOLVED_REFERENCE.value,
-        location=location,
-        reference_text=text,
-    )
-    if node_id not in seen:
-        seen.add(node_id)
-        nodes.append(
-            Node(
-                id=node_id,
-                identity=identity,
-                node_class=NodeClass.UNRESOLVED_REFERENCE,
-                label=text,
-                reference_text=text,
-                language="javascript",
-                location=location,
-            )
-        )
-    _append(relationships, origin, node_id, RelationshipKind.REFERENCES.value, location)
-
-
-def _relationship(key: tuple[str, str, str], locations: list[Location]) -> Relationship:
-    return Relationship(
-        source=key[0],
-        target=key[1],
-        kind=key[2],
-        evidence=(
-            Evidence(
-                Provenance.STATIC_ANALYSIS,
-                producer=_PRODUCER,
-                locations=tuple(dict.fromkeys(locations)),
-            ),
-        ),
-    )
-
-
-def _append(
-    relationships: dict[tuple[str, str, str], list[Location]],
-    source: str,
-    target: str,
-    kind: str,
-    location: Location | None,
-) -> None:
-    if location is not None:
-        relationships[(source, target, kind)].append(location)
-    else:
-        relationships.setdefault((source, target, kind), [])
 
 
 def _node_location(path: str, node: Any, line_index: LineIndex) -> Location:
@@ -1189,6 +1073,20 @@ def _error_location(path: str, line_index: LineIndex, error: Any) -> Location | 
             return None
         index = line_index.line_starts[line - 1] + max((column or 1) - 1, 0)
     return Location(path, Range(line_index.position(index), line_index.position(index)))
+
+
+def _parse_javascript(source: str, relative: str) -> Any:
+    """Parse JavaScript source and normalize tolerant-parser errors."""
+    line_index = LineIndex(source)
+    try:
+        tree = esprima.parseModule(source, options={"loc": True, "range": True, "tolerant": True})
+    except Exception as error:
+        raise ParseFailure(str(error), _error_location(relative, line_index, error)) from error
+    errors = getattr(tree, "errors", ()) or ()
+    if errors:
+        parse_error = errors[0]
+        raise ParseFailure(str(parse_error), _error_location(relative, line_index, parse_error))
+    return tree
 
 
 def _literal_text(node: Any) -> str:
@@ -1222,11 +1120,12 @@ def _relative_target(path: str, specifier: str) -> str | None:
     if not specifier.startswith(("./", "../")) or not specifier.lower().endswith(".js"):
         return None
     parts = path.split("/")[:-1]
-    for segment in specifier.split("/"):
+    segments = specifier.split("/")
+    for segment in segments:
         if segment == ".":
             continue
         if segment == "..":
-            if not parts:
+            if resolve_relative(tuple(parts), 1) is None:
                 return None
             parts.pop()
         else:

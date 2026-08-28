@@ -1,4 +1,4 @@
-"""Behavioral coverage for the example_language interpreter."""
+"""Behavioral starter coverage for the example_language interpreter."""
 
 from __future__ import annotations
 
@@ -9,12 +9,18 @@ from minotaur.language_interpreter.workspace import Workspace
 
 
 def test_selected_example_language_files_produce_only_established_facts(tmp_path: Path) -> None:
+    """Replace the stub assertion with facts from tested language semantics."""
     source = tmp_path / "sample.example"
-    source.write_text("replace with representative source", encoding="utf-8")
+    source.write_text("replace with representative example_language source", encoding="utf-8")
 
-    result = analyze_example_language_files(Workspace(tmp_path), (source,))
+    try:
+        result = analyze_example_language_files(Workspace(tmp_path), (source,))
+    except NotImplementedError:
+        # The copied template is deliberately incomplete. Replace this branch
+        # together with the stub once shared readers and emitters are wired to
+        # real language-specific parsing and analysis.
+        raise AssertionError("replace the template stub with tested analysis")
 
-    # Replace this with assertions for graph facts, diagnostics, and evidence
-    # that would fail if the language-specific analysis were removed. The stub
-    # intentionally raises until it has been replaced with tested semantics.
+    # Replace these with assertions for graph facts, diagnostics, and evidence
+    # that would fail if language-specific analysis were removed.
     assert result.diagnostics == ()

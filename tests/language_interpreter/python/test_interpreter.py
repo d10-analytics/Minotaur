@@ -5,11 +5,9 @@ Language-specific interpreter tests live beneath ``tests/language_interpreter``.
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -20,7 +18,6 @@ from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipK
 from minotaur.graph_model.validation import IssueCode, validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
-from minotaur.language_interpreter.python.interpreter import _calls
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -162,6 +159,24 @@ def test_syntax_error_is_reported_without_erasing_other_workspace_facts(tmp_path
     ]
     assert {node.label for node in result.document.nodes} >= {"valid", "valid.working"}
     assert "broken" not in {node.label for node in result.document.nodes}
+    assert validate_document(result.document).is_valid
+
+
+def test_type_comment_is_parsed_without_a_parse_error(tmp_path: Path) -> None:
+    _write(tmp_path, "typed.py", "x: int # type: int\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert result.diagnostics == ()
+    assert {node.label for node in result.document.nodes} >= {"typed.py", "typed"}
+    assert any(
+        node.node_class == NodeClass.FILE and node.path == "typed.py"
+        for node in result.document.nodes
+    )
+    assert any(
+        node.node_class == NodeClass.SYMBOL and node.label == "typed"
+        for node in result.document.nodes
+    )
     assert validate_document(result.document).is_valid
 
 
@@ -354,25 +369,25 @@ def test_attribute_and_nested_load_references_preserve_call_and_unresolved_bound
     assert validate_document(result.document).is_valid
 
 
-def test_resolved_attribute_chain_suppresses_all_unresolved_bases() -> None:
-    statements = ast.parse("value = a.b.c\n").body
-    relationships = defaultdict(list)
-    nodes = []
+def test_resolved_attribute_chain_suppresses_all_unresolved_bases(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "value = a.b.c\n")
+    _write(tmp_path, "app/a/b.py", "class c:\n    pass\n")
 
-    _calls(
-        statements,
-        {"app.a.b.c": "resolved-target"},
-        {},
-        "app",
-        "app.py",
-        "origin",
-        relationships,
-        nodes,
-        set(),
-    )
+    result = analyze_python_workspace(tmp_path)
+    app = _node_id(result, "app")
+    target = _node_id(result, "app.a.b.c")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
 
-    assert set(relationships) == {("origin", "resolved-target", RelationshipKind.REFERENCES.value)}
-    assert not [node for node in nodes if node.node_class == NodeClass.UNRESOLVED_REFERENCE]
+    assert (app, target, RelationshipKind.REFERENCES.value) in relationships
+    assert not unresolved.intersection({"a", "a.b"})
 
 
 def test_load_argument_in_nested_call_func_is_still_a_reference(tmp_path: Path) -> None:
