@@ -1817,6 +1817,83 @@ def test_inner_scope_import_outranks_an_enclosing_assignment(tmp_path: Path) -> 
     assert _unresolved_by_source(result)["app.outer"] == {"build", "helper"}
 
 
+def test_method_headers_see_the_class_body_imports_their_bodies_cannot(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class C:\n"
+        "    from externallib import list\n\n"
+        "    def run(self, value=list()):\n"
+        "        return list()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved_sites = {
+        (node.reference_text, location.range.start.line + 1)
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+        for relationship in result.document.relationships
+        if relationship.target == node.id
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+    # A method's header is evaluated in the class body, its body is not. Both
+    # are attributed to the method, so only the line tells the two apart: the
+    # default sees the class's ``list``, the body sees the builtin.
+    assert unresolved_sites == {("list", 4)}
+
+
+def test_the_nearest_scope_that_imports_a_name_decides_what_it_means(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "a.py", "def go():\n    return 1\n")
+    _write(tmp_path, "b.py", "def go():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import a as lib\n\n"
+        "def outer():\n"
+        "    def middle():\n"
+        "        import b as lib\n\n"
+        "        def inner():\n"
+        "            import a as lib\n\n"
+        "            return lib.go()\n"
+        "        return inner\n"
+        "    return middle\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # ``middle`` rebinds ``lib`` away from the module alias and ``inner`` binds
+    # it back. Letting an outer frame win would refuse a call the source does
+    # make; the call is to ``a.go`` and the module alias names ``a``.
+    assert ("app.outer", "a.go", RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert _unresolved_by_source(result) == {}
+
+
+def test_a_scopes_own_assignment_outranks_its_own_import(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    def inner(flag):\n"
+        "        from externallib import list\n\n"
+        "        if flag:\n"
+        "            list = build()\n"
+        "        return list()\n"
+        "    return inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # One scope binds ``list`` twice. The assignment makes it a dynamic local,
+    # which nothing static can claim, so the call reports nothing at all.
+    assert _unresolved_by_source(result)["app.outer"] == {"build"}
+
+
 def test_lambda_default_walrus_binds_the_enclosing_function(tmp_path: Path) -> None:
     _write(
         tmp_path,
