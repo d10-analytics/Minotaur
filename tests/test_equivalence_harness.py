@@ -33,8 +33,10 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # -> ad00d41 (nested-scope precedence, receiver shadowing, and closure receiver
 # inheritance repairs) -> b54522c (retrospective repairs: one full-text fact per
 # member expression with root resolution, import-bound names are not dynamic
-# locals, chain interiors traversed on loads, implicit classmethod receivers).
-BASELINE_COMMIT = "b54522c0e3e7de9e7d6869ba47d466300cab3cc5"
+# locals, chain interiors traversed on loads, implicit classmethod receivers)
+# -> 89f7db8 (import bindings carry targets: class-body imports, rebound module
+# aliases refuse resolution, nearest-frame import precedence).
+BASELINE_COMMIT = "89f7db8a74a272414f127018f1e612fe10b1d581"
 
 
 @pytest.fixture(scope="session")
