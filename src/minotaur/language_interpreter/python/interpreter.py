@@ -1,9 +1,9 @@
 """Bounded static Python-to-Minotaur interpreter.
 
-The v1 slice deliberately establishes only declarations, containment, local
-and workspace-module imports, and direct calls with a statically known target.
-Everything else is preserved as an unresolved reference; no runtime claim is
-made and no source code is executed or imported.
+The v1 slice emits declarations and containment, local and workspace-module
+imports, direct calls, references (including decorator and base-class
+references), inheritance, and unresolved references. No runtime claim is made
+and no source code is executed or imported.
 """
 
 from __future__ import annotations
@@ -82,12 +82,17 @@ class _ImportTally:
     unresolved: int = 0
     root_mismatched: int = 0
     prefixes: dict[str, int] = field(default_factory=dict)
-    _suffixes: dict[str, str] | None = None
+    _suffixes: dict[str, str] = field(init=False)
 
-    def note_unresolved(self, name: str, modules: Mapping[str, object]) -> None:
+    def __init__(self, modules: Mapping[str, object]) -> None:
+        self.resolved = 0
+        self.unresolved = 0
+        self.root_mismatched = 0
+        self.prefixes = {}
+        self._suffixes = _module_suffixes(modules)
+
+    def note_unresolved(self, name: str) -> None:
         self.unresolved += 1
-        if self._suffixes is None:
-            self._suffixes = _module_suffixes(modules)
         prefix = self._suffixes.get(name)
         if prefix is None and "." in name:
             # ``from pkg.mod import symbol``: the module part is what must match.
@@ -215,7 +220,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         nodes.extend(declared_nodes)
 
     relationships = RelationshipAccumulator()
-    tally = _ImportTally()
+    tally = _ImportTally(module_by_name)
     emitter = NodeEmitter(NAMESPACE, "python")
     for module in modules:
         relationships.add(module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None)
@@ -561,7 +566,7 @@ def _imports(
             for alias in statement.names:
                 target = modules.get(alias.name)
                 if target is None:
-                    tally.note_unresolved(alias.name, modules)
+                    tally.note_unresolved(alias.name)
                     emitter.unresolved(
                         module.module_id,
                         alias.name,
@@ -587,7 +592,7 @@ def _imports(
                 reference = f"{base}.{alias.name}" if base else alias.name
                 resolved_target = declarations.get(reference)
                 if resolved_target is None:
-                    tally.note_unresolved(reference, modules)
+                    tally.note_unresolved(reference)
                     emitter.unresolved(
                         module.module_id,
                         reference,
