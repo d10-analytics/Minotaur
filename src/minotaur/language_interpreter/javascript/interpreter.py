@@ -113,9 +113,7 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
     relationships = RelationshipAccumulator()
     seen_unresolved: set[str] = set()
     for module in modules:
-        relationships.add(
-            module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
-        )
+        relationships.add(module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None)
         for declaration_node in module.declaration_nodes:
             if declaration_node.symbol_kind != SymbolKind.METHOD.value:
                 relationships.add(
@@ -567,9 +565,7 @@ def _walk(
         target = bindings.get(node.name)
         location = _node_location(module.path, node, module.line_index)
         if target is not None:
-            relationships.add(
-                owner, target.node_id, RelationshipKind.REFERENCES.value, location
-            )
+            relationships.add(owner, target.node_id, RelationshipKind.REFERENCES.value, location)
         else:
             _unresolved(owner, node.name, location, relationships, nodes, seen)
         return
@@ -794,9 +790,7 @@ def _walk(
             if callee_name not in shadows:
                 target = bindings.get(callee_name)
                 if target is not None:
-                    relationships.add(
-                        owner, target.node_id, RelationshipKind.CALLS.value, location
-                    )
+                    relationships.add(owner, target.node_id, RelationshipKind.CALLS.value, location)
                 else:
                     _unresolved(owner, callee_name, location, relationships, nodes, seen)
         else:

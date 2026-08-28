@@ -242,9 +242,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
     tally = _ImportTally()
     seen_ids: set[str] = set()
     for module in modules:
-        relationships.add(
-            module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
-        )
+        relationships.add(module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None)
         _analyze_module(
             module,
             module_by_name,
