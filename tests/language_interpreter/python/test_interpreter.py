@@ -162,6 +162,24 @@ def test_syntax_error_is_reported_without_erasing_other_workspace_facts(tmp_path
     assert validate_document(result.document).is_valid
 
 
+def test_type_comment_is_parsed_without_a_parse_error(tmp_path: Path) -> None:
+    _write(tmp_path, "typed.py", "x: int # type: int\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert result.diagnostics == ()
+    assert {node.label for node in result.document.nodes} >= {"typed.py", "typed"}
+    assert any(
+        node.node_class == NodeClass.FILE and node.path == "typed.py"
+        for node in result.document.nodes
+    )
+    assert any(
+        node.node_class == NodeClass.SYMBOL and node.label == "typed"
+        for node in result.document.nodes
+    )
+    assert validate_document(result.document).is_valid
+
+
 def test_package_relative_imports_analyze_without_crashing(tmp_path: Path) -> None:
     _write(
         tmp_path,
