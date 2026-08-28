@@ -730,7 +730,7 @@ def _syntax_location(path: str, error: SyntaxError) -> Location | None:
 def _parse_python(source: str, relative: str) -> ast.Module:
     """Parse Python source and normalize syntax failures for the reader."""
     try:
-        return ast.parse(source, filename=relative, type_comments=True)
+        return ast.parse(source, filename=relative)
     except SyntaxError as error:
         raise ParseFailure(error.msg, _syntax_location(relative, error)) from error
 
