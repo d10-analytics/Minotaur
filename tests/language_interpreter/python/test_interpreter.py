@@ -1026,6 +1026,40 @@ def test_staticmethod_self_parameter_is_not_an_instance_receiver(tmp_path: Path)
     assert "self" in unresolved
 
 
+def test_staticmethod_nested_receiver_like_scopes_are_not_class_receivers(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    @staticmethod\n"
+        "    def invoke():\n"
+        "        def nested(self):\n"
+        "            return self.helper()\n"
+        "        callback = lambda cls: cls.helper()\n"
+        "        return nested, callback\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "app.Runner.helper")
+    invoke = _node_id(result, "app.Runner.invoke")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert (invoke, helper, RelationshipKind.CALLS.value) not in relationships
+    assert not unresolved.intersection({"self", "self.helper", "cls", "cls.helper"})
+
+
 def test_super_call_has_one_unresolved_outer_member_fact(tmp_path: Path) -> None:
     _write(
         tmp_path,
