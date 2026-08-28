@@ -34,6 +34,7 @@ from minotaur.graph_model.provenance import (
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 from minotaur.language_interpreter.contract import AnalysisResult
 from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
+from minotaur.language_interpreter.paths import resolve_relative
 from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
@@ -1119,12 +1120,14 @@ def _relative_target(path: str, specifier: str) -> str | None:
     if not specifier.startswith(("./", "../")) or not specifier.lower().endswith(".js"):
         return None
     parts = path.split("/")[:-1]
-    for segment in specifier.split("/"):
+    segments = specifier.split("/")
+    levels_up = sum(segment == ".." for segment in segments)
+    if resolve_relative(tuple(parts), levels_up) is None:
+        return None
+    for segment in segments:
         if segment == ".":
             continue
         if segment == "..":
-            if not parts:
-                return None
             parts.pop()
         else:
             parts.append(segment)

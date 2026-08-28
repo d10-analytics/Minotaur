@@ -35,6 +35,7 @@ from minotaur.language_interpreter.contract import (
     AnalysisResult,
 )
 from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
+from minotaur.language_interpreter.paths import resolve_relative
 from minotaur.language_interpreter.python.discovery import discover_python_files
 from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
 from minotaur.language_interpreter.source_text import LineIndex
@@ -728,7 +729,7 @@ def _relative_module(
     parts = current.split(".")
     if not is_package:
         parts.pop()
-    if level > len(parts):
+    if resolve_relative(tuple(parts), level) is None:
         return None
     base = parts[: len(parts) - level + 1]
     if imported:
