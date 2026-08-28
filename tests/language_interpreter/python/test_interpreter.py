@@ -901,9 +901,7 @@ def test_comprehension_receiver_targets_shadow_self_and_cls_only_inside_comp(
     # Only the calls after each comprehension can use the class receiver.
     assert len(calls) == 2
     assert {
-        location.range.start.line
-        for call in calls
-        for location in call.evidence[0].locations
+        location.range.start.line for call in calls for location in call.evidence[0].locations
     } == {5, 9}
 
 
