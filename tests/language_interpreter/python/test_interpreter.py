@@ -492,11 +492,94 @@ def test_function_binders_suppress_parameters_and_assignment_targets(tmp_path: P
             "loop_item",
             "resource",
             "error",
-            "item",
             "walrus",
         }
     )
-    assert {"source", "iterable", "manager", "items", "factory"} <= unresolved
+    assert {"source", "iterable", "manager", "items", "factory", "item"} <= unresolved
+
+
+def test_comprehension_targets_are_local_but_walrus_names_bind_the_function(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def invoke(items):\n"
+        "    before = helper\n"
+        "    helper()\n"
+        "    [helper for helper in items]\n"
+        "    [helper() for helper in items]\n"
+        "    [helper() for item in items if (marker := helper())]\n"
+        "    helper()\n"
+        "    after = helper\n"
+        "    marker()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    invoke = _node_id(result, "app.invoke")
+    helper = _node_id(result, "library.helper")
+    calls = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == invoke
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+    ]
+
+    assert len(calls) == 1
+    assert len(calls[0].evidence[0].locations) == 4
+    references = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == invoke
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    ]
+    assert len(references) == 1
+    assert len(references[0].evidence[0].locations) == 2
+    assert all(
+        node.reference_text != "marker"
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    )
+
+
+def test_function_local_imports_del_and_match_captures_are_lexical_binders(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import library\n"
+        "from library import helper\n\n"
+        "def invoke(value):\n"
+        "    import library as library\n"
+        "    from library import helper as helper\n"
+        "    del helper\n"
+        "    match value:\n"
+        '        case {"capture": capture, **rest}:\n'
+        "            return library.helper(), capture, rest\n"
+        "        case [*items]:\n"
+        "            return helper(), items\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    invoke = _node_id(result, "app.invoke")
+    helper = _node_id(result, "library.helper")
+    assert not any(
+        relationship.source == invoke
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for relationship in result.document.relationships
+    )
+    assert {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    } == set()
 
 
 def test_global_names_remain_eligible_and_nonlocal_names_are_bound(tmp_path: Path) -> None:
@@ -520,6 +603,28 @@ def test_global_names_remain_eligible_and_nonlocal_names_are_bound(tmp_path: Pat
 
     assert "module_name" in unresolved
     assert "outer" not in unresolved
+
+
+def test_nested_global_overrides_an_inherited_local_binder(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    helper = 1\n"
+        "    def inner():\n"
+        "        global helper\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "library.helper")
+    assert (outer, helper, RelationshipKind.CALLS.value) in {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
 
 
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
@@ -647,7 +752,8 @@ def test_cls_method_calls_resolve_through_class_declarations(tmp_path: Path) -> 
         "class Runner:\n"
         "    def helper(self):\n"
         "        return 1\n"
-        "    def run(self, cls):\n"
+        "    @classmethod\n"
+        "    def run(cls):\n"
         "        return cls.helper()\n",
     )
 
@@ -658,6 +764,42 @@ def test_cls_method_calls_resolve_through_class_declarations(tmp_path: Path) -> 
         (relationship.source, relationship.target, relationship.kind)
         for relationship in result.document.relationships
     }
+
+
+def test_arbitrary_and_rebound_self_or_cls_do_not_resolve_as_class_receivers(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def arbitrary(receiver):\n"
+        "        return receiver.helper()\n"
+        "    def rebound(self):\n"
+        "        self = object()\n"
+        "        return self.helper()\n"
+        "    @classmethod\n"
+        "    def invalid(cls):\n"
+        "        cls = object()\n"
+        "        return cls.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "app.Runner.helper")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+    assert all(
+        (method, helper, RelationshipKind.CALLS.value) not in relationships
+        for method in (
+            _node_id(result, "app.Runner.arbitrary"),
+            _node_id(result, "app.Runner.rebound"),
+            _node_id(result, "app.Runner.invalid"),
+        )
+    )
 
 
 def test_super_call_has_one_unresolved_outer_member_fact(tmp_path: Path) -> None:
