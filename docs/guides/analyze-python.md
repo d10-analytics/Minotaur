@@ -101,20 +101,63 @@ The interpreter also records resolvable non-call references as `references`
 relationships. For example, passing a function as `register(handler)` or
 accessing `button.clicked.connect(self.on_click)` records the resolved target
 and the load's source location. The function of a `Call` is represented by the
-`calls` relationship instead of an extra `references` relationship. An
-unresolved non-call load whose name is genuinely unbound produces the same
-explicit `unresolved-reference` node and `references` relationship as an
-unresolved call or import. Names bound in the lexical scope that owns the load
-(including parameters, assignment targets, loop and context-manager targets,
-comprehension and walrus targets, and nonlocal names) are suppressed instead
-of being reported as unresolved. A global declaration remains eligible for
-resolution. When an outer attribute chain resolves, its recursive base loads
-are suppressed because they are resolution artifacts rather than genuinely
-missing references; for example, a resolved `self.method` does not also report
-bare `self` as unresolved. The callable expression of a `Call` does not
+`calls` relationship instead of an extra `references` relationship. A call and
+a non-call load of the same expression state the same thing about a name and
+are reported identically: `self.on_click` and `self.on_click()` are either both
+resolved or both unresolved. The callable expression of a `Call` does not
 produce a duplicate non-call reference, while loads in its arguments and
-subexpressions remain eligible. Calls, imports, and genuinely unbound
-non-call loads therefore preserve unresolved facts explicitly.
+subexpressions remain eligible.
+
+A member expression that resolves is exactly one relationship, so a resolved
+`self.method` does not also report bare `self`. A member expression that does
+not resolve contributes at most one `unresolved-reference` node, labelled with
+the expression's full text rather than with its base: `obj.a.b.c.d` is one
+unresolved node called `obj.a.b.c.d`, not one node per prefix. When the
+expression itself does not resolve but the root of a plain name-and-attribute
+chain does, that root is also recorded as a resolved `references` relationship;
+`from lib import Cfg` followed by `Cfg.DEFAULT` therefore records both a
+reference to `lib.Cfg` and an unresolved `Cfg.DEFAULT`. When the chain instead
+passes through a call or a subscript, the descent records how the root was
+actually used and the outer expression remains one unresolved fact:
+`lib.helper().c.d` records a `calls` relationship to `lib.helper` and an
+unresolved `lib.helper().c.d`.
+
+Names bound in the lexical scope that owns the load (including parameters,
+assignment targets, loop and context-manager targets, comprehension and walrus
+targets, and nonlocal names) are suppressed instead of being reported as
+unresolved, because a load through a local name says nothing static about the
+workspace. This suppression applies to function and method bodies only:
+module-level and class-body bindings are still reported, so a module-level loop
+variable used as `module_level_name.attr`, or a class attribute used as
+`attr.thing` in the class body, remains an unresolved fact. A global
+declaration remains eligible for resolution. A name bound by an `import` or
+`from ... import` statement is never a dynamic local, including inside a
+function body: a function-local `from lib import helper` followed by `helper()`
+is reported as unresolved until function-local import resolution lands, and a
+function-local import that rebinds a module alias to a different target
+(`import lib` at module level, `import other as lib` in the body) refuses to
+resolve through the module alias and reports `lib.helper` as unresolved.
+
+References to Python builtin names are suppressed. The builtin set is
+`dir(builtins)` taken at analysis time; the rationale is recorded at the point
+of use in the Python interpreter module. Suppression is decided on the root of
+the expression, so `str.foo(x)` records nothing, while `super().run()` keeps
+its single unresolved fact because its root is a nested call rather than a
+name. An imported name is a workspace dependency and escapes builtin
+suppression, so `from externallib import list` followed by `list()` is
+reported. The trade-off is recall: a workspace symbol named like a builtin that
+is called without being imported (`def filter(...)` in one module, `filter(seq)`
+in another) produces no unresolved node, so `query callers` for that symbol
+reports no callers.
+
+A receiver-shaped first parameter is treated as a receiver even where it cannot
+resolve through a class. `self` and `cls` resolve member expressions through the
+owning class, including in `__new__`, `__init_subclass__`, and
+`__class_getitem__`, which take `cls` implicitly. Where the parameter cannot
+resolve through a class — a metaclass `__call__(cls, ...)`, or a `@staticmethod`
+taking a `self` parameter — the member expression is still reported as
+unresolved rather than dropped, while the bare parameter itself (`self`,
+`cls()`) is an ordinary local and is suppressed.
 
 Import, call, and reference relationships include source-location evidence so
 a consumer can identify the site that established the relationship.
