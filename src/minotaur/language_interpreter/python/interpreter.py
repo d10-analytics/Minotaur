@@ -2,8 +2,8 @@
 
 The v1 slice emits declarations and containment, local and workspace-module
 imports, direct calls, references (including decorator and base-class
-references), inheritance, and unresolved references. No runtime claim is made
-and no source code is executed or imported.
+references), and unresolved references. No runtime claim is made and no source
+code is executed or imported.
 """
 
 from __future__ import annotations
