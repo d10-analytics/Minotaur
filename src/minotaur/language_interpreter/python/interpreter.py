@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 import builtins
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -283,10 +283,22 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_shadow_names.pop()
 
     def _scope_names(self) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
-        bound_names = frozenset().union(*self._scope_bound_names)
-        global_names = frozenset().union(*self._scope_global_names)
+        bound_names: set[str] = set()
+        global_names: set[str] = set()
+        seen_names: set[str] = set()
+        for bound_frame, global_frame in reversed(
+            tuple(zip(self._scope_bound_names, self._scope_global_names, strict=True))
+        ):
+            for name in bound_frame:
+                if name not in seen_names:
+                    bound_names.add(name)
+                    seen_names.add(name)
+            for name in global_frame:
+                if name not in seen_names:
+                    global_names.add(name)
+                    seen_names.add(name)
         shadow_names = frozenset().union(*self._scope_shadow_names)
-        return bound_names - global_names, global_names, shadow_names | global_names
+        return frozenset(bound_names), frozenset(global_names), shadow_names | global_names
 
     def visit_TypeAlias(self, node: ast.AST) -> None:
         # PEP 695 type parameters are scoped to the alias expression only;
@@ -308,6 +320,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
         for header in _class_header_nodes(node):
             self.visit(header)
+        self._scope_global_names[-1] = _global_names_in_statements(
+            statement
+            for statement in node.body
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
         for statement in node.body:
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.visit(statement)
@@ -472,9 +489,13 @@ def _bound_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset
 
 def _global_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
     """Collect names declared global by one function or nested function."""
+    return _global_names_in_statements(statement.body)
+
+
+def _global_names_in_statements(statements: Iterable[ast.stmt]) -> frozenset[str]:
     collector = _BindingCollector()
-    for body_statement in statement.body:
-        collector.visit(body_statement)
+    for statement in statements:
+        collector.visit(statement)
     return frozenset(collector.global_names)
 
 
