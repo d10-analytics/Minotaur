@@ -78,6 +78,7 @@ class _ScopeContext:
     bound_names: frozenset[str] = frozenset()
     builtins: frozenset[str] = frozenset()
     receiver_name: str | None = None
+    static_method: bool = False
 
 
 @dataclass
@@ -870,6 +871,7 @@ def _analyze_module(
                         context,
                         bound_names=_bound_names(member) | frozenset(_type_param_names(statement)),
                         receiver_name=_method_receiver_name(member),
+                        static_method=_is_staticmethod(member),
                     )
                     # Method headers execute in the class's enclosing scope,
                     # while method bodies use their own lexical binders.
@@ -1067,7 +1069,12 @@ def _calls(
         head = text.partition(".")[0]
         if target is None and _suppress_builtin_call(candidate.func, call_context):
             continue
-        if target is None and head in call_context.bound_names and head not in {"self", "cls"}:
+        if (
+            target is None
+            and head in call_context.bound_names
+            and head != call_context.receiver_name
+            and not (call_context.static_method and head in {"self", "cls"})
+        ):
             # A local or parameter call is dynamic. This also intentionally
             # wins over a module import alias shadowed by the local binding.
             continue
@@ -1155,7 +1162,7 @@ def _resolve_call(
     class_declarations: Mapping[str, str] | None,
 ) -> str | None:
     head = text.partition(".")[0]
-    if head in context.bound_names and head not in {"self", "cls"}:
+    if head in context.bound_names and head != context.receiver_name:
         return None
     if "." not in text:
         target_name = context.aliases.get(text, f"{context.module_name}.{text}")
