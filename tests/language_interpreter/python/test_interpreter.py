@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -140,7 +141,7 @@ def test_dynamic_and_missing_imports_are_explicit_unresolved_references(tmp_path
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
 
-    assert set(unresolved) == {"unavailable", "value.callback"}
+    assert set(unresolved) == {"unavailable"}
     assert all(node.location is not None for node in unresolved.values())
     assert {relationship.kind for relationship in result.document.relationships} >= {
         RelationshipKind.REFERENCES.value,
@@ -330,7 +331,7 @@ def test_attribute_and_nested_load_references_preserve_call_and_unresolved_bound
         for node in result.document.nodes
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
-    assert set(unresolved) == {"unknown", "unknown.attr"}
+    assert set(unresolved) == {"unknown"}
     unresolved_nodes = [
         node
         for node in result.document.nodes
@@ -348,7 +349,6 @@ def test_attribute_and_nested_load_references_preserve_call_and_unresolved_bound
     }
     assert set(by_location) == {
         ("unknown", 15, 18),
-        ("unknown.attr", 16, 23),
         ("unknown", 16, 23),
     }
     for node in by_location.values():
@@ -413,6 +413,404 @@ def test_load_argument_in_nested_call_func_is_still_a_reference(tmp_path: Path) 
     )
     assert location.range.start.line == 6
     assert location.range.start.character == 8
+
+
+def test_callee_suppression_keeps_subexpressions_as_references(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke(table, key):\n"
+        "    table[handler]()\n"
+        "    (handler if key else fallback)()\n"
+        '    f"{value}".join()\n',
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    invoke = _node_id(result, "app.invoke")
+    references = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+        and any(
+            relationship.source == invoke
+            and relationship.target == node.id
+            and relationship.kind == RelationshipKind.REFERENCES.value
+            for relationship in result.document.relationships
+        )
+    }
+
+    assert {"handler", "fallback", "value"} <= references
+
+
+def test_unresolved_attribute_chain_emits_only_its_base_identifier(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def invoke():\n    return obj.a.b.c.d\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {"obj"}
+
+
+def test_function_binders_suppress_parameters_and_assignment_targets(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke(positional, /, regular, *, keyword, **kwargs):\n"
+        "    assigned = source\n"
+        "    for loop_item in iterable:\n"
+        "        pass\n"
+        "    with manager as resource:\n"
+        "        pass\n"
+        "    try:\n"
+        "        raise ValueError()\n"
+        "    except Exception as error:\n"
+        "        pass\n"
+        "    [item for item in items]\n"
+        "    (walrus := factory)\n"
+        "    return positional, regular, keyword, kwargs, assigned, loop_item, resource, "
+        "error, item, walrus\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert not unresolved.intersection(
+        {
+            "positional",
+            "regular",
+            "keyword",
+            "kwargs",
+            "assigned",
+            "loop_item",
+            "resource",
+            "error",
+            "item",
+            "walrus",
+        }
+    )
+    assert {"source", "iterable", "manager", "items", "factory"} <= unresolved
+
+
+def test_global_names_remain_eligible_and_nonlocal_names_are_bound(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n"
+        "    outer = 1\n"
+        "    def nested():\n"
+        "        global module_name\n"
+        "        nonlocal outer\n"
+        "        return module_name, outer\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert "module_name" in unresolved
+    assert "outer" not in unresolved
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+def test_pep695_type_parameters_are_bound(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "type Alias[T] = list[T]\n"
+        "class Box[T]:\n"
+        "    value: T\n"
+        "    def get[U](self, value: U) -> T:\n"
+        "        return value\n"
+        "def invoke[T](value: T) -> T:\n"
+        "    return value\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert "T" not in unresolved
+    assert "U" not in unresolved
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+def test_nested_generic_function_headers_bind_their_type_parameters(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n    def inner[T](value: T) -> T:\n        return value\n    return inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert "T" not in unresolved
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+def test_type_alias_parameters_do_not_bind_same_name_later_in_module(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "type Alias[T] = list[T]\nprint(T)\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {"T"}
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+def test_pep695_bounds_remain_references_while_type_parameters_are_bound(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "type Alias[T: AliasBound] = list[T]\n"
+        "def invoke[T: FunctionBound](value: T) -> T:\n"
+        "    return value\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {"AliasBound", "FunctionBound"}
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+def test_nested_generic_class_body_binds_its_type_parameters(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n    class Box[T: ClassBound]:\n        value: T\n    return Box\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {"ClassBound"}
+
+
+def test_local_binding_shadows_import_alias_for_dynamic_attribute_call(tmp_path: Path) -> None:
+    _write(tmp_path, "other.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import other\ndef invoke():\n    other = 1\n    return other.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    invoke = _node_id(result, "app.invoke")
+    other_helper = _node_id(result, "other.helper")
+    assert (
+        invoke,
+        other_helper,
+        RelationshipKind.CALLS.value,
+    ) not in {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+
+def test_cls_method_calls_resolve_through_class_declarations(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def run(self, cls):\n"
+        "        return cls.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.Runner.run")
+    helper = _node_id(result, "app.Runner.helper")
+    assert (run, helper, RelationshipKind.CALLS.value) in {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+
+def test_super_call_has_one_unresolved_outer_member_fact(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n    def run(self):\n        return super().run()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert {text for text in unresolved if "super" in text} == {"super().run"}
+
+
+def test_builtin_names_are_not_unresolved(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke(values):\n"
+        "    return len(values), str(values), ValueError(), range(1), dict(), list(), "
+        "sorted(values), tuple(values), bool(values)\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert not unresolved.intersection(
+        {"len", "str", "ValueError", "range", "dict", "list", "sorted", "tuple", "bool"}
+    )
+
+
+def test_function_headers_use_enclosing_scope_for_defaults_annotations_and_decorators(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def marker():\n    return 1\n\n"
+        "@marker\n"
+        "def invoke(marker: marker = marker) -> marker:\n"
+        "    return marker\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    invoke = _node_id(result, "app.invoke")
+    marker = _node_id(result, "app.marker")
+    references = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+    assert (invoke, marker, RelationshipKind.REFERENCES.value) in references
+
+
+def test_nested_function_and_lambda_binders_do_not_leak_as_unresolved_names(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n"
+        "    def nested(value):\n"
+        "        return value()\n"
+        "    return (lambda item: item())\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert "value" not in unresolved
+    assert "item" not in unresolved
+
+
+def test_callee_subscript_suppresses_table_but_preserves_key_reference(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def invoke():\n    table[handler]()\n")
+
+    result = analyze_python_workspace(tmp_path)
+    invoke = _node_id(result, "app.invoke")
+    references = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+        and any(
+            relationship.source == invoke
+            and relationship.target == node.id
+            and relationship.kind == RelationshipKind.REFERENCES.value
+            for relationship in result.document.relationships
+        )
+    }
+
+    assert "handler" in references
+    assert "table" not in references
+
+
+def test_complex_member_callee_keeps_base_and_key_without_pseudo_reference(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def invoke():\n    obj[key].method()\n")
+
+    result = analyze_python_workspace(tmp_path)
+    invoke = _node_id(result, "app.invoke")
+    references = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+        and any(
+            relationship.source == invoke
+            and relationship.target == node.id
+            and relationship.kind == RelationshipKind.REFERENCES.value
+            for relationship in result.document.relationships
+        )
+    }
+
+    assert {"obj", "key"} <= references
+    assert "obj[key]" not in references
+
+
+def test_non_call_complex_member_reference_emits_base_without_pseudo_reference(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "def invoke():\n    return obj[key].method\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {"obj", "key"}
+    assert "obj[key]" not in unresolved
+
+
+def test_builtin_member_callee_is_suppressed_but_argument_is_retained(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def invoke():\n    str.foo(value)\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {"value"}
 
 
 def test_decorator_load_references_resolve_for_module_and_direct_method_scopes(
@@ -549,12 +947,10 @@ def test_only_decorated_top_level_symbols_get_inward_edges(
     assert (module, undecorated, RelationshipKind.REFERENCES.value) not in relationships
     assert not any(node.label == "app.outer.nested" for node in result.document.nodes)
     assert (outer, decorator, RelationshipKind.REFERENCES.value) in relationships
-    nested = next(
-        node
+    assert not any(
+        node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "nested"
         for node in result.document.nodes
-        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "nested"
     )
-    assert (outer, nested.id, RelationshipKind.REFERENCES.value) in relationships
 
 
 def test_same_named_decorated_definitions_each_get_their_own_inward_edge(
@@ -933,7 +1329,6 @@ def test_shadowed_definitions_keep_header_and_unresolved_call_attribution(
         "missing_second",
         "unknown_first",
         "unknown_second",
-        "value",
     }
     assert first_missing.identity.originating_node == first_f.id
     assert second_missing.identity.originating_node == second_f.id

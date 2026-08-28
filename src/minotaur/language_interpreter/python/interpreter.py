@@ -9,9 +9,10 @@ code is executed or imported.
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from minotaur.graph_model.document import GraphDocument
@@ -74,6 +75,8 @@ class _ScopeContext:
     relationships: RelationshipAccumulator
     nodes: list[Node]
     emitter: NodeEmitter
+    bound_names: frozenset[str] = frozenset()
+    builtins: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -136,34 +139,90 @@ class _ScopeCallVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.calls: list[ast.Call] = []
         self.references: list[ast.Name | ast.Attribute] = []
-        self._call_func_depth = 0
+        self._scope_bound_names: list[frozenset[str]] = []
+        self.call_bound_names: dict[ast.Call, frozenset[str]] = {}
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
+        self.call_bound_names[node] = frozenset().union(*self._scope_bound_names)
         # The callable expression is represented by the calls relationship;
-        # only its arguments can contribute independent references. Keep
-        # traversing the callable expression so nested calls are preserved,
-        # while suppressing loads from that expression.
-        enclosing_func_depth = self._call_func_depth
-        self._call_func_depth += 1
-        self.visit(node.func)
-        # Reset to 0 (rather than leaving the incremented depth in place)
-        # before visiting arguments: a call's arguments are never part of
-        # a callee expression, even when this call itself sits inside an
-        # enclosing call's callee expression. For `f(g)(h)`, the outer
-        # visit_Call increments depth while visiting `f(g)` as its callee,
-        # but `g` is an argument of the inner call and must still be
-        # recorded as a reference despite the outer suppression.
-        self._call_func_depth = 0
+        # suppress only its immediate head. Interior expressions (subscript
+        # keys, conditionals, and f-string values) remain ordinary loads.
+        self._visit_callee_head(node.func)
         for argument in node.args:
             self.visit(argument)
         for keyword in node.keywords:
             self.visit(keyword.value)
-        self._call_func_depth = enclosing_func_depth
+
+    def _visit_callee_head(self, node: ast.expr) -> None:
+        """Visit callee interiors while omitting only the callable head."""
+        if isinstance(node, ast.Name):
+            return
+        if isinstance(node, ast.Attribute):
+            if isinstance(node.value, (ast.Attribute, ast.Name)):
+                self._visit_callee_head(node.value)
+            else:
+                # A complex member base is an ordinary expression: retain its
+                # base identifier and interior names (obj[key].method()).
+                self.visit(node.value)
+            return
+        if isinstance(node, ast.Subscript):
+            # A direct subscript callee suppresses only its table head while
+            # retaining keys such as ``handler`` as ordinary references.
+            self._visit_callee_head(node.value)
+            self.visit(node.slice)
+            return
+        self.visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
-        if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
+        if isinstance(node.ctx, ast.Load) and not any(
+            node.id in bound_names for bound_names in self._scope_bound_names
+        ):
             self.references.append(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._scope_bound_names.append(frozenset(_type_param_names(node)))
+        self._visit_definition_header(node)
+        self._scope_bound_names.pop()
+        self._scope_bound_names.append(_bound_names(node))
+        for statement in node.body:
+            self.visit(statement)
+        self._scope_bound_names.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._scope_bound_names.append(frozenset(_type_param_names(node)))
+        self._visit_definition_header(node)
+        self._scope_bound_names.pop()
+        self._scope_bound_names.append(_bound_names(node))
+        for statement in node.body:
+            self.visit(statement)
+        self._scope_bound_names.pop()
+
+    def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for expression in _signature_nodes(node):
+            self.visit(expression)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in node.args.defaults:
+            self.visit(default)
+        for kw_default in node.args.kw_defaults:
+            if kw_default is not None:
+                self.visit(kw_default)
+        bound_names = frozenset(_argument_names(node.args))
+        self._scope_bound_names.append(bound_names)
+        self.visit(node.body)
+        self._scope_bound_names.pop()
+
+    def visit_TypeAlias(self, node: ast.AST) -> None:
+        # PEP 695 type parameters are scoped to the alias expression only;
+        # they must not suppress a same-named load later in the module.
+        value = getattr(node, "value", None)
+        if isinstance(value, ast.AST):
+            self._scope_bound_names.append(frozenset(_type_param_names(node)))
+            for expression in _type_param_expressions(node):
+                self.visit(expression)
+            self.visit(value)
+            self._scope_bound_names.pop()
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         # A nested class body executes while the enclosing scope is active, but
@@ -171,16 +230,122 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # this visitor's ownership. The class header (decorators, bases, and
         # keywords such as ``metaclass=``) is evaluated in the enclosing scope
         # as well, so a base class is a real dependency of that scope.
+        self._scope_bound_names.append(frozenset(_type_param_names(node)))
         for header in _class_header_nodes(node):
             self.visit(header)
         for statement in node.body:
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.visit(statement)
+        self._scope_bound_names.pop()
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
+        head = _expression_text(node).partition(".")[0]
+        if isinstance(node.ctx, ast.Load) and not any(
+            head in bound_names for bound_names in self._scope_bound_names
+        ):
             self.references.append(node)
-        self.generic_visit(node)
+        # Record only the outermost attribute in a chain. Non-attribute,
+        # non-name bases still need traversal so names in e.g. obj[key].attr
+        # remain visible.
+        if not isinstance(node.value, (ast.Attribute, ast.Name)):
+            self.visit(node.value)
+
+
+class _BindingCollector(ast.NodeVisitor):
+    """Collect lexical binders without crossing nested execution scopes."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+        self.global_names: set[str] = set()
+        self.nonlocal_names: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Store):
+            self.names.add(node.id)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.global_names.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.nonlocal_names.update(node.names)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        if node.type is not None:
+            self.visit(node.type)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.names.add(node.name)
+        self._visit_definition_header(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.names.add(node.name)
+        self._visit_definition_header(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.names.add(node.name)
+        for expression in _class_header_nodes(node):
+            self.visit(expression)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        # Lambda parameters and body belong to the lambda scope.
+        return
+
+    def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        # Definition decorators, defaults, and annotations execute in the
+        # enclosing scope; they can contain stores in unusual expressions.
+        for expression in _signature_nodes(node):
+            self.visit(expression)
+
+
+def _type_param_names(node: ast.AST) -> set[str]:
+    """Return names from optional PEP 695 ``type_params`` fields."""
+    names: set[str] = set()
+    for parameter in getattr(node, "type_params", ()):
+        name = getattr(parameter, "name", None)
+        if name is None and isinstance(parameter, ast.Name):
+            name = parameter.id
+        if isinstance(name, str):
+            names.add(name)
+    return names
+
+
+def _type_param_expressions(node: ast.AST) -> tuple[ast.expr, ...]:
+    """Return PEP 695 bounds and defaults for reference analysis."""
+    expressions: list[ast.expr] = []
+    for parameter in getattr(node, "type_params", ()):
+        for field_name in ("bound", "default_value"):
+            expression = getattr(parameter, field_name, None)
+            if isinstance(expression, ast.expr):
+                expressions.append(expression)
+    return tuple(expressions)
+
+
+def _argument_names(arguments: ast.arguments) -> set[str]:
+    names = {
+        argument.arg
+        for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)
+    }
+    if arguments.vararg is not None:
+        names.add(arguments.vararg.arg)
+    if arguments.kwarg is not None:
+        names.add(arguments.kwarg.arg)
+    return names
+
+
+def _bound_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
+    """Collect names bound by one function's lexical scope."""
+    collector = _BindingCollector()
+    collector.names.update(_argument_names(statement.args))
+    collector.names.update(_type_param_names(statement))
+    for body_statement in statement.body:
+        collector.visit(body_statement)
+    collector.names.difference_update(collector.global_names)
+    collector.names.update(collector.nonlocal_names)
+    return frozenset(collector.names)
 
 
 def analyze_python_workspace(root: Path) -> AnalysisResult:
@@ -233,6 +398,10 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
     relationships = RelationshipAccumulator()
     tally = _ImportTally(module_by_name)
     emitter = NodeEmitter(NAMESPACE, "python")
+    # Both sides of an equivalence run use this same Python interpreter, so
+    # dir(builtins) is identical. A divergence therefore signals a genuine
+    # environment difference worth surfacing, not a spurious graph change.
+    builtin_names = frozenset(dir(builtins))
     for module in modules:
         relationships.add(module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None)
         _analyze_module(
@@ -244,6 +413,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             nodes,
             emitter,
             tally,
+            builtin_names,
         )
 
     return AnalysisResult(
@@ -383,6 +553,7 @@ def _analyze_module(
     nodes: list[Node],
     emitter: NodeEmitter,
     tally: _ImportTally,
+    builtin_names: frozenset[str],
 ) -> None:
     aliases = _imports(module, modules, declarations, relationships, nodes, emitter, tally)
     context = _ScopeContext(
@@ -393,6 +564,8 @@ def _analyze_module(
         relationships,
         nodes,
         emitter,
+        frozenset(),
+        builtin_names,
     )
     for symbol in symbols.values():
         relationships.add(
@@ -419,11 +592,18 @@ def _analyze_module(
                 module.path,
                 relationships,
             )
+            # Defaults, annotations, and decorators execute in the enclosing
+            # scope; body loads use the function's lexical binders.
             _calls(
-                context,
-                statement.body,
+                replace(context, bound_names=frozenset(_type_param_names(statement))),
+                [],
                 symbols[statement].node_id,
                 prefix_nodes=_signature_nodes(statement),
+            )
+            _calls(
+                replace(context, bound_names=_bound_names(statement)),
+                statement.body,
+                symbols[statement].node_id,
             )
         elif isinstance(statement, ast.ClassDef):
             _decorator_references(
@@ -441,7 +621,7 @@ def _analyze_module(
             # matching how _ScopeCallVisitor.visit_ClassDef treats a nested
             # class body inside a function.
             _calls(
-                context,
+                replace(context, bound_names=frozenset(_type_param_names(statement))),
                 [
                     member
                     for member in statement.body
@@ -460,12 +640,29 @@ def _analyze_module(
                         module.path,
                         relationships,
                     )
-                    _calls(
+                    method_context = replace(
                         context,
-                        member.body,
+                        bound_names=_bound_names(member) | frozenset(_type_param_names(statement)),
+                    )
+                    # Method headers execute in the class's enclosing scope,
+                    # while method bodies use their own lexical binders.
+                    _calls(
+                        replace(
+                            context,
+                            bound_names=frozenset(
+                                _type_param_names(statement) | _type_param_names(member)
+                            ),
+                        ),
+                        [],
                         symbols[member].node_id,
                         symbols[member].class_declarations,
                         prefix_nodes=_signature_nodes(member),
+                    )
+                    _calls(
+                        method_context,
+                        member.body,
+                        symbols[member].node_id,
+                        symbols[member].class_declarations,
                     )
 
 
@@ -502,6 +699,7 @@ def _class_header_nodes(node: ast.ClassDef) -> tuple[ast.AST, ...]:
         *node.decorator_list,
         *node.bases,
         *(keyword.value for keyword in node.keywords),
+        *_type_param_expressions(node),
     )
 
 
@@ -531,6 +729,7 @@ def _signature_nodes(
     """
     arguments = statement.args
     signature: list[ast.AST] = list(statement.decorator_list)
+    signature.extend(_type_param_expressions(statement))
     signature.extend(arguments.defaults)
     signature.extend(default for default in arguments.kw_defaults if default is not None)
     declared = (
@@ -624,19 +823,33 @@ def _calls(
         visitor.visit(statement)
     for candidate in visitor.calls:
         text = _expression_text(candidate.func)
-        target = _resolve_call(text, context, class_declarations)
+        call_context = replace(
+            context,
+            bound_names=context.bound_names | visitor.call_bound_names[candidate],
+        )
+        target = _resolve_call(text, call_context, class_declarations)
         location = _location(context.path, candidate.func)
+        head = text.partition(".")[0]
+        if target is None and _suppress_builtin_call(candidate.func, call_context):
+            continue
+        if target is None and head in call_context.bound_names and head not in {"self", "cls"}:
+            # A local or parameter call is dynamic. This also intentionally
+            # wins over a module import alias shadowed by the local binding.
+            continue
         if target is None:
             context.emitter.unresolved(caller, text, location, context.nodes, context.relationships)
         else:
             context.relationships.add(caller, target, RelationshipKind.CALLS.value, location)
     unresolved_references: list[tuple[str, Location]] = []
-    resolved_texts: set[str] = set()
     for reference in visitor.references:
         text = _expression_text(reference)
         target = _resolve_call(text, context, class_declarations)
+        head = text.partition(".")[0]
+        if target is None and head in context.bound_names:
+            continue
+        if target is None and head in context.builtins:
+            continue
         if target is not None:
-            resolved_texts.add(text)
             context.relationships.add(
                 caller,
                 target,
@@ -644,11 +857,36 @@ def _calls(
                 _location(context.path, reference),
             )
         else:
-            unresolved_references.append((text, _location(context.path, reference)))
+            unresolved_text = (
+                _base_identifier(reference) if isinstance(reference, ast.Attribute) else text
+            ) or text.partition(".")[0]
+            unresolved_references.append((unresolved_text, _location(context.path, reference)))
     for text, location in unresolved_references:
-        if any(resolved_text.startswith(text + ".") for resolved_text in resolved_texts):
-            continue
         context.emitter.unresolved(caller, text, location, context.nodes, context.relationships)
+
+
+def _suppress_builtin_call(expression: ast.expr, context: _ScopeContext) -> bool:
+    """Suppress builtin calls while retaining meaningful member bases."""
+    if isinstance(expression, ast.Name):
+        return expression.id in context.builtins
+    # ``str.foo(x)`` is a builtin member expression, but ``super().run()``
+    # retains its outer unresolved fact because its base is a nested call.
+    return (
+        isinstance(expression, ast.Attribute)
+        and isinstance(expression.value, ast.Name)
+        and (expression.value.id in context.builtins)
+    )
+
+
+def _base_identifier(expression: ast.expr) -> str | None:
+    """Return the root identifier of a member expression's value."""
+    if isinstance(expression, ast.Name):
+        return expression.id
+    if isinstance(expression, (ast.Attribute, ast.Subscript)):
+        return _base_identifier(expression.value)
+    if isinstance(expression, ast.Call):
+        return _base_identifier(expression.func)
+    return None
 
 
 def _resolve_call(
@@ -656,11 +894,14 @@ def _resolve_call(
     context: _ScopeContext,
     class_declarations: Mapping[str, str] | None,
 ) -> str | None:
+    head = text.partition(".")[0]
+    if head in context.bound_names and head not in {"self", "cls"}:
+        return None
     if "." not in text:
         target_name = context.aliases.get(text, f"{context.module_name}.{text}")
         return context.declarations.get(target_name)
-    head, _, tail = text.partition(".")
-    if head == "self" and class_declarations is not None:
+    _, _, tail = text.partition(".")
+    if head in {"self", "cls"} and class_declarations is not None:
         # ``self`` is tied to the class statement that owns the caller, not to
         # whichever same-named class was assigned to the module name last.
         # Resolve through that statement's method table so repeated method

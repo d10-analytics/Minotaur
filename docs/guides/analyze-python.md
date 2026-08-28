@@ -102,14 +102,19 @@ relationships. For example, passing a function as `register(handler)` or
 accessing `button.clicked.connect(self.on_click)` records the resolved target
 and the load's source location. The function of a `Call` is represented by the
 `calls` relationship instead of an extra `references` relationship. An
-unresolved non-call load produces the same explicit `unresolved-reference`
-node and `references` relationship as an unresolved call or import. When an
-outer attribute chain resolves, its recursive base loads are suppressed because
-they are resolution artifacts rather than genuinely missing references; for
-example, a resolved `self.method` does not also report bare `self` as
-unresolved. The callable expression of a `Call` does not produce a duplicate
-non-call reference, while loads in its arguments remain eligible. Calls,
-imports, and non-call loads therefore all preserve unresolved facts explicitly.
+unresolved non-call load whose name is genuinely unbound produces the same
+explicit `unresolved-reference` node and `references` relationship as an
+unresolved call or import. Names bound in the lexical scope that owns the load
+(including parameters, assignment targets, loop and context-manager targets,
+comprehension and walrus targets, and nonlocal names) are suppressed instead
+of being reported as unresolved. A global declaration remains eligible for
+resolution. When an outer attribute chain resolves, its recursive base loads
+are suppressed because they are resolution artifacts rather than genuinely
+missing references; for example, a resolved `self.method` does not also report
+bare `self` as unresolved. The callable expression of a `Call` does not
+produce a duplicate non-call reference, while loads in its arguments and
+subexpressions remain eligible. Calls, imports, and genuinely unbound
+non-call loads therefore preserve unresolved facts explicitly.
 
 Import, call, and reference relationships include source-location evidence so
 a consumer can identify the site that established the relationship.
@@ -155,8 +160,8 @@ When an import is missing from the workspace, or a call cannot be resolved
 statically, the analyzer records an explicit unresolved-reference node and a
 reference relationship with source-location evidence. It does not guess a
 relationship to a likely target. A query can use those unresolved references
-to preserve recall when searching for callers; see the [agent-facing query
-guide](query-reference.md).
+to preserve recall over genuinely unbound references when searching for
+callers; see the [agent-facing query guide](query-reference.md).
 
 ## Boundaries of the current slice
 

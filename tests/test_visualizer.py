@@ -269,7 +269,6 @@ def test_renderer_keeps_resolved_reference_edges_from_analyzed_source(tmp_path: 
         if relationship.kind == "references"
     ] == [
         ("src.fixture", "src.fixture.handler"),
-        ("src.fixture.register", "callback"),
     ]
 
     presentation = build_presentation(
@@ -289,5 +288,4 @@ def test_renderer_keeps_resolved_reference_edges_from_analyzed_source(tmp_path: 
         if relationship["kind"] == "references"
     ] == [
         ("src.fixture", "src.fixture.handler"),
-        ("src.fixture.register", "callback"),
     ]

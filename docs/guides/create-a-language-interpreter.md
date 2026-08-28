@@ -126,6 +126,5 @@ the interpreter can establish statically; unresolved language constructs should
 remain explicit unresolved references rather than guessed edges.
 
 Across languages, a name bound in the lexical scope that owns a reference is
-not an unresolved reference. The future `minotaur_python_scope_resolution`
-specification brings the Python interpreter to this contract; this guide does
-not imply that Python currently applies lexical scope suppression.
+not an unresolved reference. The Python interpreter applies this lexical scope
+suppression to function and method bodies.
