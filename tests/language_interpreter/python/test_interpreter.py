@@ -612,6 +612,64 @@ def test_member_chain_over_a_call_keeps_the_inner_call_and_its_arguments(
     assert unresolved["app.argument_chain"] == {"build(make).c.d"}
 
 
+def test_call_rooted_chain_records_the_call_only_once(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "library.py",
+        "def build(argument):\n    return argument\n\ndef make():\n    return 1\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import build, make\n\ndef f():\n    return build(make).c.d\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    caller = _node_id(result, "app.f")
+    build = _node_id(result, "library.build")
+    edges = [
+        (relationship.kind, len(relationship.evidence[0].locations))
+        for relationship in result.document.relationships
+        if relationship.source == caller and relationship.target == build
+    ]
+
+    # The chain descent records how ``build`` is used: it is called. Resolving
+    # the chain's root as well would assert a second, different use of the same
+    # identifier that the source never makes.
+    assert edges == [(RelationshipKind.CALLS.value, 1)]
+    assert ("app.f", "library.make", RelationshipKind.REFERENCES.value) in _edge_labels(result)
+    assert _unresolved_by_source(result)["app.f"] == {"build(make).c.d"}
+
+
+def test_subscript_rooted_chain_records_its_base_load_only_once(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def table():\n    return {}\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import table\n\ndef g():\n    return table[0].x\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    references = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.g")
+        and relationship.target == _node_id(result, "library.table")
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    ]
+
+    # ``table`` is an ordinary load inside the subscript, recorded by the
+    # descent. ``RelationshipAccumulator`` merges identical source/target/kind
+    # triples into one relationship, so a duplicate fact cannot appear as a
+    # second edge; it appears as a second evidence location, spanning the whole
+    # chain rather than the name. Pinning the single call site is what makes
+    # both the duplicate and the loss of the descent's own load visible.
+    assert len(references) == 1
+    assert len(references[0].evidence[0].locations) == 1
+    assert references[0].evidence[0].locations[0].range.start.line == 3
+    assert _unresolved_by_source(result)["app.g"] == {"table[0].x"}
+
+
 def test_attribute_store_and_delete_targets_reference_their_base(tmp_path: Path) -> None:
     _write(tmp_path, "store.py", "registry = {}\ncount = 0\n")
     _write(
