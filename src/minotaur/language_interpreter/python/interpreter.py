@@ -520,11 +520,6 @@ def _argument_names(arguments: ast.arguments) -> set[str]:
     return names
 
 
-def _bound_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
-    """Collect names bound by one function's lexical scope."""
-    return _scope_binders(statement)[0]
-
-
 def _scope_binders(
     statement: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> tuple[frozenset[str], frozenset[str]]:
