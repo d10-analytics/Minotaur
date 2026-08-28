@@ -36,7 +36,7 @@ from minotaur.language_interpreter.contract import (
     Diagnostic,
     DiagnosticCode,
 )
-from minotaur.language_interpreter.emission import NodeEmitter
+from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
 from minotaur.language_interpreter.python.discovery import discover_python_files
 from minotaur.language_interpreter.python.parsing import parse_python
 from minotaur.language_interpreter.source_text import LineIndex
@@ -336,7 +336,13 @@ def _declarations(
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             qualified = f"{module.name}.{statement.name}"
             kind = SymbolKind.CLASS if isinstance(statement, ast.ClassDef) else SymbolKind.FUNCTION
-            node = _symbol_node(module.path, statement, qualified, kind)
+            node = symbol_node(
+                qualified,
+                kind,
+                _location(module.path, statement),
+                NAMESPACE,
+                "python",
+            )
             declarations[qualified] = node.id
             symbols[statement] = _DeclaredSymbol(node.id, module.module_id)
             nodes.append(node)
@@ -360,8 +366,12 @@ def _declarations(
                 for member in statement.body:
                     if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         member_name = f"{qualified}.{member.name}"
-                        member_node = _symbol_node(
-                            module.path, member, member_name, SymbolKind.METHOD
+                        member_node = symbol_node(
+                            member_name,
+                            SymbolKind.METHOD,
+                            _location(module.path, member),
+                            NAMESPACE,
+                            "python",
                         )
                         declarations[member_name] = member_node.id
                         class_declarations[member.name] = member_node.id
@@ -641,7 +651,13 @@ def declarations_for_module(modules: dict[str, _Module], reference: str) -> str 
             and statement.name == member
         ):
             kind = SymbolKind.CLASS if isinstance(statement, ast.ClassDef) else SymbolKind.FUNCTION
-            resolved = _symbol_node(module.path, statement, f"{module.name}.{member}", kind).id
+            resolved = symbol_node(
+                f"{module.name}.{member}",
+                kind,
+                _location(module.path, statement),
+                NAMESPACE,
+                "python",
+            ).id
     return resolved
 
 
@@ -713,22 +729,6 @@ def _resolve_call(
     if alias_target_name is not None:
         return declarations.get(f"{alias_target_name}.{tail}")
     return declarations.get(f"{module_name}.{text}")
-
-
-def _symbol_node(path: str, statement: ast.AST, label: str, kind: SymbolKind) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
-    location = _location(path, statement)
-    return Node(
-        id=compute_node_id(
-            identity, node_class=NodeClass.SYMBOL.value, symbol_kind=kind.value, location=location
-        ),
-        identity=identity,
-        node_class=NodeClass.SYMBOL,
-        label=label,
-        symbol_kind=kind.value,
-        language="python",
-        location=location,
-    )
 
 
 def _module_name(path: str) -> str:

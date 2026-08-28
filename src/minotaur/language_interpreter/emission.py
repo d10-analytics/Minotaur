@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
@@ -9,8 +11,36 @@ from minotaur.graph_model.provenance import (
     IdentityBasis,
     NodeClass,
     RelationshipKind,
+    SymbolKind,
 )
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
+
+
+def symbol_node(
+    label: str,
+    kind: SymbolKind,
+    location: Location,
+    namespace: str,
+    language: str,
+    extensions: Mapping[str, Mapping[str, object]] | None = None,
+) -> Node:
+    """Construct a source-location-backed symbol node."""
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, namespace)
+    return Node(
+        id=compute_node_id(
+            identity,
+            node_class=NodeClass.SYMBOL.value,
+            symbol_kind=kind.value,
+            location=location,
+        ),
+        identity=identity,
+        node_class=NodeClass.SYMBOL,
+        label=label,
+        symbol_kind=kind.value,
+        language=language,
+        location=location,
+        extensions=extensions,
+    )
 
 
 class NodeEmitter:

@@ -33,7 +33,7 @@ from minotaur.graph_model.provenance import (
 )
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
-from minotaur.language_interpreter.emission import NodeEmitter
+from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -238,8 +238,13 @@ def _collect_declarations(
     ):
         name = statement.id.name
         kind = SymbolKind.FUNCTION if typ == "FunctionDeclaration" else SymbolKind.CLASS
-        node = _symbol_node(
-            path, statement, f"{_without_js_suffix(path)}.{name}", kind, export_kind, line_index
+        node = symbol_node(
+            f"{_without_js_suffix(path)}.{name}",
+            kind,
+            _node_location(path, statement, line_index),
+            NAMESPACE,
+            "javascript",
+            {NAMESPACE: {"export_kind": export_kind}} if export_kind else None,
         )
         binding = _Binding(name, node.id, _start(statement))
         bindings[name] = binding
@@ -256,13 +261,12 @@ def _collect_declarations(
                 method_name = _property_name(key)
                 if method_name is None:
                     continue
-                method = _symbol_node(
-                    path,
-                    member,
+                method = symbol_node(
                     f"{class_label}.{method_name}",
                     SymbolKind.METHOD,
-                    None,
-                    line_index,
+                    _node_location(path, member, line_index),
+                    NAMESPACE,
+                    "javascript",
                 )
                 # Class methods are contained by the class, never by module.
                 bindings.setdefault(
@@ -285,13 +289,13 @@ def _collect_declarations(
                 continue
             assert identifier is not None
             name = str(identifier.name)
-            node = _symbol_node(
-                path,
-                declarator,
+            node = symbol_node(
                 f"{_without_js_suffix(path)}.{name}",
                 SymbolKind.FUNCTION,
-                export_kind,
-                line_index,
+                _node_location(path, declarator, line_index),
+                NAMESPACE,
+                "javascript",
+                {NAMESPACE: {"export_kind": export_kind}} if export_kind else None,
             )
             binding = _Binding(name, node.id, _start(declarator))
             bindings[name] = binding
@@ -324,31 +328,6 @@ def _module_node(module: _Module) -> Node:
         symbol_kind=SymbolKind.MODULE.value,
         language="javascript",
         location=_full_location(module.path, module.line_index),
-    )
-
-
-def _symbol_node(
-    path: str,
-    statement: Any,
-    label: str,
-    kind: SymbolKind,
-    export_kind: str | None,
-    line_index: LineIndex,
-) -> Node:
-    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
-    location = _node_location(path, statement, line_index)
-    extensions = {NAMESPACE: {"export_kind": export_kind}} if export_kind else None
-    return Node(
-        id=compute_node_id(
-            identity, node_class=NodeClass.SYMBOL.value, symbol_kind=kind.value, location=location
-        ),
-        identity=identity,
-        node_class=NodeClass.SYMBOL,
-        label=label,
-        symbol_kind=kind.value,
-        language="javascript",
-        location=location,
-        extensions=extensions,
     )
 
 
