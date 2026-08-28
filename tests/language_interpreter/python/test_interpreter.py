@@ -1646,6 +1646,69 @@ def test_nested_scope_import_of_a_builtin_name_is_not_suppressed(tmp_path: Path)
     assert _unresolved_by_source(result)["app.outer"] == {"list"}
 
 
+def test_an_import_does_not_outlive_the_scope_that_ran_it(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer(rows):\n"
+        "    def first():\n"
+        "        from externallib import list\n\n"
+        "        return list()\n\n"
+        "    def second():\n"
+        "        return list()\n\n"
+        "    return first, second, list(), [list() for row in rows], lambda: list()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved_sites = {
+        (node.reference_text, location.range.start.line + 1)
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+        for relationship in result.document.relationships
+        if relationship.target == node.id
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+    # A scope's imports are popped with it. Leaving them behind would let one
+    # function's ``import`` decide what a sibling, the enclosing body, a
+    # comprehension, and a lambda mean by the same name.
+    assert unresolved_sites == {("list", 5)}
+
+
+def test_an_import_reaches_every_scope_nested_inside_the_one_that_ran_it(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    def middle(rows):\n"
+        "        from externallib import list\n\n"
+        "        def inner():\n"
+        "            return list()\n\n"
+        "        return inner, [list() for row in rows]\n\n"
+        "    return middle\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved_sites = {
+        (node.reference_text, location.range.start.line + 1)
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+        for relationship in result.document.relationships
+        if relationship.target == node.id
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+    # The frames between the ``import`` statement and the use do not bind the
+    # name, so consulting only the innermost one would hide the dependency and
+    # hand ``list`` back to builtin suppression. Both a nested ``def`` and a
+    # comprehension are checked because each pushes a frame of its own.
+    assert unresolved_sites == {("list", 6), ("list", 8)}
+
+
 def test_nested_scope_import_of_a_workspace_name_stays_reportable(tmp_path: Path) -> None:
     _write(tmp_path, "library.py", "def helper():\n    return 1\n")
     _write(
