@@ -253,7 +253,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # iterables, filters, and the result expression see comprehension
         # targets, which are local to the comprehension.
         self.visit(generators[0].iter)
-        self._push_scope(frozenset(_target_names(generators[0].target)), frozenset(), frozenset())
+        first_target_names = _target_names(generators[0].target)
+        self._push_scope(first_target_names, frozenset(), first_target_names)
         for condition in generators[0].ifs:
             self.visit(condition)
         for generator in generators[1:]:
@@ -479,6 +480,8 @@ def _global_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozense
 
 def _method_receiver_name(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
     """Return the conventional, unshadowed receiver for a class method."""
+    if _is_staticmethod(statement):
+        return None
     positional = (*statement.args.posonlyargs, *statement.args.args)
     if not positional:
         return None
@@ -499,6 +502,16 @@ def _is_classmethod(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         and decorator.id == "classmethod"
         or isinstance(decorator, ast.Attribute)
         and decorator.attr == "classmethod"
+        for decorator in statement.decorator_list
+    )
+
+
+def _is_staticmethod(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return any(
+        isinstance(decorator, ast.Name)
+        and decorator.id == "staticmethod"
+        or isinstance(decorator, ast.Attribute)
+        and decorator.attr == "staticmethod"
         for decorator in statement.decorator_list
     )
 
@@ -1038,7 +1051,22 @@ def _calls(
             # wins over a module import alias shadowed by the local binding.
             continue
         if target is None:
-            context.emitter.unresolved(caller, text, location, context.nodes, context.relationships)
+            unresolved_text = (
+                _base_identifier(candidate.func)
+                if (
+                    call_context.receiver_name is None
+                    and head in {"self", "cls"}
+                    and isinstance(candidate.func, ast.Attribute)
+                )
+                else text
+            ) or text
+            context.emitter.unresolved(
+                caller,
+                unresolved_text,
+                location,
+                context.nodes,
+                context.relationships,
+            )
         else:
             context.relationships.add(caller, target, RelationshipKind.CALLS.value, location)
     unresolved_references: list[tuple[str, Location]] = []
