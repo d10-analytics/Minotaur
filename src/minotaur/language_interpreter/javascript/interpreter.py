@@ -1121,13 +1121,12 @@ def _relative_target(path: str, specifier: str) -> str | None:
         return None
     parts = path.split("/")[:-1]
     segments = specifier.split("/")
-    levels_up = sum(segment == ".." for segment in segments)
-    if resolve_relative(tuple(parts), levels_up) is None:
-        return None
     for segment in segments:
         if segment == ".":
             continue
         if segment == "..":
+            if resolve_relative(tuple(parts), 1) is None:
+                return None
             parts.pop()
         else:
             parts.append(segment)
