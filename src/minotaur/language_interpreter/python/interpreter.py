@@ -1205,6 +1205,12 @@ def _emit_expression_facts(
     resolved reference to the root when the root itself is known: ``Cfg.DEFAULT``
     is both a use of the imported ``Cfg`` and an unknown member of it. The root
     is guard input only and is never the label of an emitted node.
+
+    That trailing reference is limited to a pure name-and-attribute chain. Once
+    a chain passes through a call or a subscript (``build(make).c.d``), the
+    descent has already recorded how the identifier was used -- as a call, or as
+    an ordinary load inside the subscript -- and asserting a second, different
+    use of it here would invent a fact the source never states.
     """
     text = _expression_text(expression)
     target = _resolve_call(text, context, class_declarations)
@@ -1217,11 +1223,13 @@ def _emit_expression_facts(
             return
         if _suppress_builtin(expression, context):
             return
-        root_target = _resolve_call(root, context, class_declarations) if root != text else None
-        if root_target is not None:
-            context.relationships.add(
-                caller, root_target, RelationshipKind.REFERENCES.value, location
-            )
+        chain_root = _attribute_root_name(expression)
+        if chain_root is not None and chain_root != text:
+            root_target = _resolve_call(chain_root, context, class_declarations)
+            if root_target is not None:
+                context.relationships.add(
+                    caller, root_target, RelationshipKind.REFERENCES.value, location
+                )
     context.emitter.unresolved(caller, text, location, context.nodes, context.relationships)
 
 
