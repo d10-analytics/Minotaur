@@ -38,6 +38,30 @@ def _nodes(result: AnalysisResult, label: str) -> list:
     return [node for node in result.document.nodes if node.label == label]
 
 
+def _unresolved_by_source(result: AnalysisResult) -> dict[str, set[str]]:
+    """Map each origin symbol's label to the unresolved texts recorded for it."""
+    labels = {node.id: node.label for node in result.document.nodes}
+    texts = {
+        node.id: node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    grouped: dict[str, set[str]] = {}
+    for relationship in result.document.relationships:
+        if relationship.target in texts:
+            grouped.setdefault(labels[relationship.source], set()).add(texts[relationship.target])
+    return grouped
+
+
+def _edge_labels(result: AnalysisResult) -> set[tuple[str, str, str]]:
+    """Return label-keyed relationship triples for readable expectations."""
+    labels = {node.id: node.label for node in result.document.nodes}
+    return {
+        (labels[relationship.source], labels[relationship.target], relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+
 def test_python_interpreter_establishes_containment_imports_and_direct_calls(
     tmp_path: Path,
 ) -> None:
@@ -331,7 +355,7 @@ def test_attribute_and_nested_load_references_preserve_call_and_unresolved_bound
         for node in result.document.nodes
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
-    assert set(unresolved) == {"unknown"}
+    assert set(unresolved) == {"unknown", "unknown.attr"}
     unresolved_nodes = [
         node
         for node in result.document.nodes
@@ -349,7 +373,7 @@ def test_attribute_and_nested_load_references_preserve_call_and_unresolved_bound
     }
     assert set(by_location) == {
         ("unknown", 15, 18),
-        ("unknown", 16, 23),
+        ("unknown.attr", 16, 23),
     }
     for node in by_location.values():
         assert node.identity.originating_node == configure
@@ -442,7 +466,9 @@ def test_callee_suppression_keeps_subexpressions_as_references(tmp_path: Path) -
     assert {"handler", "fallback", "value"} <= references
 
 
-def test_unresolved_attribute_chain_emits_only_its_base_identifier(tmp_path: Path) -> None:
+def test_unresolved_attribute_chain_emits_one_fact_labelled_with_its_full_text(
+    tmp_path: Path,
+) -> None:
     _write(tmp_path, "app.py", "def invoke():\n    return obj.a.b.c.d\n")
 
     result = analyze_python_workspace(tmp_path)
@@ -452,7 +478,236 @@ def test_unresolved_attribute_chain_emits_only_its_base_identifier(tmp_path: Pat
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
 
-    assert unresolved == {"obj"}
+    # The root identifier decides whether the chain is reportable; it never
+    # becomes the label, which would file every member of ``obj`` under one
+    # name that no query can act on.
+    assert unresolved == {"obj.a.b.c.d"}
+    assert len(_nodes(result, "obj.a.b.c.d")) == 1
+
+
+def test_member_loads_and_calls_emit_the_same_full_text_facts(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "class Cfg:\n    DEFAULT = 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import Cfg\n\n"
+        "def load_unknown():\n"
+        "    return unknown.target\n"
+        "def call_unknown():\n"
+        "    return unknown.target()\n"
+        "def load_member():\n"
+        "    return Cfg.DEFAULT\n"
+        "def call_member():\n"
+        "    return Cfg.DEFAULT()\n"
+        "class Declared:\n"
+        "    def on_click(self):\n"
+        "        return 1\n"
+        "    def load(self):\n"
+        "        return self.on_click\n"
+        "    def call(self):\n"
+        "        return self.on_click()\n"
+        "class Undeclared:\n"
+        "    def load(self):\n"
+        "        return self.on_click\n"
+        "    def call(self):\n"
+        "        return self.on_click()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = _unresolved_by_source(result)
+    edges = _edge_labels(result)
+
+    # A load and a call state the same thing about the same name, so the two
+    # forms report the same fact, labelled with the whole expression.
+    assert unresolved["app.load_unknown"] == {"unknown.target"}
+    assert unresolved["app.call_unknown"] == {"unknown.target"}
+    assert unresolved["app.load_member"] == {"Cfg.DEFAULT"}
+    assert unresolved["app.call_member"] == {"Cfg.DEFAULT"}
+    # The unknown member does not hide the known import it was reached through.
+    assert ("app.load_member", "library.Cfg", RelationshipKind.REFERENCES.value) in edges
+    assert ("app.call_member", "library.Cfg", RelationshipKind.REFERENCES.value) in edges
+    assert unresolved["app.Undeclared.load"] == {"self.on_click"}
+    assert unresolved["app.Undeclared.call"] == {"self.on_click"}
+    assert "app.Declared.load" not in unresolved
+    assert "app.Declared.call" not in unresolved
+    assert (
+        "app.Declared.load",
+        "app.Declared.on_click",
+        RelationshipKind.REFERENCES.value,
+    ) in edges
+    assert ("app.Declared.call", "app.Declared.on_click", RelationshipKind.CALLS.value) in edges
+
+
+def test_chain_rooted_in_a_bound_parameter_reports_nothing(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def render(items):\n    return items[0].name\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    # The root identifier is ``items``, not the ``items[0]`` that precedes the
+    # first dot, so the chain is recognized as a dynamic local.
+    assert _unresolved_by_source(result) == {}
+
+
+def test_module_member_records_the_module_and_the_unknown_member(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def wrap(function):\n    return function\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import library\n\ndef use():\n    return library.wrap, library.MISSING\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+
+    assert ("app.use", "library.wrap", RelationshipKind.REFERENCES.value) in edges
+    assert ("app.use", "library", RelationshipKind.REFERENCES.value) in edges
+    assert _unresolved_by_source(result)["app.use"] == {"library.MISSING"}
+    # An unresolved node labelled ``library`` would collide with the module
+    # that is known and resolved on the same line.
+    assert _nodes(result, "library") == [
+        node for node in _nodes(result, "library") if node.node_class == NodeClass.SYMBOL
+    ]
+
+
+def test_module_level_subscript_chain_emits_its_root_and_full_text_once(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "value = missing[0].name\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_by_source(result)["app"] == {"missing", "missing[0].name"}
+    assert len(_nodes(result, "missing")) == 1
+    assert len(_nodes(result, "missing[0].name")) == 1
+
+
+def test_member_chain_over_a_call_keeps_the_inner_call_and_its_arguments(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "library.py",
+        "def build(argument):\n    return argument\n\ndef make():\n    return 1\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "import library\n"
+        "from library import build, make\n\n"
+        "def chained():\n"
+        "    return library.make().c.d\n"
+        "def argument_chain():\n"
+        "    return build(make).c.d\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    unresolved = _unresolved_by_source(result)
+
+    # Descending a chain must not swallow the expressions inside it.
+    assert ("app.chained", "library.make", RelationshipKind.CALLS.value) in edges
+    assert ("app.argument_chain", "library.build", RelationshipKind.CALLS.value) in edges
+    assert ("app.argument_chain", "library.make", RelationshipKind.REFERENCES.value) in edges
+    assert unresolved["app.chained"] == {"library.make().c.d"}
+    assert unresolved["app.argument_chain"] == {"build(make).c.d"}
+
+
+def test_attribute_store_and_delete_targets_reference_their_base(tmp_path: Path) -> None:
+    _write(tmp_path, "store.py", "registry = {}\ncount = 0\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import store\n\n"
+        "def install():\n"
+        "    store.registry = {}\n"
+        "    store.count += 1\n"
+        "    del store.registry\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    reference = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.install")
+        and relationship.target == _node_id(result, "store")
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    ]
+
+    # A store or delete target records no member fact, but it still loads the
+    # object it assigns into.
+    assert len(reference) == 1
+    assert {location.range.start.line for location in reference[0].evidence[0].locations} == {
+        3,
+        4,
+        5,
+    }
+    assert _unresolved_by_source(result) == {}
+
+
+def test_function_local_import_is_reportable_and_lazy_reimports_resolve(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n\nclass Thing:\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import Thing\n\n"
+        "def local_only():\n"
+        "    from library import helper\n\n"
+        "    return helper()\n\n"
+        "def lazy_reimport():\n"
+        "    from library import Thing\n\n"
+        "    return Thing()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # An import binds statically. Suppressing it as if it were a local
+    # assignment would erase the call instead of leaving it to a later slice.
+    assert _unresolved_by_source(result)["app.local_only"] == {"helper"}
+    assert ("app.lazy_reimport", "library.Thing", RelationshipKind.CALLS.value) in _edge_labels(
+        result
+    )
+
+
+def test_implicit_class_receivers_resolve_through_the_owning_class(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n"
+        "    @classmethod\n"
+        "    def helper(cls):\n"
+        "        return 1\n"
+        "    def __new__(cls, *arguments):\n"
+        "        return cls.helper()\n"
+        "    def __init_subclass__(cls, **keywords):\n"
+        "        return cls.helper()\n"
+        "    def __class_getitem__(cls, item):\n"
+        "        return cls.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+
+    # These three receive the class implicitly, without a decorator to say so.
+    for method in ("__new__", "__init_subclass__", "__class_getitem__"):
+        assert (f"app.Runner.{method}", "app.Runner.helper", RelationshipKind.CALLS.value) in edges
+
+
+def test_receiver_shaped_parameter_without_eligibility_reports_its_members(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Meta(type):\n    def __call__(cls, *arguments):\n        return cls.build()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # A metaclass ``__call__`` receives the class it builds, which is not the
+    # class that declares the method: unresolvable, but not a dynamic local.
+    assert _unresolved_by_source(result)["app.Meta.__call__"] == {"cls.build"}
 
 
 def test_function_binders_suppress_parameters_and_assignment_targets(tmp_path: Path) -> None:
@@ -569,11 +824,26 @@ def test_function_local_imports_del_and_match_captures_are_lexical_binders(
     result = analyze_python_workspace(tmp_path)
     invoke = _node_id(result, "app.invoke")
     helper = _node_id(result, "library.helper")
-    assert not any(
-        relationship.source == invoke
-        and relationship.target == helper
-        and relationship.kind == RelationshipKind.CALLS.value
+    # ``del`` and match captures are dynamic binders, so the bare ``helper()``
+    # call is suppressed. The local ``import`` is not: it names the same module
+    # the module-level alias does, and ``library.helper()`` resolves through it.
+    assert (invoke, helper, RelationshipKind.CALLS.value) in {
+        (relationship.source, relationship.target, relationship.kind)
         for relationship in result.document.relationships
+    }
+    assert (
+        len(
+            [
+                relationship
+                for relationship in result.document.relationships
+                if relationship.source == invoke
+                and relationship.target == helper
+                and relationship.kind == RelationshipKind.CALLS.value
+            ][0]
+            .evidence[0]
+            .locations
+        )
+        == 1
     )
     assert {
         node.reference_text
@@ -956,6 +1226,9 @@ def test_arbitrary_and_rebound_self_or_cls_do_not_resolve_as_class_receivers(
             _node_id(result, "app.Runner.invalid"),
         )
     )
+    # An arbitrary or reassigned receiver is a dynamic local: the call is
+    # dropped outright rather than reported as an unresolved member.
+    assert _unresolved_by_source(result) == {}
 
 
 def test_comprehension_receiver_targets_shadow_self_and_cls_only_inside_comp(
@@ -1011,7 +1284,10 @@ def test_staticmethod_self_parameter_is_not_an_instance_receiver(tmp_path: Path)
         "    def capture(self):\n"
         "        def nested():\n"
         "            return self.helper()\n"
-        "        return nested()\n",
+        "        return nested()\n"
+        "    @staticmethod\n"
+        "    def bare(cls):\n"
+        "        return cls()\n",
     )
 
     result = analyze_python_workspace(tmp_path)
@@ -1029,8 +1305,9 @@ def test_staticmethod_self_parameter_is_not_an_instance_receiver(tmp_path: Path)
     assert (invoke, helper, RelationshipKind.CALLS.value) not in relationships
     assert (capture, helper, RelationshipKind.CALLS.value) not in relationships
     # A closure over a staticmethod's ``self`` parameter is the same fact one
-    # frame down: an unresolved receiver-shaped call, never a class receiver.
-    assert {node.reference_text for node in unresolved} == {"self"}
+    # frame down: an unresolved receiver-shaped member, never a class receiver.
+    # The bare ``cls()`` call has no member to report and stays a local call.
+    assert {node.reference_text for node in unresolved} == {"self.helper"}
     assert {
         location.range.start.line
         for node in unresolved
@@ -1199,6 +1476,30 @@ def test_builtin_names_are_not_unresolved(tmp_path: Path) -> None:
     )
 
 
+def test_imported_name_that_shadows_a_builtin_is_not_suppressed(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "from externallib import list\n\ndef use():\n    return list()\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    # ``list`` is a builtin, but this workspace imported something else under
+    # that name and the dependency must survive.
+    assert _unresolved_by_source(result)["app.use"] == {"list"}
+
+
+def test_lambda_default_walrus_binds_the_enclosing_function(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n    handler = lambda value=(seed := 1): value\n    return handler, seed\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # A lambda's defaults are evaluated in the enclosing scope, so the walrus
+    # binds ``seed`` there.
+    assert _unresolved_by_source(result) == {}
+
+
 def test_function_headers_use_enclosing_scope_for_defaults_annotations_and_decorators(
     tmp_path: Path,
 ) -> None:
@@ -1299,7 +1600,7 @@ def test_non_call_complex_member_reference_emits_base_without_pseudo_reference(
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
 
-    assert unresolved == {"obj", "key"}
+    assert unresolved == {"obj", "key", "obj[key].method"}
     assert "obj[key]" not in unresolved
 
 

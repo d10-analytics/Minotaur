@@ -71,6 +71,7 @@ def test_callers_prints_each_call_site_and_matching_unresolved_reference(
         "use.py:5:5  use.caller",
         "use.py:6:5  use.caller",
         "use.py:3:5  unknown.target [unresolved]",
+        "use.py:4:16  unknown.target [unresolved]",
     ]
 
 
