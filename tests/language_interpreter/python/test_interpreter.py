@@ -989,6 +989,12 @@ def test_comprehension_receiver_targets_shadow_self_and_cls_only_inside_comp(
     assert {
         location.range.start.line for call in calls for location in call.evidence[0].locations
     } == {5, 9}
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert not unresolved.intersection({"self", "self.helper", "cls", "cls.helper"})
 
 
 def test_staticmethod_self_parameter_is_not_an_instance_receiver(tmp_path: Path) -> None:
