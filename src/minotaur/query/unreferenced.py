@@ -11,6 +11,7 @@ from pathlib import Path
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.query.index import GraphIndex
+from minotaur.query.symbols import label_bare_name
 
 _TOKEN_PATTERN = re.compile(r"\w+")
 _CANDIDATE_KINDS = frozenset({"class", "function", "method"})
@@ -81,7 +82,7 @@ def unreferenced(
                 line=location.range.start.line + 1,
                 symbol=node.label,
                 kind=node.symbol_kind or "unknown",
-                text_mention=node.label.rsplit(".", 1)[-1] in mentions,
+                text_mention=label_bare_name(node.label) in mentions,
             )
         )
     return tuple(sorted(records, key=lambda record: (record.path, record.line, record.symbol)))
@@ -138,7 +139,7 @@ def _eligible(
     excluded_names: frozenset[str],
     excluded_patterns: tuple[re.Pattern[str], ...] = (),
 ) -> bool:
-    name = node.label.rsplit(".", 1)[-1]
+    name = label_bare_name(node.label)
     if name in excluded_names:
         return False
     # Patterns are searched against the qualified label so a caller can
@@ -203,6 +204,6 @@ def _definition_counts(index: GraphIndex, selected: frozenset[str]) -> dict[str,
             continue
         if location.path not in selected:
             continue
-        name = node.label.rsplit(".", 1)[-1]
+        name = label_bare_name(node.label)
         counts[name] = counts.get(name, 0) + 1
     return counts
