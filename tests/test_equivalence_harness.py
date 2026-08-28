@@ -31,8 +31,10 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # (unresolved non-call reference emission) -> 7043ae2 (neutral producer for
 # empty selections) -> e66869b (lexical suppression, builtins suppression, member-base rule)
 # -> ad00d41 (nested-scope precedence, receiver shadowing, and closure receiver
-# inheritance repairs).
-BASELINE_COMMIT = "ad00d41c9b5d7ebb274638b370e71625f51e7345"
+# inheritance repairs) -> b54522c (retrospective repairs: one full-text fact per
+# member expression with root resolution, import-bound names are not dynamic
+# locals, chain interiors traversed on loads, implicit classmethod receivers).
+BASELINE_COMMIT = "b54522c0e3e7de9e7d6869ba47d466300cab3cc5"
 
 
 @pytest.fixture(scope="session")
