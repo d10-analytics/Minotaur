@@ -11,7 +11,6 @@ the enclosing emitted owner rather than inventing a second identity grain.
 from __future__ import annotations
 
 import hashlib
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +20,7 @@ from typing import Any
 import esprima  # type: ignore[import-untyped]
 
 from minotaur.graph_model.document import GraphDocument
-from minotaur.graph_model.evidence import Evidence, Producer
+from minotaur.graph_model.evidence import Producer
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node
@@ -29,11 +28,10 @@ from minotaur.graph_model.provenance import (
     CoordinateEncoding,
     IdentityBasis,
     NodeClass,
-    Provenance,
     RelationshipKind,
     SymbolKind,
 )
-from minotaur.graph_model.relationship import Relationship
+from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
@@ -112,23 +110,22 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
     nodes: list[Node] = []
     for module in modules:
         nodes.extend((_file_node(module), _module_node(module), *module.declaration_nodes))
-    relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
+    relationships = RelationshipAccumulator()
     seen_unresolved: set[str] = set()
     for module in modules:
-        _append(
-            relationships, module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
+        relationships.add(
+            module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
         )
         for declaration_node in module.declaration_nodes:
             if declaration_node.symbol_kind != SymbolKind.METHOD.value:
-                _append(
-                    relationships,
+                relationships.add(
                     module.module_id,
                     declaration_node.id,
                     RelationshipKind.CONTAINS.value,
                     None,
                 )
         for class_id, method_id in module.method_containments:
-            _append(relationships, class_id, method_id, RelationshipKind.CONTAINS.value, None)
+            relationships.add(class_id, method_id, RelationshipKind.CONTAINS.value, None)
         _imports(module, by_path, relationships, nodes, seen_unresolved)
     for module in modules:
         _expressions(module, by_path, relationships, nodes, seen_unresolved)
@@ -136,9 +133,7 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
     document = GraphDocument(
         coordinate_encoding=CoordinateEncoding.UTF_8,
         nodes=tuple(nodes),
-        relationships=tuple(
-            _relationship(key, locations) for key, locations in relationships.items()
-        ),
+        relationships=relationships.documents(_PRODUCER),
         generated_by=_PRODUCER,
     )
     return AnalysisResult(document, tuple(diagnostics))
@@ -361,7 +356,7 @@ def _symbol_node(
 def _imports(
     module: _Module,
     modules: dict[str, _Module],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen: set[str],
 ) -> None:
@@ -378,8 +373,7 @@ def _imports(
             target = _relative_target(module.path, source)
             target_module = modules.get(target) if target else None
             if target_module is not None:
-                _append(
-                    relationships,
+                relationships.add(
                     module.module_id,
                     target_module.module_id,
                     RelationshipKind.IMPORTS.value,
@@ -452,7 +446,7 @@ def _imports(
 def _expressions(
     module: _Module,
     modules: dict[str, _Module],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen: set[str],
 ) -> None:
@@ -557,7 +551,7 @@ def _walk(
     owner: str,
     module: _Module,
     bindings: dict[str, _Binding],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen: set[str],
     shadows: set[str] | None = None,
@@ -573,8 +567,8 @@ def _walk(
         target = bindings.get(node.name)
         location = _node_location(module.path, node, module.line_index)
         if target is not None:
-            _append(
-                relationships, owner, target.node_id, RelationshipKind.REFERENCES.value, location
+            relationships.add(
+                owner, target.node_id, RelationshipKind.REFERENCES.value, location
             )
         else:
             _unresolved(owner, node.name, location, relationships, nodes, seen)
@@ -800,8 +794,8 @@ def _walk(
             if callee_name not in shadows:
                 target = bindings.get(callee_name)
                 if target is not None:
-                    _append(
-                        relationships, owner, target.node_id, RelationshipKind.CALLS.value, location
+                    relationships.add(
+                        owner, target.node_id, RelationshipKind.CALLS.value, location
                     )
                 else:
                     _unresolved(owner, callee_name, location, relationships, nodes, seen)
@@ -886,7 +880,7 @@ def _walk_parameter_defaults(
     owner: str,
     module: _Module,
     bindings: dict[str, _Binding],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen: set[str],
     shadows: set[str],
@@ -1092,7 +1086,7 @@ def _unsupported(
     module: _Module,
     text: str,
     anchor: Any,
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen: set[str],
     owner: str | None = None,
@@ -1111,7 +1105,7 @@ def _unresolved(
     origin: str,
     text: str,
     location: Location,
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen: set[str],
 ) -> None:
@@ -1135,35 +1129,7 @@ def _unresolved(
                 location=location,
             )
         )
-    _append(relationships, origin, node_id, RelationshipKind.REFERENCES.value, location)
-
-
-def _relationship(key: tuple[str, str, str], locations: list[Location]) -> Relationship:
-    return Relationship(
-        source=key[0],
-        target=key[1],
-        kind=key[2],
-        evidence=(
-            Evidence(
-                Provenance.STATIC_ANALYSIS,
-                producer=_PRODUCER,
-                locations=tuple(dict.fromkeys(locations)),
-            ),
-        ),
-    )
-
-
-def _append(
-    relationships: dict[tuple[str, str, str], list[Location]],
-    source: str,
-    target: str,
-    kind: str,
-    location: Location | None,
-) -> None:
-    if location is not None:
-        relationships[(source, target, kind)].append(location)
-    else:
-        relationships.setdefault((source, target, kind), [])
+    relationships.add(origin, node_id, RelationshipKind.REFERENCES.value, location)
 
 
 def _node_location(path: str, node: Any, line_index: LineIndex) -> Location:

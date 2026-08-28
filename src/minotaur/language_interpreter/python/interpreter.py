@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import ast
 import hashlib
-from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from minotaur.graph_model.document import GraphDocument
-from minotaur.graph_model.evidence import Evidence, Producer
+from minotaur.graph_model.evidence import Producer
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node
@@ -24,11 +23,10 @@ from minotaur.graph_model.provenance import (
     CoordinateEncoding,
     IdentityBasis,
     NodeClass,
-    Provenance,
     RelationshipKind,
     SymbolKind,
 )
-from minotaur.graph_model.relationship import Relationship
+from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 from minotaur.language_interpreter.contract import (
     IMPORT_ROOT_HINT,
     IMPORTS_RESOLVED,
@@ -240,12 +238,12 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         symbols_by_path[module.path] = symbols
         nodes.extend(declared_nodes)
 
-    relationships: dict[tuple[str, str, str], list[Location]] = defaultdict(list)
+    relationships = RelationshipAccumulator()
     tally = _ImportTally()
     seen_ids: set[str] = set()
     for module in modules:
-        _append(
-            relationships, module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
+        relationships.add(
+            module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None
         )
         _analyze_module(
             module,
@@ -262,9 +260,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         GraphDocument(
             coordinate_encoding=CoordinateEncoding.UTF_8,
             nodes=tuple(nodes),
-            relationships=tuple(
-                _relationship(key, locations) for key, locations in relationships.items()
-            ),
+            relationships=relationships.documents(_PRODUCER),
             generated_by=_PRODUCER,
             # Flat keys: extension namespaces hold scalar-valued objects.
             extensions={
@@ -383,15 +379,14 @@ def _analyze_module(
     modules: dict[str, _Module],
     symbols: dict[ast.stmt, _DeclaredSymbol],
     declarations: dict[str, str],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen_ids: set[str],
     tally: _ImportTally,
 ) -> None:
     aliases = _imports(module, modules, relationships, nodes, seen_ids, tally)
     for symbol in symbols.values():
-        _append(
-            relationships,
+        relationships.add(
             symbol.container_id,
             symbol.node_id,
             RelationshipKind.CONTAINS.value,
@@ -494,7 +489,7 @@ def _decorator_references(
     source: str,
     target: str,
     path: str,
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
 ) -> None:
     """Record each decorator as an enclosing-scope use of its definition.
 
@@ -502,8 +497,7 @@ def _decorator_references(
     is intentionally avoided because repeated definitions have distinct nodes.
     """
     for decorator in statement.decorator_list:
-        _append(
-            relationships,
+        relationships.add(
             source,
             target,
             RelationshipKind.REFERENCES.value,
@@ -571,7 +565,7 @@ def _signature_nodes(
 def _imports(
     module: _Module,
     modules: dict[str, _Module],
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen_ids: set[str],
     tally: _ImportTally,
@@ -593,8 +587,7 @@ def _imports(
                     )
                 else:
                     tally.resolved += 1
-                    _append(
-                        relationships,
+                    relationships.add(
                         module.module_id,
                         target.module_id,
                         RelationshipKind.IMPORTS.value,
@@ -621,8 +614,7 @@ def _imports(
                     )
                 else:
                     tally.resolved += 1
-                    _append(
-                        relationships,
+                    relationships.add(
                         module.module_id,
                         resolved_target,
                         RelationshipKind.IMPORTS.value,
@@ -663,7 +655,7 @@ def _calls(
     module_name: str,
     path: str,
     caller: str,
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen_ids: set[str],
     class_declarations: Mapping[str, str] | None = None,
@@ -681,7 +673,7 @@ def _calls(
         if target is None:
             _unresolved(caller, text, location, relationships, nodes, seen_ids)
         else:
-            _append(relationships, caller, target, RelationshipKind.CALLS.value, location)
+            relationships.add(caller, target, RelationshipKind.CALLS.value, location)
     unresolved_references: list[tuple[str, Location]] = []
     resolved_texts: set[str] = set()
     for reference in visitor.references:
@@ -689,8 +681,7 @@ def _calls(
         target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
         if target is not None:
             resolved_texts.add(text)
-            _append(
-                relationships,
+            relationships.add(
                 caller,
                 target,
                 RelationshipKind.REFERENCES.value,
@@ -731,7 +722,7 @@ def _unresolved(
     origin: str,
     text: str,
     location: Location,
-    relationships: dict[tuple[str, str, str], list[Location]],
+    relationships: RelationshipAccumulator,
     nodes: list[Node],
     seen_ids: set[str],
 ) -> None:
@@ -755,7 +746,7 @@ def _unresolved(
                 location=location,
             )
         )
-    _append(relationships, origin, node_id, RelationshipKind.REFERENCES.value, location)
+    relationships.add(origin, node_id, RelationshipKind.REFERENCES.value, location)
 
 
 def _symbol_node(path: str, statement: ast.AST, label: str, kind: SymbolKind) -> Node:
@@ -772,25 +763,6 @@ def _symbol_node(path: str, statement: ast.AST, label: str, kind: SymbolKind) ->
         language="python",
         location=location,
     )
-
-
-def _relationship(key: tuple[str, str, str], locations: list[Location]) -> Relationship:
-    unique = tuple(dict.fromkeys(locations))
-    evidence = Evidence(Provenance.STATIC_ANALYSIS, producer=_PRODUCER, locations=unique)
-    return Relationship(source=key[0], target=key[1], kind=key[2], evidence=(evidence,))
-
-
-def _append(
-    relationships: dict[tuple[str, str, str], list[Location]],
-    source: str,
-    target: str,
-    kind: str,
-    location: Location | None,
-) -> None:
-    if location is not None:
-        relationships[(source, target, kind)].append(location)
-    else:
-        relationships.setdefault((source, target, kind), [])
 
 
 def _module_name(path: str) -> str:
