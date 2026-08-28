@@ -582,6 +582,76 @@ def test_function_local_imports_del_and_match_captures_are_lexical_binders(
     } == set()
 
 
+def test_all_match_capture_forms_are_lexical_binders(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke(value):\n"
+        "    match value:\n"
+        '        case {"mapping": mapping, **rest}:\n'
+        "            return mapping, rest\n"
+        "        case [sequence, *star]:\n"
+        "            return sequence, star\n"
+        "        case int(number) as typed:\n"
+        "            return number, typed\n"
+        "        case [or_value] | (or_value,):\n"
+        "            return or_value\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert not unresolved.intersection(
+        {"mapping", "rest", "sequence", "star", "number", "typed", "or_value"}
+    )
+
+
+def test_comprehension_generator_order_and_walrus_positions_preserve_scope(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def invoke(values):\n"
+        "    ordered = [result for helper in helper() for result in helper()]\n"
+        "    scoped = [\n"
+        "        (first := helper())\n"
+        "        for item in values\n"
+        "        if (allowed := predicate(item))\n"
+        "        for other in item\n"
+        "        if other\n"
+        "    ]\n"
+        "    return ordered, scoped, first, allowed, item, other\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    invoke = _node_id(result, "app.invoke")
+    helper = _node_id(result, "library.helper")
+    calls = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == invoke
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+    ]
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    # The first generator iterable sees the enclosing import, while the second
+    # iterable sees the first generator's local ``helper`` target.
+    assert len(calls) == 1
+    assert unresolved == {"predicate", "item", "other"}
+
+
 def test_global_names_remain_eligible_and_nonlocal_names_are_bound(tmp_path: Path) -> None:
     _write(
         tmp_path,
@@ -800,6 +870,70 @@ def test_arbitrary_and_rebound_self_or_cls_do_not_resolve_as_class_receivers(
             _node_id(result, "app.Runner.invalid"),
         )
     )
+
+
+def test_comprehension_receiver_targets_shadow_self_and_cls_only_inside_comp(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def run(self, values):\n"
+        "        inside = [self.helper() for self in values]\n"
+        "        return self.helper()\n"
+        "    @classmethod\n"
+        "    def class_run(cls, values):\n"
+        "        inside = [cls.helper() for cls in values]\n"
+        "        return cls.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "app.Runner.helper")
+    calls = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.target == helper and relationship.kind == RelationshipKind.CALLS.value
+    ]
+
+    # Only the calls after each comprehension can use the class receiver.
+    assert len(calls) == 2
+    assert {
+        location.range.start.line
+        for call in calls
+        for location in call.evidence[0].locations
+    } == {5, 9}
+
+
+def test_staticmethod_self_parameter_is_not_an_instance_receiver(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    @staticmethod\n"
+        "    def invoke(self):\n"
+        "        return self.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "app.Runner.helper")
+    relationships = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    invoke = _node_id(result, "app.Runner.invoke")
+    assert (invoke, helper, RelationshipKind.CALLS.value) not in relationships
+    assert "self" in unresolved
 
 
 def test_super_call_has_one_unresolved_outer_member_fact(tmp_path: Path) -> None:
