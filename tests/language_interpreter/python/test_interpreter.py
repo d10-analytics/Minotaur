@@ -1730,6 +1730,93 @@ def test_nested_scope_import_of_a_workspace_name_stays_reportable(tmp_path: Path
     assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
 
 
+def test_class_body_imports_bind_in_the_class_scope_only(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class C:\n"
+        "    from externallib import list\n\n"
+        "    values = list()\n\n"
+        "    def method(self):\n"
+        "        return list()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = _unresolved_by_source(result)
+
+    # The class body binds ``list`` for itself; inside a method the class scope
+    # is invisible again and the builtin is the builtin.
+    assert unresolved["app.C"] == {"list"}
+    assert "app.C.method" not in unresolved
+
+
+def test_local_import_rebinding_a_module_alias_refuses_that_alias(tmp_path: Path) -> None:
+    _write(tmp_path, "a.py", "def go():\n    return 1\n")
+    _write(tmp_path, "b.py", "def go():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import a as lib\n\ndef f():\n    import b as lib\n\n    return lib.go()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # The call is to ``b.go``. Resolving it through the module's ``lib`` would
+    # record a dependency on ``a`` that this scope cannot even see.
+    assert ("app.f", "a.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
+    assert _unresolved_by_source(result)["app.f"] == {"lib.go"}
+
+
+def test_local_from_import_rebinding_a_module_alias_refuses_that_alias(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "models.py", "class User:\n    pass\n")
+    _write(tmp_path, "other.py", "class User:\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from models import User\n\n"
+        "def f():\n"
+        "    from other import User\n\n"
+        "    return User()\n\n"
+        "def nested():\n"
+        "    from other import User\n\n"
+        "    def inner():\n"
+        "        return User()\n"
+        "    return inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = _unresolved_by_source(result)
+    edges = _edge_labels(result)
+
+    assert ("app.f", "models.User", RelationshipKind.CALLS.value) not in edges
+    assert unresolved["app.f"] == {"User"}
+    # The same rebinding seen from a nested scope, through the scope stack.
+    assert ("app.nested", "models.User", RelationshipKind.CALLS.value) not in edges
+    assert unresolved["app.nested"] == {"User"}
+
+
+def test_inner_scope_import_outranks_an_enclosing_assignment(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    helper = build()\n"
+        "    def inner():\n"
+        "        from externallib import helper\n\n"
+        "        return helper()\n"
+        "    return inner, helper\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # The nearest binding of ``helper`` inside ``inner`` is its import, so the
+    # call is reported; the enclosing assignment only governs ``outer``'s own
+    # use of the name, which stays a dynamic local.
+    assert _unresolved_by_source(result)["app.outer"] == {"build", "helper"}
+
+
 def test_lambda_default_walrus_binds_the_enclosing_function(tmp_path: Path) -> None:
     _write(
         tmp_path,
