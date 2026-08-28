@@ -538,6 +538,47 @@ def test_member_loads_and_calls_emit_the_same_full_text_facts(tmp_path: Path) ->
     assert ("app.Declared.call", "app.Declared.on_click", RelationshipKind.CALLS.value) in edges
 
 
+def test_a_resolved_member_expression_records_only_itself(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def wrap(function):\n    return function\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import library\n\ndef use():\n    return library.wrap()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    use = _node_id(result, "app.use")
+    facts = [
+        (relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+        if relationship.source == use
+    ]
+
+    # The reference to the module that carries an unknown member exists only
+    # because the member is unknown. Once the whole expression resolves, adding
+    # the module as well would count one use of ``library.wrap`` twice and make
+    # every module look used by everyone who calls into it.
+    assert facts == [(_node_id(result, "library.wrap"), RelationshipKind.CALLS.value)]
+
+
+def test_expression_without_a_root_identifier_still_reports_its_full_text(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        'def invoke():\n    return f"{missing}".join\n',
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # No guard can fire on an expression that has no root identifier at all, so
+    # this is the one path that reaches emission unguarded: it must still
+    # produce the expression's own fact, not fall through to silence, and the
+    # interior name must survive the descent.
+    assert _unresolved_by_source(result)["app.invoke"] == {"f'{missing}'.join", "missing"}
+
+
 def test_chain_rooted_in_a_bound_parameter_reports_nothing(tmp_path: Path) -> None:
     _write(tmp_path, "app.py", "def render(items):\n    return items[0].name\n")
 
@@ -1286,6 +1327,32 @@ def test_arbitrary_and_rebound_self_or_cls_do_not_resolve_as_class_receivers(
     )
     # An arbitrary or reassigned receiver is a dynamic local: the call is
     # dropped outright rather than reported as an unresolved member.
+    assert _unresolved_by_source(result) == {}
+
+
+def test_an_import_that_rebinds_the_receiver_disqualifies_it(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def run(self):\n"
+        "        from library import self\n\n"
+        "        return self.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # An import binder is deliberately not a dynamic local, but it is still a
+    # rebinding: whatever ``self`` names here, it is not the instance, so
+    # resolving through the owning class would assert a call that cannot occur.
+    assert (
+        "app.Runner.run",
+        "app.Runner.helper",
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
     assert _unresolved_by_source(result) == {}
 
 
