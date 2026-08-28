@@ -65,6 +65,17 @@ class _DeclaredSymbol:
     class_declarations: Mapping[str, str] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ScopeContext:
+    declarations: Mapping[str, str]
+    aliases: Mapping[str, str]
+    module_name: str
+    path: str
+    relationships: RelationshipAccumulator
+    nodes: list[Node]
+    emitter: NodeEmitter
+
+
 @dataclass
 class _ImportTally:
     """Counts of import statements that did or did not resolve in the workspace.
@@ -374,6 +385,15 @@ def _analyze_module(
     tally: _ImportTally,
 ) -> None:
     aliases = _imports(module, modules, declarations, relationships, nodes, emitter, tally)
+    context = _ScopeContext(
+        declarations,
+        aliases,
+        module.name,
+        module.path,
+        relationships,
+        nodes,
+        emitter,
+    )
     for symbol in symbols.values():
         relationships.add(
             symbol.container_id,
@@ -382,19 +402,13 @@ def _analyze_module(
             None,
         )
     _calls(
+        context,
         [
             statement
             for statement in module.tree.body
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         ],
-        declarations,
-        aliases,
-        module.name,
-        module.path,
         module.module_id,
-        relationships,
-        nodes,
-        emitter,
     )
     for statement in module.tree.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -406,15 +420,9 @@ def _analyze_module(
                 relationships,
             )
             _calls(
+                context,
                 statement.body,
-                declarations,
-                aliases,
-                module.name,
-                module.path,
                 symbols[statement].node_id,
-                relationships,
-                nodes,
-                emitter,
                 prefix_nodes=_signature_nodes(statement),
             )
         elif isinstance(statement, ast.ClassDef):
@@ -433,19 +441,13 @@ def _analyze_module(
             # matching how _ScopeCallVisitor.visit_ClassDef treats a nested
             # class body inside a function.
             _calls(
+                context,
                 [
                     member
                     for member in statement.body
                     if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
                 ],
-                declarations,
-                aliases,
-                module.name,
-                module.path,
                 symbols[statement].node_id,
-                relationships,
-                nodes,
-                emitter,
                 symbols[statement].class_declarations,
                 prefix_nodes=_class_header_nodes(statement),
             )
@@ -459,15 +461,9 @@ def _analyze_module(
                         relationships,
                     )
                     _calls(
+                        context,
                         member.body,
-                        declarations,
-                        aliases,
-                        module.name,
-                        module.path,
                         symbols[member].node_id,
-                        relationships,
-                        nodes,
-                        emitter,
                         symbols[member].class_declarations,
                         prefix_nodes=_signature_nodes(member),
                     )
@@ -615,15 +611,9 @@ def _imports(
 
 
 def _calls(
+    context: _ScopeContext,
     statements: list[ast.stmt],
-    declarations: dict[str, str],
-    aliases: dict[str, str],
-    module_name: str,
-    path: str,
     caller: str,
-    relationships: RelationshipAccumulator,
-    nodes: list[Node],
-    emitter: NodeEmitter,
     class_declarations: Mapping[str, str] | None = None,
     prefix_nodes: tuple[ast.AST, ...] = (),
 ) -> None:
@@ -634,43 +624,41 @@ def _calls(
         visitor.visit(statement)
     for candidate in visitor.calls:
         text = _expression_text(candidate.func)
-        target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
-        location = _location(path, candidate.func)
+        target = _resolve_call(text, context, class_declarations)
+        location = _location(context.path, candidate.func)
         if target is None:
-            emitter.unresolved(caller, text, location, nodes, relationships)
+            context.emitter.unresolved(caller, text, location, context.nodes, context.relationships)
         else:
-            relationships.add(caller, target, RelationshipKind.CALLS.value, location)
+            context.relationships.add(caller, target, RelationshipKind.CALLS.value, location)
     unresolved_references: list[tuple[str, Location]] = []
     resolved_texts: set[str] = set()
     for reference in visitor.references:
         text = _expression_text(reference)
-        target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
+        target = _resolve_call(text, context, class_declarations)
         if target is not None:
             resolved_texts.add(text)
-            relationships.add(
+            context.relationships.add(
                 caller,
                 target,
                 RelationshipKind.REFERENCES.value,
-                _location(path, reference),
+                _location(context.path, reference),
             )
         else:
-            unresolved_references.append((text, _location(path, reference)))
+            unresolved_references.append((text, _location(context.path, reference)))
     for text, location in unresolved_references:
         if any(resolved_text.startswith(text + ".") for resolved_text in resolved_texts):
             continue
-        emitter.unresolved(caller, text, location, nodes, relationships)
+        context.emitter.unresolved(caller, text, location, context.nodes, context.relationships)
 
 
 def _resolve_call(
     text: str,
-    declarations: dict[str, str],
-    aliases: dict[str, str],
-    module_name: str,
+    context: _ScopeContext,
     class_declarations: Mapping[str, str] | None,
 ) -> str | None:
     if "." not in text:
-        target_name = aliases.get(text, f"{module_name}.{text}")
-        return declarations.get(target_name)
+        target_name = context.aliases.get(text, f"{context.module_name}.{text}")
+        return context.declarations.get(target_name)
     head, _, tail = text.partition(".")
     if head == "self" and class_declarations is not None:
         # ``self`` is tied to the class statement that owns the caller, not to
@@ -678,10 +666,10 @@ def _resolve_call(
         # Resolve through that statement's method table so repeated method
         # names remain last-wins locally without leaking across class objects.
         return class_declarations.get(tail)
-    alias_target_name = aliases.get(head)
+    alias_target_name = context.aliases.get(head)
     if alias_target_name is not None:
-        return declarations.get(f"{alias_target_name}.{tail}")
-    return declarations.get(f"{module_name}.{text}")
+        return context.declarations.get(f"{alias_target_name}.{tail}")
+    return context.declarations.get(f"{context.module_name}.{text}")
 
 
 def _module_name(path: str) -> str:
