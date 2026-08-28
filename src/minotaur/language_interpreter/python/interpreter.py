@@ -36,6 +36,7 @@ from minotaur.language_interpreter.contract import (
     Diagnostic,
     DiagnosticCode,
 )
+from minotaur.language_interpreter.emission import NodeEmitter
 from minotaur.language_interpreter.python.discovery import discover_python_files
 from minotaur.language_interpreter.python.parsing import parse_python
 from minotaur.language_interpreter.source_text import LineIndex
@@ -240,7 +241,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
 
     relationships = RelationshipAccumulator()
     tally = _ImportTally()
-    seen_ids: set[str] = set()
+    emitter = NodeEmitter(NAMESPACE, "python")
     for module in modules:
         relationships.add(module.file_id, module.module_id, RelationshipKind.CONTAINS.value, None)
         _analyze_module(
@@ -250,7 +251,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             declarations,
             relationships,
             nodes,
-            seen_ids,
+            emitter,
             tally,
         )
 
@@ -379,10 +380,10 @@ def _analyze_module(
     declarations: dict[str, str],
     relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen_ids: set[str],
+    emitter: NodeEmitter,
     tally: _ImportTally,
 ) -> None:
-    aliases = _imports(module, modules, relationships, nodes, seen_ids, tally)
+    aliases = _imports(module, modules, relationships, nodes, emitter, tally)
     for symbol in symbols.values():
         relationships.add(
             symbol.container_id,
@@ -403,7 +404,7 @@ def _analyze_module(
         module.module_id,
         relationships,
         nodes,
-        seen_ids,
+        emitter,
     )
     for statement in module.tree.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -423,7 +424,7 @@ def _analyze_module(
                 symbols[statement].node_id,
                 relationships,
                 nodes,
-                seen_ids,
+                emitter,
                 prefix_nodes=_signature_nodes(statement),
             )
         elif isinstance(statement, ast.ClassDef):
@@ -454,7 +455,7 @@ def _analyze_module(
                 symbols[statement].node_id,
                 relationships,
                 nodes,
-                seen_ids,
+                emitter,
                 symbols[statement].class_declarations,
                 prefix_nodes=_class_header_nodes(statement),
             )
@@ -476,7 +477,7 @@ def _analyze_module(
                         symbols[member].node_id,
                         relationships,
                         nodes,
-                        seen_ids,
+                        emitter,
                         symbols[member].class_declarations,
                         prefix_nodes=_signature_nodes(member),
                     )
@@ -565,7 +566,7 @@ def _imports(
     modules: dict[str, _Module],
     relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen_ids: set[str],
+    emitter: NodeEmitter,
     tally: _ImportTally,
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
@@ -575,13 +576,12 @@ def _imports(
                 target = modules.get(alias.name)
                 if target is None:
                     tally.note_unresolved(alias.name, modules)
-                    _unresolved(
+                    emitter.unresolved(
                         module.module_id,
                         alias.name,
                         _location(module.path, statement),
-                        relationships,
                         nodes,
-                        seen_ids,
+                        relationships,
                     )
                 else:
                     tally.resolved += 1
@@ -602,13 +602,12 @@ def _imports(
                 resolved_target = declarations_for_module(modules, reference)
                 if resolved_target is None:
                     tally.note_unresolved(reference, modules)
-                    _unresolved(
+                    emitter.unresolved(
                         module.module_id,
                         reference,
                         _location(module.path, statement),
-                        relationships,
                         nodes,
-                        seen_ids,
+                        relationships,
                     )
                 else:
                     tally.resolved += 1
@@ -655,7 +654,7 @@ def _calls(
     caller: str,
     relationships: RelationshipAccumulator,
     nodes: list[Node],
-    seen_ids: set[str],
+    emitter: NodeEmitter,
     class_declarations: Mapping[str, str] | None = None,
     prefix_nodes: tuple[ast.AST, ...] = (),
 ) -> None:
@@ -669,7 +668,7 @@ def _calls(
         target = _resolve_call(text, declarations, aliases, module_name, class_declarations)
         location = _location(path, candidate.func)
         if target is None:
-            _unresolved(caller, text, location, relationships, nodes, seen_ids)
+            emitter.unresolved(caller, text, location, nodes, relationships)
         else:
             relationships.add(caller, target, RelationshipKind.CALLS.value, location)
     unresolved_references: list[tuple[str, Location]] = []
@@ -690,7 +689,7 @@ def _calls(
     for text, location in unresolved_references:
         if any(resolved_text.startswith(text + ".") for resolved_text in resolved_texts):
             continue
-        _unresolved(caller, text, location, relationships, nodes, seen_ids)
+        emitter.unresolved(caller, text, location, nodes, relationships)
 
 
 def _resolve_call(
@@ -714,37 +713,6 @@ def _resolve_call(
     if alias_target_name is not None:
         return declarations.get(f"{alias_target_name}.{tail}")
     return declarations.get(f"{module_name}.{text}")
-
-
-def _unresolved(
-    origin: str,
-    text: str,
-    location: Location,
-    relationships: RelationshipAccumulator,
-    nodes: list[Node],
-    seen_ids: set[str],
-) -> None:
-    identity = NodeIdentity(IdentityBasis.UNRESOLVED_REFERENCE, NAMESPACE, originating_node=origin)
-    node_id = compute_node_id(
-        identity,
-        node_class=NodeClass.UNRESOLVED_REFERENCE.value,
-        location=location,
-        reference_text=text,
-    )
-    if node_id not in seen_ids:
-        seen_ids.add(node_id)
-        nodes.append(
-            Node(
-                id=node_id,
-                identity=identity,
-                node_class=NodeClass.UNRESOLVED_REFERENCE,
-                label=text,
-                reference_text=text,
-                language="python",
-                location=location,
-            )
-        )
-    relationships.add(origin, node_id, RelationshipKind.REFERENCES.value, location)
 
 
 def _symbol_node(path: str, statement: ast.AST, label: str, kind: SymbolKind) -> Node:
