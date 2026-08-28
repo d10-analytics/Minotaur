@@ -32,8 +32,9 @@ from minotaur.graph_model.provenance import (
     SymbolKind,
 )
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
-from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.contract import AnalysisResult
 from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
+from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -66,45 +67,17 @@ class _Binding:
 
 def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
     """Analyze selected JavaScript files, retaining valid sibling results."""
-    diagnostics: list[Diagnostic] = []
     modules: list[_Module] = []
-    for path in sorted(files, key=lambda p: p.relative_to(workspace.root).as_posix()):
-        relative = path.relative_to(workspace.root).as_posix()
-        try:
-            content = path.read_bytes()
-            source = content.decode("utf-8")
-        except (OSError, UnicodeError) as error:
-            diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
-            continue
-        line_index = LineIndex(source)
-        try:
-            tree = esprima.parseModule(
-                source, options={"loc": True, "range": True, "tolerant": True}
-            )
-        except Exception as error:
-            diagnostics.append(
-                Diagnostic(
-                    DiagnosticCode.PARSE_ERROR,
-                    relative,
-                    str(error),
-                    _error_location(relative, line_index, error),
-                )
-            )
-            continue
-        errors = getattr(tree, "errors", ()) or ()
-        if errors:
-            parse_error = errors[0]
-            diagnostics.append(
-                Diagnostic(
-                    DiagnosticCode.PARSE_ERROR,
-                    relative,
-                    str(parse_error),
-                    _error_location(relative, line_index, parse_error),
-                )
-            )
-            continue
+    sources, diagnostics = read_and_parse(workspace, files, _parse_javascript)
+    for parsed in sources:
         modules.append(
-            _make_module(relative, source, tree, hashlib.sha256(content).hexdigest(), line_index)
+            _make_module(
+                parsed.relative,
+                parsed.source,
+                parsed.tree,
+                hashlib.sha256(parsed.content).hexdigest(),
+                LineIndex(parsed.source),
+            )
         )
 
     by_path = {module.path: module for module in modules}
@@ -1099,6 +1072,24 @@ def _error_location(path: str, line_index: LineIndex, error: Any) -> Location | 
             return None
         index = line_index.line_starts[line - 1] + max((column or 1) - 1, 0)
     return Location(path, Range(line_index.position(index), line_index.position(index)))
+
+
+def _parse_javascript(source: str, relative: str) -> Any:
+    """Parse JavaScript source and normalize tolerant-parser errors."""
+    line_index = LineIndex(source)
+    try:
+        tree = esprima.parseModule(
+            source, options={"loc": True, "range": True, "tolerant": True}
+        )
+    except Exception as error:
+        raise ParseFailure(str(error), _error_location(relative, line_index, error)) from error
+    errors = getattr(tree, "errors", ()) or ()
+    if errors:
+        parse_error = errors[0]
+        raise ParseFailure(
+            str(parse_error), _error_location(relative, line_index, parse_error)
+        )
+    return tree
 
 
 def _literal_text(node: Any) -> str:

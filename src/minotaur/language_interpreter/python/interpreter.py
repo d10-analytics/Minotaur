@@ -33,12 +33,10 @@ from minotaur.language_interpreter.contract import (
     IMPORTS_ROOT_MISMATCHED,
     IMPORTS_UNRESOLVED,
     AnalysisResult,
-    Diagnostic,
-    DiagnosticCode,
 )
 from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
 from minotaur.language_interpreter.python.discovery import discover_python_files
-from minotaur.language_interpreter.python.parsing import parse_python
+from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -200,34 +198,18 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
     layer: API callers may supply arbitrary order, but graph bytes and emitted
     diagnostics must not change merely because argument order changed.
     """
-    diagnostics: list[Diagnostic] = []
     modules: list[_Module] = []
     nodes: list[Node] = []
 
-    for file_path in sorted(files, key=lambda path: path.relative_to(workspace.root).as_posix()):
-        relative = file_path.relative_to(workspace.root).as_posix()
-        try:
-            content = file_path.read_bytes()
-            source = content.decode("utf-8")
-        except (OSError, UnicodeError) as error:
-            diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
-            continue
-        try:
-            parsed = parse_python(source, relative)
-        except SyntaxError as error:
-            diagnostics.append(
-                Diagnostic(
-                    DiagnosticCode.PARSE_ERROR,
-                    relative,
-                    error.msg,
-                    _syntax_location(relative, error),
-                )
-            )
-            continue
-        module = _make_module(relative, parsed.tree, source, LineIndex(source))
+    sources, diagnostics = read_and_parse(workspace, files, _parse_python)
+    for parsed in sources:
+        module = _make_module(parsed.relative, parsed.tree, parsed.source, LineIndex(parsed.source))
         modules.append(module)
         nodes.extend(
-            (_file_node(relative, hashlib.sha256(content).hexdigest()), _module_node(module))
+            (
+                _file_node(parsed.relative, hashlib.sha256(parsed.content).hexdigest()),
+                _module_node(module),
+            )
         )
 
     module_by_name = {module.name: module for module in modules}
@@ -772,6 +754,14 @@ def _syntax_location(path: str, error: SyntaxError) -> Location | None:
     line = error.lineno - 1
     column = max((error.offset or 1) - 1, 0)
     return Location(path, Range(Position(line, column), Position(line, column)))
+
+
+def _parse_python(source: str, relative: str) -> ast.Module:
+    """Parse Python source and normalize syntax failures for the reader."""
+    try:
+        return ast.parse(source, filename=relative, type_comments=True)
+    except SyntaxError as error:
+        raise ParseFailure(error.msg, _syntax_location(relative, error)) from error
 
 
 def _expression_text(expression: ast.expr) -> str:
