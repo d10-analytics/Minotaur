@@ -27,9 +27,7 @@ def test_read_and_parse_sorts_root_relative_paths_and_preserves_raw_bytes(tmp_pa
     assert diagnostics == []
     assert seen == ["a/source.py", "z/source.py"]
     assert [source.relative for source in sources] == ["a/source.py", "z/source.py"]
-    assert sources[1] == ParsedSource(
-        "z/source.py", b"z = 'caf\xc3\xa9'\n", "z = 'café'\n", "z"
-    )
+    assert sources[1] == ParsedSource("z/source.py", b"z = 'caf\xc3\xa9'\n", "z = 'café'\n", "z")
 
 
 def test_read_and_parse_reports_parse_failure_and_continues(tmp_path: Path) -> None:
