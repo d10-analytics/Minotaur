@@ -77,8 +77,9 @@ class _ScopeContext:
     emitter: NodeEmitter
     bound_names: frozenset[str] = frozenset()
     builtins: frozenset[str] = frozenset()
+    import_names: frozenset[str] = frozenset()
     receiver_name: str | None = None
-    static_method: bool = False
+    receiver_parameter: str | None = None
 
 
 @dataclass
@@ -160,19 +161,27 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # The callable expression is represented by the calls relationship;
         # suppress only its immediate head. Interior expressions (subscript
         # keys, conditionals, and f-string values) remain ordinary loads.
-        self._visit_callee_head(node.func)
+        self._visit_chain_interiors(node.func)
         for argument in node.args:
             self.visit(argument)
         for keyword in node.keywords:
             self.visit(keyword.value)
 
-    def _visit_callee_head(self, node: ast.expr) -> None:
-        """Visit callee interiors while omitting only the callable head."""
+    def _visit_chain_interiors(self, node: ast.expr) -> None:
+        """Visit a member chain's interiors while omitting its head identifiers.
+
+        One expression contributes one fact, labelled with its full text, so
+        neither a callee (``a.b().c.d()``) nor a load (``a.b().c.d``) records
+        the names it is built from. Everything that is not part of that head --
+        a nested call, a subscript key, a conditional -- remains an ordinary
+        expression and must still be traversed, which is why both paths share
+        this descent instead of stopping at the first non-attribute base.
+        """
         if isinstance(node, ast.Name):
             return
         if isinstance(node, ast.Attribute):
             if isinstance(node.value, (ast.Attribute, ast.Name)):
-                self._visit_callee_head(node.value)
+                self._visit_chain_interiors(node.value)
             else:
                 # A complex member base is an ordinary expression: retain its
                 # base identifier and interior names (obj[key].method()).
@@ -181,7 +190,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         if isinstance(node, ast.Subscript):
             # A direct subscript callee suppresses only its table head while
             # retaining keys such as ``handler`` as ordinary references.
-            self._visit_callee_head(node.value)
+            self._visit_chain_interiors(node.value)
             self.visit(node.slice)
             return
         self.visit(node)
@@ -336,18 +345,21 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._pop_scope()
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        head = _expression_text(node).partition(".")[0]
-        bound_names, global_names, shadow_names = self._scope_names()
-        if isinstance(node.ctx, ast.Load) and head not in bound_names:
-            self.references.append(node)
-            self.reference_bound_names[node] = bound_names
-            self.reference_global_names[node] = global_names
-            self.reference_shadow_names[node] = shadow_names
-        # Record only the outermost attribute in a chain. Non-attribute,
-        # non-name bases still need traversal so names in e.g. obj[key].attr
-        # remain visible.
-        if not isinstance(node.value, (ast.Attribute, ast.Name)):
+        if not isinstance(node.ctx, ast.Load):
+            # ``store.registry = {}`` and ``del store.registry`` record no
+            # member fact, but they still load the base object, which is an
+            # ordinary reference to it.
             self.visit(node.value)
+            return
+        bound_names, global_names, shadow_names = self._scope_names()
+        # Record only the outermost attribute of a chain; whether it is
+        # reportable at all is decided once, on its root identifier, where the
+        # facts are emitted. Interiors are traversed without being recorded.
+        self.references.append(node)
+        self.reference_bound_names[node] = bound_names
+        self.reference_global_names[node] = global_names
+        self.reference_shadow_names[node] = shadow_names
+        self._visit_chain_interiors(node)
 
 
 class _BindingCollector(ast.NodeVisitor):
@@ -355,6 +367,7 @@ class _BindingCollector(ast.NodeVisitor):
 
     def __init__(self) -> None:
         self.names: set[str] = set()
+        self.import_names: set[str] = set()
         self.global_names: set[str] = set()
         self.nonlocal_names: set[str] = set()
 
@@ -365,13 +378,16 @@ class _BindingCollector(ast.NodeVisitor):
         self.nonlocal_names.update(node.names)
 
     def visit_Import(self, node: ast.Import) -> None:
+        # Import bindings are static, not dynamic locals: they are collected
+        # apart from other binders so that a function-local import stays
+        # reportable instead of silencing every use of the imported name.
         for alias in node.names:
-            self.names.add(alias.asname or alias.name.partition(".")[0])
+            self.import_names.add(alias.asname or alias.name.partition(".")[0])
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         for alias in node.names:
             if alias.name != "*":
-                self.names.add(alias.asname or alias.name)
+                self.import_names.add(alias.asname or alias.name)
 
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -435,8 +451,14 @@ class _BindingCollector(ast.NodeVisitor):
             self.visit(expression)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        # Lambda parameters and body belong to the lambda scope.
-        return
+        # Lambda parameters and body belong to the lambda scope, but its
+        # defaults are evaluated in the enclosing one and can bind names there
+        # through an assignment expression.
+        for default in node.args.defaults:
+            self.visit(default)
+        for kw_default in node.args.kw_defaults:
+            if kw_default is not None:
+                self.visit(kw_default)
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         # Definition decorators, defaults, and annotations execute in the
@@ -482,6 +504,19 @@ def _argument_names(arguments: ast.arguments) -> set[str]:
 
 def _bound_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
     """Collect names bound by one function's lexical scope."""
+    return _scope_binders(statement)[0]
+
+
+def _scope_binders(
+    statement: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return one function's dynamic binders and its import-bound names.
+
+    A name bound only by an ``import`` statement is a static binding whose
+    target a later slice can resolve, so it is reported like a module-level
+    alias rather than suppressed as a dynamic local. A name that is both
+    imported and assigned stays a dynamic local.
+    """
     collector = _BindingCollector()
     collector.names.update(_argument_names(statement.args))
     collector.names.update(_type_param_names(statement))
@@ -489,7 +524,15 @@ def _bound_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset
         collector.visit(body_statement)
     collector.names.difference_update(collector.global_names)
     collector.names.update(collector.nonlocal_names)
-    return frozenset(collector.names)
+    return frozenset(collector.names), frozenset(collector.import_names - collector.names)
+
+
+def _module_import_names(statements: Iterable[ast.stmt]) -> frozenset[str]:
+    """Return the names bound by one module body's import statements."""
+    collector = _BindingCollector()
+    for statement in statements:
+        collector.visit(statement)
+    return frozenset(collector.import_names)
 
 
 def _global_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
@@ -504,25 +547,50 @@ def _global_names_in_statements(statements: Iterable[ast.stmt]) -> frozenset[str
     return frozenset(collector.global_names)
 
 
-def _method_receiver_name(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
-    """Return the conventional, unshadowed receiver for a class method."""
-    if _is_staticmethod(statement):
-        return None
+def _receiver_parameter_name(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """Return a method's receiver-shaped first parameter while it stays bound.
+
+    ``self`` and ``cls`` name a receiver even where they are not the *eligible*
+    receiver for the method's kind: a metaclass ``__call__(cls, ...)`` and a
+    ``@staticmethod`` taking ``self`` cannot resolve through a class, but the
+    parameter is not a dynamic local either, so its member expressions are
+    reported as unresolved rather than dropped. A parameter reassigned in the
+    body is an ordinary local again and yields ``None``.
+    """
     positional = (*statement.args.posonlyargs, *statement.args.args)
-    if not positional:
+    if not positional or positional[0].arg not in _RECEIVER_NAMES:
         return None
-    receiver = "cls" if _is_classmethod(statement) else "self"
-    if positional[0].arg != receiver:
-        return None
+    receiver = positional[0].arg
     collector = _BindingCollector()
     for body_statement in statement.body:
         collector.visit(body_statement)
-    if receiver in collector.names or receiver in collector.global_names:
+    if (
+        receiver in collector.names
+        or receiver in collector.import_names
+        or receiver in collector.global_names
+    ):
         return None
     return receiver
 
 
+def _eligible_receiver_name(
+    statement: ast.FunctionDef | ast.AsyncFunctionDef, receiver_parameter: str | None
+) -> str | None:
+    """Return the receiver that resolves through the owning class, if any."""
+    if receiver_parameter is None or _is_staticmethod(statement):
+        return None
+    expected = "cls" if _is_classmethod(statement) else "self"
+    return receiver_parameter if receiver_parameter == expected else None
+
+
 def _is_classmethod(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether a method receives its class instead of an instance.
+
+    ``__new__``, ``__init_subclass__`` and ``__class_getitem__`` receive ``cls``
+    implicitly, so an undecorated definition of one is a class receiver too.
+    """
+    if statement.name in _IMPLICIT_CLASSMETHODS:
+        return True
     return any(
         isinstance(decorator, ast.Name)
         and decorator.id == "classmethod"
@@ -540,6 +608,10 @@ def _is_staticmethod(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         and decorator.attr == "staticmethod"
         for decorator in statement.decorator_list
     )
+
+
+_RECEIVER_NAMES = frozenset({"self", "cls"})
+_IMPLICIT_CLASSMETHODS = frozenset({"__new__", "__init_subclass__", "__class_getitem__"})
 
 
 def _target_names(target: ast.expr) -> frozenset[str]:
@@ -787,6 +859,7 @@ def _analyze_module(
     builtin_names: frozenset[str],
 ) -> None:
     aliases = _imports(module, modules, declarations, relationships, nodes, emitter, tally)
+    module_imports = _module_import_names(module.tree.body)
     context = _ScopeContext(
         declarations,
         aliases,
@@ -797,6 +870,7 @@ def _analyze_module(
         emitter,
         frozenset(),
         builtin_names,
+        module_imports,
     )
     for symbol in symbols.values():
         relationships.add(
@@ -831,8 +905,13 @@ def _analyze_module(
                 symbols[statement].node_id,
                 prefix_nodes=_signature_nodes(statement),
             )
+            binders, local_imports = _scope_binders(statement)
             _calls(
-                replace(context, bound_names=_bound_names(statement)),
+                replace(
+                    context,
+                    bound_names=binders,
+                    import_names=module_imports | local_imports,
+                ),
                 statement.body,
                 symbols[statement].node_id,
             )
@@ -871,11 +950,14 @@ def _analyze_module(
                         module.path,
                         relationships,
                     )
+                    binders, local_imports = _scope_binders(member)
+                    receiver_parameter = _receiver_parameter_name(member)
                     method_context = replace(
                         context,
-                        bound_names=_bound_names(member) | frozenset(_type_param_names(statement)),
-                        receiver_name=_method_receiver_name(member),
-                        static_method=_is_staticmethod(member),
+                        bound_names=binders | frozenset(_type_param_names(statement)),
+                        import_names=module_imports | local_imports,
+                        receiver_name=_eligible_receiver_name(member, receiver_parameter),
+                        receiver_parameter=receiver_parameter,
                     )
                     # Method headers execute in the class's enclosing scope,
                     # while method bodies use their own lexical binders.
@@ -1055,102 +1137,140 @@ def _calls(
     for statement in statements:
         visitor.visit(statement)
     for candidate in visitor.calls:
-        text = _expression_text(candidate.func)
-        bound_names = (
-            context.bound_names | visitor.call_bound_names[candidate]
-        ) - visitor.call_global_names[candidate]
-        call_context = replace(
-            context,
-            bound_names=bound_names,
-            receiver_name=(
-                None
-                if context.receiver_name in visitor.call_shadow_names[candidate]
-                else context.receiver_name
+        _emit_expression_facts(
+            _scoped_context(
+                context,
+                context.bound_names | visitor.call_bound_names[candidate],
+                visitor.call_global_names[candidate],
+                visitor.call_shadow_names[candidate],
             ),
+            caller,
+            candidate.func,
+            _location(context.path, candidate.func),
+            class_declarations,
+            RelationshipKind.CALLS.value,
         )
-        target = _resolve_call(text, call_context, class_declarations)
-        location = _location(context.path, candidate.func)
-        head = text.partition(".")[0]
-        if target is None and _suppress_builtin_call(candidate.func, call_context):
-            continue
-        if (
-            target is None
-            and head in call_context.bound_names
-            and head != call_context.receiver_name
-            and not (
-                call_context.static_method
-                and head in {"self", "cls"}
-                and head not in visitor.call_shadow_names[candidate]
-            )
-        ):
-            # A local or parameter call is dynamic. This also intentionally
-            # wins over a module import alias shadowed by the local binding.
-            continue
-        if target is None:
-            unresolved_text = (
-                _base_identifier(candidate.func)
-                if (
-                    call_context.receiver_name is None
-                    and head in {"self", "cls"}
-                    and isinstance(candidate.func, ast.Attribute)
-                )
-                else text
-            ) or text
-            context.emitter.unresolved(
-                caller,
-                unresolved_text,
-                location,
-                context.nodes,
-                context.relationships,
-            )
-        else:
-            context.relationships.add(caller, target, RelationshipKind.CALLS.value, location)
-    unresolved_references: list[tuple[str, Location]] = []
     for reference in visitor.references:
-        text = _expression_text(reference)
-        reference_context = replace(
-            context,
-            bound_names=(context.bound_names | visitor.reference_bound_names[reference])
-            - visitor.reference_global_names[reference],
-            receiver_name=(
-                None
-                if context.receiver_name in visitor.reference_shadow_names[reference]
-                else context.receiver_name
+        _emit_expression_facts(
+            _scoped_context(
+                context,
+                context.bound_names | visitor.reference_bound_names[reference],
+                visitor.reference_global_names[reference],
+                visitor.reference_shadow_names[reference],
             ),
+            caller,
+            reference,
+            _location(context.path, reference),
+            class_declarations,
+            RelationshipKind.REFERENCES.value,
         )
-        target = _resolve_call(text, reference_context, class_declarations)
-        head = text.partition(".")[0]
-        if target is None and head in reference_context.bound_names:
-            continue
-        if target is None and head in reference_context.builtins:
-            continue
-        if target is not None:
-            context.relationships.add(
-                caller,
-                target,
-                RelationshipKind.REFERENCES.value,
-                _location(context.path, reference),
-            )
-        else:
-            unresolved_text = (
-                _base_identifier(reference) if isinstance(reference, ast.Attribute) else text
-            ) or text.partition(".")[0]
-            unresolved_references.append((unresolved_text, _location(context.path, reference)))
-    for text, location in unresolved_references:
-        context.emitter.unresolved(caller, text, location, context.nodes, context.relationships)
 
 
-def _suppress_builtin_call(expression: ast.expr, context: _ScopeContext) -> bool:
-    """Suppress builtin calls while retaining meaningful member bases."""
-    if isinstance(expression, ast.Name):
-        return expression.id in context.builtins
-    # ``str.foo(x)`` is a builtin member expression, but ``super().run()``
-    # retains its outer unresolved fact because its base is a nested call.
-    return (
-        isinstance(expression, ast.Attribute)
-        and isinstance(expression.value, ast.Name)
-        and (expression.value.id in context.builtins)
+def _scoped_context(
+    context: _ScopeContext,
+    bound_names: frozenset[str],
+    global_names: frozenset[str],
+    shadow_names: frozenset[str],
+) -> _ScopeContext:
+    """Narrow one scope's context to the binders visible at one expression."""
+    return replace(
+        context,
+        bound_names=bound_names - global_names,
+        receiver_name=None if context.receiver_name in shadow_names else context.receiver_name,
+        receiver_parameter=(
+            None if context.receiver_parameter in shadow_names else context.receiver_parameter
+        ),
     )
+
+
+def _emit_expression_facts(
+    context: _ScopeContext,
+    caller: str,
+    expression: ast.expr,
+    location: Location,
+    class_declarations: Mapping[str, str] | None,
+    resolved_kind: str,
+) -> None:
+    """Emit the facts one callee or load expression contributes.
+
+    Calls and non-call loads state the same thing about a name, so both go
+    through this one function and cannot drift apart: ``self.on_click`` and
+    ``self.on_click()`` are either both resolved or both unresolved.
+
+    An expression that resolves is exactly one edge. Otherwise the decision is
+    made on the expression's root identifier -- never on the text before its
+    first dot, which for ``items[0].name`` is ``items[0]`` -- and a dynamic
+    local or a builtin yields nothing. What remains is reported as one
+    unresolved node labelled with the expression's full text, preceded by a
+    resolved reference to the root when the root itself is known: ``Cfg.DEFAULT``
+    is both a use of the imported ``Cfg`` and an unknown member of it. The root
+    is guard input only and is never the label of an emitted node.
+    """
+    text = _expression_text(expression)
+    target = _resolve_call(text, context, class_declarations)
+    if target is not None:
+        context.relationships.add(caller, target, resolved_kind, location)
+        return
+    root = _base_identifier(expression)
+    if root is not None:
+        if _is_dynamic_local(root, expression, context):
+            return
+        if _suppress_builtin(expression, context):
+            return
+        root_target = _resolve_call(root, context, class_declarations) if root != text else None
+        if root_target is not None:
+            context.relationships.add(
+                caller, root_target, RelationshipKind.REFERENCES.value, location
+            )
+    context.emitter.unresolved(caller, text, location, context.nodes, context.relationships)
+
+
+def _is_dynamic_local(root: str, expression: ast.expr, context: _ScopeContext) -> bool:
+    """Whether an unresolved expression is rooted in a local binding.
+
+    A call or load through a local name says nothing static about the
+    workspace. The exception is a member expression rooted in this scope's
+    receiver-shaped parameter, whether or not that parameter is the eligible
+    receiver: ``self.on_click`` in a class without that method, a
+    ``@staticmethod`` taking ``self``, and a metaclass ``__call__(cls, ...)``
+    all name a member that cannot be resolved yet remains worth reporting.
+    The bare parameter itself (``self``, ``cls()``) is an ordinary local.
+    """
+    if root not in context.bound_names:
+        return False
+    if isinstance(expression, ast.Name):
+        return True
+    return root not in (context.receiver_name, context.receiver_parameter)
+
+
+def _suppress_builtin(expression: ast.expr, context: _ScopeContext) -> bool:
+    """Suppress builtin uses while retaining meaningful member bases.
+
+    ``str.foo(x)`` is a builtin member expression, but ``super().run()``
+    retains its outer unresolved fact because its base is a nested call, and an
+    imported name that happens to shadow a builtin (``from externallib import
+    list``) is a workspace dependency rather than a builtin.
+    """
+    root = _attribute_root_name(expression)
+    return (
+        root is not None
+        and root in context.builtins
+        and root not in context.aliases
+        and root not in context.import_names
+    )
+
+
+def _attribute_root_name(expression: ast.expr) -> str | None:
+    """Return the root identifier of a pure name-and-attribute chain.
+
+    Unlike ``_base_identifier`` this stops at a call or subscript, because
+    ``super().run`` is headed by a call result rather than by ``super``.
+    """
+    if isinstance(expression, ast.Name):
+        return expression.id
+    if isinstance(expression, ast.Attribute):
+        return _attribute_root_name(expression.value)
+    return None
 
 
 def _base_identifier(expression: ast.expr) -> str | None:
