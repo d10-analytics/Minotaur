@@ -77,6 +77,7 @@ class _ScopeContext:
     emitter: NodeEmitter
     bound_names: frozenset[str] = frozenset()
     builtins: frozenset[str] = frozenset()
+    receiver_name: str | None = None
 
 
 @dataclass
@@ -140,11 +141,21 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.calls: list[ast.Call] = []
         self.references: list[ast.Name | ast.Attribute] = []
         self._scope_bound_names: list[frozenset[str]] = []
+        self._scope_global_names: list[frozenset[str]] = []
+        self._scope_shadow_names: list[frozenset[str]] = []
         self.call_bound_names: dict[ast.Call, frozenset[str]] = {}
+        self.call_global_names: dict[ast.Call, frozenset[str]] = {}
+        self.call_shadow_names: dict[ast.Call, frozenset[str]] = {}
+        self.reference_bound_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
+        self.reference_global_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
+        self.reference_shadow_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
-        self.call_bound_names[node] = frozenset().union(*self._scope_bound_names)
+        bound_names, global_names, shadow_names = self._scope_names()
+        self.call_bound_names[node] = bound_names
+        self.call_global_names[node] = global_names
+        self.call_shadow_names[node] = shadow_names
         # The callable expression is represented by the calls relationship;
         # suppress only its immediate head. Interior expressions (subscript
         # keys, conditionals, and f-string values) remain ordinary loads.
@@ -175,28 +186,32 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
-        if isinstance(node.ctx, ast.Load) and not any(
-            node.id in bound_names for bound_names in self._scope_bound_names
-        ):
+        bound_names, global_names, shadow_names = self._scope_names()
+        if isinstance(node.ctx, ast.Load) and node.id not in bound_names:
             self.references.append(node)
+            self.reference_bound_names[node] = bound_names
+            self.reference_global_names[node] = global_names
+            self.reference_shadow_names[node] = shadow_names
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._scope_bound_names.append(frozenset(_type_param_names(node)))
+        self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
         self._visit_definition_header(node)
-        self._scope_bound_names.pop()
-        self._scope_bound_names.append(_bound_names(node))
+        self._pop_scope()
+        bound_names = _bound_names(node)
+        self._push_scope(bound_names, _global_names(node), bound_names)
         for statement in node.body:
             self.visit(statement)
-        self._scope_bound_names.pop()
+        self._pop_scope()
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._scope_bound_names.append(frozenset(_type_param_names(node)))
+        self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
         self._visit_definition_header(node)
-        self._scope_bound_names.pop()
-        self._scope_bound_names.append(_bound_names(node))
+        self._pop_scope()
+        bound_names = _bound_names(node)
+        self._push_scope(bound_names, _global_names(node), bound_names)
         for statement in node.body:
             self.visit(statement)
-        self._scope_bound_names.pop()
+        self._pop_scope()
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for expression in _signature_nodes(node):
@@ -209,20 +224,79 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             if kw_default is not None:
                 self.visit(kw_default)
         bound_names = frozenset(_argument_names(node.args))
-        self._scope_bound_names.append(bound_names)
+        self._push_scope(bound_names, frozenset(), bound_names)
         self.visit(node.body)
+        self._pop_scope()
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, (node.key, node.value))
+
+    def _visit_comprehension(
+        self,
+        generators: list[ast.comprehension],
+        result_expressions: tuple[ast.expr, ...],
+    ) -> None:
+        if not generators:
+            for expression in result_expressions:
+                self.visit(expression)
+            return
+        # The first iterable is evaluated in the enclosing scope. Subsequent
+        # iterables, filters, and the result expression see comprehension
+        # targets, which are local to the comprehension.
+        self.visit(generators[0].iter)
+        self._push_scope(frozenset(_target_names(generators[0].target)), frozenset(), frozenset())
+        for condition in generators[0].ifs:
+            self.visit(condition)
+        for generator in generators[1:]:
+            self.visit(generator.iter)
+            self._scope_bound_names[-1] |= _target_names(generator.target)
+            self._scope_shadow_names[-1] |= _target_names(generator.target)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for expression in result_expressions:
+            self.visit(expression)
+        self._pop_scope()
+
+    def _push_scope(
+        self,
+        bound_names: frozenset[str],
+        global_names: frozenset[str],
+        shadow_names: frozenset[str],
+    ) -> None:
+        self._scope_bound_names.append(bound_names)
+        self._scope_global_names.append(global_names)
+        self._scope_shadow_names.append(shadow_names)
+
+    def _pop_scope(self) -> None:
         self._scope_bound_names.pop()
+        self._scope_global_names.pop()
+        self._scope_shadow_names.pop()
+
+    def _scope_names(self) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+        bound_names = frozenset().union(*self._scope_bound_names)
+        global_names = frozenset().union(*self._scope_global_names)
+        shadow_names = frozenset().union(*self._scope_shadow_names)
+        return bound_names - global_names, global_names, shadow_names | global_names
 
     def visit_TypeAlias(self, node: ast.AST) -> None:
         # PEP 695 type parameters are scoped to the alias expression only;
         # they must not suppress a same-named load later in the module.
         value = getattr(node, "value", None)
         if isinstance(value, ast.AST):
-            self._scope_bound_names.append(frozenset(_type_param_names(node)))
+            self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
             for expression in _type_param_expressions(node):
                 self.visit(expression)
             self.visit(value)
-            self._scope_bound_names.pop()
+            self._pop_scope()
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         # A nested class body executes while the enclosing scope is active, but
@@ -230,20 +304,22 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # this visitor's ownership. The class header (decorators, bases, and
         # keywords such as ``metaclass=``) is evaluated in the enclosing scope
         # as well, so a base class is a real dependency of that scope.
-        self._scope_bound_names.append(frozenset(_type_param_names(node)))
+        self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
         for header in _class_header_nodes(node):
             self.visit(header)
         for statement in node.body:
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.visit(statement)
-        self._scope_bound_names.pop()
+        self._pop_scope()
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         head = _expression_text(node).partition(".")[0]
-        if isinstance(node.ctx, ast.Load) and not any(
-            head in bound_names for bound_names in self._scope_bound_names
-        ):
+        bound_names, global_names, shadow_names = self._scope_names()
+        if isinstance(node.ctx, ast.Load) and head not in bound_names:
             self.references.append(node)
+            self.reference_bound_names[node] = bound_names
+            self.reference_global_names[node] = global_names
+            self.reference_shadow_names[node] = shadow_names
         # Record only the outermost attribute in a chain. Non-attribute,
         # non-name bases still need traversal so names in e.g. obj[key].attr
         # remain visible.
@@ -259,15 +335,33 @@ class _BindingCollector(ast.NodeVisitor):
         self.global_names: set[str] = set()
         self.nonlocal_names: set[str] = set()
 
-    def visit_Name(self, node: ast.Name) -> None:
-        if isinstance(node.ctx, ast.Store):
-            self.names.add(node.id)
-
     def visit_Global(self, node: ast.Global) -> None:
         self.global_names.update(node.names)
 
     def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
         self.nonlocal_names.update(node.names)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.names.add(alias.asname or alias.name.partition(".")[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name != "*":
+                self.names.add(alias.asname or alias.name)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.names.add(node.id)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        for case in node.cases:
+            self.names.update(_pattern_capture_names(case.pattern))
+            if case.guard is not None:
+                self.visit(case.guard)
+            for statement in case.body:
+                self.visit(statement)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if node.name is not None:
@@ -346,6 +440,77 @@ def _bound_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset
     collector.names.difference_update(collector.global_names)
     collector.names.update(collector.nonlocal_names)
     return frozenset(collector.names)
+
+
+def _global_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
+    """Collect names declared global by one function or nested function."""
+    collector = _BindingCollector()
+    for body_statement in statement.body:
+        collector.visit(body_statement)
+    return frozenset(collector.global_names)
+
+
+def _method_receiver_name(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """Return the conventional, unshadowed receiver for a class method."""
+    positional = (*statement.args.posonlyargs, *statement.args.args)
+    if not positional:
+        return None
+    receiver = "cls" if _is_classmethod(statement) else "self"
+    if positional[0].arg != receiver:
+        return None
+    collector = _BindingCollector()
+    for body_statement in statement.body:
+        collector.visit(body_statement)
+    if receiver in collector.names or receiver in collector.global_names:
+        return None
+    return receiver
+
+
+def _is_classmethod(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return any(
+        isinstance(decorator, ast.Name)
+        and decorator.id == "classmethod"
+        or isinstance(decorator, ast.Attribute)
+        and decorator.attr == "classmethod"
+        for decorator in statement.decorator_list
+    )
+
+
+def _target_names(target: ast.expr) -> frozenset[str]:
+    """Return names bound by a comprehension target."""
+    names: set[str] = set()
+    for node in ast.walk(target):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+    return frozenset(names)
+
+
+def _pattern_capture_names(pattern: ast.pattern) -> frozenset[str]:
+    """Return all names captured by a structural-pattern case."""
+    names: set[str] = set()
+    if isinstance(pattern, ast.MatchAs):
+        if pattern.name is not None:
+            names.add(pattern.name)
+        if pattern.pattern is not None:
+            names.update(_pattern_capture_names(pattern.pattern))
+    elif isinstance(pattern, ast.MatchStar):
+        if pattern.name is not None:
+            names.add(pattern.name)
+    elif isinstance(pattern, ast.MatchMapping):
+        if pattern.rest is not None:
+            names.add(pattern.rest)
+        for nested in pattern.patterns:
+            names.update(_pattern_capture_names(nested))
+    elif isinstance(pattern, ast.MatchSequence):
+        for nested in pattern.patterns:
+            names.update(_pattern_capture_names(nested))
+    elif isinstance(pattern, ast.MatchClass):
+        for nested in (*pattern.patterns, *pattern.kwd_patterns):
+            names.update(_pattern_capture_names(nested))
+    elif isinstance(pattern, ast.MatchOr):
+        for nested in pattern.patterns:
+            names.update(_pattern_capture_names(nested))
+    return frozenset(names)
 
 
 def analyze_python_workspace(root: Path) -> AnalysisResult:
@@ -643,6 +808,7 @@ def _analyze_module(
                     method_context = replace(
                         context,
                         bound_names=_bound_names(member) | frozenset(_type_param_names(statement)),
+                        receiver_name=_method_receiver_name(member),
                     )
                     # Method headers execute in the class's enclosing scope,
                     # while method bodies use their own lexical binders.
@@ -823,9 +989,17 @@ def _calls(
         visitor.visit(statement)
     for candidate in visitor.calls:
         text = _expression_text(candidate.func)
+        bound_names = (
+            context.bound_names | visitor.call_bound_names[candidate]
+        ) - visitor.call_global_names[candidate]
         call_context = replace(
             context,
-            bound_names=context.bound_names | visitor.call_bound_names[candidate],
+            bound_names=bound_names,
+            receiver_name=(
+                None
+                if context.receiver_name in visitor.call_shadow_names[candidate]
+                else context.receiver_name
+            ),
         )
         target = _resolve_call(text, call_context, class_declarations)
         location = _location(context.path, candidate.func)
@@ -843,11 +1017,23 @@ def _calls(
     unresolved_references: list[tuple[str, Location]] = []
     for reference in visitor.references:
         text = _expression_text(reference)
-        target = _resolve_call(text, context, class_declarations)
+        reference_context = replace(
+            context,
+            bound_names=(
+                context.bound_names | visitor.reference_bound_names[reference]
+            )
+            - visitor.reference_global_names[reference],
+            receiver_name=(
+                None
+                if context.receiver_name in visitor.reference_shadow_names[reference]
+                else context.receiver_name
+            ),
+        )
+        target = _resolve_call(text, reference_context, class_declarations)
         head = text.partition(".")[0]
-        if target is None and head in context.bound_names:
+        if target is None and head in reference_context.bound_names:
             continue
-        if target is None and head in context.builtins:
+        if target is None and head in reference_context.builtins:
             continue
         if target is not None:
             context.relationships.add(
@@ -901,7 +1087,7 @@ def _resolve_call(
         target_name = context.aliases.get(text, f"{context.module_name}.{text}")
         return context.declarations.get(target_name)
     _, _, tail = text.partition(".")
-    if head in {"self", "cls"} and class_declarations is not None:
+    if head == context.receiver_name and class_declarations is not None:
         # ``self`` is tied to the class statement that owns the caller, not to
         # whichever same-named class was assigned to the module name last.
         # Resolve through that statement's method table so repeated method
