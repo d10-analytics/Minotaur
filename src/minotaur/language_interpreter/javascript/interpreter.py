@@ -1078,17 +1078,13 @@ def _parse_javascript(source: str, relative: str) -> Any:
     """Parse JavaScript source and normalize tolerant-parser errors."""
     line_index = LineIndex(source)
     try:
-        tree = esprima.parseModule(
-            source, options={"loc": True, "range": True, "tolerant": True}
-        )
+        tree = esprima.parseModule(source, options={"loc": True, "range": True, "tolerant": True})
     except Exception as error:
         raise ParseFailure(str(error), _error_location(relative, line_index, error)) from error
     errors = getattr(tree, "errors", ()) or ()
     if errors:
         parse_error = errors[0]
-        raise ParseFailure(
-            str(parse_error), _error_location(relative, line_index, parse_error)
-        )
+        raise ParseFailure(str(parse_error), _error_location(relative, line_index, parse_error))
     return tree
 
 
