@@ -1006,7 +1006,12 @@ def test_staticmethod_self_parameter_is_not_an_instance_receiver(tmp_path: Path)
         "        return 1\n"
         "    @staticmethod\n"
         "    def invoke(self):\n"
-        "        return self.helper()\n",
+        "        return self.helper()\n"
+        "    @staticmethod\n"
+        "    def capture(self):\n"
+        "        def nested():\n"
+        "            return self.helper()\n"
+        "        return nested()\n",
     )
 
     result = analyze_python_workspace(tmp_path)
@@ -1015,15 +1020,24 @@ def test_staticmethod_self_parameter_is_not_an_instance_receiver(tmp_path: Path)
         (relationship.source, relationship.target, relationship.kind)
         for relationship in result.document.relationships
     }
-    unresolved = {
-        node.reference_text
-        for node in result.document.nodes
-        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
-    }
+    unresolved = [
+        node for node in result.document.nodes if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    ]
 
     invoke = _node_id(result, "app.Runner.invoke")
+    capture = _node_id(result, "app.Runner.capture")
     assert (invoke, helper, RelationshipKind.CALLS.value) not in relationships
-    assert "self" in unresolved
+    assert (capture, helper, RelationshipKind.CALLS.value) not in relationships
+    # A closure over a staticmethod's ``self`` parameter is the same fact one
+    # frame down: an unresolved receiver-shaped call, never a class receiver.
+    assert {node.reference_text for node in unresolved} == {"self"}
+    assert {
+        location.range.start.line
+        for node in unresolved
+        for relationship in result.document.relationships
+        if relationship.target == node.id
+        for location in relationship.evidence[0].locations
+    } == {5, 9}
 
 
 def test_staticmethod_nested_receiver_like_scopes_are_not_class_receivers(
@@ -1057,6 +1071,95 @@ def test_staticmethod_nested_receiver_like_scopes_are_not_class_receivers(
     }
 
     assert (invoke, helper, RelationshipKind.CALLS.value) not in relationships
+    assert not unresolved.intersection({"self", "self.helper", "cls", "cls.helper"})
+
+
+def test_closures_inherit_valid_instance_and_class_receivers(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def outer(self, items):\n"
+        "        def nested():\n"
+        "            def deeper():\n"
+        "                return [self.helper() for item in items]\n"
+        "            return deeper(), self.helper\n"
+        "        callback = lambda: self.helper()\n"
+        "        return nested(), callback()\n"
+        "    @classmethod\n"
+        "    def class_outer(cls):\n"
+        "        def nested():\n"
+        "            return cls.helper()\n"
+        "        callback = lambda: cls.helper()\n"
+        "        return nested(), callback()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "app.Runner.helper")
+    outer = _node_id(result, "app.Runner.outer")
+    class_outer = _node_id(result, "app.Runner.class_outer")
+    lines_by_edge = {
+        (relationship.source, relationship.kind): {
+            location.range.start.line for location in relationship.evidence[0].locations
+        }
+        for relationship in result.document.relationships
+        if relationship.target == helper
+        and relationship.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+    }
+
+    # Every closure use is attributed to the enclosing emitted method, whose
+    # receiver it captures unshadowed.
+    assert lines_by_edge == {
+        (outer, RelationshipKind.CALLS.value): {6, 8},
+        (outer, RelationshipKind.REFERENCES.value): {7},
+        (class_outer, RelationshipKind.CALLS.value): {13, 14},
+    }
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert not unresolved.intersection({"self", "self.helper", "cls", "cls.helper"})
+
+
+def test_nested_scopes_that_rebind_the_receiver_do_not_inherit_it(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Runner:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def outer(self):\n"
+        "        def nested(self):\n"
+        "            return self.helper()\n"
+        "        def rebound():\n"
+        "            self = object()\n"
+        "            return self.helper()\n"
+        "        callback = lambda cls: cls.helper()\n"
+        "        return nested(self), rebound(), callback(Runner)\n"
+        "    @classmethod\n"
+        "    def class_outer(cls):\n"
+        "        def nested(cls):\n"
+        "            return cls.helper()\n"
+        "        callback = lambda self: self.helper()\n"
+        "        return nested(cls), callback(cls)\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "app.Runner.helper")
+    assert not [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.target == helper
+        and relationship.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+    ]
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
     assert not unresolved.intersection({"self", "self.helper", "cls", "cls.helper"})
 
 
