@@ -60,8 +60,8 @@ location, coerce malformed coordinates, or substitute a local absolute path.
 Every node has an opaque `id`, a required `identity` descriptor, a
 `node_class`, and a non-empty display `label`.
 
-Interpreter labels use dotted qualified names whose final segment is the bare
-declaration name.
+Symbol labels emitted by language interpreters use dotted qualified names whose
+final segment is the bare declaration name.
 
 ```json
 {
