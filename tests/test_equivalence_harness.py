@@ -29,8 +29,10 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # (same-name definition attribution semantics) -> 3e70c17 (same-named classes
 # keep self-call resolution within their own class statement) -> 68df533
 # (unresolved non-call reference emission) -> 7043ae2 (neutral producer for
-# empty selections) -> e66869b (lexical suppression, builtins suppression, member-base rule).
-BASELINE_COMMIT = "e66869b6c2bb5edb86b76e4cd22d60b0c5fda8b6"
+# empty selections) -> e66869b (lexical suppression, builtins suppression, member-base rule)
+# -> ad00d41 (nested-scope precedence, receiver shadowing, and closure receiver
+# inheritance repairs).
+BASELINE_COMMIT = "ad00d41c9b5d7ebb274638b370e71625f51e7345"
 
 
 @pytest.fixture(scope="session")
