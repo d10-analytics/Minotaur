@@ -1611,6 +1611,62 @@ def test_imported_name_that_shadows_a_builtin_is_not_suppressed(tmp_path: Path) 
     assert _unresolved_by_source(result)["app.use"] == {"list"}
 
 
+def test_module_named_after_a_builtin_does_not_exempt_that_builtin(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/list.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from pkg.list import helper\n\ndef use():\n    return list.foo, list()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # Importing *from* ``pkg.list`` binds ``helper``, not ``list``. The member
+    # load is an ordinary builtin use and is suppressed, and the bare call
+    # resolves through the module shorthand: neither leaves the builtin behind
+    # as an unresolved workspace dependency.
+    assert "app.use" not in _unresolved_by_source(result)
+
+
+def test_nested_scope_import_of_a_builtin_name_is_not_suppressed(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    def inner():\n"
+        "        from externallib import list\n\n"
+        "        return list()\n"
+        "    return inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # A nested scope binds imports exactly as a top-level one does; losing them
+    # there would silently drop the dependency one frame down.
+    assert _unresolved_by_source(result)["app.outer"] == {"list"}
+
+
+def test_nested_scope_import_of_a_workspace_name_stays_reportable(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    def inner():\n"
+        "        from library import helper\n\n"
+        "        return helper()\n"
+        "    return inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # Import bindings are not dynamic locals at any depth, and resolving them
+    # is a later slice's work: the call is reported, not dropped and not
+    # resolved through a module-level alias that does not exist.
+    assert _unresolved_by_source(result)["app.outer"] == {"helper"}
+    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
+
+
 def test_lambda_default_walrus_binds_the_enclosing_function(tmp_path: Path) -> None:
     _write(
         tmp_path,
