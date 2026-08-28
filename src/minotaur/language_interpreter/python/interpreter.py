@@ -29,7 +29,15 @@ from minotaur.graph_model.provenance import (
     SymbolKind,
 )
 from minotaur.graph_model.relationship import Relationship
-from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.contract import (
+    IMPORT_ROOT_HINT,
+    IMPORTS_RESOLVED,
+    IMPORTS_ROOT_MISMATCHED,
+    IMPORTS_UNRESOLVED,
+    AnalysisResult,
+    Diagnostic,
+    DiagnosticCode,
+)
 from minotaur.language_interpreter.python.discovery import discover_python_files
 from minotaur.language_interpreter.python.parsing import parse_python
 from minotaur.language_interpreter.source_text import LineIndex
@@ -261,10 +269,10 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             # Flat keys: extension namespaces hold scalar-valued objects.
             extensions={
                 "minotaur-python": {
-                    "imports_resolved": tally.resolved,
-                    "imports_unresolved": tally.unresolved,
-                    "imports_root_mismatched": tally.root_mismatched,
-                    **({"import_root_hint": tally.root_hint} if tally.root_hint else {}),
+                    IMPORTS_RESOLVED: tally.resolved,
+                    IMPORTS_UNRESOLVED: tally.unresolved,
+                    IMPORTS_ROOT_MISMATCHED: tally.root_mismatched,
+                    **({IMPORT_ROOT_HINT: tally.root_hint} if tally.root_hint else {}),
                 }
             },
         ),

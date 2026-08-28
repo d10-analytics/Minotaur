@@ -8,6 +8,11 @@ from enum import Enum
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import Location
 
+IMPORTS_RESOLVED = "imports_resolved"
+IMPORTS_UNRESOLVED = "imports_unresolved"
+IMPORTS_ROOT_MISMATCHED = "imports_root_mismatched"
+IMPORT_ROOT_HINT = "import_root_hint"
+
 
 class DiagnosticCode(str, Enum):
     """Conditions that prevent a source file from being fully interpreted."""
