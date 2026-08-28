@@ -53,6 +53,7 @@ class _Module:
     tree: ast.Module
     source: str
     line_index: LineIndex
+    location: Location
     file_id: str
     module_id: str
 
@@ -148,12 +149,6 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
             self.references.append(node)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.generic_visit(node)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self.generic_visit(node)
-
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         # A nested class body executes while the enclosing scope is active, but
         # methods of that class execute in their own scope and remain outside
@@ -165,9 +160,6 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         for statement in node.body:
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.visit(statement)
-
-    def visit_Lambda(self, node: ast.Lambda) -> None:
-        self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if isinstance(node.ctx, ast.Load) and self._call_func_depth == 0:
@@ -246,7 +238,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             generated_by=_PRODUCER,
             # Flat keys: extension namespaces hold scalar-valued objects.
             extensions={
-                "minotaur-python": {
+                NAMESPACE: {
                     IMPORTS_RESOLVED: tally.resolved,
                     IMPORTS_UNRESOLVED: tally.unresolved,
                     IMPORTS_ROOT_MISMATCHED: tally.root_mismatched,
@@ -277,6 +269,7 @@ def _make_module(path: str, tree: ast.Module, source: str, line_index: LineIndex
         tree,
         source,
         line_index,
+        location,
         file_id,
         module_id,
     )
@@ -291,13 +284,12 @@ def _file_node(path: str, content_sha256: str) -> Node:
         label=path,
         path=path,
         language="python",
-        extensions={"minotaur-python": {"content_sha256": content_sha256}},
+        extensions={NAMESPACE: {"content_sha256": content_sha256}},
     )
 
 
 def _module_node(module: _Module) -> Node:
     identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
-    location = _module_location(module.path, module.line_index)
     return Node(
         id=module.module_id,
         identity=identity,
@@ -305,7 +297,7 @@ def _module_node(module: _Module) -> Node:
         label=module.name,
         symbol_kind=SymbolKind.MODULE.value,
         language="python",
-        location=location,
+        location=module.location,
     )
 
 
