@@ -126,5 +126,10 @@ the interpreter can establish statically; unresolved language constructs should
 remain explicit unresolved references rather than guessed edges.
 
 Across languages, a name bound in the lexical scope that owns a reference is
-not an unresolved reference. The Python interpreter applies this lexical scope
-suppression to function and method bodies.
+not an unresolved reference. This lexical-scope suppression applies to
+function and method bodies.
+
+For an unresolved member expression, emit exactly one unresolved fact labelled
+with the expression's full text, beside the ordinary fact for its base
+expression when that base is eligible. A member expression in a call position
+is still one member fact; it does not imply a call relationship.

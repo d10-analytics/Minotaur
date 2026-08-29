@@ -46,8 +46,8 @@ Direct named exports retain the declaration node and carry scalar metadata
 declaration under `export default` remains a local declaration with
 `export_kind == "default"`; anonymous default declarations and default
 expressions do not invent a symbol. Nested function and class declarations do
-not become symbols or `contains` relationships: uses in their bodies retain
-the enclosing emitted function or method as owner.
+not become symbols or `contains` relationships: uses in their bodies, including
+methods of nested classes, retain the nearest enclosing emitted symbol as owner.
 
 ## Supported module imports
 
@@ -72,10 +72,14 @@ In executable expression positions, bare identifiers that resolve to supported
 declarations or supported named imports produce `calls` for calls and
 `references` for non-call uses. An unbound bare identifier produces an
 unresolved-reference node and a `references` relationship, never a `calls`
-relationship. Declaration names, object-property keys, member or computed
-dispatch, `this`, `new`, labels, and IIFE callee forms do not produce these
-expression facts. Parameters and lexical bindings shadow module bindings;
-the later supported top-level binding wins in source order.
+relationship. A member expression rooted in an unshadowed identifier adds one
+unresolved-reference fact labelled with the full member text, beside the base
+identifier fact. This applies in call and non-call positions, including
+computed chains such as `table[key].run`; member dispatch remains runtime-
+sensitive and never produces a `calls` relationship. Declaration names,
+object-property keys, `this`, `new`, labels, and IIFE callee forms do not
+produce these expression facts. Parameters and lexical bindings shadow module
+bindings; the later supported top-level binding wins in source order.
 
 ## Unsupported module syntax
 
