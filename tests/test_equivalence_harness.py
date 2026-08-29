@@ -37,7 +37,8 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # -> 89f7db8 (import bindings carry targets: class-body imports, rebound module
 # aliases refuse resolution, nearest-frame import precedence).
 # -> 9ea1dc1 (member-expression labels and nested-class method-body facts).
-BASELINE_COMMIT = "9ea1dc16dbda961b6e46771fc3e97621abd80fb0"
+# -> 14c778f (nested method bodies exclude every enclosing class namespace).
+BASELINE_COMMIT = "14c778f9f45a3b29a103410a8410fa12233dfa28"
 
 
 @pytest.fixture(scope="session")
