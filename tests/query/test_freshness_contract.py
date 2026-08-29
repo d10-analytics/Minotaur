@@ -575,7 +575,7 @@ def test_freshness_document_links_and_first_read_anchor_resolve() -> None:
     assert "## Explicit exclusions" in javascript_text
     assert "import { helper as localHelper } from './lib.js';" in javascript_text
     assert "all-or-nothing" in javascript_text
-    assert "minotaur_python_scope_resolution" in javascript_text
+    assert "minotaur_python_scope_resolution" not in javascript_text
     inbound_links = {
         repository / "README.md": "docs/guides/analyze-javascript.md",
         repository / "docs/guides/query-reference.md": "analyze-javascript.md",

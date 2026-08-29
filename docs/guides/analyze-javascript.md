@@ -114,8 +114,3 @@ sorted root-relative selection in the shared
 `extensions["minotaur"]["selection"]` document extension. These are metadata,
 not node-identity inputs; use the freshness guide for the complete observable
 refresh contract.
-
-## Transitional Python scope note
-
-The Python interpreter does not yet suppress locally bound names; the follow-up
-spec `minotaur_python_scope_resolution` removes this sentence.
