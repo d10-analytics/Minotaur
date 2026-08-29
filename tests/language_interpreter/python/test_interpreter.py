@@ -2764,6 +2764,29 @@ def test_nested_class_method_headers_use_the_enclosing_scope(tmp_path: Path) -> 
     )
 
 
+def test_nested_class_method_headers_suppress_outer_function_locals(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    decorator = lambda target: target\n"
+        "    class Inner:\n"
+        "        @decorator\n"
+        "        @unknown_decorator\n"
+        "        def run(self):\n"
+        "            return 1\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # The enclosing function's local decorator is not a workspace dependency;
+    # the unbound decorator must still be reported under that function owner.
+    assert _unresolved_by_source(result)["app.outer"] == {"unknown_decorator"}
+
+
 def test_nested_class_method_receiver_does_not_use_outer_class_declarations(
     tmp_path: Path,
 ) -> None:
@@ -2814,6 +2837,7 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     assert visitor._scope_shadow_names == []
     assert visitor._scope_import_targets == []
     assert visitor._scope_receiver_overrides == []
+    assert visitor._scope_nested_class_method == []
 
     result = analyze_python_workspace(tmp_path)
     outer = _node_id(result, "app.outer")
