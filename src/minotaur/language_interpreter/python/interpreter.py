@@ -159,6 +159,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_shadow_names: list[frozenset[str]] = []
         self._scope_import_targets: list[Mapping[str, str]] = []
         self._scope_receiver_overrides: list[tuple[str | None, str | None] | None] = []
+        self._scope_nested_class_method: list[bool] = []
         self._receiver_name = receiver_name
         self._receiver_parameter = receiver_parameter
         self.call_bound_names: dict[ast.Call, frozenset[str]] = {}
@@ -168,6 +169,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.call_import_bound: dict[ast.Call, frozenset[str]] = {}
         self.call_receiver_names: dict[ast.Call, str | None] = {}
         self.call_receiver_parameters: dict[ast.Call, str | None] = {}
+        self.call_nested_class_method: dict[ast.Call, bool] = {}
         self.reference_bound_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_global_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_shadow_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
@@ -175,6 +177,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.reference_import_bound: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_receiver_names: dict[ast.Name | ast.Attribute, str | None] = {}
         self.reference_receiver_parameters: dict[ast.Name | ast.Attribute, str | None] = {}
+        self.reference_nested_class_method: dict[ast.Name | ast.Attribute, bool] = {}
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
@@ -187,6 +190,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.call_receiver_names[node], self.call_receiver_parameters[node] = (
             self._scope_receivers()
         )
+        self.call_nested_class_method[node] = any(self._scope_nested_class_method)
         # The callable expression is represented by the calls relationship;
         # suppress only its immediate head. Interior expressions (subscript
         # keys, conditionals, and f-string values) remain ordinary loads.
@@ -236,6 +240,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.reference_receiver_names[node], self.reference_receiver_parameters[node] = (
                 self._scope_receivers()
             )
+            self.reference_nested_class_method[node] = any(self._scope_nested_class_method)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._visit_function(node)
@@ -272,6 +277,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             shadow_names,
             import_targets,
             receiver_override=receiver_override,
+            nested_class_method=nested_class_method,
         )
         for statement in node.body:
             self.visit(statement)
@@ -338,12 +344,14 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         shadow_names: frozenset[str],
         import_targets: Mapping[str, str] | None = None,
         receiver_override: tuple[str | None, str | None] | None = None,
+        nested_class_method: bool = False,
     ) -> None:
         self._scope_bound_names.append(bound_names)
         self._scope_global_names.append(global_names)
         self._scope_shadow_names.append(shadow_names)
         self._scope_import_targets.append(import_targets or {})
         self._scope_receiver_overrides.append(receiver_override)
+        self._scope_nested_class_method.append(nested_class_method)
 
     def _pop_scope(self) -> None:
         self._scope_bound_names.pop()
@@ -351,6 +359,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_shadow_names.pop()
         self._scope_import_targets.pop()
         self._scope_receiver_overrides.pop()
+        self._scope_nested_class_method.pop()
 
     def _scope_receivers(self) -> tuple[str | None, str | None]:
         for override in reversed(self._scope_receiver_overrides):
@@ -465,6 +474,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.reference_receiver_names[node], self.reference_receiver_parameters[node] = (
             self._scope_receivers()
         )
+        self.reference_nested_class_method[node] = any(self._scope_nested_class_method)
         self._visit_chain_interiors(node)
 
 
@@ -1290,7 +1300,7 @@ def _calls(
             caller,
             candidate.func,
             _location(context.path, candidate.func),
-            class_declarations,
+            None if visitor.call_nested_class_method[candidate] else class_declarations,
             RelationshipKind.CALLS.value,
         )
     for reference in visitor.references:
@@ -1310,7 +1320,7 @@ def _calls(
             caller,
             reference,
             _location(context.path, reference),
-            class_declarations,
+            None if visitor.reference_nested_class_method[reference] else class_declarations,
             RelationshipKind.REFERENCES.value,
         )
 
