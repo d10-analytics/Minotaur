@@ -635,23 +635,29 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         """Add one class statement's bindings for later headers.
 
         Class locals are sequential: a preceding assignment suppresses an
-        outer name in a later decorator/default, while a preceding import
-        supplies the nearest import binding. These bindings belong only to the
-        class frame and are therefore hidden while a method body executes.
+        outer name in a later decorator/default, a preceding import supplies
+        the nearest import binding, and deleting either reveals the enclosing
+        name again. These bindings belong only to the class frame and are
+        therefore hidden while a method body executes.
         """
         collector = _BindingCollector(self._module_name, self._is_package)
         collector.visit(statement)
         global_names = self._scope_global_names[-1]
         self._scope_bound_names[-1] = _class_dynamic_names_after_statement(
-            self._scope_bound_names[-1], collector, global_names
+            self._scope_bound_names[-1],
+            collector,
+            global_names,
+            self._scope_type_param_names[-1],
         )
         self._scope_shadow_names[-1] = _class_dynamic_names_after_statement(
-            self._scope_shadow_names[-1], collector, global_names
+            self._scope_shadow_names[-1],
+            collector,
+            global_names,
+            self._scope_type_param_names[-1],
         )
-        self._scope_import_targets[-1] = {
-            **self._scope_import_targets[-1],
-            **collector.import_targets,
-        }
+        self._scope_import_targets[-1] = _class_import_targets_after_statement(
+            self._scope_import_targets[-1], collector, global_names
+        )
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if not isinstance(node.ctx, ast.Load):
@@ -687,6 +693,7 @@ class _BindingCollector(ast.NodeVisitor):
 
     def __init__(self, module_name: str = "", is_package: bool = False) -> None:
         self.names: set[str] = set()
+        self.deleted_names: set[str] = set()
         self.import_targets: dict[str, str] = {}
         self.global_names: set[str] = set()
         self.nonlocal_names: set[str] = set()
@@ -717,7 +724,10 @@ class _BindingCollector(ast.NodeVisitor):
                 )
 
     def visit_Name(self, node: ast.Name) -> None:
-        if isinstance(node.ctx, (ast.Store, ast.Del)):
+        if isinstance(node.ctx, ast.Del):
+            self.deleted_names.add(node.id)
+            self.names.add(node.id)
+        elif isinstance(node.ctx, ast.Store):
             self.names.add(node.id)
 
     def visit_Match(self, node: ast.Match) -> None:
@@ -798,18 +808,46 @@ def _class_dynamic_names_after_statement(
     current_names: frozenset[str],
     collector: _BindingCollector,
     global_names: Iterable[str],
+    protected_names: Iterable[str] = (),
 ) -> frozenset[str]:
     """Apply one class statement's binding category in source order.
 
     Dynamic assignments suppress static facts, while imports remain
     reportable. A later class import therefore replaces an earlier dynamic
-    binding of the same name. If one compound statement contains both binding
-    kinds, retain the dynamic possibility because its control flow is not
-    statically known here.
+    binding of the same name, and a deletion clears the class-local binding.
+    If one compound statement contains both binding kinds, retain the dynamic
+    possibility because its control flow is not statically known here.
     """
+    global_name_set = frozenset(global_names)
+    deleted_names = (
+        frozenset(collector.deleted_names) - global_name_set - frozenset(protected_names)
+    )
     imported_names = frozenset(collector.import_targets)
-    dynamic_names = frozenset(collector.names) - frozenset(global_names)
-    return (current_names - imported_names) | dynamic_names
+    dynamic_names = frozenset(collector.names) - global_name_set - deleted_names
+    return (current_names - imported_names - deleted_names) | dynamic_names
+
+
+def _class_import_targets_after_statement(
+    current_targets: Mapping[str, str],
+    collector: _BindingCollector,
+    global_names: Iterable[str],
+    outer_targets: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Apply one class statement's imports and deletions in source order."""
+    deleted_names = frozenset(collector.deleted_names) - frozenset(global_names)
+    import_targets = {
+        name: target for name, target in current_targets.items() if name not in deleted_names
+    }
+    if outer_targets is not None:
+        import_targets.update(
+            (name, outer_targets[name]) for name in deleted_names if name in outer_targets
+        )
+    import_targets.update(
+        (name, target)
+        for name, target in collector.import_targets.items()
+        if name not in deleted_names
+    )
+    return import_targets
 
 
 def _type_param_names(node: ast.AST) -> set[str]:
@@ -893,19 +931,28 @@ def _class_context_after_statement(
     """Add one class-body statement's bindings for later method headers.
 
     Class locals are sequential. A preceding assignment suppresses an
-    enclosing name in a later method header, while a preceding import supplies
-    the nearest import binding. These bindings stay in this class-only context
-    and are therefore never visible to method bodies.
+    enclosing name in a later method header, a preceding import supplies the
+    nearest import binding, and deleting either reveals the enclosing name
+    again. These bindings stay in this class-only context and are therefore
+    never visible to method bodies.
     """
     collector = _BindingCollector(module_name, is_package)
     collector.visit(statement)
     class_bound_names = _class_dynamic_names_after_statement(
-        context.class_scope_bound_names, collector, collector.global_names
+        context.class_scope_bound_names,
+        collector,
+        collector.global_names,
+        context.class_scope_type_param_names,
     )
     return replace(
         context,
         bound_names=(context.bound_names - context.class_scope_bound_names) | class_bound_names,
-        import_targets={**context.import_targets, **collector.import_targets},
+        import_targets=_class_import_targets_after_statement(
+            context.import_targets,
+            collector,
+            collector.global_names,
+            context.class_scope_outer_import_targets,
+        ),
         class_scope_bound_names=class_bound_names,
     )
 
