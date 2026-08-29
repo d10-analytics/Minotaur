@@ -594,9 +594,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         collector = _BindingCollector(self._module_name, self._is_package)
         collector.visit(statement)
         global_names = self._scope_global_names[-1]
-        dynamic_names = frozenset(collector.names) - global_names
-        self._scope_bound_names[-1] |= dynamic_names
-        self._scope_shadow_names[-1] |= dynamic_names
+        self._scope_bound_names[-1] = _class_dynamic_names_after_statement(
+            self._scope_bound_names[-1], collector, global_names
+        )
+        self._scope_shadow_names[-1] = _class_dynamic_names_after_statement(
+            self._scope_shadow_names[-1], collector, global_names
+        )
         self._scope_import_targets[-1] = {
             **self._scope_import_targets[-1],
             **collector.import_targets,
@@ -743,6 +746,24 @@ class _BindingCollector(ast.NodeVisitor):
             self.visit(expression)
 
 
+def _class_dynamic_names_after_statement(
+    current_names: frozenset[str],
+    collector: _BindingCollector,
+    global_names: Iterable[str],
+) -> frozenset[str]:
+    """Apply one class statement's binding category in source order.
+
+    Dynamic assignments suppress static facts, while imports remain
+    reportable. A later class import therefore replaces an earlier dynamic
+    binding of the same name. If one compound statement contains both binding
+    kinds, retain the dynamic possibility because its control flow is not
+    statically known here.
+    """
+    imported_names = frozenset(collector.import_targets)
+    dynamic_names = frozenset(collector.names) - frozenset(global_names)
+    return (current_names - imported_names) | dynamic_names
+
+
 def _type_param_names(node: ast.AST) -> set[str]:
     """Return names from optional PEP 695 ``type_params`` fields."""
     names: set[str] = set()
@@ -830,12 +851,14 @@ def _class_context_after_statement(
     """
     collector = _BindingCollector(module_name, is_package)
     collector.visit(statement)
-    dynamic_names = frozenset(collector.names) - frozenset(collector.global_names)
+    class_bound_names = _class_dynamic_names_after_statement(
+        context.class_scope_bound_names, collector, collector.global_names
+    )
     return replace(
         context,
-        bound_names=context.bound_names | dynamic_names,
+        bound_names=(context.bound_names - context.class_scope_bound_names) | class_bound_names,
         import_targets={**context.import_targets, **collector.import_targets},
-        class_scope_bound_names=context.class_scope_bound_names | dynamic_names,
+        class_scope_bound_names=class_bound_names,
     )
 
 
