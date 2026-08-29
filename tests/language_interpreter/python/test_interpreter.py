@@ -3011,16 +3011,17 @@ def test_nested_methods_skip_every_enclosing_class_namespace(
         if relationship.source == outer and relationship.target == helper
     ]
 
-    # Both nested method bodies see the module import despite separate class
-    # bindings in their enclosing classes. Their headers still observe those
-    # bindings: the assignment suppresses the first decorator and the import
-    # leaves the second decorator unresolved rather than using the module one.
+    # Class namespaces are not lexical enclosures: the first nested decorator
+    # skips Outer.helper and sees the module import. Both method bodies also
+    # see the module import; the second nested class's own import suppresses
+    # only its decorator and leaves that header unresolved.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in relationships
         for evidence in relationship.evidence
         for location in evidence.locations
     } == {
+        (RelationshipKind.REFERENCES.value, 7),
         (RelationshipKind.CALLS.value, 9),
         (RelationshipKind.CALLS.value, 14),
     }
@@ -3064,6 +3065,7 @@ def test_direct_nested_methods_skip_the_enclosing_class_namespace(
         for evidence in relationship.evidence
         for location in evidence.locations
     } == {
+        (RelationshipKind.REFERENCES.value, 6),
         (RelationshipKind.CALLS.value, 8),
         (RelationshipKind.CALLS.value, 13),
     }
