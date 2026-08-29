@@ -3239,6 +3239,7 @@ def test_direct_nested_class_header_uses_enclosing_class_assignment(
         "class Outer:\n"
         "    helper = staticmethod(lambda: None)\n"
         "    class Inner(helper):\n"
+        "        value = helper()\n"
         "        @helper\n"
         "        def run(self):\n"
         "            return helper()\n",
@@ -3255,16 +3256,17 @@ def test_direct_nested_class_header_uses_enclosing_class_assignment(
 
     # The nested class statement's base executes in Outer's body and therefore
     # sees the preceding class-local assignment. Inner's body starts a new
-    # class namespace: its method header and body skip Outer.helper and see the
-    # module import instead.
+    # class namespace: its ordinary body expression, method header, and method
+    # body skip Outer.helper and see the module import instead.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in relationships
         for evidence in relationship.evidence
         for location in evidence.locations
     } == {
-        (RelationshipKind.REFERENCES.value, 6),
-        (RelationshipKind.CALLS.value, 8),
+        (RelationshipKind.CALLS.value, 6),
+        (RelationshipKind.REFERENCES.value, 7),
+        (RelationshipKind.CALLS.value, 9),
     }
     assert _unresolved_by_source(result) == {}
 
@@ -3282,6 +3284,7 @@ def test_function_nested_class_header_uses_enclosing_class_import(
         "    class Outer:\n"
         "        from other import helper\n"
         "        class Inner(helper):\n"
+        "            value = helper()\n"
         "            @helper\n"
         "            def run(self):\n"
         "                return helper()\n"
@@ -3295,8 +3298,9 @@ def test_function_nested_class_header_uses_enclosing_class_import(
 
     # Inner's base sees the import in the immediately enclosing class body;
     # local imports are conservatively unresolved rather than attributed to a
-    # different module binding. The method decorator and body cannot close
-    # over Outer, so they independently resolve through the module import.
+    # different module binding. Inner's ordinary body expression, method
+    # decorator, and method body cannot close over Outer, so they independently
+    # resolve through the module import.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in result.document.relationships
@@ -3304,8 +3308,9 @@ def test_function_nested_class_header_uses_enclosing_class_import(
         for evidence in relationship.evidence
         for location in evidence.locations
     } == {
-        (RelationshipKind.REFERENCES.value, 7),
-        (RelationshipKind.CALLS.value, 9),
+        (RelationshipKind.CALLS.value, 7),
+        (RelationshipKind.REFERENCES.value, 8),
+        (RelationshipKind.CALLS.value, 10),
     }
     assert all(
         relationship.source != factory or relationship.target != class_helper
@@ -3326,7 +3331,7 @@ def test_function_nested_class_header_uses_enclosing_class_import(
     } == {6}
 
 
-def test_direct_nested_class_skips_enclosing_class_imports(
+def test_direct_nested_class_header_uses_enclosing_class_import(
     tmp_path: Path,
 ) -> None:
     _write(
@@ -3360,9 +3365,10 @@ def test_direct_nested_class_skips_enclosing_class_imports(
         _node_id(result, "other.helper"),
     }
 
-    # A direct class namespace is not a lexical enclosure. The nested class
-    # header, its method header, and its method body therefore skip Outer's
-    # imports and resolve through the module imports beneath that namespace.
+    # The nested class statement's base uses Outer's import rather than the
+    # module import; local imports remain conservatively unresolved. Inner's
+    # method header and body do not close over Outer and therefore resolve
+    # through the module import beneath that namespace.
     assert {
         (relationship.target, relationship.kind, location.range.start.line + 1)
         for relationship in result.document.relationships
@@ -3370,7 +3376,6 @@ def test_direct_nested_class_skips_enclosing_class_imports(
         for evidence in relationship.evidence
         for location in evidence.locations
     } == {
-        (library_base, RelationshipKind.REFERENCES.value, 5),
         (library_helper, RelationshipKind.REFERENCES.value, 6),
         (library_helper, RelationshipKind.CALLS.value, 8),
     }
@@ -3378,7 +3383,19 @@ def test_direct_nested_class_skips_enclosing_class_imports(
         relationship.source != outer or relationship.target not in other_targets
         for relationship in result.document.relationships
     )
-    assert _unresolved_by_source(result) == {}
+    assert _unresolved_by_source(result) == {"app.Outer": {"Base"}}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "Base"
+    }
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in unresolved_ids
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {5}
 
 
 def test_direct_nested_class_after_delete_uses_restored_enclosing_imports(
@@ -3770,7 +3787,7 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     assert visitor._scope_shadow_names == []
     assert visitor._scope_import_targets == []
     assert visitor._scope_receiver_overrides == []
-    assert visitor._scope_nested_class_method == []
+    assert visitor._scope_excludes_enclosing_class == []
     assert visitor._scope_is_class == []
     assert visitor._scope_type_param_names == []
 
