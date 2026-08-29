@@ -143,7 +143,13 @@ def _module_suffixes(modules: Mapping[str, object]) -> dict[str, str]:
 class _ScopeCallVisitor(ast.NodeVisitor):
     """Collect calls nested within one top-level lexical scope."""
 
-    def __init__(self, module_name: str = "", is_package: bool = False) -> None:
+    def __init__(
+        self,
+        module_name: str = "",
+        is_package: bool = False,
+        receiver_name: str | None = None,
+        receiver_parameter: str | None = None,
+    ) -> None:
         self._module_name = module_name
         self._is_package = is_package
         self.calls: list[ast.Call] = []
@@ -152,16 +158,23 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_global_names: list[frozenset[str]] = []
         self._scope_shadow_names: list[frozenset[str]] = []
         self._scope_import_targets: list[Mapping[str, str]] = []
+        self._scope_receiver_overrides: list[tuple[str | None, str | None] | None] = []
+        self._receiver_name = receiver_name
+        self._receiver_parameter = receiver_parameter
         self.call_bound_names: dict[ast.Call, frozenset[str]] = {}
         self.call_global_names: dict[ast.Call, frozenset[str]] = {}
         self.call_shadow_names: dict[ast.Call, frozenset[str]] = {}
         self.call_import_targets: dict[ast.Call, Mapping[str, str]] = {}
         self.call_import_bound: dict[ast.Call, frozenset[str]] = {}
+        self.call_receiver_names: dict[ast.Call, str | None] = {}
+        self.call_receiver_parameters: dict[ast.Call, str | None] = {}
         self.reference_bound_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_global_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_shadow_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_import_targets: dict[ast.Name | ast.Attribute, Mapping[str, str]] = {}
         self.reference_import_bound: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
+        self.reference_receiver_names: dict[ast.Name | ast.Attribute, str | None] = {}
+        self.reference_receiver_parameters: dict[ast.Name | ast.Attribute, str | None] = {}
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
@@ -171,6 +184,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.call_shadow_names[node] = shadow_names
         self.call_import_targets[node] = self._scope_imports()
         self.call_import_bound[node] = import_bound
+        self.call_receiver_names[node], self.call_receiver_parameters[node] = (
+            self._scope_receivers()
+        )
         # The callable expression is represented by the calls relationship;
         # suppress only its immediate head. Interior expressions (subscript
         # keys, conditionals, and f-string values) remain ordinary loads.
@@ -217,23 +233,46 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.reference_shadow_names[node] = shadow_names
             self.reference_import_targets[node] = self._scope_imports()
             self.reference_import_bound[node] = import_bound
+            self.reference_receiver_names[node], self.reference_receiver_parameters[node] = (
+                self._scope_receivers()
+            )
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
-        self._visit_definition_header(node)
-        self._pop_scope()
-        bound_names, import_targets = _scope_binders(node, self._module_name, self._is_package)
-        self._push_scope(bound_names, _global_names(node), bound_names, import_targets)
-        for statement in node.body:
-            self.visit(statement)
-        self._pop_scope()
+        self._visit_function(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def _visit_function(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        *,
+        nested_class_method: bool = False,
+    ) -> None:
         self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
         self._visit_definition_header(node)
         self._pop_scope()
         bound_names, import_targets = _scope_binders(node, self._module_name, self._is_package)
-        self._push_scope(bound_names, _global_names(node), bound_names, import_targets)
+        receiver_override = None
+        shadow_names = bound_names
+        if nested_class_method:
+            receiver_parameter = _receiver_parameter_name(node)
+            receiver_override = (
+                _eligible_receiver_name(node, receiver_parameter),
+                receiver_parameter,
+            )
+            # The receiver parameter is the source of the method's receiver
+            # context, not a nested rebinding of it. Other binders in this
+            # frame still shadow a receiver inherited from an outer scope.
+            if receiver_parameter is not None:
+                shadow_names -= frozenset((receiver_parameter,))
+        self._push_scope(
+            bound_names,
+            _global_names(node),
+            shadow_names,
+            import_targets,
+            receiver_override=receiver_override,
+        )
         for statement in node.body:
             self.visit(statement)
         self._pop_scope()
@@ -298,17 +337,26 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         global_names: frozenset[str],
         shadow_names: frozenset[str],
         import_targets: Mapping[str, str] | None = None,
+        receiver_override: tuple[str | None, str | None] | None = None,
     ) -> None:
         self._scope_bound_names.append(bound_names)
         self._scope_global_names.append(global_names)
         self._scope_shadow_names.append(shadow_names)
         self._scope_import_targets.append(import_targets or {})
+        self._scope_receiver_overrides.append(receiver_override)
 
     def _pop_scope(self) -> None:
         self._scope_bound_names.pop()
         self._scope_global_names.pop()
         self._scope_shadow_names.pop()
         self._scope_import_targets.pop()
+        self._scope_receiver_overrides.pop()
+
+    def _scope_receivers(self) -> tuple[str | None, str | None]:
+        for override in reversed(self._scope_receiver_overrides):
+            if override is not None:
+                return override
+        return self._receiver_name, self._receiver_parameter
 
     def _scope_imports(self) -> Mapping[str, str]:
         """Return the import binding each visible name resolves to.
@@ -375,11 +423,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self._pop_scope()
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        # A nested class body executes while the enclosing scope is active, but
-        # methods of that class execute in their own scope and remain outside
-        # this visitor's ownership. The class header (decorators, bases, and
-        # keywords such as ``metaclass=``) is evaluated in the enclosing scope
-        # as well, so a base class is a real dependency of that scope.
+        # A nested class body executes while the enclosing scope is active. Its
+        # methods need their own scope too, but remain attributed to this
+        # visitor's caller because nested classes have no emitted symbols. The
+        # class header (decorators, bases, and keywords such as ``metaclass=``)
+        # is evaluated in the enclosing scope as well, so a base class is a
+        # real dependency of that scope.
         self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
         for header in _class_header_nodes(node):
             self.visit(header)
@@ -391,6 +440,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         for statement in node.body:
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.visit(statement)
+        for statement in node.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self._visit_function(statement, nested_class_method=True)
         self._pop_scope()
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -410,6 +462,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.reference_shadow_names[node] = shadow_names
         self.reference_import_targets[node] = self._scope_imports()
         self.reference_import_bound[node] = import_bound
+        self.reference_receiver_names[node], self.reference_receiver_parameters[node] = (
+            self._scope_receivers()
+        )
         self._visit_chain_interiors(node)
 
 
@@ -1208,7 +1263,12 @@ def _calls(
     class_declarations: Mapping[str, str] | None = None,
     prefix_nodes: tuple[ast.AST, ...] = (),
 ) -> None:
-    visitor = _ScopeCallVisitor(context.module_name, context.is_package)
+    visitor = _ScopeCallVisitor(
+        context.module_name,
+        context.is_package,
+        context.receiver_name,
+        context.receiver_parameter,
+    )
     for node in prefix_nodes:
         visitor.visit(node)
     for statement in statements:
@@ -1216,7 +1276,11 @@ def _calls(
     for candidate in visitor.calls:
         _emit_expression_facts(
             _scoped_context(
-                context,
+                replace(
+                    context,
+                    receiver_name=visitor.call_receiver_names[candidate],
+                    receiver_parameter=visitor.call_receiver_parameters[candidate],
+                ),
                 context.bound_names | visitor.call_bound_names[candidate],
                 visitor.call_global_names[candidate],
                 visitor.call_shadow_names[candidate],
@@ -1232,7 +1296,11 @@ def _calls(
     for reference in visitor.references:
         _emit_expression_facts(
             _scoped_context(
-                context,
+                replace(
+                    context,
+                    receiver_name=visitor.reference_receiver_names[reference],
+                    receiver_parameter=visitor.reference_receiver_parameters[reference],
+                ),
                 context.bound_names | visitor.reference_bound_names[reference],
                 visitor.reference_global_names[reference],
                 visitor.reference_shadow_names[reference],
