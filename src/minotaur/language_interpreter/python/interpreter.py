@@ -271,6 +271,34 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             # frame still shadow a receiver inherited from an outer scope.
             if receiver_parameter is not None:
                 shadow_names -= frozenset((receiver_parameter,))
+
+        # A method header is evaluated in the class namespace, but its body is
+        # not. Temporarily remove the class frame so class-local assignments and
+        # imports cannot leak into body resolution; the enclosing function (or
+        # module) frame remains visible for the method body. Restore the frame
+        # after the walk so later class statements see the namespace built by
+        # earlier statements in source order.
+        class_scope: (
+            tuple[
+                frozenset[str],
+                frozenset[str],
+                frozenset[str],
+                Mapping[str, str],
+                tuple[str | None, str | None] | None,
+                bool,
+            ]
+            | None
+        ) = None
+        if nested_class_method:
+            class_scope = (
+                self._scope_bound_names[-1],
+                self._scope_global_names[-1],
+                self._scope_shadow_names[-1],
+                self._scope_import_targets[-1],
+                self._scope_receiver_overrides[-1],
+                self._scope_nested_class_method[-1],
+            )
+            self._pop_scope()
         self._push_scope(
             bound_names,
             _global_names(node),
@@ -282,6 +310,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         for statement in node.body:
             self.visit(statement)
         self._pop_scope()
+        if class_scope is not None:
+            self._push_scope(*class_scope)
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for expression in _signature_nodes(node):
@@ -447,12 +477,31 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
         )
         for statement in node.body:
-            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                self.visit(statement)
-        for statement in node.body:
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self._visit_function(statement, nested_class_method=True)
+            else:
+                self.visit(statement)
+            self._record_class_bindings(statement)
         self._pop_scope()
+
+    def _record_class_bindings(self, statement: ast.stmt) -> None:
+        """Add one class statement's bindings for later headers.
+
+        Class locals are sequential: a preceding assignment suppresses an
+        outer name in a later decorator/default, while a preceding import
+        supplies the nearest import binding. These bindings belong only to the
+        class frame and are therefore hidden while a method body executes.
+        """
+        collector = _BindingCollector(self._module_name, self._is_package)
+        collector.visit(statement)
+        global_names = self._scope_global_names[-1]
+        dynamic_names = frozenset(collector.names) - global_names
+        self._scope_bound_names[-1] |= dynamic_names
+        self._scope_shadow_names[-1] |= dynamic_names
+        self._scope_import_targets[-1] = {
+            **self._scope_import_targets[-1],
+            **collector.import_targets,
+        }
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if not isinstance(node.ctx, ast.Load):
