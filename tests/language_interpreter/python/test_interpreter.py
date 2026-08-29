@@ -3354,6 +3354,69 @@ def test_direct_class_import_replaces_preceding_dynamic_header_binding(
     } == {9}
 
 
+def test_direct_nested_class_import_replaces_compound_dynamic_binding(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        if True:\n"
+        "            helper = staticmethod(lambda target: target)\n"
+        "        @helper\n"
+        "        def before(self):\n"
+        "            return self.missing()\n"
+        "        from other import helper\n"
+        "        @helper\n"
+        "        def after(self):\n"
+        "            return helper(), self.missing()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.Outer")
+    module_helper = _node_id(result, "library.helper")
+    resolved_helper_uses = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == module_helper
+    ]
+
+    # The nested class's compound assignment suppresses its first header. Its
+    # own later import replaces that dynamic possibility for the second header,
+    # while both method bodies retain module scope and receiver-shaped members.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in resolved_helper_uses
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {(RelationshipKind.CALLS.value, 13)}
+    unresolved = _unresolved_by_source(result)
+    assert unresolved["app.Outer"] == {"helper", "self.missing"}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    unresolved_locations = {
+        (node.reference_text, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in unresolved_ids
+        for node in result.document.nodes
+        if node.id == relationship.target
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert unresolved_locations == {
+        ("self.missing", 9),
+        ("helper", 11),
+        ("self.missing", 13),
+    }
+
+
 def test_nested_class_method_receiver_does_not_use_outer_class_declarations(
     tmp_path: Path,
 ) -> None:
