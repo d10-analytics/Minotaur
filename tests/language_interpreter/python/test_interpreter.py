@@ -231,6 +231,36 @@ def test_package_relative_imports_analyze_without_crashing(tmp_path: Path) -> No
     }
 
 
+def test_package_context_resolves_relative_imports_in_function_nested_class(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "pkg/__init__.py",
+        "from .helper import helper\n"
+        "\n"
+        "def outer():\n"
+        "    class Nested:\n"
+        "        from .helper import helper\n"
+        "        helper()\n"
+        "    return Nested\n",
+    )
+    _write(tmp_path, "pkg/helper.py", "def helper():\n    return 1\n")
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "pkg.outer")
+    helper = _node_id(result, "pkg.helper.helper")
+
+    assert (
+        outer,
+        helper,
+        RelationshipKind.CALLS.value,
+    ) in {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+
 def test_calls_in_nested_functions_are_attributed_to_the_outer_function(tmp_path: Path) -> None:
     _write(
         tmp_path,
