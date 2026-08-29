@@ -3269,6 +3269,114 @@ def test_direct_nested_class_headers_skip_the_enclosing_class_namespace(
     assert _unresolved_by_source(result) == {}
 
 
+def test_direct_nested_class_skips_enclosing_class_imports(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "library.py",
+        "class Base:\n    pass\n\ndef helper(value=None):\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "other.py",
+        "class Base:\n    pass\n\ndef helper(value=None):\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import Base, helper\n\n"
+        "class Outer:\n"
+        "    from other import Base, helper\n"
+        "    class Inner(Base):\n"
+        "        @helper\n"
+        "        def run(self):\n"
+        "            return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.Outer")
+    library_base = _node_id(result, "library.Base")
+    library_helper = _node_id(result, "library.helper")
+    other_targets = {
+        _node_id(result, "other.Base"),
+        _node_id(result, "other.helper"),
+    }
+
+    # A direct class namespace is not a lexical enclosure. The nested class
+    # header, its method header, and its method body therefore skip Outer's
+    # imports and resolve through the module imports beneath that namespace.
+    assert {
+        (relationship.target, relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in {library_base, library_helper}
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (library_base, RelationshipKind.REFERENCES.value, 5),
+        (library_helper, RelationshipKind.REFERENCES.value, 6),
+        (library_helper, RelationshipKind.CALLS.value, 8),
+    }
+    assert all(
+        relationship.source != outer or relationship.target not in other_targets
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {}
+
+
+def test_direct_nested_class_after_delete_uses_restored_enclosing_imports(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "library.py",
+        "class Base:\n    pass\n\ndef helper(value=None):\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "other.py",
+        "class Base:\n    pass\n\ndef helper(value=None):\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import Base, helper\n\n"
+        "class Outer:\n"
+        "    from other import Base, helper\n"
+        "    del Base, helper\n"
+        "    class Inner(Base):\n"
+        "        @helper\n"
+        "        async def run(self):\n"
+        "            return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.Outer")
+    library_base = _node_id(result, "library.Base")
+    library_helper = _node_id(result, "library.helper")
+    other_targets = {
+        _node_id(result, "other.Base"),
+        _node_id(result, "other.helper"),
+    }
+
+    assert {
+        (relationship.target, relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in {library_base, library_helper}
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (library_base, RelationshipKind.REFERENCES.value, 6),
+        (library_helper, RelationshipKind.REFERENCES.value, 7),
+        (library_helper, RelationshipKind.CALLS.value, 9),
+    }
+    assert all(
+        relationship.source != outer or relationship.target not in other_targets
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {}
+
+
 def test_direct_class_method_headers_use_assignment_source_order_and_body_scope(
     tmp_path: Path,
 ) -> None:
