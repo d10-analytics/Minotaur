@@ -341,21 +341,21 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._pop_scope()
         for index, frame in sorted(class_scopes):
             (
-                bound_names,
-                global_names,
-                shadow_names,
-                import_targets,
-                receiver_override,
-                nested_class_method,
-                is_class,
+                restored_bound_names,
+                restored_global_names,
+                restored_shadow_names,
+                restored_import_targets,
+                restored_receiver_override,
+                restored_nested_class_method,
+                restored_is_class,
             ) = frame
-            self._scope_bound_names.insert(index, bound_names)
-            self._scope_global_names.insert(index, global_names)
-            self._scope_shadow_names.insert(index, shadow_names)
-            self._scope_import_targets.insert(index, import_targets)
-            self._scope_receiver_overrides.insert(index, receiver_override)
-            self._scope_nested_class_method.insert(index, nested_class_method)
-            self._scope_is_class.insert(index, is_class)
+            self._scope_bound_names.insert(index, restored_bound_names)
+            self._scope_global_names.insert(index, restored_global_names)
+            self._scope_shadow_names.insert(index, restored_shadow_names)
+            self._scope_import_targets.insert(index, restored_import_targets)
+            self._scope_receiver_overrides.insert(index, restored_receiver_override)
+            self._scope_nested_class_method.insert(index, restored_nested_class_method)
+            self._scope_is_class.insert(index, restored_is_class)
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for expression in _signature_nodes(node):
@@ -1125,7 +1125,7 @@ def _analyze_module(
         frozenset(),
         builtin_names,
         module_imports,
-        module.is_package,
+        is_package=module.is_package,
     )
     for symbol in symbols.values():
         relationships.add(
