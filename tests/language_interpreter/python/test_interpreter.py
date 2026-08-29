@@ -3052,6 +3052,50 @@ def test_nested_class_import_replaces_preceding_dynamic_header_binding(
     } == {10}
 
 
+def test_nested_class_delete_restores_enclosing_import_for_later_header(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        from other import helper\n"
+        "        del helper\n"
+        "        @helper\n"
+        "        async def run(self):\n"
+        "            return helper()\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    module_helper = _node_id(result, "library.helper")
+    deleted_helper = _node_id(result, "other.helper")
+
+    # Deleting the class-local import restores the enclosing module import for
+    # the later async method header. Its body is class-isolated and resolves
+    # through that same enclosing import independently.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == module_helper
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 7),
+        (RelationshipKind.CALLS.value, 9),
+    }
+    assert all(
+        relationship.source != outer or relationship.target != deleted_helper
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {}
+
+
 def test_nested_class_method_header_sees_preceding_import_but_body_does_not(
     tmp_path: Path,
 ) -> None:
@@ -3407,6 +3451,45 @@ def test_direct_class_import_replaces_preceding_dynamic_header_binding(
         for evidence in relationship.evidence
         for location in evidence.locations
     } == {9}
+
+
+def test_direct_class_delete_restores_enclosing_import_for_later_header(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    from other import helper\n"
+        "    del helper\n"
+        "    @helper\n"
+        "    def run(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.Runner.run")
+    module_helper = _node_id(result, "library.helper")
+    deleted_helper = _node_id(result, "other.helper")
+
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == run and relationship.target == module_helper
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 6),
+        (RelationshipKind.CALLS.value, 8),
+    }
+    assert all(
+        relationship.source != run or relationship.target != deleted_helper
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {}
 
 
 def test_direct_nested_class_import_replaces_compound_dynamic_binding(
