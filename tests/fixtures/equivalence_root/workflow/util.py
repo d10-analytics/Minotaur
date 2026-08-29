@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 from workflow.helper import fixture_helper
 
+
 def fixture_outer() -> type[object]:
     """Build nested classes whose headers and bodies use different scopes."""
 
