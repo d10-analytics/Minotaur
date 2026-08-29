@@ -2764,6 +2764,28 @@ def test_nested_class_method_headers_use_the_enclosing_scope(tmp_path: Path) -> 
     )
 
 
+def test_nested_class_method_receiver_does_not_use_outer_class_declarations(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Outer:\n"
+        "    def other(self):\n"
+        "        return 1\n"
+        "    class Inner:\n"
+        "        def run(self):\n"
+        "            return self.other()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_by_source(result)["app.Outer"] == {"self.other"}
+    assert ("app.Outer", "app.Outer.other", RelationshipKind.CALLS.value) not in _edge_labels(
+        result
+    )
+
+
 def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     tmp_path: Path,
 ) -> None:
