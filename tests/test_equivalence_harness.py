@@ -41,7 +41,9 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # bindings follow source-order import rebinding).
 # -> 7b737fd (PEP 695 type-parameter retention, deleted class imports restore
 # enclosing bindings, and direct-class imports stay out of nested scopes).
-BASELINE_COMMIT = "7b737fd99b98dfacfc9b3f0f7999004b62080347"
+# -> 235eb4e (nested class headers retain their immediate enclosing class
+# phase while nested bodies isolate class namespaces).
+BASELINE_COMMIT = "235eb4e238fdc00d72a1c6e1d0fccb613969e0a"
 
 
 @pytest.fixture(scope="session")
