@@ -5,6 +5,7 @@ Language-specific interpreter tests live beneath ``tests/language_interpreter``.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import sys
@@ -19,6 +20,7 @@ from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipK
 from minotaur.graph_model.validation import IssueCode, validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
+from minotaur.language_interpreter.python.interpreter import _ScopeCallVisitor
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -2672,6 +2674,137 @@ def test_class_body_statements_are_attributed_to_the_class_not_dropped(
     # the class merely because the class body is now visited.
     assert (method, inner, RelationshipKind.CALLS.value) in relationships
     assert (cfg, inner, RelationshipKind.CALLS.value) not in relationships
+
+
+def test_nested_class_methods_are_attributed_to_the_enclosing_owner(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import lib\n\n"
+        "def outer(left, right):\n"
+        "    class Inner:\n"
+        "        def run(self):\n"
+        "            return lib.helper(), self.other(), missing()\n"
+        "        def other(self):\n"
+        "            return 1\n"
+        "    return (left + right).denominator, Inner\n\n"
+        "class Outer:\n"
+        "    class Nested:\n"
+        "        def run(self):\n"
+        "            return lib.helper()\n"
+        "    def direct(self):\n"
+        "        return lib.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    outer_class = _node_id(result, "app.Outer")
+    helper = _node_id(result, "lib.helper")
+    edges = _edge_labels(result)
+
+    assert ("app.outer", "lib.helper", RelationshipKind.CALLS.value) in edges
+    assert ("app.Outer", "lib.helper", RelationshipKind.CALLS.value) in edges
+    assert {
+        location.range.start.line
+        for relationship in result.document.relationships
+        if relationship.source == outer
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {5}
+    assert {
+        location.range.start.line
+        for relationship in result.document.relationships
+        if relationship.source == outer_class
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {13}
+    assert _unresolved_by_source(result)["app.outer"] == {
+        "(left + right).denominator",
+        "missing",
+        "self.other",
+    }
+
+
+def test_nested_class_method_headers_use_the_enclosing_scope(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def decorator(target):\n    return target\n\n"
+        "def default():\n    return 1\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        @decorator\n"
+        "        @unknown_decorator\n"
+        "        def run(value=default, annotation: decorator = None):\n"
+        "            return value\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    relationships = _edge_labels(result)
+    outer = _node_id(result, "app.outer")
+    decorator = _node_id(result, "app.decorator")
+    default = _node_id(result, "app.default")
+
+    assert ("app.outer", "app.decorator", RelationshipKind.REFERENCES.value) in relationships
+    assert ("app.outer", "app.default", RelationshipKind.REFERENCES.value) in relationships
+    assert _unresolved_by_source(result)["app.outer"] == {"unknown_decorator"}
+    assert ("app.outer", "app.decorator", RelationshipKind.CALLS.value) not in relationships
+    assert ("app.outer", "app.default", RelationshipKind.CALLS.value) not in relationships
+    assert all(
+        relationship.source != outer
+        or relationship.target not in {decorator, default}
+        or relationship.kind == RelationshipKind.REFERENCES.value
+        for relationship in result.document.relationships
+    )
+
+
+def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    source = (
+        "from lib import helper\n\n"
+        "def outer():\n"
+        "    helper = object()\n"
+        "    local = object()\n"
+        "    class First:\n"
+        "        def middle(self):\n"
+        "            class Second:\n"
+        "                def leaf(self):\n"
+        "                    global helper\n"
+        "                    nonlocal local\n"
+        "                    return lib.helper(), helper(), local()\n"
+        "            return Second\n"
+        "    return First\n"
+    )
+    _write(tmp_path, "app.py", source)
+
+    visitor = _ScopeCallVisitor("app")
+    visitor.visit(ast.parse(source))
+    assert visitor._scope_bound_names == []
+    assert visitor._scope_global_names == []
+    assert visitor._scope_shadow_names == []
+    assert visitor._scope_import_targets == []
+    assert visitor._scope_receiver_overrides == []
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "lib.helper")
+    relationships = _edge_labels(result)
+    assert ("app.outer", "lib.helper", RelationshipKind.CALLS.value) in relationships
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
+    assert any(
+        relationship.source == outer
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for relationship in result.document.relationships
+    )
 
 
 def test_function_signature_defaults_and_annotations_are_attributed_to_the_function(
