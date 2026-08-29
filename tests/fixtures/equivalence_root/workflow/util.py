@@ -14,6 +14,9 @@ def fixture_outer() -> type[object]:
     class Outer:
         fixture_helper = staticmethod(lambda: None)
 
+        class HeaderPhase(fixture_helper):
+            pass
+
         class Assigned:
             @fixture_helper
             def run(self) -> int:
