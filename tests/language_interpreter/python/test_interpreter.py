@@ -491,8 +491,7 @@ def test_non_atomic_member_bases_keep_parentheses_in_unresolved_labels(
     _write(
         tmp_path,
         "app.py",
-        "def invoke():\n"
-        "    return (left + right).denominator, (a if k else b).run\n",
+        "def invoke():\n    return (left + right).denominator, (a if k else b).run\n",
     )
 
     result = analyze_python_workspace(tmp_path)
