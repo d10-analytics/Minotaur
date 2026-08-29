@@ -716,6 +716,29 @@ def _import_targets(
     return collector.import_targets
 
 
+def _class_context_after_statement(
+    context: _ScopeContext,
+    statement: ast.stmt,
+    module_name: str,
+    is_package: bool,
+) -> _ScopeContext:
+    """Add one class-body statement's bindings for later method headers.
+
+    Class locals are sequential. A preceding assignment suppresses an
+    enclosing name in a later method header, while a preceding import supplies
+    the nearest import binding. These bindings stay in this class-only context
+    and are therefore never visible to method bodies.
+    """
+    collector = _BindingCollector(module_name, is_package)
+    collector.visit(statement)
+    dynamic_names = frozenset(collector.names) - frozenset(collector.global_names)
+    return replace(
+        context,
+        bound_names=context.bound_names | dynamic_names,
+        import_targets={**context.import_targets, **collector.import_targets},
+    )
+
+
 def _global_names(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
     """Collect names declared global by one function or nested function."""
     return _global_names_in_statements(statement.body)
@@ -1112,22 +1135,18 @@ def _analyze_module(
             # Methods are excluded here and analyzed below in their own scope,
             # matching how _ScopeCallVisitor.visit_ClassDef treats a nested
             # class body inside a function.
-            # A class body binds its own imports, and its method headers are
-            # evaluated in that same scope. Method bodies are not: class scope
-            # is invisible from inside a method.
-            class_imports = _import_targets(statement.body, module.name, module.is_package)
+            # A class statement's header runs in the enclosing scope, before
+            # the class namespace exists. Its body then executes sequentially
+            # in a new namespace: preceding assignments and imports are
+            # visible to later method headers, but class scope is invisible to
+            # method bodies.
             class_context = replace(
                 context,
                 bound_names=frozenset(_type_param_names(statement)),
-                import_targets={**module_imports, **class_imports},
             )
             _calls(
                 class_context,
-                [
-                    member
-                    for member in statement.body
-                    if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-                ],
+                [],
                 symbols[statement].node_id,
                 symbols[statement].class_declarations,
                 prefix_nodes=_class_header_nodes(statement),
@@ -1155,9 +1174,8 @@ def _analyze_module(
                     _calls(
                         replace(
                             class_context,
-                            bound_names=frozenset(
-                                _type_param_names(statement) | _type_param_names(member)
-                            ),
+                            bound_names=class_context.bound_names
+                            | frozenset(_type_param_names(member)),
                         ),
                         [],
                         symbols[member].node_id,
@@ -1170,6 +1188,16 @@ def _analyze_module(
                         symbols[member].node_id,
                         symbols[member].class_declarations,
                     )
+                else:
+                    _calls(
+                        class_context,
+                        [member],
+                        symbols[statement].node_id,
+                        symbols[statement].class_declarations,
+                    )
+                class_context = _class_context_after_statement(
+                    class_context, member, module.name, module.is_package
+                )
 
 
 def _decorator_references(
