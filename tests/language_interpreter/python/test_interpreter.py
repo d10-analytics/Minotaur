@@ -2940,6 +2940,63 @@ def test_nested_class_method_headers_use_class_imports_in_source_order(
     assert _unresolved_by_source(result)["app.outer"] == {"helper"}
 
 
+def test_nested_class_import_replaces_preceding_dynamic_header_binding(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        helper = staticmethod(lambda target: target)\n"
+        "        @helper\n"
+        "        def before(self):\n"
+        "            return 1\n"
+        "        from other import helper\n"
+        "        @helper\n"
+        "        def after(self):\n"
+        "            return helper()\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    module_helper = _node_id(result, "library.helper")
+    resolved_helper_uses = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == module_helper
+    ]
+
+    # The dynamic class assignment suppresses the earlier decorator. The
+    # subsequent class import replaces that assignment for the later header,
+    # so it is reported as an unresolved local import instead of being
+    # suppressed or attributed to the module import. The method body remains
+    # isolated from both class bindings and resolves through the module.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in resolved_helper_uses
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {(RelationshipKind.CALLS.value, 12)}
+    assert _unresolved_by_source(result) == {"app.outer": {"helper"}}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "helper"
+    }
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in unresolved_ids
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {10}
+
+
 def test_nested_class_method_header_sees_preceding_import_but_body_does_not(
     tmp_path: Path,
 ) -> None:
@@ -3244,6 +3301,57 @@ def test_direct_class_method_headers_use_import_source_order_and_body_scope(
         (RelationshipKind.CALLS.value, 10),
     }
     assert _unresolved_by_source(result) == {"app.Runner.after": {"helper"}}
+
+
+def test_direct_class_import_replaces_preceding_dynamic_header_binding(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    helper = staticmethod(lambda target: target)\n"
+        "    @helper\n"
+        "    def before(self):\n"
+        "        return 1\n"
+        "    from other import helper\n"
+        "    @helper\n"
+        "    def after(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    before = _node_id(result, "app.Runner.before")
+    after = _node_id(result, "app.Runner.after")
+    module_helper = _node_id(result, "library.helper")
+    resolved_helper_uses = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source in {before, after} and relationship.target == module_helper
+    ]
+
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in resolved_helper_uses
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {(RelationshipKind.CALLS.value, 11)}
+    assert _unresolved_by_source(result) == {"app.Runner.after": {"helper"}}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "helper"
+    }
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == after and relationship.target in unresolved_ids
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {9}
 
 
 def test_nested_class_method_receiver_does_not_use_outer_class_declarations(
