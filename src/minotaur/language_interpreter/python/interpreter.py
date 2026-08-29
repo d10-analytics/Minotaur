@@ -1471,5 +1471,7 @@ def _expression_text(expression: ast.expr) -> str:
     if isinstance(expression, ast.Name):
         return expression.id
     if isinstance(expression, ast.Attribute):
-        return f"{_expression_text(expression.value)}.{expression.attr}"
+        if isinstance(expression.value, (ast.Name, ast.Attribute)):
+            return f"{_expression_text(expression.value)}.{expression.attr}"
+        return ast.unparse(expression)
     return ast.unparse(expression)
