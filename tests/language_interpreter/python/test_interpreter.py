@@ -2993,6 +2993,51 @@ def test_direct_class_method_headers_use_assignment_source_order_and_body_scope(
     assert _unresolved_by_source(result) == {}
 
 
+def test_direct_async_class_method_headers_use_assignment_source_order_and_body_scope(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    @helper\n"
+        "    async def before(self):\n"
+        "        return 1\n"
+        "    helper = staticmethod(lambda: None)\n"
+        "    @helper\n"
+        "    async def after(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    method_sources = {
+        _node_id(result, "app.Runner.before"),
+        _node_id(result, "app.Runner.after"),
+    }
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source in method_sources and relationship.target == helper
+    ]
+
+    # Async methods use the same class-header scope: the first decorator sees
+    # the module import, the later one sees the class-local assignment, and
+    # the later body still resolves through the enclosing module scope.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 4),
+        (RelationshipKind.CALLS.value, 10),
+    }
+    assert _unresolved_by_source(result) == {}
+
+
 def test_direct_class_method_headers_use_import_source_order_and_body_scope(
     tmp_path: Path,
 ) -> None:
