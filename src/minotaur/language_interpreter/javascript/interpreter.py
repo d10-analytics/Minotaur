@@ -510,6 +510,7 @@ def _walk(
     seen: NodeEmitter,
     shadows: set[str] | None = None,
     skip_declaration: bool = False,
+    member_fact: bool = True,
 ) -> None:
     if node is None or not hasattr(node, "type"):
         return
@@ -750,7 +751,17 @@ def _walk(
                 else:
                     seen.unresolved(owner, callee_name, location, nodes, relationships)
         else:
-            _walk(callee, owner, module, bindings, relationships, nodes, seen, shadows)
+            _walk(
+                callee,
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+                member_fact=member_fact,
+            )
         # Member dispatch and IIFE callee forms are deliberately outside the
         # direct bare-identifier call contract; their bases and bodies remain
         # ordinary executable expressions.
@@ -773,6 +784,7 @@ def _walk(
             nodes,
             seen,
             shadows,
+            member_fact=False,
         )
         if getattr(node, "computed", False):
             _walk(
@@ -785,6 +797,18 @@ def _walk(
                 seen,
                 shadows,
             )
+        if member_fact:
+            root = _member_root(node)
+            if root is not None and root not in shadows:
+                text = _member_text(node, module.source)
+                if text is not None:
+                    seen.unresolved(
+                        owner,
+                        text,
+                        _node_location(module.path, node, module.line_index),
+                        nodes,
+                        relationships,
+                    )
         return
     if typ == "Property":
         if getattr(node, "computed", False):
@@ -1110,6 +1134,34 @@ def _property_name(node: Any) -> str | None:
         return str(value)
     value = getattr(node, "value", None)
     return str(value) if isinstance(value, (str, int, float)) else None
+
+
+def _member_root(node: Any) -> str | None:
+    """Return the root identifier of a member-expression chain."""
+    typ = getattr(node, "type", None)
+    if typ == "Identifier":
+        return str(node.name)
+    if typ == "MemberExpression":
+        return _member_root(getattr(node, "object", None))
+    return None
+
+
+def _member_text(node: Any, source: str) -> str | None:
+    """Render a member chain using canonical dots and source-range keys."""
+    typ = getattr(node, "type", None)
+    if typ == "Identifier":
+        return str(node.name)
+    if typ != "MemberExpression":
+        return None
+    object_text = _member_text(getattr(node, "object", None), source)
+    if object_text is None:
+        return None
+    property_node = getattr(node, "property", None)
+    if getattr(node, "computed", False):
+        start, end = getattr(property_node, "range", (0, 0))
+        return f"{object_text}[{source[start:end]}]"
+    property_name = _property_name(property_node)
+    return f"{object_text}.{property_name}" if property_name is not None else None
 
 
 def _start(node: Any) -> int:
