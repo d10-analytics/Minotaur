@@ -507,6 +507,20 @@ def test_non_atomic_member_bases_keep_parentheses_in_unresolved_labels(
     }
 
 
+def test_already_unparsed_member_bases_keep_their_full_text_labels(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def invoke():\n    return f(x).y, self.items[0].name\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_by_source(result)["app.invoke"] == {
+        "f",
+        "x",
+        "f(x).y",
+        "self.items",
+        "self.items[0].name",
+    }
+
+
 def test_member_loads_and_calls_emit_the_same_full_text_facts(tmp_path: Path) -> None:
     _write(tmp_path, "library.py", "class Cfg:\n    DEFAULT = 1\n")
     _write(
