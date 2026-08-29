@@ -800,11 +800,11 @@ def _walk(
         if member_fact:
             root = _member_root(node)
             if root is not None and root not in shadows:
-                text = _member_text(node, module.source)
-                if text is not None:
+                member_label = _member_text(node, module.source)
+                if member_label is not None:
                     seen.unresolved(
                         owner,
-                        text,
+                        member_label,
                         _node_location(module.path, node, module.line_index),
                         nodes,
                         relationships,
