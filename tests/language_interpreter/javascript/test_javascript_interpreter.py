@@ -1018,6 +1018,23 @@ def test_member_calls_and_loads_emit_exact_base_and_full_facts(tmp_path, source,
     assert unresolved == expected
 
 
+def test_nested_member_calls_and_loads_keep_the_complete_chain_label(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function f() { unknown.api.run(); const value = unknown.api.other; }"
+            )
+        },
+    )
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert unresolved == {"unknown", "unknown.api.run", "unknown.api.other"}
+
+
 def test_resolved_member_callee_keeps_import_reference_and_never_calls(tmp_path):
     result = _analyze(
         tmp_path,
