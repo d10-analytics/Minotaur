@@ -3228,7 +3228,7 @@ def test_direct_nested_methods_skip_the_enclosing_class_namespace(
     assert _unresolved_by_source(result) == {"app.Outer": {"helper"}}
 
 
-def test_direct_nested_class_headers_skip_the_enclosing_class_namespace(
+def test_direct_nested_class_header_uses_enclosing_class_assignment(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "library.py", "def helper():\n    return 1\n")
@@ -3253,20 +3253,77 @@ def test_direct_nested_class_headers_skip_the_enclosing_class_namespace(
         if relationship.source == outer and relationship.target == helper
     ]
 
-    # The nested class header and its method header skip Outer.helper and see
-    # the module import. Its method body is class-scope-isolated and sees that
-    # same module import as well.
+    # The nested class statement's base executes in Outer's body and therefore
+    # sees the preceding class-local assignment. Inner's body starts a new
+    # class namespace: its method header and body skip Outer.helper and see the
+    # module import instead.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in relationships
         for evidence in relationship.evidence
         for location in evidence.locations
     } == {
-        (RelationshipKind.REFERENCES.value, 5),
         (RelationshipKind.REFERENCES.value, 6),
         (RelationshipKind.CALLS.value, 8),
     }
     assert _unresolved_by_source(result) == {}
+
+
+def test_function_nested_class_header_uses_enclosing_class_import(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def factory():\n"
+        "    class Outer:\n"
+        "        from other import helper\n"
+        "        class Inner(helper):\n"
+        "            @helper\n"
+        "            def run(self):\n"
+        "                return helper()\n"
+        "    return Outer\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    factory = _node_id(result, "app.factory")
+    module_helper = _node_id(result, "library.helper")
+    class_helper = _node_id(result, "other.helper")
+
+    # Inner's base sees the import in the immediately enclosing class body;
+    # local imports are conservatively unresolved rather than attributed to a
+    # different module binding. The method decorator and body cannot close
+    # over Outer, so they independently resolve through the module import.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == factory and relationship.target == module_helper
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 7),
+        (RelationshipKind.CALLS.value, 9),
+    }
+    assert all(
+        relationship.source != factory or relationship.target != class_helper
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {"app.factory": {"helper"}}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "helper"
+    }
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == factory and relationship.target in unresolved_ids
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {6}
 
 
 def test_direct_nested_class_skips_enclosing_class_imports(
