@@ -1322,6 +1322,7 @@ def test_function_nested_generic_class_method_keeps_type_parameters_only(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
     _write(
         tmp_path,
         "app.py",
@@ -1329,6 +1330,7 @@ def test_function_nested_generic_class_method_keeps_type_parameters_only(
         "def outer[OuterT]():\n"
         "    class Box[T]:\n"
         "        helper = staticmethod(lambda: None)\n"
+        "        from other import helper\n"
         "        def get(self):\n"
         "            return T, OuterT, helper()\n"
         "    return Box\n",
@@ -1339,6 +1341,8 @@ def test_function_nested_generic_class_method_keeps_type_parameters_only(
     # PEP 695 parameters are lexical for methods, while ordinary class-body
     # bindings remain isolated and cannot shadow the enclosing import.
     assert _unresolved_by_source(result) == {}
+    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert ("app.outer", "other.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
 
 
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
@@ -1346,6 +1350,7 @@ def test_direct_nested_generic_class_method_keeps_type_parameters_only(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
     _write(
         tmp_path,
         "app.py",
@@ -1353,6 +1358,7 @@ def test_direct_nested_generic_class_method_keeps_type_parameters_only(
         "class Outer[OuterT]:\n"
         "    class Box[T]:\n"
         "        helper = staticmethod(lambda: None)\n"
+        "        from other import helper\n"
         "        def get(self):\n"
         "            return T, OuterT, helper()\n",
     )
@@ -1362,6 +1368,8 @@ def test_direct_nested_generic_class_method_keeps_type_parameters_only(
     # The direct-class path uses the same method-body isolation as a
     # function-nested class: retain Box.T, discard Box.helper.
     assert _unresolved_by_source(result) == {}
+    assert ("app.Outer", "library.helper", RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert ("app.Outer", "other.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
 
 
 def test_local_binding_shadows_import_alias_for_dynamic_attribute_call(tmp_path: Path) -> None:
