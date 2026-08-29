@@ -1,3 +1,4 @@
+# ruff: noqa
 """Small helpers shared by the fixture workflow."""
 
 from __future__ import annotations
@@ -41,6 +42,39 @@ class FixtureScopes:
     class Imported:
         from externallib import fixture_helper
 
+        @fixture_helper
+        def run(self) -> int:
+            return fixture_helper()
+
+
+def generic_scope_probe[T]():
+    """Exercise lexical PEP 695 parameters inside a nested class method."""
+
+    class Box[U]:
+        def values(self) -> tuple[T, U, int]:
+            return T, U, fixture_helper()
+
+    return Box
+
+
+class DeletedBindingScope:
+    """Exercise restoration of an enclosing import after class-local deletion."""
+
+    from externallib import fixture_helper
+
+    del fixture_helper
+
+    @fixture_helper
+    def run(self) -> int:
+        return fixture_helper()
+
+
+class ImportedOuterScope:
+    """Exercise nested-class isolation when the outer class only imports."""
+
+    from externallib import fixture_helper
+
+    class Inner:
         @fixture_helper
         def run(self) -> int:
             return fixture_helper()
