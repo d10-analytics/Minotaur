@@ -2948,6 +2948,94 @@ def test_nested_class_method_header_sees_preceding_import_but_body_does_not(
     assert _unresolved_by_source(result)["app.outer"] == {"helper"}
 
 
+def test_direct_class_method_headers_use_assignment_source_order_and_body_scope(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    @helper\n"
+        "    def before(self):\n"
+        "        return 1\n"
+        "    helper = staticmethod(lambda: None)\n"
+        "    @helper\n"
+        "    def after(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    method_sources = {
+        _node_id(result, "app.Runner.before"),
+        _node_id(result, "app.Runner.after"),
+    }
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source in method_sources and relationship.target == helper
+    ]
+
+    # The first header runs before the class-local assignment and sees the
+    # module import. The later header sees that assignment, while its body
+    # still resolves ``helper`` through the enclosing module scope.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 4),
+        (RelationshipKind.CALLS.value, 10),
+    }
+    assert _unresolved_by_source(result) == {}
+
+
+def test_direct_class_method_headers_use_import_source_order_and_body_scope(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    @helper\n"
+        "    def before(self):\n"
+        "        return 1\n"
+        "    from other import helper\n"
+        "    @helper\n"
+        "    def after(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    before = _node_id(result, "app.Runner.before")
+    after = _node_id(result, "app.Runner.after")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source in {before, after} and relationship.target == helper
+    ]
+
+    # The first header sees the enclosing import. The class-local import
+    # shadows it for the later header, but not for the method body.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 4),
+        (RelationshipKind.CALLS.value, 10),
+    }
+    assert _unresolved_by_source(result) == {"app.Runner.after": {"helper"}}
+
+
 def test_nested_class_method_receiver_does_not_use_outer_class_declarations(
     tmp_path: Path,
 ) -> None:
