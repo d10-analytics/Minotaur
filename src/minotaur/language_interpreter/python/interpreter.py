@@ -88,7 +88,7 @@ class _ScopeContext:
     # PEP 695 type parameters are lexical even though ordinary class locals
     # are not; nested classes and methods retain these names.
     class_scope_type_param_names: frozenset[str] = frozenset()
-    class_scope_outer_import_targets: Mapping[str, str] = field(default_factory=dict)
+    class_scope_outer_import_targets: Mapping[str, str] | None = None
     is_package: bool = False
     receiver_name: str | None = None
     receiver_parameter: str | None = None
@@ -1639,16 +1639,17 @@ def _calls(
 
 def _without_enclosing_class_scope(context: _ScopeContext) -> _ScopeContext:
     """Hide class-only context while retaining enclosing lexical scopes."""
-    if not context.class_scope_bound_names:
+    outer_import_targets = context.class_scope_outer_import_targets
+    if outer_import_targets is None:
         return context
     type_param_names = context.class_scope_type_param_names
     return replace(
         context,
         bound_names=(context.bound_names - context.class_scope_bound_names) | type_param_names,
-        import_targets=context.class_scope_outer_import_targets,
+        import_targets=outer_import_targets,
         class_scope_bound_names=type_param_names,
         class_scope_type_param_names=type_param_names,
-        class_scope_outer_import_targets={},
+        class_scope_outer_import_targets=None,
     )
 
 
