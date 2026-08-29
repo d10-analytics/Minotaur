@@ -85,6 +85,9 @@ class _ScopeContext:
     # separately so a nested class method can discard every enclosing class
     # namespace while restoring the module/function imports beneath it.
     class_scope_bound_names: frozenset[str] = frozenset()
+    # PEP 695 type parameters are lexical even though ordinary class locals
+    # are not; nested classes and methods retain these names.
+    class_scope_type_param_names: frozenset[str] = frozenset()
     class_scope_outer_import_targets: Mapping[str, str] = field(default_factory=dict)
     is_package: bool = False
     receiver_name: str | None = None
@@ -166,6 +169,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_receiver_overrides: list[tuple[str | None, str | None] | None] = []
         self._scope_nested_class_method: list[bool] = []
         self._scope_is_class: list[bool] = []
+        self._scope_type_param_names: list[frozenset[str]] = []
         self._receiver_name = receiver_name
         self._receiver_parameter = receiver_parameter
         self.call_bound_names: dict[ast.Call, frozenset[str]] = {}
@@ -373,6 +377,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         receiver_override: tuple[str | None, str | None] | None = None,
         nested_class_method: bool = False,
         class_scope: bool = False,
+        type_param_names: frozenset[str] = frozenset(),
     ) -> None:
         self._scope_bound_names.append(bound_names)
         self._scope_global_names.append(global_names)
@@ -381,6 +386,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_receiver_overrides.append(receiver_override)
         self._scope_nested_class_method.append(nested_class_method)
         self._scope_is_class.append(class_scope)
+        self._scope_type_param_names.append(type_param_names)
 
     def _pop_scope(self) -> None:
         self._scope_bound_names.pop()
@@ -390,6 +396,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_receiver_overrides.pop()
         self._scope_nested_class_method.pop()
         self._scope_is_class.pop()
+        self._scope_type_param_names.pop()
 
     def _remove_class_scopes(
         self,
@@ -404,6 +411,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 tuple[str | None, str | None] | None,
                 bool,
                 bool,
+                frozenset[str],
             ],
         ]
     ]:
@@ -419,6 +427,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     tuple[str | None, str | None] | None,
                     bool,
                     bool,
+                    frozenset[str],
                 ],
             ]
         ] = []
@@ -436,16 +445,31 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                         self._scope_receiver_overrides[index],
                         self._scope_nested_class_method[index],
                         self._scope_is_class[index],
+                        self._scope_type_param_names[index],
                     ),
                 )
             )
-            del self._scope_bound_names[index]
-            del self._scope_global_names[index]
-            del self._scope_shadow_names[index]
-            del self._scope_import_targets[index]
-            del self._scope_receiver_overrides[index]
-            del self._scope_nested_class_method[index]
-            del self._scope_is_class[index]
+            type_param_names = self._scope_type_param_names[index]
+            if type_param_names:
+                # A class namespace is not lexical, but PEP 695 type
+                # parameters are. Keep only those bindings visible while a
+                # nested method body is analyzed.
+                self._scope_bound_names[index] = type_param_names
+                self._scope_global_names[index] = frozenset()
+                self._scope_shadow_names[index] = type_param_names
+                self._scope_import_targets[index] = {}
+                self._scope_receiver_overrides[index] = None
+                self._scope_nested_class_method[index] = False
+                self._scope_is_class[index] = False
+            else:
+                del self._scope_bound_names[index]
+                del self._scope_global_names[index]
+                del self._scope_shadow_names[index]
+                del self._scope_import_targets[index]
+                del self._scope_receiver_overrides[index]
+                del self._scope_nested_class_method[index]
+                del self._scope_is_class[index]
+                del self._scope_type_param_names[index]
         return removed
 
     def _restore_class_scopes(
@@ -461,10 +485,28 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     tuple[str | None, str | None] | None,
                     bool,
                     bool,
+                    frozenset[str],
                 ],
             ]
         ],
     ) -> None:
+        for _, frame in sorted(removed, reverse=True):
+            if not frame[-1]:
+                continue
+            marker_index = next(
+                index
+                for index in reversed(range(len(self._scope_type_param_names)))
+                if self._scope_type_param_names[index] and not self._scope_is_class[index]
+            )
+            del self._scope_bound_names[marker_index]
+            del self._scope_global_names[marker_index]
+            del self._scope_shadow_names[marker_index]
+            del self._scope_import_targets[marker_index]
+            del self._scope_receiver_overrides[marker_index]
+            del self._scope_nested_class_method[marker_index]
+            del self._scope_is_class[marker_index]
+            del self._scope_type_param_names[marker_index]
+
         for index, frame in sorted(removed):
             (
                 restored_bound_names,
@@ -474,6 +516,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 restored_receiver_override,
                 restored_nested_class_method,
                 restored_is_class,
+                restored_type_param_names,
             ) = frame
             self._scope_bound_names.insert(index, restored_bound_names)
             self._scope_global_names.insert(index, restored_global_names)
@@ -482,6 +525,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self._scope_receiver_overrides.insert(index, restored_receiver_override)
             self._scope_nested_class_method.insert(index, restored_nested_class_method)
             self._scope_is_class.insert(index, restored_is_class)
+            self._scope_type_param_names.insert(index, restored_type_param_names)
 
     def _scope_receivers(self) -> tuple[str | None, str | None]:
         for override in reversed(self._scope_receiver_overrides):
@@ -565,7 +609,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # own source-ordered bindings to later method headers.
         enclosing_class_scopes = self._remove_class_scopes()
         self._push_scope(
-            frozenset(_type_param_names(node)), frozenset(), frozenset(), class_scope=True
+            frozenset(_type_param_names(node)),
+            frozenset(),
+            frozenset(),
+            class_scope=True,
+            type_param_names=frozenset(_type_param_names(node)),
         )
         for header in _class_header_nodes(node):
             self.visit(header)
@@ -1267,6 +1315,7 @@ def _analyze_module(
                 context,
                 bound_names=frozenset(_type_param_names(statement)),
                 class_scope_bound_names=frozenset(_type_param_names(statement)),
+                class_scope_type_param_names=frozenset(_type_param_names(statement)),
                 class_scope_outer_import_targets=context.import_targets,
             )
             _calls(
@@ -1545,11 +1594,13 @@ def _without_enclosing_class_scope(context: _ScopeContext) -> _ScopeContext:
     """Hide class-only context while retaining enclosing lexical scopes."""
     if not context.class_scope_bound_names:
         return context
+    type_param_names = context.class_scope_type_param_names
     return replace(
         context,
-        bound_names=context.bound_names - context.class_scope_bound_names,
+        bound_names=(context.bound_names - context.class_scope_bound_names) | type_param_names,
         import_targets=context.class_scope_outer_import_targets,
-        class_scope_bound_names=frozenset(),
+        class_scope_bound_names=type_param_names,
+        class_scope_type_param_names=type_param_names,
         class_scope_outer_import_targets={},
     )
 
