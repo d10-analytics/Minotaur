@@ -2787,6 +2787,80 @@ def test_nested_class_method_headers_suppress_outer_function_locals(
     assert _unresolved_by_source(result)["app.outer"] == {"unknown_decorator"}
 
 
+def test_nested_class_method_header_sees_preceding_assignment_but_body_does_not(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        helper = staticmethod(lambda: None)\n"
+        "        @helper\n"
+        "        def run(self):\n"
+        "            return helper()\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.outer") and relationship.target == helper
+    ]
+
+    # The class-local assignment shadows the module decorator for the method
+    # header, but the method body cannot see that class binding and resolves
+    # its call through the enclosing module import.
+    assert [
+        (relationship.kind, location.range.start.line)
+        for relationship in relationships
+        for location in relationship.evidence[0].locations
+    ] == [(RelationshipKind.CALLS.value, 7)]
+    assert _unresolved_by_source(result) == {}
+
+
+def test_nested_class_method_header_sees_preceding_import_but_body_does_not(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        from other import helper\n"
+        "        @helper\n"
+        "        def run(self):\n"
+        "            return helper()\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    outer = _node_id(result, "app.outer")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == helper
+    ]
+
+    # The class-local import prevents the decorator from being attributed to
+    # the outer import. The method body remains isolated from the class import
+    # and therefore still resolves the enclosing module binding.
+    assert [
+        (relationship.kind, location.range.start.line)
+        for relationship in relationships
+        for location in relationship.evidence[0].locations
+    ] == [(RelationshipKind.CALLS.value, 7)]
+    assert _unresolved_by_source(result)["app.outer"] == {"helper"}
+
+
 def test_nested_class_method_receiver_does_not_use_outer_class_declarations(
     tmp_path: Path,
 ) -> None:
