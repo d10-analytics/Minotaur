@@ -1021,11 +1021,7 @@ def test_member_calls_and_loads_emit_exact_base_and_full_facts(tmp_path, source,
 def test_nested_member_calls_and_loads_keep_the_complete_chain_label(tmp_path):
     result = _analyze(
         tmp_path,
-        {
-            "app.js": (
-                "function f() { unknown.api.run(); const value = unknown.api.other; }"
-            )
-        },
+        {"app.js": ("function f() { unknown.api.run(); const value = unknown.api.other; }")},
     )
     unresolved = {
         node.reference_text
