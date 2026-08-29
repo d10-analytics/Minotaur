@@ -1317,6 +1317,53 @@ def test_nested_generic_class_body_binds_its_type_parameters(tmp_path: Path) -> 
     assert unresolved == {"ClassBound"}
 
 
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+def test_function_nested_generic_class_method_keeps_type_parameters_only(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer[OuterT]():\n"
+        "    class Box[T]:\n"
+        "        helper = staticmethod(lambda: None)\n"
+        "        def get(self):\n"
+        "            return T, OuterT, helper()\n"
+        "    return Box\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # PEP 695 parameters are lexical for methods, while ordinary class-body
+    # bindings remain isolated and cannot shadow the enclosing import.
+    assert _unresolved_by_source(result) == {}
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+def test_direct_nested_generic_class_method_keeps_type_parameters_only(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Outer[OuterT]:\n"
+        "    class Box[T]:\n"
+        "        helper = staticmethod(lambda: None)\n"
+        "        def get(self):\n"
+        "            return T, OuterT, helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # The direct-class path uses the same method-body isolation as a
+    # function-nested class: retain Box.T, discard Box.helper.
+    assert _unresolved_by_source(result) == {}
+
+
 def test_local_binding_shadows_import_alias_for_dynamic_attribute_call(tmp_path: Path) -> None:
     _write(tmp_path, "other.py", "def helper():\n    return 1\n")
     _write(
@@ -3469,6 +3516,7 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     assert visitor._scope_receiver_overrides == []
     assert visitor._scope_nested_class_method == []
     assert visitor._scope_is_class == []
+    assert visitor._scope_type_param_names == []
 
     result = analyze_python_workspace(tmp_path)
     outer = _node_id(result, "app.outer")
