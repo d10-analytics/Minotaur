@@ -5,6 +5,7 @@ Language-specific interpreter tests live beneath ``tests/language_interpreter``.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import sys
@@ -19,6 +20,7 @@ from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipK
 from minotaur.graph_model.validation import IssueCode, validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
+from minotaur.language_interpreter.python.interpreter import _ScopeCallVisitor
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -226,6 +228,36 @@ def test_package_relative_imports_analyze_without_crashing(tmp_path: Path) -> No
     } >= {
         (package, _node_id(result, "pkg.util"), RelationshipKind.IMPORTS.value),
         (run, helper, RelationshipKind.CALLS.value),
+    }
+
+
+def test_package_context_resolves_relative_imports_in_function_nested_class(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "pkg/__init__.py",
+        "from .helper import helper\n"
+        "\n"
+        "def outer():\n"
+        "    class Nested:\n"
+        "        from .helper import helper\n"
+        "        helper()\n"
+        "    return Nested\n",
+    )
+    _write(tmp_path, "pkg/helper.py", "def helper():\n    return 1\n")
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "pkg.outer")
+    helper = _node_id(result, "pkg.helper.helper")
+
+    assert (
+        outer,
+        helper,
+        RelationshipKind.CALLS.value,
+    ) in {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
     }
 
 
@@ -483,6 +515,42 @@ def test_unresolved_attribute_chain_emits_one_fact_labelled_with_its_full_text(
     # name that no query can act on.
     assert unresolved == {"obj.a.b.c.d"}
     assert len(_nodes(result, "obj.a.b.c.d")) == 1
+
+
+def test_non_atomic_member_bases_keep_parentheses_in_unresolved_labels(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n    return (left + right).denominator, (a if k else b).run\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_by_source(result)["app.invoke"] == {
+        "(left + right).denominator",
+        "(a if k else b).run",
+        "left",
+        "right",
+        "a",
+        "k",
+        "b",
+    }
+
+
+def test_already_unparsed_member_bases_keep_their_full_text_labels(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "def invoke():\n    return f(x).y, self.items[0].name\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_by_source(result)["app.invoke"] == {
+        "f",
+        "x",
+        "f(x).y",
+        "self.items",
+        "self.items[0].name",
+    }
 
 
 def test_member_loads_and_calls_emit_the_same_full_text_facts(tmp_path: Path) -> None:
@@ -1247,6 +1315,61 @@ def test_nested_generic_class_body_binds_its_type_parameters(tmp_path: Path) -> 
     }
 
     assert unresolved == {"ClassBound"}
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+def test_function_nested_generic_class_method_keeps_type_parameters_only(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer[OuterT]():\n"
+        "    class Box[T]:\n"
+        "        helper = staticmethod(lambda: None)\n"
+        "        from other import helper\n"
+        "        def get(self):\n"
+        "            return T, OuterT, helper()\n"
+        "    return Box\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # PEP 695 parameters are lexical for methods, while ordinary class-body
+    # bindings remain isolated and cannot shadow the enclosing import.
+    assert _unresolved_by_source(result) == {}
+    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert ("app.outer", "other.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+def test_direct_nested_generic_class_method_keeps_type_parameters_only(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Outer[OuterT]:\n"
+        "    class Box[T]:\n"
+        "        helper = staticmethod(lambda: None)\n"
+        "        from other import helper\n"
+        "        def get(self):\n"
+        "            return T, OuterT, helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # The direct-class path uses the same method-body isolation as a
+    # function-nested class: retain Box.T, discard Box.helper.
+    assert _unresolved_by_source(result) == {}
+    assert ("app.Outer", "library.helper", RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert ("app.Outer", "other.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
 
 
 def test_local_binding_shadows_import_alias_for_dynamic_attribute_call(tmp_path: Path) -> None:
@@ -2636,6 +2759,1050 @@ def test_class_body_statements_are_attributed_to_the_class_not_dropped(
     # the class merely because the class body is now visited.
     assert (method, inner, RelationshipKind.CALLS.value) in relationships
     assert (cfg, inner, RelationshipKind.CALLS.value) not in relationships
+
+
+def test_nested_class_methods_are_attributed_to_the_enclosing_owner(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import lib\n\n"
+        "def outer(left, right):\n"
+        "    class Inner:\n"
+        "        def run(self):\n"
+        "            return lib.helper(), self.other(), missing()\n"
+        "        def other(self):\n"
+        "            return 1\n"
+        "    return (left + right).denominator, Inner\n\n"
+        "class Outer:\n"
+        "    class Nested:\n"
+        "        def run(self):\n"
+        "            return lib.helper()\n"
+        "    def direct(self):\n"
+        "        return lib.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    outer_class = _node_id(result, "app.Outer")
+    helper = _node_id(result, "lib.helper")
+    edges = _edge_labels(result)
+
+    assert ("app.outer", "lib.helper", RelationshipKind.CALLS.value) in edges
+    assert ("app.Outer", "lib.helper", RelationshipKind.CALLS.value) in edges
+    assert {
+        location.range.start.line
+        for relationship in result.document.relationships
+        if relationship.source == outer
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {5}
+    assert {
+        location.range.start.line
+        for relationship in result.document.relationships
+        if relationship.source == outer_class
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {13}
+    assert _unresolved_by_source(result)["app.outer"] == {
+        "(left + right).denominator",
+        "missing",
+        "self.other",
+    }
+
+
+def test_nested_class_method_headers_use_the_enclosing_scope(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def decorator(target):\n    return target\n\n"
+        "def default():\n    return 1\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        @decorator\n"
+        "        @unknown_decorator\n"
+        "        def run(value=default, annotation: decorator = None):\n"
+        "            return value\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    relationships = _edge_labels(result)
+    outer = _node_id(result, "app.outer")
+    decorator = _node_id(result, "app.decorator")
+    default = _node_id(result, "app.default")
+
+    assert ("app.outer", "app.decorator", RelationshipKind.REFERENCES.value) in relationships
+    assert ("app.outer", "app.default", RelationshipKind.REFERENCES.value) in relationships
+    assert _unresolved_by_source(result)["app.outer"] == {"unknown_decorator"}
+    assert ("app.outer", "app.decorator", RelationshipKind.CALLS.value) not in relationships
+    assert ("app.outer", "app.default", RelationshipKind.CALLS.value) not in relationships
+    assert all(
+        relationship.source != outer
+        or relationship.target not in {decorator, default}
+        or relationship.kind == RelationshipKind.REFERENCES.value
+        for relationship in result.document.relationships
+    )
+
+
+def test_nested_class_method_headers_suppress_outer_function_locals(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    decorator = lambda target: target\n"
+        "    class Inner:\n"
+        "        @decorator\n"
+        "        @unknown_decorator\n"
+        "        def run(self):\n"
+        "            return 1\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # The enclosing function's local decorator is not a workspace dependency;
+    # the unbound decorator must still be reported under that function owner.
+    assert _unresolved_by_source(result)["app.outer"] == {"unknown_decorator"}
+
+
+def test_nested_class_method_header_sees_preceding_assignment_but_body_does_not(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        helper = staticmethod(lambda: None)\n"
+        "        @helper\n"
+        "        def run(self):\n"
+        "            return helper()\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.outer") and relationship.target == helper
+    ]
+
+    # The class-local assignment shadows the module decorator for the method
+    # header, but the method body cannot see that class binding and resolves
+    # its call through the enclosing module import.
+    assert [
+        (relationship.kind, location.range.start.line)
+        for relationship in relationships
+        for location in relationship.evidence[0].locations
+    ] == [(RelationshipKind.CALLS.value, 7)]
+    assert _unresolved_by_source(result) == {}
+
+
+def test_nested_class_method_headers_use_class_bindings_in_source_order(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        @helper\n"
+        "        def before(self):\n"
+        "            return 1\n"
+        "        helper = staticmethod(lambda: None)\n"
+        "        @helper\n"
+        "        def after(self):\n"
+        "            return 1\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "library.helper")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == helper
+    ]
+
+    # The first header executes before the class-local assignment exists and
+    # therefore sees the module import. The later header sees the class-local
+    # binding and must not retain that outer dependency.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 5),
+    }
+    assert _unresolved_by_source(result) == {}
+
+
+def test_nested_class_method_headers_use_class_imports_in_source_order(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        @helper\n"
+        "        def before(self):\n"
+        "            return 1\n"
+        "        from other import helper\n"
+        "        @helper\n"
+        "        def after(self):\n"
+        "            return 1\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "library.helper")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == helper
+    ]
+
+    # The first header executes before the class-local import and sees the
+    # module import. The later header sees the new local import and must not
+    # retain that outer dependency.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 5),
+    }
+    assert _unresolved_by_source(result)["app.outer"] == {"helper"}
+
+
+def test_nested_class_import_replaces_preceding_dynamic_header_binding(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        helper = staticmethod(lambda target: target)\n"
+        "        @helper\n"
+        "        def before(self):\n"
+        "            return 1\n"
+        "        from other import helper\n"
+        "        @helper\n"
+        "        def after(self):\n"
+        "            return helper()\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    module_helper = _node_id(result, "library.helper")
+    resolved_helper_uses = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == module_helper
+    ]
+
+    # The dynamic class assignment suppresses the earlier decorator. The
+    # subsequent class import replaces that assignment for the later header,
+    # so it is reported as an unresolved local import instead of being
+    # suppressed or attributed to the module import. The method body remains
+    # isolated from both class bindings and resolves through the module.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in resolved_helper_uses
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {(RelationshipKind.CALLS.value, 12)}
+    assert _unresolved_by_source(result) == {"app.outer": {"helper"}}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "helper"
+    }
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in unresolved_ids
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {10}
+
+
+def test_nested_class_delete_restores_enclosing_import_for_later_header(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        from other import helper\n"
+        "        del helper\n"
+        "        @helper\n"
+        "        async def run(self):\n"
+        "            return helper()\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    module_helper = _node_id(result, "library.helper")
+    deleted_helper = _node_id(result, "other.helper")
+
+    # Deleting the class-local import restores the enclosing module import for
+    # the later async method header. Its body is class-isolated and resolves
+    # through that same enclosing import independently.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == module_helper
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 7),
+        (RelationshipKind.CALLS.value, 9),
+    }
+    assert all(
+        relationship.source != outer or relationship.target != deleted_helper
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {}
+
+
+def test_nested_class_method_header_sees_preceding_import_but_body_does_not(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        from other import helper\n"
+        "        @helper\n"
+        "        def run(self):\n"
+        "            return helper()\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    outer = _node_id(result, "app.outer")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == helper
+    ]
+
+    # The class-local import prevents the decorator from being attributed to
+    # the outer import. The method body remains isolated from the class import
+    # and therefore still resolves the enclosing module binding.
+    assert [
+        (relationship.kind, location.range.start.line)
+        for relationship in relationships
+        for location in relationship.evidence[0].locations
+    ] == [(RelationshipKind.CALLS.value, 7)]
+    assert _unresolved_by_source(result)["app.outer"] == {"helper"}
+
+
+def test_nested_methods_skip_every_enclosing_class_namespace(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Outer:\n"
+        "        helper = staticmethod(lambda: None)\n"
+        "        class Assigned:\n"
+        "            @helper\n"
+        "            def run(self):\n"
+        "                return helper()\n"
+        "        class Imported:\n"
+        "            from other import helper\n"
+        "            @helper\n"
+        "            def run(self):\n"
+        "                return helper()\n"
+        "    return Outer\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "library.helper")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == helper
+    ]
+
+    # Class namespaces are not lexical enclosures: the first nested decorator
+    # skips Outer.helper and sees the module import. Both method bodies also
+    # see the module import; the second nested class's own import suppresses
+    # only its decorator and leaves that header unresolved.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 7),
+        (RelationshipKind.CALLS.value, 9),
+        (RelationshipKind.CALLS.value, 14),
+    }
+    assert _unresolved_by_source(result) == {"app.outer": {"helper"}}
+
+
+def test_direct_nested_methods_skip_the_enclosing_class_namespace(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Outer:\n"
+        "    helper = staticmethod(lambda: None)\n"
+        "    class Assigned:\n"
+        "        @helper\n"
+        "        def run(self):\n"
+        "            return helper()\n"
+        "    class Imported:\n"
+        "        from other import helper\n"
+        "        @helper\n"
+        "        def run(self):\n"
+        "            return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.Outer")
+    helper = _node_id(result, "library.helper")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == helper
+    ]
+
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 6),
+        (RelationshipKind.CALLS.value, 8),
+        (RelationshipKind.CALLS.value, 13),
+    }
+    assert _unresolved_by_source(result) == {"app.Outer": {"helper"}}
+
+
+def test_direct_nested_class_header_uses_enclosing_class_assignment(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Outer:\n"
+        "    helper = staticmethod(lambda: None)\n"
+        "    class Inner(helper):\n"
+        "        value = helper()\n"
+        "        @helper\n"
+        "        def run(self):\n"
+        "            return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.Outer")
+    helper = _node_id(result, "library.helper")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == helper
+    ]
+
+    # The nested class statement's base executes in Outer's body and therefore
+    # sees the preceding class-local assignment. Inner's body starts a new
+    # class namespace: its ordinary body expression, method header, and method
+    # body skip Outer.helper and see the module import instead.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.CALLS.value, 6),
+        (RelationshipKind.REFERENCES.value, 7),
+        (RelationshipKind.CALLS.value, 9),
+    }
+    assert _unresolved_by_source(result) == {}
+
+
+def test_function_nested_class_header_uses_enclosing_class_import(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def factory():\n"
+        "    class Outer:\n"
+        "        from other import helper\n"
+        "        class Inner(helper):\n"
+        "            value = helper()\n"
+        "            @helper\n"
+        "            def run(self):\n"
+        "                return helper()\n"
+        "    return Outer\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    factory = _node_id(result, "app.factory")
+    module_helper = _node_id(result, "library.helper")
+    class_helper = _node_id(result, "other.helper")
+
+    # Inner's base sees the import in the immediately enclosing class body;
+    # local imports are conservatively unresolved rather than attributed to a
+    # different module binding. Inner's ordinary body expression, method
+    # decorator, and method body cannot close over Outer, so they independently
+    # resolve through the module import.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == factory and relationship.target == module_helper
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.CALLS.value, 7),
+        (RelationshipKind.REFERENCES.value, 8),
+        (RelationshipKind.CALLS.value, 10),
+    }
+    assert all(
+        relationship.source != factory or relationship.target != class_helper
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {"app.factory": {"helper"}}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "helper"
+    }
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == factory and relationship.target in unresolved_ids
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {6}
+
+
+def test_direct_nested_class_header_uses_enclosing_class_import(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "library.py",
+        "class Base:\n    pass\n\ndef helper(value=None):\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "other.py",
+        "class Base:\n    pass\n\ndef helper(value=None):\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import Base, helper\n\n"
+        "class Outer:\n"
+        "    from other import Base, helper\n"
+        "    class Inner(Base):\n"
+        "        @helper\n"
+        "        def run(self):\n"
+        "            return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.Outer")
+    library_base = _node_id(result, "library.Base")
+    library_helper = _node_id(result, "library.helper")
+    other_targets = {
+        _node_id(result, "other.Base"),
+        _node_id(result, "other.helper"),
+    }
+
+    # The nested class statement's base uses Outer's import rather than the
+    # module import; local imports remain conservatively unresolved. Inner's
+    # method header and body do not close over Outer and therefore resolve
+    # through the module import beneath that namespace.
+    assert {
+        (relationship.target, relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in {library_base, library_helper}
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (library_helper, RelationshipKind.REFERENCES.value, 6),
+        (library_helper, RelationshipKind.CALLS.value, 8),
+    }
+    assert all(
+        relationship.source != outer or relationship.target not in other_targets
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {"app.Outer": {"Base"}}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "Base"
+    }
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in unresolved_ids
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {5}
+
+
+def test_direct_nested_class_after_delete_uses_restored_enclosing_imports(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "library.py",
+        "class Base:\n    pass\n\ndef helper(value=None):\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "other.py",
+        "class Base:\n    pass\n\ndef helper(value=None):\n    return value\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import Base, helper\n\n"
+        "class Outer:\n"
+        "    from other import Base, helper\n"
+        "    del Base, helper\n"
+        "    class Inner(Base):\n"
+        "        @helper\n"
+        "        async def run(self):\n"
+        "            return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.Outer")
+    library_base = _node_id(result, "library.Base")
+    library_helper = _node_id(result, "library.helper")
+    other_targets = {
+        _node_id(result, "other.Base"),
+        _node_id(result, "other.helper"),
+    }
+
+    assert {
+        (relationship.target, relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in {library_base, library_helper}
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (library_base, RelationshipKind.REFERENCES.value, 6),
+        (library_helper, RelationshipKind.REFERENCES.value, 7),
+        (library_helper, RelationshipKind.CALLS.value, 9),
+    }
+    assert all(
+        relationship.source != outer or relationship.target not in other_targets
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {}
+
+
+def test_direct_class_method_headers_use_assignment_source_order_and_body_scope(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    @helper\n"
+        "    def before(self):\n"
+        "        return 1\n"
+        "    helper = staticmethod(lambda: None)\n"
+        "    @helper\n"
+        "    def after(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    method_sources = {
+        _node_id(result, "app.Runner.before"),
+        _node_id(result, "app.Runner.after"),
+    }
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source in method_sources and relationship.target == helper
+    ]
+
+    # The first header runs before the class-local assignment and sees the
+    # module import. The later header sees that assignment, while its body
+    # still resolves ``helper`` through the enclosing module scope.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 4),
+        (RelationshipKind.CALLS.value, 10),
+    }
+    assert _unresolved_by_source(result) == {}
+
+
+def test_direct_async_class_method_headers_use_assignment_source_order_and_body_scope(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    @helper\n"
+        "    async def before(self):\n"
+        "        return 1\n"
+        "    helper = staticmethod(lambda: None)\n"
+        "    @helper\n"
+        "    async def after(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    method_sources = {
+        _node_id(result, "app.Runner.before"),
+        _node_id(result, "app.Runner.after"),
+    }
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source in method_sources and relationship.target == helper
+    ]
+
+    # Async methods use the same class-header scope: the first decorator sees
+    # the module import, the later one sees the class-local assignment, and
+    # the later body still resolves through the enclosing module scope.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 4),
+        (RelationshipKind.CALLS.value, 10),
+    }
+    assert _unresolved_by_source(result) == {}
+
+
+def test_direct_class_method_headers_use_import_source_order_and_body_scope(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    @helper\n"
+        "    def before(self):\n"
+        "        return 1\n"
+        "    from other import helper\n"
+        "    @helper\n"
+        "    def after(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    helper = _node_id(result, "library.helper")
+    before = _node_id(result, "app.Runner.before")
+    after = _node_id(result, "app.Runner.after")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source in {before, after} and relationship.target == helper
+    ]
+
+    # The first header sees the enclosing import. The class-local import
+    # shadows it for the later header, but not for the method body.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 4),
+        (RelationshipKind.CALLS.value, 10),
+    }
+    assert _unresolved_by_source(result) == {"app.Runner.after": {"helper"}}
+
+
+def test_direct_class_import_replaces_preceding_dynamic_header_binding(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    helper = staticmethod(lambda target: target)\n"
+        "    @helper\n"
+        "    def before(self):\n"
+        "        return 1\n"
+        "    from other import helper\n"
+        "    @helper\n"
+        "    def after(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    before = _node_id(result, "app.Runner.before")
+    after = _node_id(result, "app.Runner.after")
+    module_helper = _node_id(result, "library.helper")
+    resolved_helper_uses = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source in {before, after} and relationship.target == module_helper
+    ]
+
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in resolved_helper_uses
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {(RelationshipKind.CALLS.value, 11)}
+    assert _unresolved_by_source(result) == {"app.Runner.after": {"helper"}}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "helper"
+    }
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == after and relationship.target in unresolved_ids
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {9}
+
+
+def test_direct_class_delete_restores_enclosing_import_for_later_header(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Runner:\n"
+        "    from other import helper\n"
+        "    del helper\n"
+        "    @helper\n"
+        "    def run(self):\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.Runner.run")
+    module_helper = _node_id(result, "library.helper")
+    deleted_helper = _node_id(result, "other.helper")
+
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == run and relationship.target == module_helper
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 6),
+        (RelationshipKind.CALLS.value, 8),
+    }
+    assert all(
+        relationship.source != run or relationship.target != deleted_helper
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_by_source(result) == {}
+
+
+def test_direct_nested_class_import_replaces_compound_dynamic_binding(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        if True:\n"
+        "            helper = staticmethod(lambda target: target)\n"
+        "        @helper\n"
+        "        def before(self):\n"
+        "            return self.missing()\n"
+        "        from other import helper\n"
+        "        @helper\n"
+        "        def after(self):\n"
+        "            return helper(), self.missing()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.Outer")
+    module_helper = _node_id(result, "library.helper")
+    resolved_helper_uses = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == module_helper
+    ]
+
+    # The nested class's compound assignment suppresses its first header. Its
+    # own later import replaces that dynamic possibility for the second header,
+    # while both method bodies retain module scope and receiver-shaped members.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in resolved_helper_uses
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {(RelationshipKind.CALLS.value, 13)}
+    unresolved = _unresolved_by_source(result)
+    assert unresolved["app.Outer"] == {"helper", "self.missing"}
+    unresolved_ids = {
+        node.id
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    unresolved_locations = {
+        (node.reference_text, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target in unresolved_ids
+        for node in result.document.nodes
+        if node.id == relationship.target
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert unresolved_locations == {
+        ("self.missing", 9),
+        ("helper", 11),
+        ("self.missing", 13),
+    }
+
+
+def test_nested_class_method_receiver_does_not_use_outer_class_declarations(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "class Outer:\n"
+        "    def other(self):\n"
+        "        return 1\n"
+        "    class Inner:\n"
+        "        def run(self):\n"
+        "            return self.other()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_by_source(result)["app.Outer"] == {"self.other"}
+    assert ("app.Outer", "app.Outer.other", RelationshipKind.CALLS.value) not in _edge_labels(
+        result
+    )
+
+
+def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    source = (
+        "from lib import helper\n\n"
+        "def outer():\n"
+        "    helper = object()\n"
+        "    local = object()\n"
+        "    class First:\n"
+        "        def middle(self):\n"
+        "            class Second:\n"
+        "                def leaf(self):\n"
+        "                    global helper\n"
+        "                    nonlocal local\n"
+        "                    return lib.helper(), helper(), local()\n"
+        "            return Second\n"
+        "    return First\n"
+    )
+    _write(tmp_path, "app.py", source)
+
+    visitor = _ScopeCallVisitor("app")
+    visitor.visit(ast.parse(source))
+    assert visitor._scope_bound_names == []
+    assert visitor._scope_global_names == []
+    assert visitor._scope_shadow_names == []
+    assert visitor._scope_import_targets == []
+    assert visitor._scope_receiver_overrides == []
+    assert visitor._scope_excludes_enclosing_class == []
+    assert visitor._scope_is_class == []
+    assert visitor._scope_type_param_names == []
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "lib.helper")
+    relationships = _edge_labels(result)
+    assert ("app.outer", "lib.helper", RelationshipKind.CALLS.value) in relationships
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
+    assert any(
+        relationship.source == outer
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for relationship in result.document.relationships
+    )
 
 
 def test_function_signature_defaults_and_annotations_are_attributed_to_the_function(

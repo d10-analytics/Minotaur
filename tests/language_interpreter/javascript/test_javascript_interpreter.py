@@ -1001,6 +1001,93 @@ def test_member_bases_are_references_and_iife_bodies_are_walked_once(tmp_path):
     assert [(edge.kind) for edge in target_edges] == [RelationshipKind.CALLS.value]
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("function f() { unknown.target(); }", {"unknown", "unknown.target"}),
+        ("function f() { const h = unknown.other; }", {"unknown", "unknown.other"}),
+    ],
+)
+def test_member_calls_and_loads_emit_exact_base_and_full_facts(tmp_path, source, expected):
+    result = _analyze(tmp_path, {"app.js": source})
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert unresolved == expected
+
+
+def test_nested_member_calls_and_loads_keep_the_complete_chain_label(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {"app.js": ("function f() { unknown.api.run(); const value = unknown.api.other; }")},
+    )
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert unresolved == {"unknown", "unknown.api.run", "unknown.api.other"}
+
+
+def test_resolved_member_callee_keeps_import_reference_and_never_calls(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "lib.js": "export function api() {}\n",
+            "app.js": "import { api } from './lib.js';\napi.run();\n",
+        },
+    )
+    app = _node(result, "app")
+    api = _node(result, "lib.api")
+    api_edges = [
+        edge
+        for edge in result.document.relationships
+        if edge.source == app.id and edge.target == api.id
+    ]
+    assert [edge.kind for edge in api_edges] == [RelationshipKind.REFERENCES.value]
+    assert {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"api.run"}
+    assert not _edges(result, RelationshipKind.CALLS.value)
+
+
+def test_shadowed_member_root_suppresses_the_whole_member_fact(tmp_path):
+    result = _analyze(tmp_path, {"app.js": "function f(cfg) { return cfg.value; }"})
+    assert {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == set()
+
+
+def test_computed_member_chain_emits_full_text_and_ordinary_base_key_facts(tmp_path):
+    result = _analyze(tmp_path, {"app.js": "function f() { return table[key].run(); }"})
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert unresolved == {"table", "key", "table[key].run"}
+    assert not _edges(result, RelationshipKind.CALLS.value)
+
+
+def test_member_fact_exclusions_keep_this_new_and_iife_dispatch_silent(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {"app.js": "this.field; new Foo().bar; (function () { hidden(); })().value;"},
+    )
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert unresolved == {"hidden"}
+
+
 def test_relative_parent_imports_resolve_and_root_escape_is_unresolved(tmp_path):
     result = _analyze(
         tmp_path,

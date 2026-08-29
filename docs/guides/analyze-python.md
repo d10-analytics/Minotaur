@@ -90,8 +90,10 @@ see it before deleting that symbol. Class headers are treated the same way: the
 decorators, bases, and keywords of `class Sub(Base, metaclass=Meta)` are
 references from the class (or, for a nested class, from the enclosing scope),
 so a base class used only through subclassing is not reported as unreferenced.
-Nested function definitions do not become separate symbol nodes, and methods
-of nested classes remain outside this slice.
+Nested function definitions do not become separate symbol nodes. Methods of
+nested classes likewise do not become separate nodes: their bodies are analyzed
+with the same scope rules and their facts are attributed to the nearest
+enclosing emitted symbol. Nested class declarations remain outside this slice.
 
 Repeated direct declarations with the same name in one scope remain separate
 nodes, and each node receives its own header and body relationships. Name-based
@@ -121,6 +123,11 @@ passes through a call or a subscript, the descent records how the root was
 actually used and the outer expression remains one unresolved fact:
 `lib.helper().c.d` records a `calls` relationship to `lib.helper` and an
 unresolved `lib.helper().c.d`.
+
+For a non-atomic member base, the unresolved label uses the full AST expression
+text, preserving the expression it names: `(left + right).denominator` is not
+labelled `left + right.denominator`, and `items[0].name` remains
+`items[0].name`.
 
 Names bound in the lexical scope that owns the load (including parameters,
 assignment targets, loop and context-manager targets, comprehension and walrus
