@@ -260,7 +260,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         *,
         nested_class_method: bool = False,
     ) -> None:
-        self._push_scope(frozenset(_type_param_names(node)), frozenset(), frozenset())
+        self._push_scope(
+            frozenset(_type_param_names(node)),
+            frozenset(),
+            frozenset(),
+            nested_class_method=nested_class_method,
+        )
         self._visit_definition_header(node)
         self._pop_scope()
         bound_names, import_targets = _scope_binders(node, self._module_name, self._is_package)
@@ -284,50 +289,14 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # module) frames remain visible for the method body. Restore the frames
         # after the walk so later class statements see the namespace built by
         # earlier statements in source order.
-        class_scopes: list[
-            tuple[
-                int,
-                tuple[
-                    frozenset[str],
-                    frozenset[str],
-                    frozenset[str],
-                    Mapping[str, str],
-                    tuple[str | None, str | None] | None,
-                    bool,
-                    bool,
-                ],
-            ]
-        ] = []
+        class_scopes = []
         if nested_class_method:
             # A method body cannot close over any class namespace, including
             # classes that contain the class declaring the method. Function
             # frames remain in place because they are legitimate lexical
             # scopes. Keep the removed frames indexed so they can be restored
             # before the enclosing class continues in source order.
-            for index in reversed(range(len(self._scope_is_class))):
-                if not self._scope_is_class[index]:
-                    continue
-                class_scopes.append(
-                    (
-                        index,
-                        (
-                            self._scope_bound_names[index],
-                            self._scope_global_names[index],
-                            self._scope_shadow_names[index],
-                            self._scope_import_targets[index],
-                            self._scope_receiver_overrides[index],
-                            self._scope_nested_class_method[index],
-                            self._scope_is_class[index],
-                        ),
-                    )
-                )
-                del self._scope_bound_names[index]
-                del self._scope_global_names[index]
-                del self._scope_shadow_names[index]
-                del self._scope_import_targets[index]
-                del self._scope_receiver_overrides[index]
-                del self._scope_nested_class_method[index]
-                del self._scope_is_class[index]
+            class_scopes = self._remove_class_scopes()
         self._push_scope(
             bound_names,
             _global_names(node),
@@ -339,23 +308,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         for statement in node.body:
             self.visit(statement)
         self._pop_scope()
-        for index, frame in sorted(class_scopes):
-            (
-                restored_bound_names,
-                restored_global_names,
-                restored_shadow_names,
-                restored_import_targets,
-                restored_receiver_override,
-                restored_nested_class_method,
-                restored_is_class,
-            ) = frame
-            self._scope_bound_names.insert(index, restored_bound_names)
-            self._scope_global_names.insert(index, restored_global_names)
-            self._scope_shadow_names.insert(index, restored_shadow_names)
-            self._scope_import_targets.insert(index, restored_import_targets)
-            self._scope_receiver_overrides.insert(index, restored_receiver_override)
-            self._scope_nested_class_method.insert(index, restored_nested_class_method)
-            self._scope_is_class.insert(index, restored_is_class)
+        self._restore_class_scopes(class_scopes)
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for expression in _signature_nodes(node):
@@ -438,6 +391,98 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_nested_class_method.pop()
         self._scope_is_class.pop()
 
+    def _remove_class_scopes(
+        self,
+    ) -> list[
+        tuple[
+            int,
+            tuple[
+                frozenset[str],
+                frozenset[str],
+                frozenset[str],
+                Mapping[str, str],
+                tuple[str | None, str | None] | None,
+                bool,
+                bool,
+            ],
+        ]
+    ]:
+        """Temporarily hide every class namespace from a nested scope."""
+        removed: list[
+            tuple[
+                int,
+                tuple[
+                    frozenset[str],
+                    frozenset[str],
+                    frozenset[str],
+                    Mapping[str, str],
+                    tuple[str | None, str | None] | None,
+                    bool,
+                    bool,
+                ],
+            ]
+        ] = []
+        for index in reversed(range(len(self._scope_is_class))):
+            if not self._scope_is_class[index]:
+                continue
+            removed.append(
+                (
+                    index,
+                    (
+                        self._scope_bound_names[index],
+                        self._scope_global_names[index],
+                        self._scope_shadow_names[index],
+                        self._scope_import_targets[index],
+                        self._scope_receiver_overrides[index],
+                        self._scope_nested_class_method[index],
+                        self._scope_is_class[index],
+                    ),
+                )
+            )
+            del self._scope_bound_names[index]
+            del self._scope_global_names[index]
+            del self._scope_shadow_names[index]
+            del self._scope_import_targets[index]
+            del self._scope_receiver_overrides[index]
+            del self._scope_nested_class_method[index]
+            del self._scope_is_class[index]
+        return removed
+
+    def _restore_class_scopes(
+        self,
+        removed: list[
+            tuple[
+                int,
+                tuple[
+                    frozenset[str],
+                    frozenset[str],
+                    frozenset[str],
+                    Mapping[str, str],
+                    tuple[str | None, str | None] | None,
+                    bool,
+                    bool,
+                ],
+            ]
+        ],
+    ) -> None:
+        for index, frame in sorted(removed):
+            (
+                restored_bound_names,
+                restored_global_names,
+                restored_shadow_names,
+                restored_import_targets,
+                restored_receiver_override,
+                restored_nested_class_method,
+                restored_is_class,
+            ) = frame
+            self._scope_bound_names.insert(index, restored_bound_names)
+            self._scope_global_names.insert(index, restored_global_names)
+            self._scope_shadow_names.insert(index, restored_shadow_names)
+            self._scope_import_targets.insert(index, restored_import_targets)
+            self._scope_receiver_overrides.insert(index, restored_receiver_override)
+            self._scope_nested_class_method.insert(index, restored_nested_class_method)
+            self._scope_is_class.insert(index, restored_is_class)
+
     def _scope_receivers(self) -> tuple[str | None, str | None]:
         for override in reversed(self._scope_receiver_overrides):
             if override is not None:
@@ -514,7 +559,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # visitor's caller because nested classes have no emitted symbols. The
         # class header (decorators, bases, and keywords such as ``metaclass=``)
         # is evaluated in the enclosing scope as well, so a base class is a
-        # real dependency of that scope.
+        # real dependency of that scope. Class namespaces are not lexical
+        # enclosures, so hide every enclosing class while evaluating this
+        # class's header and body; the class frame below still supplies its
+        # own source-ordered bindings to later method headers.
+        enclosing_class_scopes = self._remove_class_scopes()
         self._push_scope(
             frozenset(_type_param_names(node)), frozenset(), frozenset(), class_scope=True
         )
@@ -532,6 +581,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 self.visit(statement)
             self._record_class_bindings(statement)
         self._pop_scope()
+        self._restore_class_scopes(enclosing_class_scopes)
 
     def _record_class_bindings(self, statement: ast.stmt) -> None:
         """Add one class statement's bindings for later headers.
