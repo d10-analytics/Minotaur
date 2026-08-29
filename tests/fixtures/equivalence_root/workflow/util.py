@@ -4,6 +4,46 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from workflow.helper import fixture_helper
+
+def fixture_outer() -> type[object]:
+    """Build nested classes whose headers and bodies use different scopes."""
+
+    class Outer:
+        fixture_helper = staticmethod(lambda: None)
+
+        class Assigned:
+            @fixture_helper
+            def run(self) -> int:
+                return fixture_helper()
+
+        class Imported:
+            from externallib import fixture_helper
+
+            @fixture_helper
+            def run(self) -> int:
+                return fixture_helper()
+
+    return Outer
+
+
+class FixtureScopes:
+    """Exercise nested class scope isolation in a direct class body."""
+
+    fixture_helper = staticmethod(lambda: None)
+
+    class Assigned:
+        @fixture_helper
+        def run(self) -> int:
+            return fixture_helper()
+
+    class Imported:
+        from externallib import fixture_helper
+
+        @fixture_helper
+        def run(self) -> int:
+            return fixture_helper()
+
 
 def format_report(values: Sequence[int]) -> str:
     """Render *values* as one stable line."""
