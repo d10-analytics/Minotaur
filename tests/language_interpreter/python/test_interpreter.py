@@ -2823,6 +2823,49 @@ def test_nested_class_method_header_sees_preceding_assignment_but_body_does_not(
     assert _unresolved_by_source(result) == {}
 
 
+def test_nested_class_method_headers_use_class_bindings_in_source_order(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        @helper\n"
+        "        def before(self):\n"
+        "            return 1\n"
+        "        helper = staticmethod(lambda: None)\n"
+        "        @helper\n"
+        "        def after(self):\n"
+        "            return 1\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    helper = _node_id(result, "library.helper")
+    relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == helper
+    ]
+
+    # The first header executes before the class-local assignment exists and
+    # therefore sees the module import. The later header sees the class-local
+    # binding and must not retain that outer dependency.
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {
+        (RelationshipKind.REFERENCES.value, 5),
+    }
+    assert _unresolved_by_source(result) == {}
+
+
 def test_nested_class_method_header_sees_preceding_import_but_body_does_not(
     tmp_path: Path,
 ) -> None:
