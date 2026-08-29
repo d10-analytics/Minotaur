@@ -485,6 +485,29 @@ def test_unresolved_attribute_chain_emits_one_fact_labelled_with_its_full_text(
     assert len(_nodes(result, "obj.a.b.c.d")) == 1
 
 
+def test_non_atomic_member_bases_keep_parentheses_in_unresolved_labels(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n"
+        "    return (left + right).denominator, (a if k else b).run\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_by_source(result)["app.invoke"] == {
+        "(left + right).denominator",
+        "(a if k else b).run",
+        "left",
+        "right",
+        "a",
+        "k",
+        "b",
+    }
+
+
 def test_member_loads_and_calls_emit_the_same_full_text_facts(tmp_path: Path) -> None:
     _write(tmp_path, "library.py", "class Cfg:\n    DEFAULT = 1\n")
     _write(
