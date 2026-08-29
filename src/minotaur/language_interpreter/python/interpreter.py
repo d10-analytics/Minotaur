@@ -1291,8 +1291,13 @@ def _analyze_module(
                         symbols[member].class_declarations,
                     )
                 else:
+                    nested_class_context = (
+                        _without_enclosing_class_scope(class_context)
+                        if isinstance(member, ast.ClassDef)
+                        else class_context
+                    )
                     _calls(
-                        class_context,
+                        nested_class_context,
                         [member],
                         symbols[statement].node_id,
                         symbols[statement].class_declarations,
