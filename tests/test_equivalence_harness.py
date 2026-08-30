@@ -43,7 +43,9 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # enclosing bindings, and direct-class imports stay out of nested scopes).
 # -> 235eb4e (nested class headers retain their immediate enclosing class
 # phase while nested bodies isolate class namespaces).
-BASELINE_COMMIT = "235eb4e238fdc00d72a1c6e1d0fccb613969e0a"
+# -> 21a6003 (import resolution: dotted imports, relative escape, module/class
+# keying, star and local imports, `__future__` tally).
+BASELINE_COMMIT = "21a60030e9d592cf218f6a40aecaf729a87ee82c"
 
 
 @pytest.fixture(scope="session")
