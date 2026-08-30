@@ -18,9 +18,16 @@ from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file
 from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipKind
 from minotaur.graph_model.validation import IssueCode, validate_document
+from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
+from minotaur.language_interpreter.emission import NodeEmitter
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
-from minotaur.language_interpreter.python.interpreter import _ScopeCallVisitor
+from minotaur.language_interpreter.python.interpreter import (
+    _imports,
+    _ImportTally,
+    _make_module,
+    _ScopeCallVisitor,
+)
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -175,6 +182,134 @@ def test_dynamic_and_missing_imports_are_explicit_unresolved_references(tmp_path
     assert validate_document(result.document).is_valid
 
 
+def test_star_import_records_module_edge_and_resolves_once(tmp_path: Path) -> None:
+    _write(tmp_path, "other.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from other import *\n\ndef caller():\n    return other.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    extension = result.document.extensions["minotaur-python"]
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert ("app", "other", RelationshipKind.IMPORTS.value) in edges
+    assert extension["imports_resolved"] == 1
+    assert extension["imports_unresolved"] == 0
+    assert "other.*" not in unresolved
+    assert ("app.caller", "other.helper", RelationshipKind.CALLS.value) in edges
+
+
+def test_missing_star_import_is_one_unresolved_module_reference(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "from missing import *\n")
+
+    result = analyze_python_workspace(tmp_path)
+    extension = result.document.extensions["minotaur-python"]
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert extension["imports_resolved"] == 0
+    assert extension["imports_unresolved"] == 1
+    assert unresolved == {"missing"}
+
+
+def test_future_annotations_import_is_not_an_unresolved_reference(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "from __future__ import annotations\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert "__future__.annotations" not in unresolved
+
+
+def test_future_annotations_import_does_not_increment_unresolved_tally(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "from __future__ import annotations\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert result.document.extensions["minotaur-python"]["imports_unresolved"] == 0
+
+
+def test_multiple_future_imports_produce_no_import_facts(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "from __future__ import annotations, division\n")
+
+    result = analyze_python_workspace(tmp_path)
+    extension = result.document.extensions["minotaur-python"]
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert extension["imports_resolved"] == 0
+    assert extension["imports_unresolved"] == 0
+    assert unresolved == set()
+
+
+def test_nested_future_import_is_excluded_by_import_guard(tmp_path: Path) -> None:
+    source = "def run():\n    from __future__ import annotations\n"
+    parsed = ast.parse(source)
+    nested = next(node for node in ast.walk(parsed) if isinstance(node, ast.ImportFrom))
+    assert nested.module == "__future__"
+
+    # Keep the ImportFrom's parseable nested AST origin, while making it
+    # reachable by the current module-body import loop. This isolates the
+    # ``__future__`` guard from the recursive traversal change in T05.
+    module = _make_module(
+        "app.py",
+        ast.Module(body=[nested], type_ignores=[]),
+        source,
+        LineIndex(source),
+    )
+    nodes = []
+    tally = _ImportTally({})
+
+    aliases = _imports(
+        module,
+        {},
+        {},
+        RelationshipAccumulator(),
+        nodes,
+        NodeEmitter("minotaur-python", "python"),
+        tally,
+    )
+
+    assert aliases == {}
+    assert tally.resolved == 0
+    assert tally.unresolved == 0
+    assert nodes == []
+
+
+def test_non_future_from_import_remains_unresolved(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "from os import path\n")
+
+    result = analyze_python_workspace(tmp_path)
+    extension = result.document.extensions["minotaur-python"]
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert extension["imports_unresolved"] == 1
+    assert unresolved == {"os.path"}
+
+
 def test_syntax_error_is_reported_without_erasing_other_workspace_facts(tmp_path: Path) -> None:
     _write(tmp_path, "valid.py", "def working():\n    return 1\n")
     _write(tmp_path, "broken.py", "def incomplete(:\n")
@@ -261,6 +396,124 @@ def test_package_context_resolves_relative_imports_in_function_nested_class(
     }
 
 
+def test_root_escaping_relative_imports_keep_their_dotted_source_labels(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "pkg/module.py",
+        "from ... import sibling\nfrom ....outside import helper\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    # The import cannot be resolved after ascending beyond ``pkg``, but the
+    # leading dots are part of the requested name and must not be discarded.
+    assert unresolved == {"...sibling", "....outside.helper"}
+
+
+def test_root_level_single_dot_import_keeps_its_unresolved_label(tmp_path: Path) -> None:
+    _write(tmp_path, "a.py", "from . import sibling\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {".sibling"}
+
+
+def test_root_level_double_dot_import_keeps_its_unresolved_label(tmp_path: Path) -> None:
+    _write(tmp_path, "a.py", "from .. import x\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {"..x"}
+
+
+def test_escape_only_relative_imports_are_not_root_mismatches(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/module.py", "from ...outside import helper\n")
+
+    result = analyze_python_workspace(tmp_path)
+    extension = result.document.extensions["minotaur-python"]
+
+    assert extension == {
+        "imports_resolved": 0,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 1,
+    }
+
+
+def test_root_escape_stays_unresolved_when_its_dotted_label_collides(
+    tmp_path: Path,
+) -> None:
+    # A file whose name starts with dots deliberately creates a declaration
+    # label matching the source spelling. Escaping imports must not resolve
+    # against that unrelated declaration.
+    _write(tmp_path, "...outside.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "pkg/module.py", "from ...outside import helper\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    imports = {
+        (relationship.source, relationship.target)
+        for relationship in result.document.relationships
+        if relationship.kind == RelationshipKind.IMPORTS.value
+    }
+
+    assert unresolved == {"...outside.helper"}
+    assert imports == set()
+    assert result.document.extensions["minotaur-python"] == {
+        "imports_resolved": 0,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 1,
+    }
+
+
+def test_root_escaping_relative_imports_do_not_trigger_root_mismatch_warning(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "src/pkg/__init__.py", "")
+    _write(tmp_path, "src/pkg/a.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "src/pkg/b.py",
+        "from pkg.a import helper\nfrom ...outside import helper as external\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    extension = result.document.extensions["minotaur-python"]
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {"pkg.a.helper", "...outside.helper"}
+    assert extension == {
+        "imports_resolved": 0,
+        "imports_root_mismatched": 1,
+        "imports_unresolved": 2,
+        "import_root_hint": "src",
+    }
+
+
 def test_calls_in_nested_functions_are_attributed_to_the_outer_function(tmp_path: Path) -> None:
     _write(
         tmp_path,
@@ -305,6 +558,411 @@ def test_module_alias_and_module_level_calls_resolve_to_known_workspace_function
         for node in result.document.nodes
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
+
+
+def test_unaliased_dotted_module_import_resolves_module_qualified_calls(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/submodule.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.submodule\n\ndef invoke():\n    return pkg.submodule.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app.invoke", "pkg.submodule.helper", RelationshipKind.CALLS.value) in _edge_labels(
+        result
+    )
+    assert _unresolved_by_source(result) == {}
+
+
+def test_aliased_dotted_module_import_resolves_alias_calls(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/submodule.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.submodule as submodule\n\ndef invoke():\n    return submodule.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app.invoke", "pkg.submodule.helper", RelationshipKind.CALLS.value) in _edge_labels(
+        result
+    )
+    assert _unresolved_by_source(result) == {}
+
+
+def test_nested_imports_record_edges_and_resolve_local_calls(tmp_path: Path) -> None:
+    _write(tmp_path, "other.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "util.py", "value = 1\n")
+    _write(tmp_path, "fast_impl.py", "value = 1\n")
+    _write(tmp_path, "slow_impl.py", "value = 1\n")
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/util.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def direct():\n"
+        "    import other\n"
+        "    return other.helper()\n\n"
+        "def named():\n"
+        "    from other import helper\n"
+        "    return helper()\n\n"
+        "class Holder:\n"
+        "    import util\n\n"
+        "if TYPE_CHECKING:\n"
+        "    import util\n\n"
+        "try:\n"
+        "    import fast_impl\n"
+        "except ImportError:\n"
+        "    import slow_impl\n\n"
+        "def dotted():\n"
+        "    import pkg.util\n"
+        "    return pkg.util.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+
+    assert {
+        ("app", "other", RelationshipKind.IMPORTS.value),
+        ("app", "util", RelationshipKind.IMPORTS.value),
+        ("app", "fast_impl", RelationshipKind.IMPORTS.value),
+        ("app", "slow_impl", RelationshipKind.IMPORTS.value),
+        ("app", "pkg.util", RelationshipKind.IMPORTS.value),
+        ("app.direct", "other.helper", RelationshipKind.CALLS.value),
+        ("app.named", "other.helper", RelationshipKind.CALLS.value),
+        ("app.dotted", "pkg.util.helper", RelationshipKind.CALLS.value),
+    } <= edges
+
+
+def test_nested_from_import_records_module_and_symbol_edges(tmp_path: Path) -> None:
+    _write(tmp_path, "other.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n    from other import helper\n    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+
+    assert ("app", "other", RelationshipKind.IMPORTS.value) in edges
+    assert ("app", "other.helper", RelationshipKind.IMPORTS.value) in edges
+    assert ("app.invoke", "other.helper", RelationshipKind.CALLS.value) in edges
+
+
+def test_class_body_import_records_module_edge(tmp_path: Path) -> None:
+    _write(tmp_path, "util.py", "value = 1\n")
+    _write(tmp_path, "app.py", "class Holder:\n    import util\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app", "util", RelationshipKind.IMPORTS.value) in _edge_labels(result)
+
+
+def test_conditional_import_records_module_edge(tmp_path: Path) -> None:
+    _write(tmp_path, "util.py", "value = 1\n")
+    _write(tmp_path, "app.py", "if TYPE_CHECKING:\n    import util\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app", "util", RelationshipKind.IMPORTS.value) in _edge_labels(result)
+
+
+def test_dotted_module_call_wins_over_same_named_package_class_member(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "pkg/__init__.py",
+        "class util:\n    def helper(self):\n        return 1\n",
+    )
+    _write(tmp_path, "pkg/util.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "main.py",
+        "import pkg.util\n\ndef invoke():\n    return pkg.util.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    caller = _node_id(result, "main.invoke")
+    module_helper = next(
+        node
+        for node in _nodes(result, "pkg.util.helper")
+        if node.location is not None and node.location.path == "pkg/util.py"
+    )
+    class_helper = next(
+        node
+        for node in _nodes(result, "pkg.util.helper")
+        if node.location is not None and node.location.path == "pkg/__init__.py"
+    )
+    calls = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == caller and relationship.kind == RelationshipKind.CALLS.value
+    ]
+
+    assert [(relationship.target, relationship.kind) for relationship in calls] == [
+        (module_helper.id, RelationshipKind.CALLS.value)
+    ]
+    assert all(relationship.target != class_helper.id for relationship in calls)
+
+
+def test_workspace_qualified_module_lookup_is_module_first_without_import(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "pkg/__init__.py",
+        "class util:\n    def helper(self):\n        return 1\n",
+    )
+    _write(tmp_path, "pkg/util.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "main.py",
+        "def invoke():\n    return pkg.util.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    caller = _node_id(result, "main.invoke")
+    module_helper = next(
+        node
+        for node in _nodes(result, "pkg.util.helper")
+        if node.location is not None and node.location.path == "pkg/util.py"
+    )
+
+    assert {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    } >= {(caller, module_helper.id, RelationshipKind.CALLS.value)}
+    assert _unresolved_by_source(result) == {}
+
+
+def test_parent_module_import_resolves_qualified_child_module_call(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "pkg/__init__.py",
+        "class util:\n    def helper(self):\n        return 1\n",
+    )
+    _write(tmp_path, "pkg/util.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "main.py",
+        "import pkg\n\ndef invoke():\n    return pkg.util.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    caller = _node_id(result, "main.invoke")
+    module_helper = next(
+        node
+        for node in _nodes(result, "pkg.util.helper")
+        if node.location is not None and node.location.path == "pkg/util.py"
+    )
+
+    assert {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    } >= {(caller, module_helper.id, RelationshipKind.CALLS.value)}
+
+
+def test_module_first_lookup_does_not_bypass_a_rebound_root_alias(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "pkg/__init__.py",
+        "class util:\n    def helper(self):\n        return 1\n",
+    )
+    _write(tmp_path, "pkg/util.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "other.py",
+        "class util:\n    def helper(self):\n        return 3\n",
+    )
+    _write(
+        tmp_path,
+        "main.py",
+        "import pkg\nimport other as pkg\n\ndef invoke():\n    return pkg.util.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    caller = _node_id(result, "main.invoke")
+    module_helper = next(
+        node
+        for node in _nodes(result, "pkg.util.helper")
+        if node.location is not None and node.location.path == "pkg/util.py"
+    )
+    rebound_helper = _node_id(result, "other.util.helper")
+
+    assert {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    } >= {(caller, rebound_helper, RelationshipKind.CALLS.value)}
+    edges = {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+    assert (caller, module_helper.id, RelationshipKind.CALLS.value) not in edges
+
+
+def test_qualified_class_member_call_still_resolves_without_child_module(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "pkg/__init__.py",
+        "class Cls:\n    def method(self):\n        return 1\n",
+    )
+    _write(
+        tmp_path,
+        "main.py",
+        "import pkg\n\ndef invoke():\n    return pkg.Cls.method()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    caller = _node_id(result, "main.invoke")
+    method = _node_id(result, "pkg.Cls.method")
+
+    assert {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    } >= {(caller, method, RelationshipKind.CALLS.value)}
+
+
+def test_rebinding_a_dotted_import_root_removes_stale_prefixes(tmp_path: Path) -> None:
+    _write(tmp_path, "foo/__init__.py", "")
+    _write(tmp_path, "foo/bar.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "baz.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import foo.bar\nimport baz as foo\n\ndef invoke():\n    return foo.bar.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert (
+        "app.invoke",
+        "foo.bar.helper",
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
+    assert _unresolved_by_source(result) == {"app.invoke": {"foo.bar.helper"}}
+
+
+def test_from_import_rebinding_a_root_removes_stale_dotted_prefixes(tmp_path: Path) -> None:
+    _write(tmp_path, "foo/__init__.py", "")
+    _write(tmp_path, "foo/bar.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "baz.py", "class foo:\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import foo.bar\nfrom baz import foo\n\ndef invoke():\n    return foo.bar.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert (
+        "app.invoke",
+        "foo.bar.helper",
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
+    assert _unresolved_by_source(result) == {"app.invoke": {"foo.bar.helper"}}
+
+
+def test_dotted_imports_sharing_a_root_resolve_both_module_calls(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/util.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "pkg/models.py", "def build():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.util\n"
+        "import pkg.models\n\n"
+        "def invoke():\n"
+        "    pkg.util.helper()\n"
+        "    pkg.models.build()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert {
+        ("app.invoke", "pkg.util.helper", RelationshipKind.CALLS.value),
+        ("app.invoke", "pkg.models.build", RelationshipKind.CALLS.value),
+    } <= _edge_labels(result)
+    assert _unresolved_by_source(result) == {}
+
+
+def test_unaliased_dotted_import_keeps_root_binding_consistent_in_nested_scope(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "pkg/submodule.py", "value = 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg\n\ndef invoke():\n    import pkg.submodule\n    return pkg.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app.invoke", "pkg.helper", RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert _unresolved_by_source(result) == {}
+
+
+def test_local_alias_rebinding_still_blocks_the_module_alias(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg as package\n\n"
+        "def invoke():\n"
+        "    import other as package\n"
+        "    return package.helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app.invoke", "pkg.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
+    assert _unresolved_by_source(result) == {"app.invoke": {"package.helper"}}
+
+
+def test_dotted_import_alias_does_not_resolve_an_unknown_member(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/submodule.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.submodule\n\ndef invoke():\n    return pkg.submodule.missing()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_by_source(result) == {"app.invoke": {"pkg.submodule.missing"}}
+    assert ("app.invoke", "pkg.submodule.helper", RelationshipKind.CALLS.value) not in _edge_labels(
+        result
+    )
+
+
+def test_missing_dotted_import_remains_an_unresolved_import(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "import missing.package\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+    assert unresolved == {"missing.package"}
+    assert result.document.extensions["minotaur-python"]["imports_unresolved"] == 1
 
 
 def test_module_callback_reference_is_resolved_without_misclassifying_calls(
@@ -829,9 +1487,9 @@ def test_function_local_import_is_reportable_and_lazy_reimports_resolve(
 
     result = analyze_python_workspace(tmp_path)
 
-    # An import binds statically. Suppressing it as if it were a local
-    # assignment would erase the call instead of leaving it to a later slice.
-    assert _unresolved_by_source(result)["app.local_only"] == {"helper"}
+    # A function-local import is both reportable and a resolution source for
+    # the call in that same function.
+    assert _unresolved_by_source(result).get("app.local_only", set()) == set()
     assert ("app.lazy_reimport", "library.Thing", RelationshipKind.CALLS.value) in _edge_labels(
         result
     )
@@ -1476,7 +2134,7 @@ def test_an_import_that_rebinds_the_receiver_disqualifies_it(tmp_path: Path) -> 
         "app.Runner.helper",
         RelationshipKind.CALLS.value,
     ) not in _edge_labels(result)
-    assert _unresolved_by_source(result) == {}
+    assert _unresolved_by_source(result) == {"app": {"library.self"}}
 
 
 def test_comprehension_receiver_targets_shadow_self_and_cls_only_inside_comp(
@@ -1796,7 +2454,7 @@ def test_an_import_does_not_outlive_the_scope_that_ran_it(tmp_path: Path) -> Non
     # A scope's imports are popped with it. Leaving them behind would let one
     # function's ``import`` decide what a sibling, the enclosing body, a
     # comprehension, and a lambda mean by the same name.
-    assert unresolved_sites == {("list", 5)}
+    assert unresolved_sites == {("externallib.list", 3), ("list", 5)}
 
 
 def test_an_import_reaches_every_scope_nested_inside_the_one_that_ran_it(
@@ -1829,7 +2487,11 @@ def test_an_import_reaches_every_scope_nested_inside_the_one_that_ran_it(
     # name, so consulting only the innermost one would hide the dependency and
     # hand ``list`` back to builtin suppression. Both a nested ``def`` and a
     # comprehension are checked because each pushes a frame of its own.
-    assert unresolved_sites == {("list", 6), ("list", 8)}
+    assert unresolved_sites == {
+        ("externallib.list", 3),
+        ("list", 6),
+        ("list", 8),
+    }
 
 
 def test_nested_scope_import_of_a_workspace_name_stays_reportable(tmp_path: Path) -> None:
@@ -1846,11 +2508,10 @@ def test_nested_scope_import_of_a_workspace_name_stays_reportable(tmp_path: Path
 
     result = analyze_python_workspace(tmp_path)
 
-    # Import bindings are not dynamic locals at any depth, and resolving them
-    # is a later slice's work: the call is reported, not dropped and not
-    # resolved through a module-level alias that does not exist.
-    assert _unresolved_by_source(result)["app.outer"] == {"helper"}
-    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
+    # Import bindings are not dynamic locals at any depth, and the nested
+    # import now resolves the call through its lexical import target.
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
+    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) in _edge_labels(result)
 
 
 def test_class_body_imports_bind_in_the_class_scope_only(tmp_path: Path) -> None:
@@ -1966,7 +2627,7 @@ def test_method_headers_see_the_class_body_imports_their_bodies_cannot(
     # A method's header is evaluated in the class body, its body is not. Both
     # are attributed to the method, so only the line tells the two apart: the
     # default sees the class's ``list``, the body sees the builtin.
-    assert unresolved_sites == {("list", 4)}
+    assert unresolved_sites == {("externallib.list", 2), ("list", 4)}
 
 
 def test_the_nearest_scope_that_imports_a_name_decides_what_it_means(

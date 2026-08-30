@@ -92,6 +92,7 @@ class _ScopeContext:
     is_package: bool = False
     receiver_name: str | None = None
     receiver_parameter: str | None = None
+    modules: Mapping[str, _Module] = field(default_factory=dict)
 
 
 @dataclass
@@ -120,8 +121,10 @@ class _ImportTally:
         self.prefixes = {}
         self._suffixes = _module_suffixes(modules)
 
-    def note_unresolved(self, name: str) -> None:
+    def note_unresolved(self, name: str, *, root_mismatch_eligible: bool = True) -> None:
         self.unresolved += 1
+        if not root_mismatch_eligible:
+            return
         prefix = self._suffixes.get(name)
         if prefix is None and "." in name:
             # ``from pkg.mod import symbol``: the module part is what must match.
@@ -692,6 +695,45 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._visit_chain_interiors(node)
 
 
+def _import_bindings(alias: ast.alias) -> dict[str, str]:
+    """Return the names and qualified targets introduced by one import.
+
+    An unaliased dotted import binds its root package, while each dotted
+    prefix remains useful for static member lookup (``import pkg.mod`` makes
+    both ``pkg`` and ``pkg.mod`` available to the resolver). An explicit alias
+    binds only that alias to the complete imported name.
+    """
+    if alias.asname is not None:
+        return {alias.asname: alias.name}
+    parts = alias.name.split(".")
+    return {".".join(parts[:index]): ".".join(parts[:index]) for index in range(1, len(parts) + 1)}
+
+
+def _update_import_bindings(bindings: dict[str, str], alias: ast.alias) -> None:
+    """Apply one import while clearing aliases invalidated by rebinding.
+
+    A later ``import other as package`` rebinds ``package`` and therefore
+    invalidates dotted prefixes left by an earlier ``import package.module``.
+    Unaliased siblings such as ``import package.util, package.models`` retain
+    each other's prefixes because they bind the same root package.
+    """
+    imported = _import_bindings(alias)
+    root = alias.asname or alias.name.partition(".")[0]
+    if alias.asname is not None or bindings.get(root) not in (None, root):
+        for name in tuple(bindings):
+            if name == root or name.startswith(f"{root}."):
+                del bindings[name]
+    bindings.update(imported)
+
+
+def _update_named_import_binding(bindings: dict[str, str], name: str, target: str) -> None:
+    """Replace a named import and invalidate its previously bound prefixes."""
+    for existing in tuple(bindings):
+        if existing == name or existing.startswith(f"{name}."):
+            del bindings[existing]
+    bindings[name] = target
+
+
 class _BindingCollector(ast.NodeVisitor):
     """Collect lexical binders without crossing nested execution scopes.
 
@@ -722,14 +764,16 @@ class _BindingCollector(ast.NodeVisitor):
         # target is recorded exactly as ``_imports`` records an alias, so the
         # two can be compared.
         for alias in node.names:
-            self.import_targets[alias.asname or alias.name.partition(".")[0]] = alias.name
+            _update_import_bindings(self.import_targets, alias)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         base = _relative_module(self._module_name, self._is_package, node.module, node.level)
         for alias in node.names:
             if alias.name != "*":
-                self.import_targets[alias.asname or alias.name] = (
-                    f"{base}.{alias.name}" if base else alias.name
+                _update_named_import_binding(
+                    self.import_targets,
+                    alias.asname or alias.name,
+                    f"{base}.{alias.name}" if base else alias.name,
                 )
 
     def visit_Name(self, node: ast.Name) -> None:
@@ -1303,6 +1347,7 @@ def _analyze_module(
         builtin_names,
         module_imports,
         is_package=module.is_package,
+        modules=modules,
     )
     for symbol in symbols.values():
         relationships.add(
@@ -1520,7 +1565,16 @@ def _imports(
     tally: _ImportTally,
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
-    for statement in module.tree.body:
+    # This traversal intentionally differs from _BindingCollector's
+    # scope-bounded walk: _imports records graph edges and tally counts for
+    # every syntactically unambiguous import, regardless of execution scope.
+    # Conditional definitions have a separate declaration-grain concern, but
+    # imports remain unambiguous at every nesting depth (O-03/M-4).
+    # Keep the returned alias table module-scoped: nested bindings are supplied
+    # by _scope_binders through context.import_targets, so exposing them here
+    # would leak a function or class import into unrelated scopes.
+    module_statements = frozenset(module.tree.body)
+    for statement in ast.walk(module.tree):
         if isinstance(statement, ast.Import):
             for alias in statement.names:
                 target = modules.get(alias.name)
@@ -1541,14 +1595,77 @@ def _imports(
                         RelationshipKind.IMPORTS.value,
                         _location(module.path, statement),
                     )
-                    aliases[alias.asname or alias.name.split(".")[0]] = alias.name
+                    if statement in module_statements:
+                        _update_import_bindings(aliases, alias)
         elif isinstance(statement, ast.ImportFrom):
+            # ``__future__`` imports are compile-time directives, not workspace
+            # dependencies; exclude them from the graph and unresolved tally.
+            if statement.module == "__future__":
+                continue
             base = _relative_module(
                 module.name, module.is_package, statement.module, statement.level
             )
-            target_module = modules.get(base) if base is not None else None
+            root_escape = statement.level > 0 and base is None
+            target_module = modules.get(base) if not root_escape and base is not None else None
+            if (
+                statement not in module_statements
+                and target_module is not None
+                and not any(alias.name == "*" for alias in statement.names)
+            ):
+                # A nested named import depends on its containing module as
+                # well as the selected declaration; emit that module edge
+                # once, before the per-name symbol edges below.
+                relationships.add(
+                    module.module_id,
+                    target_module.module_id,
+                    RelationshipKind.IMPORTS.value,
+                    _location(module.path, statement),
+                )
             for alias in statement.names:
-                reference = f"{base}.{alias.name}" if base else alias.name
+                if alias.name == "*":
+                    # Star imports record the module dependency only. Expanding
+                    # declarations according to ``__all__`` is a separate
+                    # concern deferred to the declaration-grain analysis.
+                    star_reference = (
+                        base
+                        if base is not None
+                        else _relative_import_reference(
+                            base, statement.module, statement.level, alias.name
+                        )
+                    )
+                    if target_module is None:
+                        tally.note_unresolved(
+                            star_reference, root_mismatch_eligible=not root_escape
+                        )
+                        emitter.unresolved(
+                            module.module_id,
+                            star_reference,
+                            _location(module.path, statement),
+                            nodes,
+                            relationships,
+                        )
+                    else:
+                        tally.resolved += 1
+                        relationships.add(
+                            module.module_id,
+                            target_module.module_id,
+                            RelationshipKind.IMPORTS.value,
+                            _location(module.path, statement),
+                        )
+                    continue
+                reference = _relative_import_reference(
+                    base, statement.module, statement.level, alias.name
+                )
+                if root_escape:
+                    tally.note_unresolved(reference, root_mismatch_eligible=False)
+                    emitter.unresolved(
+                        module.module_id,
+                        reference,
+                        _location(module.path, statement),
+                        nodes,
+                        relationships,
+                    )
+                    continue
                 resolved_target = declarations.get(reference)
                 if resolved_target is None:
                     tally.note_unresolved(reference)
@@ -1567,8 +1684,9 @@ def _imports(
                         RelationshipKind.IMPORTS.value,
                         _location(module.path, statement),
                     )
-                    aliases[alias.asname or alias.name] = reference
-            if target_module is not None and base is not None:
+                    if statement in module_statements:
+                        _update_named_import_binding(aliases, alias.asname or alias.name, reference)
+            if statement in module_statements and target_module is not None and base is not None:
                 aliases.setdefault(base.rsplit(".", 1)[-1], base)
     return aliases
 
@@ -1810,19 +1928,54 @@ def _resolve_call(
         return None
     if head in context.bound_names and head != context.receiver_name:
         return None
-    if "." not in text:
-        target_name = context.aliases.get(text, f"{context.module_name}.{text}")
-        return context.declarations.get(target_name)
-    _, _, tail = text.partition(".")
     if head == context.receiver_name and class_declarations is not None:
         # ``self`` is tied to the class statement that owns the caller, not to
         # whichever same-named class was assigned to the module name last.
         # Resolve through that statement's method table so repeated method
         # names remain last-wins locally without leaking across class objects.
+        if "." not in text:
+            return None
+        _, _, tail = text.partition(".")
         return class_declarations.get(tail)
-    alias_target_name = context.aliases.get(head)
-    if alias_target_name is not None:
-        return context.declarations.get(f"{alias_target_name}.{tail}")
+    # A module prefix is eligible only while its root still denotes itself.
+    # Later aliases such as ``import other as pkg`` invalidate ``pkg.util``;
+    # bypassing the alias table here would resurrect that stale module path.
+    root_alias = context.aliases.get(head)
+    root_is_unrebound = root_alias in (None, head) and (
+        local_target is None or local_target == head
+    )
+    if "." in text and root_is_unrebound:
+        parts = text.split(".")
+        for index in range(len(parts), 0, -1):
+            prefix = ".".join(parts[:index])
+            if prefix in context.modules:
+                # Prefer the module's full qualified declaration before the
+                # flat table's class key. This prevents a module and class
+                # with the same name from colliding without rekeying the
+                # shared declarations table. Minotaur intentionally analyzes
+                # the workspace as a whole, so a known parent module also
+                # permits a qualified child lookup even without a matching
+                # import in the source module (O-01).
+                return context.declarations.get(text)
+    # Analysis declarations cover the workspace as a whole, so resolve a
+    # dotted call through its longest imported prefix. This preserves a
+    # specific alias such as ``pkg.submodule`` when a shorter ``pkg`` alias is
+    # also visible, and keeps unaliased dotted imports aligned with Python's
+    # root-package binding.
+    parts = text.split(".")
+    for index in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:index])
+        alias_target_name = context.aliases.get(prefix)
+        if alias_target_name is None:
+            alias_target_name = context.import_targets.get(prefix)
+        if alias_target_name is None:
+            continue
+        suffix = ".".join(parts[index:])
+        target_name = f"{alias_target_name}.{suffix}" if suffix else alias_target_name
+        # Once a prefix is bound, an absent member is unresolved; falling back
+        # to a shorter alias could attribute the same source expression to a
+        # different workspace object.
+        return context.declarations.get(target_name)
     return context.declarations.get(f"{context.module_name}.{text}")
 
 
@@ -1847,6 +2000,27 @@ def _relative_module(
     if imported:
         base.extend(imported.split("."))
     return ".".join(base)
+
+
+def _relative_import_reference(
+    base: str | None, imported: str | None, level: int, name: str
+) -> str:
+    """Render an imported name without losing an invalid relative prefix.
+
+    A relative import that ascends beyond the analyzed package has no resolved
+    module base, but its source spelling still identifies what was requested.
+    Retaining the leading dots keeps that unresolved fact distinct from a
+    bare absolute import and prevents it from looking like a root-mismatch
+    candidate.
+    """
+    if base is not None:
+        return f"{base}.{name}" if base else name
+    if level > 0:
+        prefix = "." * level
+        if imported:
+            prefix += f"{imported}."
+        return f"{prefix}{name}"
+    return f"{imported}.{name}" if imported else name
 
 
 def _module_location(path: str, line_index: LineIndex) -> Location:

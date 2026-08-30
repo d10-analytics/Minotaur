@@ -140,8 +140,9 @@ variable used as `module_level_name.attr`, or a class attribute used as
 declaration remains eligible for resolution. A name bound by an `import` or
 `from ... import` statement is never a dynamic local, including inside a
 function body: a function-local `from lib import helper` followed by `helper()`
-is reported as unresolved until function-local import resolution lands, and a
-function-local import that rebinds a module alias to a different target
+resolves when its workspace target is available (and remains unresolved when
+it is not), while a function-local import that rebinds a module alias to a
+different target
 (`import lib` at module level, `import other as lib` in the body) refuses to
 resolve through the module alias and reports `lib.helper` as unresolved.
 
@@ -178,10 +179,14 @@ Python uses `extensions["minotaur-python"]["content_sha256"]`. The analyze comma
 records its sorted root-relative input targets in the document extension
 `extensions["minotaur"]["selection"]`. The analyzer records import resolution
 counts in the document extension `extensions["minotaur-python"]`:
-`imports_resolved`, `imports_unresolved`, `imports_root_mismatched` (imports
-that would resolve under a different root), and, when mismatches exist,
-`import_root_hint` (the root-relative directory that would resolve them). These extensions are metadata and do
-not affect node identity or the graph format version. When the root is inside
+`imports_resolved`, `imports_unresolved`, and `imports_root_mismatched`
+(unresolved imports whose dotted name suffix-matches an analyzed module,
+indicating a root mismatch), plus, when mismatches exist, `import_root_hint`
+(the root-relative directory that would resolve them). Import counts include
+`import` and `from ... import` statements at every nesting depth, while
+`from __future__ import ...` compile-time directives are excluded. These
+extensions are metadata and do not affect node identity or the graph format
+version. When the root is inside
 a Git work tree, the document may also contain the current commit and branch
 in `source_control`; this is snapshot context, not a freshness substitute.
 
