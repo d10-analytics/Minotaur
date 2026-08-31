@@ -1602,9 +1602,11 @@ def _imports(
                 if base is not None:
                     reference = f"{base}.{alias.name}" if base else alias.name
                 elif root_escape:
-                    reference = "." * statement.level + (
-                        f"{statement.module}." if statement.module else ""
-                    ) + alias.name
+                    reference = (
+                        "." * statement.level
+                        + (f"{statement.module}." if statement.module else "")
+                        + alias.name
+                    )
                 else:
                     reference = (
                         f"{statement.module}.{alias.name}" if statement.module else alias.name
