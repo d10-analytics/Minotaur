@@ -327,9 +327,7 @@ def test_root_escape_bypasses_matching_workspace_modules_and_declarations(
     _write(
         tmp_path,
         "pkg/module.py",
-        "def run():\n"
-        "    from ...outside import *\n"
-        "    from ...outside import helper\n",
+        "def run():\n    from ...outside import *\n    from ...outside import helper\n",
     )
 
     result = analyze_python_workspace(tmp_path)
