@@ -261,6 +261,103 @@ def test_package_context_resolves_relative_imports_in_function_nested_class(
     }
 
 
+def test_root_level_star_import_keeps_only_the_module_reference(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "from . import *\n")
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = [
+        node for node in result.document.nodes if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    ]
+    extension = result.document.extensions["minotaur-python"]
+
+    assert len(unresolved) == 1
+    assert unresolved[0].reference_text == "."
+    assert _unresolved_by_source(result) == {"app": {"."}}
+    assert extension == {
+        "imports_resolved": 0,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 1,
+    }
+    reference = next(
+        relationship
+        for relationship in result.document.relationships
+        if relationship.target == unresolved[0].id
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    )
+    assert reference.evidence[0].locations == (unresolved[0].location,)
+
+
+def test_nested_root_escape_and_ordinary_star_imports_are_module_facts(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def exported():\n    return 1\n")
+    _write(
+        tmp_path,
+        "pkg/module.py",
+        "def run():\n    from ...outside import *\n    from ...outside import helper\n",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import *\nfrom missing import *\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    extension = result.document.extensions["minotaur-python"]
+    edges = _edge_labels(result)
+
+    assert _unresolved_by_source(result)["pkg.module"] == {
+        "...outside",
+        "...outside.helper",
+    }
+    assert _unresolved_by_source(result)["app"] == {"missing"}
+    assert extension == {
+        "imports_resolved": 1,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 3,
+    }
+    assert ("app", "library", RelationshipKind.IMPORTS.value) in edges
+    assert ("app", "library.exported", RelationshipKind.IMPORTS.value) not in edges
+
+
+def test_nested_future_is_ignored_while_ordinary_import_keeps_module_and_symbol_facts(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "other.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run():\n    from __future__ import annotations\n    from other import helper\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    extension = result.document.extensions["minotaur-python"]
+    edges = _edge_labels(result)
+
+    assert extension == {
+        "imports_resolved": 1,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 0,
+    }
+    assert ("app", "other", RelationshipKind.IMPORTS.value) in edges
+    assert ("app", "other.helper", RelationshipKind.IMPORTS.value) in edges
+    assert not any(
+        "__future__" in label for label in _unresolved_by_source(result).get("app", set())
+    )
+    for target in ("other", "other.helper"):
+        relationship = next(
+            relationship
+            for relationship in result.document.relationships
+            if relationship.source == _node_id(result, "app")
+            and relationship.target == _node_id(result, target)
+            and relationship.kind == RelationshipKind.IMPORTS.value
+        )
+        location = relationship.evidence[0].locations[0]
+        assert location.path == "app.py"
+        assert location.range.start.line == 2
+        assert location.range.start.character == 4
+
+
 def test_calls_in_nested_functions_are_attributed_to_the_outer_function(tmp_path: Path) -> None:
     _write(
         tmp_path,
@@ -1476,7 +1573,7 @@ def test_an_import_that_rebinds_the_receiver_disqualifies_it(tmp_path: Path) -> 
         "app.Runner.helper",
         RelationshipKind.CALLS.value,
     ) not in _edge_labels(result)
-    assert _unresolved_by_source(result) == {}
+    assert _unresolved_by_source(result) == {"app": {"library.self"}}
 
 
 def test_comprehension_receiver_targets_shadow_self_and_cls_only_inside_comp(
@@ -1796,7 +1893,7 @@ def test_an_import_does_not_outlive_the_scope_that_ran_it(tmp_path: Path) -> Non
     # A scope's imports are popped with it. Leaving them behind would let one
     # function's ``import`` decide what a sibling, the enclosing body, a
     # comprehension, and a lambda mean by the same name.
-    assert unresolved_sites == {("list", 5)}
+    assert unresolved_sites == {("externallib.list", 3), ("list", 5)}
 
 
 def test_an_import_reaches_every_scope_nested_inside_the_one_that_ran_it(
@@ -1829,7 +1926,11 @@ def test_an_import_reaches_every_scope_nested_inside_the_one_that_ran_it(
     # name, so consulting only the innermost one would hide the dependency and
     # hand ``list`` back to builtin suppression. Both a nested ``def`` and a
     # comprehension are checked because each pushes a frame of its own.
-    assert unresolved_sites == {("list", 6), ("list", 8)}
+    assert unresolved_sites == {
+        ("externallib.list", 3),
+        ("list", 6),
+        ("list", 8),
+    }
 
 
 def test_nested_scope_import_of_a_workspace_name_stays_reportable(tmp_path: Path) -> None:
@@ -1966,7 +2067,7 @@ def test_method_headers_see_the_class_body_imports_their_bodies_cannot(
     # A method's header is evaluated in the class body, its body is not. Both
     # are attributed to the method, so only the line tells the two apart: the
     # default sees the class's ``list``, the body sees the builtin.
-    assert unresolved_sites == {("list", 4)}
+    assert unresolved_sites == {("externallib.list", 2), ("list", 4)}
 
 
 def test_the_nearest_scope_that_imports_a_name_decides_what_it_means(
