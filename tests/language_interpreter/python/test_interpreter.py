@@ -320,6 +320,46 @@ def test_nested_root_escape_and_ordinary_star_imports_are_module_facts(
     assert ("app", "library.exported", RelationshipKind.IMPORTS.value) not in edges
 
 
+def test_root_escape_bypasses_matching_workspace_modules_and_declarations(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "outside.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "pkg/module.py",
+        "def run():\n"
+        "    from ...outside import *\n"
+        "    from ...outside import helper\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    extension = result.document.extensions["minotaur-python"]
+    unresolved = {
+        node.reference_text: node
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    module_id = _node_id(result, "pkg.module")
+
+    assert set(unresolved) == {"...outside", "...outside.helper"}
+    assert extension == {
+        "imports_resolved": 0,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 2,
+    }
+    for text, line in (("...outside", 1), ("...outside.helper", 2)):
+        relationship = next(
+            relationship
+            for relationship in result.document.relationships
+            if relationship.source == module_id
+            and relationship.target == unresolved[text].id
+            and relationship.kind == RelationshipKind.REFERENCES.value
+        )
+        assert relationship.evidence[0].locations[0].path == "pkg/module.py"
+        assert relationship.evidence[0].locations[0].range.start.line == line
+        assert relationship.evidence[0].locations[0].range.start.character == 4
+
+
 def test_nested_future_is_ignored_while_ordinary_import_keeps_module_and_symbol_facts(
     tmp_path: Path,
 ) -> None:
