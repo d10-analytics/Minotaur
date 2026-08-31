@@ -13,37 +13,17 @@ from pathlib import Path
 
 import pytest
 
+from minotaur.graph_model.provenance import NodeClass, RelationshipKind
+from minotaur.language_interpreter.python import analyze_python_files
+from minotaur.language_interpreter.workspace import Workspace
+
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
-# The specification Baseline: the commit every hot-path change is measured and
-# compared against.  The harness's provenance guard refuses plain copies and
-# refuses two clean worktrees sharing a HEAD, so the baseline side must be a
-# real worktree pinned to a commit other than the branch under test.
-#
-# The harness demands byte-identical answers, so this pin must move forward
-# whenever the interpreter *intentionally* changes what it records; otherwise
-# every later branch is measured against semantics it is not meant to
-# reproduce.  History: fb63689 (trusted graph load) -> 54a2657 (decorator
-# application recorded as an enclosing-scope reference) -> 4980c8b
-# (same-name definition attribution semantics) -> 3e70c17 (same-named classes
-# keep self-call resolution within their own class statement) -> 68df533
-# (unresolved non-call reference emission) -> 7043ae2 (neutral producer for
-# empty selections) -> e66869b (lexical suppression, builtins suppression, member-base rule)
-# -> ad00d41 (nested-scope precedence, receiver shadowing, and closure receiver
-# inheritance repairs) -> b54522c (retrospective repairs: one full-text fact per
-# member expression with root resolution, import-bound names are not dynamic
-# locals, chain interiors traversed on loads, implicit classmethod receivers)
-# -> 89f7db8 (import bindings carry targets: class-body imports, rebound module
-# aliases refuse resolution, nearest-frame import precedence).
-# -> 9ea1dc1 (member-expression labels and nested-class method-body facts).
-# -> 8c822d0 (nested-class headers skip enclosing class namespaces and class
-# bindings follow source-order import rebinding).
-# -> 7b737fd (PEP 695 type-parameter retention, deleted class imports restore
-# enclosing bindings, and direct-class imports stay out of nested scopes).
-# -> 235eb4e (nested class headers retain their immediate enclosing class
-# phase while nested bodies isolate class namespaces).
-BASELINE_COMMIT = "235eb4e238fdc00d72a1c6e1d0fccb613969e0a"
+# Keep comparisons anchored to the reviewed behavior/test head.  This full
+# commit ID must advance whenever an intentional graph-fact change becomes
+# part of the branch under test.
+BASELINE_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
 
 
 @pytest.fixture(scope="session")
@@ -323,6 +303,93 @@ def test_committed_fixture_root_has_a_python_substrate_for_every_query_class() -
     commands = {entry["command"] for entry in fixture["queries"]}
     assert commands == {"definitions", "callers", "impact", "unreferenced", "context", "diff"}
     assert (FIXTURE_ROOT / fixture["selection"]).is_file()
+
+
+def test_root_star_fixture_is_a_non_vacuous_module_only_import_fact() -> None:
+    """The committed root-star source is analyzed as a real graph fact."""
+
+    result = analyze_python_files(
+        Workspace(FIXTURE_ROOT),
+        (FIXTURE_ROOT / "root_star.py",),
+    )
+    assert result.diagnostics == ()
+    assert result.document.extensions == {
+        "minotaur-python": {
+            "imports_resolved": 0,
+            "imports_root_mismatched": 0,
+            "imports_unresolved": 1,
+        }
+    }
+    labels = {node.id: node.label for node in result.document.nodes}
+    module = next(
+        node
+        for node in result.document.nodes
+        if node.node_class == NodeClass.SYMBOL and node.label == "root_star"
+    )
+    unresolved = [
+        node
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "."
+    ]
+    assert len(unresolved) == 1
+    assert not any(
+        node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text != "."
+        for node in result.document.nodes
+    )
+    reference = next(
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == module.id
+        and relationship.target == unresolved[0].id
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    )
+    assert labels[reference.target] == "."
+    assert reference.evidence[0].locations == (unresolved[0].location,)
+    assert unresolved[0].location is not None
+    assert unresolved[0].location.path == "root_star.py"
+    assert unresolved[0].location.range.start.line == 0
+
+
+def test_fixture_pin_is_a_full_sha_and_fixture_commit_is_its_immediate_child() -> None:
+    """The fixture baseline remains tied to the reviewed behavior head."""
+
+    assert len(BASELINE_COMMIT) == 40
+    resolved = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", BASELINE_COMMIT],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert resolved.returncode == 0
+    assert resolved.stdout.strip() == BASELINE_COMMIT
+
+    added = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "log",
+            "--diff-filter=A",
+            "--format=%H",
+            "-1",
+            "--",
+            "tests/fixtures/equivalence_root/root_star.py",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert added.returncode == 0
+    fixture_commit = added.stdout.strip()
+    assert fixture_commit
+    parent = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", f"{fixture_commit}^"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert parent.returncode == 0
+    assert parent.stdout.strip() == BASELINE_COMMIT
 
 
 def test_every_non_control_query_answers_on_the_committed_fixture_root(
