@@ -12,7 +12,7 @@ while constructing the next one.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -470,24 +470,241 @@ Environment = BindingEnvironment
 BindingFlowState = BindingEnvironment
 
 
+class CompletionKind(str, Enum):
+    """The finite kinds of an owner-region completion."""
+
+    NORMAL = "normal"
+    BREAK = "break"
+    CONTINUE = "continue"
+    RETURN = "return"
+    EXCEPTION = "exception"
+    INVALID_CONTROL = "invalid-control"
+    UNKNOWN_SEMANTICS = "unknown-semantics"
+
+
+def _coerce_completion_kind(value: CompletionKind | str) -> CompletionKind:
+    if isinstance(value, CompletionKind):
+        return value
+    try:
+        return CompletionKind(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"unknown completion kind: {value!r}") from error
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionKey:
+    """Routing identity independent of a lexical binding slot.
+
+    ``target`` is meaningful only for targeted ``break`` and ``continue``
+    completions.  It names a stable region allocated by a lowerer; it is
+    never an execution-path or predecessor identity.
+    """
+
+    kind: CompletionKind
+    target: str | None = None
+
+    def __post_init__(self) -> None:
+        kind = _coerce_completion_kind(self.kind)
+        object.__setattr__(self, "kind", kind)
+        if kind in (CompletionKind.BREAK, CompletionKind.CONTINUE):
+            if not isinstance(self.target, str) or not self.target:
+                raise ValueError(f"{kind.value} completion requires a target region")
+        elif self.target is not None:
+            raise ValueError(f"{kind.value} completion cannot carry a target region")
+
+    @classmethod
+    def normal(cls) -> CompletionKey:
+        return cls(CompletionKind.NORMAL)
+
+    @classmethod
+    def break_(cls, target: str) -> CompletionKey:
+        return cls(CompletionKind.BREAK, target)
+
+    @classmethod
+    def continue_(cls, target: str) -> CompletionKey:
+        return cls(CompletionKind.CONTINUE, target)
+
+    @classmethod
+    def returned(cls) -> CompletionKey:
+        return cls(CompletionKind.RETURN)
+
+    @classmethod
+    def return_(cls) -> CompletionKey:
+        return cls.returned()
+
+    @classmethod
+    def exception(cls) -> CompletionKey:
+        return cls(CompletionKind.EXCEPTION)
+
+    @classmethod
+    def invalid_control(cls) -> CompletionKey:
+        return cls(CompletionKind.INVALID_CONTROL)
+
+    @classmethod
+    def unknown_semantics(cls) -> CompletionKey:
+        return cls(CompletionKind.UNKNOWN_SEMANTICS)
+
+    @property
+    def is_normal(self) -> bool:
+        return self.kind is CompletionKind.NORMAL
+
+    @property
+    def is_exception(self) -> bool:
+        return self.kind is CompletionKind.EXCEPTION
+
+    @property
+    def is_terminal(self) -> bool:
+        return not self.is_normal
+
+    @property
+    def region(self) -> str | None:
+        """Alias for the optional stable loop/region target."""
+
+        return self.target
+
+
+# Explicit spellings are convenient for callers that use a channel enum or a
+# key enum in annotations.  They intentionally denote the same value type.
+CompletionChannel = CompletionKind
+CompletionType = CompletionKind
+
+
+def _coerce_completion_key(value: CompletionKey | CompletionKind | str) -> CompletionKey:
+    if isinstance(value, CompletionKey):
+        return value
+    return CompletionKey(_coerce_completion_kind(value))
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionMap(Mapping[CompletionKey, BindingEnvironment]):
+    """Immutable map of completion routing keys to environments."""
+
+    entries: Mapping[CompletionKey, BindingEnvironment] = MappingProxyType({})
+
+    def __post_init__(self) -> None:
+        normalized: dict[CompletionKey, BindingEnvironment] = {}
+        for raw_key, environment in dict(self.entries).items():
+            key = _coerce_completion_key(raw_key)
+            if not isinstance(environment, BindingEnvironment):
+                raise TypeError("completion values must be BindingEnvironment values")
+            normalized[key] = environment
+        object.__setattr__(
+            self,
+            "entries",
+            MappingProxyType(
+                dict(
+                    sorted(
+                        normalized.items(),
+                        key=lambda item: (item[0].kind.value, item[0].target or ""),
+                    )
+                )
+            ),
+        )
+
+    @classmethod
+    def normal(cls, environment: BindingEnvironment | None = None) -> CompletionMap:
+        return cls({CompletionKey.normal(): environment or BindingEnvironment()})
+
+    @classmethod
+    def from_environment(cls, environment: BindingEnvironment) -> CompletionMap:
+        return cls.normal(environment)
+
+    def __getitem__(self, key: CompletionKey) -> BindingEnvironment:
+        return self.entries[_coerce_completion_key(key)]
+
+    def __iter__(self) -> Iterator[CompletionKey]:
+        return iter(self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    @property
+    def channels(self) -> Mapping[CompletionKey, BindingEnvironment]:
+        return self.entries
+
+    @property
+    def values_by_key(self) -> Mapping[CompletionKey, BindingEnvironment]:
+        return self.entries
+
+    def join(self, other: CompletionMap) -> CompletionMap:
+        """Join maps pointwise without ever merging distinct routing keys."""
+
+        if not isinstance(other, CompletionMap):
+            raise TypeError("completion join requires another CompletionMap")
+        result: dict[CompletionKey, BindingEnvironment] = dict(self.entries)
+        for key, environment in other.entries.items():
+            if key in result:
+                result[key] = result[key].meet(environment)
+            else:
+                result[key] = environment
+        return CompletionMap(result)
+
+    meet = join
+
+    def with_channel(self, key: CompletionKey, environment: BindingEnvironment) -> CompletionMap:
+        updated = dict(self.entries)
+        updated[key] = environment
+        return CompletionMap(updated)
+
+    def resume(
+        self,
+        cleanup_result: CompletionMap,
+        *,
+        suppress_exceptions: bool = False,
+    ) -> CompletionMap:
+        return resume_cleanup(self, cleanup_result, suppress_exceptions=suppress_exceptions)
+
+    def cleanup(
+        self,
+        operations: Iterable[StateOperation] = (),
+        *,
+        override: CompletionKey | None = None,
+        suppress_exceptions: bool = False,
+    ) -> CompletionMap:
+        return CleanupRegion(tuple(operations)).apply(
+            self, override=override, suppress_exceptions=suppress_exceptions
+        )
+
+
+KeyedEnvironment = CompletionMap
+CompletionEnvironment = CompletionMap
+FlowMap = CompletionMap
+
+
 @dataclass(frozen=True, slots=True)
 class NormalEdge:
     """A typed ordinary-flow edge between two ordered blocks."""
 
     source: str
     target: str
+    completion: CompletionKey | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, str) or not self.source:
             raise ValueError("normal edge source must be a non-empty string")
         if not isinstance(self.target, str) or not self.target:
             raise ValueError("normal edge target must be a non-empty string")
+        if self.completion is not None and not isinstance(self.completion, CompletionKey):
+            object.__setattr__(self, "completion", _coerce_completion_key(self.completion))
 
     @property
     def edge_id(self) -> tuple[str, str]:
         """The stable identity of this edge."""
 
         return (self.source, self.target)
+
+    @property
+    def key(self) -> CompletionKey | None:
+        """Explicit completion routing key, or ``None`` to preserve one."""
+
+        return self.completion
+
+    @property
+    def completion_key(self) -> CompletionKey | None:
+        return self.completion
+
+
+CompletionEdge = NormalEdge
 
 
 @dataclass(frozen=True, slots=True)
@@ -566,9 +783,18 @@ def _normal_edges(block_id: str, edges: Sequence[NormalEdge | str]) -> tuple[Nor
             result.append(NormalEdge(block_id, edge))
         else:
             raise TypeError("normal edges must be NormalEdge or target strings")
-    if len({edge.target for edge in result}) != len(result):
+    if len({(edge.target, edge.completion) for edge in result}) != len(result):
         raise ValueError("a block cannot contain duplicate normal edges")
-    return tuple(sorted(result, key=lambda edge: edge.target))
+    return tuple(
+        sorted(
+            result,
+            key=lambda edge: (
+                edge.target,
+                edge.completion.kind.value if edge.completion is not None else "",
+                edge.completion.target if edge.completion is not None else "",
+            ),
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,11 +853,44 @@ class ResolutionSnapshot:
     inputs: Mapping[str, BindingEnvironment]
     outputs: Mapping[str, BindingEnvironment]
     uses: Mapping[str, BindingEnvironment]
+    completion_inputs: Mapping[str, CompletionMap] = MappingProxyType({})
+    completion_outputs: Mapping[str, CompletionMap] = MappingProxyType({})
+    completion_uses: Mapping[str, CompletionMap] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "inputs", _immutable_mapping(self.inputs))
         object.__setattr__(self, "outputs", _immutable_mapping(self.outputs))
         object.__setattr__(self, "uses", _immutable_mapping(self.uses))
+        object.__setattr__(
+            self,
+            "completion_inputs",
+            MappingProxyType(
+                {
+                    key: value if isinstance(value, CompletionMap) else CompletionMap(value)
+                    for key, value in sorted(self.completion_inputs.items())
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "completion_outputs",
+            MappingProxyType(
+                {
+                    key: value if isinstance(value, CompletionMap) else CompletionMap(value)
+                    for key, value in sorted(self.completion_outputs.items())
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "completion_uses",
+            MappingProxyType(
+                {
+                    key: value if isinstance(value, CompletionMap) else CompletionMap(value)
+                    for key, value in sorted(self.completion_uses.items())
+                }
+            ),
+        )
 
     @property
     def block_inputs(self) -> Mapping[str, BindingEnvironment]:
@@ -651,11 +910,172 @@ class ResolutionSnapshot:
 
         return self.uses
 
+    @property
+    def keyed_inputs(self) -> Mapping[str, CompletionMap]:
+        return self.completion_inputs
+
+    @property
+    def keyed_outputs(self) -> Mapping[str, CompletionMap]:
+        return self.completion_outputs
+
+    @property
+    def keyed_uses(self) -> Mapping[str, CompletionMap]:
+        return self.completion_uses
+
+    def use_for(self, site_id: str) -> BindingEnvironment | None:
+        return self.uses.get(site_id)
+
+    def keyed_use_for(self, site_id: str) -> CompletionMap | None:
+        return self.completion_uses.get(site_id)
+
     def input_for(self, block_id: str) -> BindingEnvironment | None:
         return self.inputs.get(block_id)
 
     def output_for(self, block_id: str) -> BindingEnvironment | None:
         return self.outputs.get(block_id)
+
+
+def meet_completion_maps(*maps: CompletionMap) -> CompletionMap:
+    """Meet reachable environments per completion key."""
+
+    result = CompletionMap()
+    for value in maps:
+        if not isinstance(value, CompletionMap):
+            raise TypeError("completion map meet requires CompletionMap values")
+        result = result.join(value)
+    return result
+
+
+def cross_key_snapshot(value: CompletionMap) -> BindingEnvironment:
+    """Meet all keyed executions for one use site without changing routing."""
+
+    if not isinstance(value, CompletionMap):
+        raise TypeError("cross-key snapshot requires a CompletionMap")
+    environments = tuple(value.values())
+    if not environments:
+        return BindingEnvironment()
+    result = environments[0]
+    for environment in environments[1:]:
+        result = result.meet(environment)
+    return result
+
+
+cross_key_meet = cross_key_snapshot
+meet_keyed_snapshot = cross_key_snapshot
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupRegion:
+    """Pointwise cleanup transformation for pending completion channels."""
+
+    operations: tuple[StateOperation, ...] = ()
+
+    def __post_init__(self) -> None:
+        operations = tuple(self.operations)
+        if any(not isinstance(operation, StateOperation) for operation in operations):
+            raise TypeError("cleanup operations must be StateOperation values")
+        object.__setattr__(self, "operations", operations)
+
+    def execute(self, incoming: CompletionMap) -> CompletionMap:
+        """Run cleanup independently for every incoming routing key."""
+
+        if not isinstance(incoming, CompletionMap):
+            raise TypeError("cleanup input must be a CompletionMap")
+        result: dict[CompletionKey, BindingEnvironment] = {}
+        for key, environment in incoming.items():
+            transformed = environment
+            for operation in self.operations:
+                transformed = transformed.transfer(
+                    operation.slot, operation.state, operation.target
+                )
+            result[key] = transformed
+        return CompletionMap(result)
+
+    run = execute
+
+    def apply(
+        self,
+        incoming: CompletionMap,
+        *,
+        override: CompletionKey | None = None,
+        suppress_exceptions: bool = False,
+    ) -> CompletionMap:
+        """Resume pending keys, or route cleanup terminal flow as an override.
+
+        Suppression is deliberately restricted to exceptional pending flow.
+        A cleanup return/raise/break/continue/unknown key therefore cannot
+        accidentally suppress a pending return or targeted loop completion.
+        """
+
+        if override is not None:
+            override = _coerce_completion_key(override)
+            if override.is_normal:
+                raise ValueError("normal cleanup is represented by resume, not override")
+        transformed = self.execute(incoming)
+        result: dict[CompletionKey, BindingEnvironment] = {}
+        for pending_key, environment in transformed.items():
+            output_key = override or pending_key
+            if suppress_exceptions and pending_key.is_exception:
+                output_key = CompletionKey.normal()
+            if output_key in result:
+                result[output_key] = result[output_key].meet(environment)
+            else:
+                result[output_key] = environment
+        return CompletionMap(result)
+
+    transform = apply
+
+    def resume(
+        self,
+        incoming: CompletionMap,
+        *,
+        override: CompletionKey | None = None,
+        suppress_exceptions: bool = False,
+    ) -> CompletionMap:
+        return self.apply(incoming, override=override, suppress_exceptions=suppress_exceptions)
+
+
+def resume_cleanup(
+    pending: CompletionMap,
+    cleanup_result: CompletionMap,
+    *,
+    suppress_exceptions: bool = False,
+) -> CompletionMap:
+    """Correlate ordinary cleanup completion with each pending key.
+
+    ``cleanup_result`` is keyed by the cleanup's own completion channels.  Its
+    normal channel resumes each pending key; any non-normal channel is an
+    explicit cleanup override.  No pending key is merged with another one.
+    """
+
+    if not isinstance(pending, CompletionMap) or not isinstance(cleanup_result, CompletionMap):
+        raise TypeError("cleanup resume requires two CompletionMap values")
+    normal_environment = cleanup_result.get(CompletionKey.normal())
+    overrides = tuple(
+        (key, environment) for key, environment in cleanup_result.items() if not key.is_normal
+    )
+    result: dict[CompletionKey, BindingEnvironment] = (
+        {key: (normal_environment or environment) for key, environment in pending.items()}
+        if normal_environment is not None
+        else {}
+    )
+    if suppress_exceptions:
+        for key in tuple(result):
+            if key.is_exception:
+                environment = result.pop(key)
+                existing = result.get(CompletionKey.normal())
+                result[CompletionKey.normal()] = (
+                    existing.meet(environment) if existing is not None else environment
+                )
+    for key, environment in overrides:
+        existing = result.get(key)
+        result[key] = existing.meet(environment) if existing is not None else environment
+    if normal_environment is None and not overrides:
+        return CompletionMap()
+    return CompletionMap(result)
+
+
+cleanup_resume = resume_cleanup
 
 
 class BindingSolver:
@@ -770,6 +1190,121 @@ class BindingSolver:
         return ResolutionSnapshot(inputs, outputs, uses)
 
 
+class CompletionSolver(BindingSolver):
+    """Deterministic fixed-point solver whose environments remain keyed."""
+
+    def __init__(
+        self,
+        blocks: Iterable[BasicBlock] | Mapping[str, BasicBlock],
+        entry: str | None = None,
+        initial: CompletionMap | BindingEnvironment | None = None,
+        *,
+        initial_environment: CompletionMap | BindingEnvironment | None = None,
+        max_steps: int | None = None,
+    ) -> None:
+        if initial is not None and initial_environment is not None:
+            raise ValueError("specify only one initial environment")
+        supplied = initial_environment if initial_environment is not None else initial
+        if supplied is None:
+            completion_initial = CompletionMap.normal()
+        elif isinstance(supplied, BindingEnvironment):
+            completion_initial = CompletionMap.normal(supplied)
+        elif isinstance(supplied, CompletionMap):
+            completion_initial = supplied
+        else:
+            raise TypeError("completion solver initial state must be a CompletionMap")
+        super().__init__(blocks, entry, initial=BindingEnvironment(), max_steps=max_steps)
+        self.initial_completion = completion_initial
+
+    def solve(self) -> ResolutionSnapshot:
+        predecessors: dict[str, tuple[NormalEdge, ...]] = {
+            block_id: tuple(
+                sorted(
+                    (
+                        edge
+                        for block in self._blocks.values()
+                        for edge in block.normal_edges
+                        if edge.target == block_id
+                    ),
+                    key=lambda edge: (
+                        edge.source,
+                        edge.completion.kind.value if edge.completion is not None else "",
+                        edge.completion.target if edge.completion is not None else "",
+                    ),
+                )
+            )
+            for block_id in self._ordered_ids
+        }
+        outputs: dict[str, CompletionMap] = {}
+        inputs: dict[str, CompletionMap] = {}
+        uses: dict[str, CompletionMap] = {}
+        worklist: deque[str] = deque((self.entry,))
+        queued = {self.entry}
+        steps = 0
+
+        while worklist:
+            block_id = worklist.popleft()
+            queued.discard(block_id)
+            steps += 1
+            if steps > self.max_steps:
+                raise RuntimeError("completion worklist did not converge within max_steps")
+
+            incoming = CompletionMap()
+            if block_id == self.entry:
+                incoming = self.initial_completion
+            for edge in predecessors[block_id]:
+                predecessor_output = outputs.get(edge.source)
+                if predecessor_output is None:
+                    continue
+                routed: dict[CompletionKey, BindingEnvironment] = {}
+                for key, environment in predecessor_output.items():
+                    routed[edge.completion or key] = environment
+                incoming = incoming.join(CompletionMap(routed))
+            if not incoming:
+                continue
+            if inputs.get(block_id) == incoming and block_id in outputs:
+                continue
+            inputs[block_id] = incoming
+            environment_by_key: dict[CompletionKey, BindingEnvironment] = {}
+            for key, environment in incoming.items():
+                current = environment
+                for operation in self._blocks[block_id].operations:
+                    if isinstance(operation, UseOperation):
+                        prior = uses.get(operation.operation_id, CompletionMap())
+                        uses[operation.operation_id] = prior.join(CompletionMap({key: current}))
+                    else:
+                        current = current.transfer(
+                            operation.slot, operation.state, operation.target
+                        )
+                environment_by_key[key] = current
+            output = CompletionMap(environment_by_key)
+            if outputs.get(block_id) == output:
+                continue
+            outputs[block_id] = output
+            for edge in self._blocks[block_id].normal_edges:
+                if edge.target not in queued:
+                    worklist.append(edge.target)
+                    queued.add(edge.target)
+
+        shared_uses = {site_id: cross_key_snapshot(value) for site_id, value in uses.items()}
+        shared_inputs = {block_id: cross_key_snapshot(value) for block_id, value in inputs.items()}
+        shared_outputs = {
+            block_id: cross_key_snapshot(value) for block_id, value in outputs.items()
+        }
+        return ResolutionSnapshot(
+            shared_inputs,
+            shared_outputs,
+            shared_uses,
+            inputs,
+            outputs,
+            uses,
+        )
+
+
+KeyedBindingSolver = CompletionSolver
+CompletionFlowSolver = CompletionSolver
+
+
 def solve(
     blocks: Iterable[BasicBlock] | Mapping[str, BasicBlock],
     entry: str | None = None,
@@ -781,6 +1316,25 @@ def solve(
     """Convenience entry point for the sole ordinary-flow solver."""
 
     return BindingSolver(
+        blocks,
+        entry,
+        initial,
+        initial_environment=initial_environment,
+        max_steps=max_steps,
+    ).solve()
+
+
+def solve_completions(
+    blocks: Iterable[BasicBlock] | Mapping[str, BasicBlock],
+    entry: str | None = None,
+    initial: CompletionMap | BindingEnvironment | None = None,
+    *,
+    initial_environment: CompletionMap | BindingEnvironment | None = None,
+    max_steps: int | None = None,
+) -> ResolutionSnapshot:
+    """Solve ordered blocks while retaining every completion routing key."""
+
+    return CompletionSolver(
         blocks,
         entry,
         initial,
@@ -827,10 +1381,23 @@ __all__ = [
     "BindingProvenance",
     "BindingSlot",
     "BindingState",
+    "CompletionChannel",
+    "CompletionEdge",
+    "CompletionEnvironment",
+    "CompletionFlowSolver",
+    "CompletionKey",
+    "CompletionKind",
+    "CompletionMap",
+    "CompletionSolver",
+    "CompletionType",
+    "CleanupRegion",
     "Environment",
     "BasicBlock",
     "Block",
     "BindingSolver",
+    "FlowMap",
+    "KeyedBindingSolver",
+    "KeyedEnvironment",
     "NormalEdge",
     "Operation",
     "PrefixBinding",
@@ -849,7 +1416,14 @@ __all__ = [
     "invalidate",
     "lookup_prefix",
     "meet",
+    "meet_completion_maps",
+    "cross_key_meet",
+    "cross_key_snapshot",
+    "meet_keyed_snapshot",
     "meet_states",
     "reimport",
     "transfer",
+    "resume_cleanup",
+    "cleanup_resume",
+    "solve_completions",
 ]
