@@ -470,6 +470,117 @@ Environment = BindingEnvironment
 BindingFlowState = BindingEnvironment
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class ActivationShape:
+    """Static lexical slots owned by one activation.
+
+    Local slots are storage for the activation and are reset on every entry.
+    Delegated slots belong to an enclosing owner and therefore pass through
+    entry and exit.  The shape contains only static slot identities; it does
+    not encode an execution path, frame, or runtime instance.
+    """
+
+    local_slots: tuple[BindingSlot, ...] = ()
+    delegated_slots: tuple[BindingSlot, ...] = ()
+
+    def __init__(
+        self,
+        local_slots: Iterable[BindingSlot] = (),
+        delegated_slots: Iterable[BindingSlot] = (),
+        *,
+        locals: Iterable[BindingSlot] | None = None,
+        delegated: Iterable[BindingSlot] | None = None,
+    ) -> None:
+        """Build a shape using either long or concise slot names."""
+
+        if locals is not None:
+            if tuple(local_slots):
+                raise ValueError("specify either local_slots or locals, not both")
+            local_slots = locals
+        if delegated is not None:
+            if tuple(delegated_slots):
+                raise ValueError("specify either delegated_slots or delegated, not both")
+            delegated_slots = delegated
+        object.__setattr__(self, "local_slots", tuple(local_slots))
+        object.__setattr__(self, "delegated_slots", tuple(delegated_slots))
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        try:
+            local_slots = tuple(self.local_slots)
+            delegated_slots = tuple(self.delegated_slots)
+        except TypeError as error:
+            raise TypeError("activation slots must be finite") from error
+        if any(not isinstance(slot, BindingSlot) for slot in local_slots + delegated_slots):
+            raise TypeError("activation slots must be BindingSlot values")
+        if len(set(local_slots)) != len(local_slots):
+            raise ValueError("activation local slots must be unique")
+        if len(set(delegated_slots)) != len(delegated_slots):
+            raise ValueError("activation delegated slots must be unique")
+        if set(local_slots).intersection(delegated_slots):
+            raise ValueError("activation slots cannot be both local and delegated")
+        object.__setattr__(
+            self,
+            "local_slots",
+            tuple(sorted(local_slots, key=lambda slot: slot.slot_id)),
+        )
+        object.__setattr__(
+            self,
+            "delegated_slots",
+            tuple(sorted(delegated_slots, key=lambda slot: slot.slot_id)),
+        )
+
+    @property
+    def locals(self) -> tuple[BindingSlot, ...]:
+        """Slots reset when this activation is entered."""
+
+        return self.local_slots
+
+    @property
+    def delegated(self) -> tuple[BindingSlot, ...]:
+        """Slots owned by an enclosing activation."""
+
+        return self.delegated_slots
+
+    @property
+    def slots(self) -> tuple[BindingSlot, ...]:
+        """All statically named slots in deterministic order."""
+
+        return tuple(sorted(self.local_slots + self.delegated_slots, key=lambda slot: slot.slot_id))
+
+    def require_equal(self, other: ActivationShape) -> ActivationShape:
+        """Validate that two joins refer to exactly the same static shape."""
+
+        if not isinstance(other, ActivationShape):
+            raise TypeError("activation shape join requires another ActivationShape")
+        if self != other:
+            raise ValueError("cannot join activations with unequal shapes")
+        return self
+
+    def join(self, other: ActivationShape) -> ActivationShape:
+        """Return this shape after equal-shape validation."""
+
+        return self.require_equal(other)
+
+    validate_equal = require_equal
+
+
+Activation = ActivationShape
+
+
+def join_activation_shapes(*shapes: ActivationShape) -> ActivationShape:
+    """Validate and return one shape for a set of activation predecessors."""
+
+    if not shapes:
+        raise ValueError("an activation shape join requires at least one shape")
+    first = shapes[0]
+    if not isinstance(first, ActivationShape):
+        raise TypeError("activation shapes must be ActivationShape values")
+    for shape in shapes[1:]:
+        first.require_equal(shape)
+    return first
+
+
 class CompletionKind(str, Enum):
     """The finite kinds of an owner-region completion."""
 
@@ -669,6 +780,121 @@ class CompletionMap(Mapping[CompletionKey, BindingEnvironment]):
 KeyedEnvironment = CompletionMap
 CompletionEnvironment = CompletionMap
 FlowMap = CompletionMap
+
+
+def _enter_environment(
+    environment: BindingEnvironment, shape: ActivationShape
+) -> BindingEnvironment:
+    """Reset local storage while preserving every non-local binding."""
+
+    bindings = dict(environment.bindings)
+    for slot in shape.local_slots:
+        bindings[slot] = BindingState.unbound()
+    return BindingEnvironment(bindings, environment.prefixes)
+
+
+def _exit_environment(
+    environment: BindingEnvironment, shape: ActivationShape
+) -> BindingEnvironment:
+    """Project one activation's local storage out of its environment."""
+
+    bindings = {
+        slot: state for slot, state in environment.bindings.items() if slot not in shape.local_slots
+    }
+    return BindingEnvironment(bindings, environment.prefixes)
+
+
+@dataclass(frozen=True, slots=True)
+class EnterActivation:
+    """Create fresh local state for one statically described activation."""
+
+    shape: ActivationShape
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.shape, ActivationShape):
+            raise TypeError("activation entry requires an ActivationShape")
+
+    def apply(
+        self, value: BindingEnvironment | CompletionMap
+    ) -> BindingEnvironment | CompletionMap:
+        if isinstance(value, BindingEnvironment):
+            return _enter_environment(value, self.shape)
+        if isinstance(value, CompletionMap):
+            return CompletionMap(
+                {
+                    key: _enter_environment(environment, self.shape)
+                    for key, environment in value.items()
+                }
+            )
+        raise TypeError("activation entry requires a BindingEnvironment or CompletionMap")
+
+    enter = apply
+    execute = apply
+
+    def __call__(
+        self, value: BindingEnvironment | CompletionMap
+    ) -> BindingEnvironment | CompletionMap:
+        return self.apply(value)
+
+
+@dataclass(frozen=True, slots=True)
+class ExitActivation:
+    """Project activation locals out of every completion channel on exit."""
+
+    shape: ActivationShape
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.shape, ActivationShape):
+            raise TypeError("activation exit requires an ActivationShape")
+
+    def apply(
+        self, value: BindingEnvironment | CompletionMap
+    ) -> BindingEnvironment | CompletionMap:
+        if isinstance(value, BindingEnvironment):
+            return _exit_environment(value, self.shape)
+        if isinstance(value, CompletionMap):
+            return CompletionMap(
+                {
+                    key: _exit_environment(environment, self.shape)
+                    for key, environment in value.items()
+                }
+            )
+        raise TypeError("activation exit requires a BindingEnvironment or CompletionMap")
+
+    project = apply
+    execute = apply
+
+    def __call__(
+        self, value: BindingEnvironment | CompletionMap
+    ) -> BindingEnvironment | CompletionMap:
+        return self.apply(value)
+
+
+def enter_activation(
+    value: BindingEnvironment | CompletionMap,
+    shape: ActivationShape,
+) -> BindingEnvironment | CompletionMap:
+    """Enter an activation, resetting its local slots."""
+
+    return EnterActivation(shape).apply(value)
+
+
+def exit_activation(
+    value: BindingEnvironment | CompletionMap,
+    shape: ActivationShape,
+) -> BindingEnvironment | CompletionMap:
+    """Exit an activation, projecting its local slots pointwise."""
+
+    return ExitActivation(shape).apply(value)
+
+
+def project_activation(
+    value: BindingEnvironment | CompletionMap,
+    shape: ActivationShape,
+) -> BindingEnvironment | CompletionMap:
+    """Alias for :func:`exit_activation`."""
+
+    return exit_activation(value, shape)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1381,6 +1607,10 @@ __all__ = [
     "BindingProvenance",
     "BindingSlot",
     "BindingState",
+    "Activation",
+    "ActivationShape",
+    "EnterActivation",
+    "ExitActivation",
     "CompletionChannel",
     "CompletionEdge",
     "CompletionEnvironment",
@@ -1421,6 +1651,10 @@ __all__ = [
     "cross_key_snapshot",
     "meet_keyed_snapshot",
     "meet_states",
+    "join_activation_shapes",
+    "enter_activation",
+    "exit_activation",
+    "project_activation",
     "reimport",
     "transfer",
     "resume_cleanup",
