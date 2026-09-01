@@ -25,6 +25,11 @@ class BindingProvenance(str, Enum):
     NON_IMPORT = "non-import"
     UNCERTAIN = "uncertain"
 
+    # Descriptive spellings make the lattice vocabulary explicit while
+    # retaining the concise wire values used by the implementation.
+    DEFINITE_IMPORT = "import"
+    DEFINITE_NON_IMPORT = "non-import"
+
 
 # Short aliases are useful to downstream private packages and keep the enum
 # name unambiguous when imported alongside graph-model provenance.
@@ -131,9 +136,13 @@ class BindingState:
     def imported(cls, target: str) -> BindingState:
         return cls(BindingProvenance.IMPORT, target=target)
 
+    definite_import = imported
+
     @classmethod
     def non_import(cls) -> BindingState:
         return _NON_IMPORT
+
+    definite_non_import = non_import
 
     @classmethod
     def uncertain(cls, targets: Iterable[str] = ()) -> BindingState:
@@ -162,6 +171,14 @@ class BindingState:
     @property
     def import_target(self) -> str | None:
         return self.target if self.is_import else None
+
+    @property
+    def targets(self) -> frozenset[str]:
+        """All finite candidates, including a definite import's target."""
+
+        if self.is_import and self.target is not None:
+            return frozenset((self.target,))
+        return self.possibilities
 
 
 _UNBOUND = BindingState(BindingProvenance.UNBOUND)
@@ -214,8 +231,19 @@ def meet_states(
     return _uncertain(())
 
 
-# Concise spelling used by clients that treat the lattice as a free function.
-meet = meet_states
+def meet(
+    left: BindingState | BindingEnvironment | PrefixEnvironment,
+    right: BindingState | BindingEnvironment | PrefixEnvironment,
+) -> BindingState | BindingEnvironment | PrefixEnvironment:
+    """Meet either scalar binding states or one of the persistent maps."""
+
+    if isinstance(left, BindingState) and isinstance(right, BindingState):
+        return meet_states(left, right)
+    if isinstance(left, BindingEnvironment) and isinstance(right, BindingEnvironment):
+        return left.meet(right)
+    if isinstance(left, PrefixEnvironment) and isinstance(right, PrefixEnvironment):
+        return left.meet(right)
+    raise TypeError("meet operands must have the same binding-flow type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +382,8 @@ class PrefixEnvironment:
 # Longer descriptive alias retained for callers that name the state directly.
 QualifiedPrefixState = PrefixEnvironment
 PrefixState = PrefixEnvironment
+PrefixMap = PrefixEnvironment
+QualifiedPrefixMap = PrefixEnvironment
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,6 +458,7 @@ class BindingEnvironment:
 
 
 Environment = BindingEnvironment
+BindingFlowState = BindingEnvironment
 
 
 def transfer(
@@ -462,6 +493,7 @@ def lookup_prefix(
 
 __all__ = [
     "BindingEnvironment",
+    "BindingFlowState",
     "BindingKind",
     "BindingProvenance",
     "BindingSlot",
@@ -469,9 +501,11 @@ __all__ = [
     "Environment",
     "PrefixBinding",
     "PrefixEnvironment",
+    "PrefixMap",
     "PrefixState",
     "Provenance",
     "QualifiedPrefixState",
+    "QualifiedPrefixMap",
     "invalidate",
     "lookup_prefix",
     "meet",
