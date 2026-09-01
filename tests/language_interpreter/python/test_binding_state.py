@@ -50,6 +50,14 @@ def test_meet_table_preserves_definite_imports_and_collapses_conflicts() -> None
     assert meet_states(states[1], states[2]).target is None
 
 
+def test_meet_with_unknown_uncertainty_never_narrows_candidates() -> None:
+    unknown = BindingState.uncertain()
+    imported = BindingState.imported("pkg.helper")
+
+    assert meet_states(unknown, imported) == unknown
+    assert meet_states(imported, unknown) == unknown
+
+
 def test_environment_transfer_invalidation_and_reimport_are_persistent() -> None:
     slot = BindingSlot("module", "helper")
     original = BindingEnvironment()
@@ -123,3 +131,19 @@ def test_prefix_entries_are_immutable_and_tombstones_are_explicit() -> None:
     assert state.lookup("pkg.mod.child") is None
     with pytest.raises(TypeError):
         state.entries["pkg"] = PrefixBinding.imported("pkg")  # type: ignore[index]
+
+
+def test_prefix_meet_blocks_parent_fallback_for_missing_or_conflicting_children() -> None:
+    parent = PrefixEnvironment().import_prefix("pkg", "pkg")
+    imported_child = parent.import_prefix("pkg.mod", "pkg.mod")
+    conflicting_child = parent.import_prefix("pkg.mod", "other.mod")
+    missing_child = parent
+
+    assert imported_child.meet(missing_child).lookup("pkg.mod.call") is None
+    assert imported_child.meet(conflicting_child).lookup("pkg.mod.call") is None
+    assert imported_child.meet(missing_child).tombstones == frozenset(("pkg.mod",))
+
+
+def test_empty_prefix_binding_is_rejected() -> None:
+    with pytest.raises(ValueError, match="target or tombstone"):
+        PrefixBinding()
