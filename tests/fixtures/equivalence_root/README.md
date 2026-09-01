@@ -1,7 +1,8 @@
 # Equivalence fixture root
 
-A deterministic, committed Python substrate for `scripts/check_equivalence.py`
-(specification `R-07`, root (1) of `D-06`).
+A deterministic, committed Python substrate for `scripts/check_equivalence.py`.
+It includes `root_star.py`, a minimal unexecuted source case that keeps the
+harness's module-only root-star analysis non-vacuous.
 
 The tree is small on purpose: every query class in
 `scripts/equivalence_queries.json` has a real, non-empty hit here — several

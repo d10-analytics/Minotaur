@@ -1520,7 +1520,12 @@ def _imports(
     tally: _ImportTally,
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
-    for statement in module.tree.body:
+    # Syntactic import facts are collected at every nesting depth.  The
+    # returned aliases remain module-scoped, however: nested bindings are
+    # owned by their lexical scope collectors and must not leak into callers
+    # outside that scope.
+    module_statements = frozenset(module.tree.body)
+    for statement in ast.walk(module.tree):
         if isinstance(statement, ast.Import):
             for alias in statement.names:
                 target = modules.get(alias.name)
@@ -1541,14 +1546,81 @@ def _imports(
                         RelationshipKind.IMPORTS.value,
                         _location(module.path, statement),
                     )
-                    aliases[alias.asname or alias.name.split(".")[0]] = alias.name
+                    if statement in module_statements:
+                        aliases[alias.asname or alias.name.split(".")[0]] = alias.name
         elif isinstance(statement, ast.ImportFrom):
+            # Future imports are compiler directives, not workspace imports.
+            if statement.module == "__future__":
+                continue
             base = _relative_module(
                 module.name, module.is_package, statement.module, statement.level
             )
-            target_module = modules.get(base) if base is not None else None
+            root_escape = statement.level > 0 and base is None
+            target_module = modules.get(base) if not root_escape and base is not None else None
+            if (
+                statement not in module_statements
+                and target_module is not None
+                and not any(alias.name == "*" for alias in statement.names)
+            ):
+                # A nested named import has both a module dependency and a
+                # declaration dependency. The module edge is emitted once
+                # before the per-name edges below.
+                relationships.add(
+                    module.module_id,
+                    target_module.module_id,
+                    RelationshipKind.IMPORTS.value,
+                    _location(module.path, statement),
+                )
             for alias in statement.names:
-                reference = f"{base}.{alias.name}" if base else alias.name
+                if alias.name == "*":
+                    # Star imports depend on the module as a whole; they do
+                    # not name a declaration or a synthetic ``.*`` member.
+                    if base is not None:
+                        reference = base
+                    elif root_escape:
+                        reference = "." * statement.level + (statement.module or "")
+                    else:
+                        reference = statement.module or ""
+                    if target_module is None:
+                        tally.note_unresolved(reference)
+                        emitter.unresolved(
+                            module.module_id,
+                            reference,
+                            _location(module.path, statement),
+                            nodes,
+                            relationships,
+                        )
+                    else:
+                        tally.resolved += 1
+                        relationships.add(
+                            module.module_id,
+                            target_module.module_id,
+                            RelationshipKind.IMPORTS.value,
+                            _location(module.path, statement),
+                        )
+                    continue
+                if base is not None:
+                    reference = f"{base}.{alias.name}" if base else alias.name
+                elif root_escape:
+                    reference = (
+                        "." * statement.level
+                        + (f"{statement.module}." if statement.module else "")
+                        + alias.name
+                    )
+                else:
+                    reference = (
+                        f"{statement.module}.{alias.name}" if statement.module else alias.name
+                    )
+                if root_escape:
+                    tally.note_unresolved(reference)
+                    emitter.unresolved(
+                        module.module_id,
+                        reference,
+                        _location(module.path, statement),
+                        nodes,
+                        relationships,
+                    )
+                    continue
                 resolved_target = declarations.get(reference)
                 if resolved_target is None:
                     tally.note_unresolved(reference)
@@ -1567,8 +1639,9 @@ def _imports(
                         RelationshipKind.IMPORTS.value,
                         _location(module.path, statement),
                     )
-                    aliases[alias.asname or alias.name] = reference
-            if target_module is not None and base is not None:
+                    if statement in module_statements:
+                        aliases[alias.asname or alias.name] = reference
+            if statement in module_statements and target_module is not None and base is not None:
                 aliases.setdefault(base.rsplit(".", 1)[-1], base)
     return aliases
 
