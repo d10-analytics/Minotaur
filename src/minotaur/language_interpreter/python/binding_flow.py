@@ -514,6 +514,12 @@ class StateOperation:
         )
         object.__setattr__(self, "state", normalized)
 
+    @property
+    def id(self) -> str:
+        """Stable operation identity."""
+
+        return self.operation_id
+
 
 @dataclass(frozen=True, slots=True)
 class UseOperation:
@@ -527,6 +533,18 @@ class UseOperation:
             raise ValueError("use operation ID must be a non-empty string")
         if not isinstance(self.slot, BindingSlot):
             raise TypeError("use operation slot must be a BindingSlot")
+
+    @property
+    def id(self) -> str:
+        """Stable operation identity."""
+
+        return self.operation_id
+
+    @property
+    def site_id(self) -> str:
+        """The use-site identity recorded in a resolution snapshot."""
+
+        return self.operation_id
 
 
 # Descriptive aliases allow callers to choose the vocabulary used by their
@@ -627,6 +645,12 @@ class ResolutionSnapshot:
     def use_snapshots(self) -> Mapping[str, BindingEnvironment]:
         return self.uses
 
+    @property
+    def snapshots(self) -> Mapping[str, BindingEnvironment]:
+        """Alias for use-site snapshots."""
+
+        return self.uses
+
     def input_for(self, block_id: str) -> BindingEnvironment | None:
         return self.inputs.get(block_id)
 
@@ -643,6 +667,7 @@ class BindingSolver:
         entry: str | None = None,
         initial: BindingEnvironment | None = None,
         *,
+        initial_environment: BindingEnvironment | None = None,
         max_steps: int | None = None,
     ) -> None:
         if isinstance(blocks, Mapping):
@@ -669,7 +694,15 @@ class BindingSolver:
             for edge in block.normal_edges:
                 if edge.target not in self._blocks:
                     raise ValueError(f"normal edge targets unknown block: {edge.target!r}")
-        self.initial = initial if initial is not None else BindingEnvironment()
+        if initial is not None and initial_environment is not None:
+            raise ValueError("specify only one initial environment")
+        self.initial = (
+            initial_environment
+            if initial_environment is not None
+            else initial
+            if initial is not None
+            else BindingEnvironment()
+        )
         if not isinstance(self.initial, BindingEnvironment):
             raise TypeError("solver initial state must be a BindingEnvironment")
         default_steps = max(64, len(self._blocks) * 64)
@@ -742,11 +775,18 @@ def solve(
     entry: str | None = None,
     initial: BindingEnvironment | None = None,
     *,
+    initial_environment: BindingEnvironment | None = None,
     max_steps: int | None = None,
 ) -> ResolutionSnapshot:
     """Convenience entry point for the sole ordinary-flow solver."""
 
-    return BindingSolver(blocks, entry, initial, max_steps=max_steps).solve()
+    return BindingSolver(
+        blocks,
+        entry,
+        initial,
+        initial_environment=initial_environment,
+        max_steps=max_steps,
+    ).solve()
 
 
 def transfer(
