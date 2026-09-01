@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import MappingProxyType
 
@@ -66,6 +69,44 @@ def test_entry_resets_locals_and_retains_delegated_outer_writes() -> None:
     assert isinstance(reentered, BindingEnvironment)
     assert reentered.get(local).is_unbound
     assert reentered.get(delegated).import_target == "module.outer"
+
+
+def test_reentry_resets_locals_pointwise_on_every_completion_channel() -> None:
+    local = BindingSlot("function", "local")
+    delegated = BindingSlot("module", "outer")
+    shape = ActivationShape((local,), (delegated,))
+    keys = (
+        CompletionKey.normal(),
+        CompletionKey.break_("loop"),
+        CompletionKey.continue_("loop"),
+        CompletionKey.return_(),
+        CompletionKey.exception(),
+        CompletionKey.invalid_control(),
+        CompletionKey.unknown_semantics(),
+    )
+    stale = CompletionMap(
+        {
+            key: BindingEnvironment()
+            .transfer(local, BindingState.imported(f"stale.{index}"))
+            .transfer(delegated, BindingState.imported(f"outer.{index}"))
+            for index, key in enumerate(keys)
+        }
+    )
+
+    entered = EnterActivation(shape).apply(stale)
+    assert isinstance(entered, CompletionMap)
+    rebound = CompletionMap(
+        {
+            key: environment.transfer(local, BindingState.imported(f"rebound.{index}"))
+            for index, (key, environment) in enumerate(entered.items())
+        }
+    )
+    reentered = enter_activation(rebound, shape)
+    assert isinstance(reentered, CompletionMap)
+    assert set(reentered) == set(keys)
+    for index, key in enumerate(keys):
+        assert reentered[key].get(local).is_unbound
+        assert reentered[key].get(delegated).import_target == f"outer.{index}"
 
 
 def test_exit_projects_locals_from_every_completion_channel() -> None:
@@ -137,3 +178,26 @@ def test_existing_interpreter_does_not_import_or_reference_dormant_kernel() -> N
     source = Path(interpreter.__file__).read_text(encoding="utf-8")
     assert "binding_flow" not in source
     assert not any("binding_flow" in name for name in interpreter.__dict__)
+
+
+def test_public_python_import_and_analysis_leave_kernel_dormant(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+    probe = """
+import sys
+from pathlib import Path
+from minotaur.language_interpreter.python import analyze_python_workspace
+
+result = analyze_python_workspace(Path(sys.argv[1]))
+assert result.diagnostics == ()
+assert not any(name.endswith(".binding_flow") for name in sys.modules)
+print("dormant")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", probe, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "dormant"
