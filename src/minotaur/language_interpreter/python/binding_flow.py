@@ -11,7 +11,8 @@ while constructing the next one.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections import deque
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -469,6 +470,285 @@ Environment = BindingEnvironment
 BindingFlowState = BindingEnvironment
 
 
+@dataclass(frozen=True, slots=True)
+class NormalEdge:
+    """A typed ordinary-flow edge between two ordered blocks."""
+
+    source: str
+    target: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source:
+            raise ValueError("normal edge source must be a non-empty string")
+        if not isinstance(self.target, str) or not self.target:
+            raise ValueError("normal edge target must be a non-empty string")
+
+    @property
+    def edge_id(self) -> tuple[str, str]:
+        """The stable identity of this edge."""
+
+        return (self.source, self.target)
+
+
+@dataclass(frozen=True, slots=True)
+class StateOperation:
+    """An immutable description of one slot-state transfer.
+
+    The operation deliberately has no environment argument or environment
+    method.  Only :class:`BindingSolver` interprets it, which keeps builders
+    declarative and makes propagation a single-owner concern.
+    """
+
+    operation_id: str
+    slot: BindingSlot
+    state: BindingState | BindingProvenance | str
+    target: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operation_id, str) or not self.operation_id:
+            raise ValueError("state operation ID must be a non-empty string")
+        if not isinstance(self.slot, BindingSlot):
+            raise TypeError("state operation slot must be a BindingSlot")
+        normalized = (
+            BindingState.imported(self.target) if self.target is not None else _as_state(self.state)
+        )
+        object.__setattr__(self, "state", normalized)
+
+
+@dataclass(frozen=True, slots=True)
+class UseOperation:
+    """An immutable description of a binding use-site snapshot."""
+
+    operation_id: str
+    slot: BindingSlot
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operation_id, str) or not self.operation_id:
+            raise ValueError("use operation ID must be a non-empty string")
+        if not isinstance(self.slot, BindingSlot):
+            raise TypeError("use operation slot must be a BindingSlot")
+
+
+# Descriptive aliases allow callers to choose the vocabulary used by their
+# lowering layer without introducing another operation implementation.
+BindingOperation = StateOperation
+TransferOperation = StateOperation
+UseSiteOperation = UseOperation
+Operation = StateOperation | UseOperation
+
+
+def _normal_edges(block_id: str, edges: Sequence[NormalEdge | str]) -> tuple[NormalEdge, ...]:
+    result: list[NormalEdge] = []
+    for edge in edges:
+        if isinstance(edge, NormalEdge):
+            if edge.source != block_id:
+                raise ValueError("normal edge source does not match its block")
+            result.append(edge)
+        elif isinstance(edge, str):
+            result.append(NormalEdge(block_id, edge))
+        else:
+            raise TypeError("normal edges must be NormalEdge or target strings")
+    if len({edge.target for edge in result}) != len(result):
+        raise ValueError("a block cannot contain duplicate normal edges")
+    return tuple(sorted(result, key=lambda edge: edge.target))
+
+
+@dataclass(frozen=True, slots=True)
+class BasicBlock:
+    """An ordered, declarative block in the ordinary binding-flow IR."""
+
+    block_id: str
+    operations: tuple[StateOperation | UseOperation, ...] = ()
+    normal_edges: tuple[NormalEdge, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.block_id, str) or not self.block_id:
+            raise ValueError("block ID must be a non-empty string")
+        try:
+            operations = tuple(self.operations)
+        except TypeError as error:
+            raise TypeError("block operations must be finite") from error
+        if any(
+            not isinstance(operation, (StateOperation, UseOperation)) for operation in operations
+        ):
+            raise TypeError("block operations must be state or use operations")
+        if len({operation.operation_id for operation in operations}) != len(operations):
+            raise ValueError("operation IDs must be unique within a block")
+        object.__setattr__(self, "operations", operations)
+        object.__setattr__(
+            self,
+            "normal_edges",
+            _normal_edges(self.block_id, tuple(self.normal_edges)),
+        )
+
+    @property
+    def id(self) -> str:
+        """Short alias for the stable block identity."""
+
+        return self.block_id
+
+    @property
+    def edges(self) -> tuple[NormalEdge, ...]:
+        return self.normal_edges
+
+
+OrderedBlock = BasicBlock
+Block = BasicBlock
+
+
+def _immutable_mapping(
+    values: Mapping[str, BindingEnvironment],
+) -> Mapping[str, BindingEnvironment]:
+    return MappingProxyType({key: values[key] for key in sorted(values)})
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionSnapshot:
+    """The immutable result of one complete ordinary-flow solve."""
+
+    inputs: Mapping[str, BindingEnvironment]
+    outputs: Mapping[str, BindingEnvironment]
+    uses: Mapping[str, BindingEnvironment]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "inputs", _immutable_mapping(self.inputs))
+        object.__setattr__(self, "outputs", _immutable_mapping(self.outputs))
+        object.__setattr__(self, "uses", _immutable_mapping(self.uses))
+
+    @property
+    def block_inputs(self) -> Mapping[str, BindingEnvironment]:
+        return self.inputs
+
+    @property
+    def block_outputs(self) -> Mapping[str, BindingEnvironment]:
+        return self.outputs
+
+    @property
+    def use_snapshots(self) -> Mapping[str, BindingEnvironment]:
+        return self.uses
+
+    def input_for(self, block_id: str) -> BindingEnvironment | None:
+        return self.inputs.get(block_id)
+
+    def output_for(self, block_id: str) -> BindingEnvironment | None:
+        return self.outputs.get(block_id)
+
+
+class BindingSolver:
+    """Compute ordinary binding flow to a deterministic fixed point."""
+
+    def __init__(
+        self,
+        blocks: Iterable[BasicBlock] | Mapping[str, BasicBlock],
+        entry: str | None = None,
+        initial: BindingEnvironment | None = None,
+        *,
+        max_steps: int | None = None,
+    ) -> None:
+        if isinstance(blocks, Mapping):
+            source = tuple(blocks.values())
+            if any(key != block.block_id for key, block in blocks.items()):
+                raise ValueError("block mapping keys must match block IDs")
+        else:
+            source = tuple(blocks)
+        if not source or any(not isinstance(block, BasicBlock) for block in source):
+            raise ValueError("solver requires at least one BasicBlock")
+        if len({block.block_id for block in source}) != len(source):
+            raise ValueError("block IDs must be unique")
+        operation_ids = [
+            operation.operation_id for block in source for operation in block.operations
+        ]
+        if len(set(operation_ids)) != len(operation_ids):
+            raise ValueError("operation IDs must be unique across the flow")
+        self._blocks = {block.block_id: block for block in source}
+        self._ordered_ids = tuple(sorted(self._blocks))
+        self.entry = entry if entry is not None else self._ordered_ids[0]
+        if self.entry not in self._blocks:
+            raise ValueError(f"unknown solver entry block: {self.entry!r}")
+        for block in source:
+            for edge in block.normal_edges:
+                if edge.target not in self._blocks:
+                    raise ValueError(f"normal edge targets unknown block: {edge.target!r}")
+        self.initial = initial if initial is not None else BindingEnvironment()
+        if not isinstance(self.initial, BindingEnvironment):
+            raise TypeError("solver initial state must be a BindingEnvironment")
+        default_steps = max(64, len(self._blocks) * 64)
+        self.max_steps = default_steps if max_steps is None else max_steps
+        if not isinstance(self.max_steps, int) or isinstance(self.max_steps, bool):
+            raise TypeError("solver max_steps must be an integer")
+        if self.max_steps <= 0:
+            raise ValueError("solver max_steps must be positive")
+
+    def solve(self) -> ResolutionSnapshot:
+        """Run a bounded deterministic worklist and return immutable snapshots."""
+
+        predecessors: dict[str, tuple[str, ...]] = {
+            block_id: tuple(
+                sorted(
+                    block.block_id
+                    for block in self._blocks.values()
+                    if any(edge.target == block_id for edge in block.normal_edges)
+                )
+            )
+            for block_id in self._ordered_ids
+        }
+        outputs: dict[str, BindingEnvironment] = {}
+        inputs: dict[str, BindingEnvironment] = {}
+        uses: dict[str, BindingEnvironment] = {}
+        worklist: deque[str] = deque((self.entry,))
+        queued = {self.entry}
+        steps = 0
+
+        while worklist:
+            block_id = worklist.popleft()
+            queued.discard(block_id)
+            steps += 1
+            if steps > self.max_steps:
+                raise RuntimeError("binding-flow worklist did not converge within max_steps")
+
+            incoming = [outputs[pred] for pred in predecessors[block_id] if pred in outputs]
+            if block_id == self.entry:
+                incoming.insert(0, self.initial)
+            if not incoming:
+                continue
+            block_input = incoming[0]
+            for predecessor_state in incoming[1:]:
+                block_input = block_input.meet(predecessor_state)
+            prior_input = inputs.get(block_id)
+            if prior_input == block_input and block_id in outputs:
+                continue
+            inputs[block_id] = block_input
+            environment = block_input
+            for operation in self._blocks[block_id].operations:
+                if isinstance(operation, UseOperation):
+                    uses[operation.operation_id] = environment
+                else:
+                    environment = environment.transfer(
+                        operation.slot, operation.state, operation.target
+                    )
+            if outputs.get(block_id) == environment:
+                continue
+            outputs[block_id] = environment
+            for edge in self._blocks[block_id].normal_edges:
+                if edge.target not in queued:
+                    worklist.append(edge.target)
+                    queued.add(edge.target)
+
+        return ResolutionSnapshot(inputs, outputs, uses)
+
+
+def solve(
+    blocks: Iterable[BasicBlock] | Mapping[str, BasicBlock],
+    entry: str | None = None,
+    initial: BindingEnvironment | None = None,
+    *,
+    max_steps: int | None = None,
+) -> ResolutionSnapshot:
+    """Convenience entry point for the sole ordinary-flow solver."""
+
+    return BindingSolver(blocks, entry, initial, max_steps=max_steps).solve()
+
+
 def transfer(
     environment: BindingEnvironment,
     slot: BindingSlot,
@@ -502,11 +782,17 @@ def lookup_prefix(
 __all__ = [
     "BindingEnvironment",
     "BindingFlowState",
+    "BindingOperation",
     "BindingKind",
     "BindingProvenance",
     "BindingSlot",
     "BindingState",
     "Environment",
+    "BasicBlock",
+    "Block",
+    "BindingSolver",
+    "NormalEdge",
+    "Operation",
     "PrefixBinding",
     "PrefixEnvironment",
     "PrefixMap",
@@ -514,6 +800,12 @@ __all__ = [
     "Provenance",
     "QualifiedPrefixState",
     "QualifiedPrefixMap",
+    "OrderedBlock",
+    "ResolutionSnapshot",
+    "StateOperation",
+    "TransferOperation",
+    "UseOperation",
+    "UseSiteOperation",
     "invalidate",
     "lookup_prefix",
     "meet",
