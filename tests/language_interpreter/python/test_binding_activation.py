@@ -27,16 +27,22 @@ from minotaur.language_interpreter.python.binding_flow import (
 
 def test_shape_is_typed_immutable_and_order_independent() -> None:
     local = BindingSlot("function", "local")
+    second_local = BindingSlot("function", "second")
     delegated = BindingSlot("module", "outer")
-    shape = ActivationShape((local,), (delegated,))
-    reordered = ActivationShape((local,), (delegated,))
-    concise = ActivationShape(locals=(local,), delegated=(delegated,))
+    second_delegated = BindingSlot("module", "second_outer")
+    shape = ActivationShape((local, second_local), (delegated, second_delegated))
+    reordered = ActivationShape((second_local, local), (second_delegated, delegated))
+    concise = ActivationShape(locals=(local, second_local), delegated=(delegated, second_delegated))
 
     assert shape == reordered
     assert shape == concise
-    assert shape.locals == (local,)
-    assert shape.delegated == (delegated,)
-    assert shape.slots == tuple(sorted((local, delegated), key=lambda slot: slot.slot_id))
+    assert shape.locals == tuple(sorted((local, second_local), key=lambda slot: slot.slot_id))
+    assert shape.delegated == tuple(
+        sorted((delegated, second_delegated), key=lambda slot: slot.slot_id)
+    )
+    assert shape.slots == tuple(
+        sorted((local, second_local, delegated, second_delegated), key=lambda slot: slot.slot_id)
+    )
     with pytest.raises(AttributeError):
         shape.local_slots += (BindingSlot("function", "other"),)  # type: ignore[misc]
 
