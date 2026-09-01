@@ -70,6 +70,50 @@ def test_keyed_join_is_pointwise_and_immutable() -> None:
         joined.entries[CompletionKey.normal()] = normal  # type: ignore[index]
 
 
+def test_keyed_join_keeps_all_channel_and_target_identities_separate() -> None:
+    slot = BindingSlot("module", "channel_value")
+    keys = (
+        CompletionKey.normal(),
+        CompletionKey.break_("outer"),
+        CompletionKey.break_("inner"),
+        CompletionKey.continue_("outer"),
+        CompletionKey.continue_("inner"),
+        CompletionKey.return_(),
+        CompletionKey.exception(),
+        CompletionKey.invalid_control(),
+        CompletionKey.unknown_semantics(),
+    )
+    left = CompletionMap(
+        {
+            key: BindingEnvironment().transfer(slot, BindingState.imported(f"left.{index}"))
+            for index, key in enumerate(keys)
+        }
+    )
+    right = CompletionMap(
+        {
+            CompletionKey.break_("outer"): BindingEnvironment().transfer(
+                slot, BindingState.imported("right.outer")
+            ),
+            CompletionKey.break_("inner"): BindingEnvironment().transfer(
+                slot, BindingState.imported("right.inner")
+            ),
+        }
+    )
+
+    joined = left.join(right)
+
+    assert set(joined) == set(keys)
+    assert joined[CompletionKey.break_("outer")].get(slot) == BindingState.uncertain(
+        ("left.1", "right.outer")
+    )
+    assert joined[CompletionKey.break_("inner")].get(slot) == BindingState.uncertain(
+        ("left.2", "right.inner")
+    )
+    for key in keys:
+        if key not in {CompletionKey.break_("outer"), CompletionKey.break_("inner")}:
+            assert joined[key] == left[key]
+
+
 def test_cleanup_resumes_all_channels_and_changes_each_environment_pointwise() -> None:
     slot = BindingSlot("module", "cleanup_marker")
     pending = CompletionMap(
@@ -91,6 +135,35 @@ def test_cleanup_resumes_all_channels_and_changes_each_environment_pointwise() -
     assert set(result) == set(pending)
     for key in pending:
         assert result[key].get(slot).is_non_import
+
+
+def test_cleanup_pointwise_retains_each_channel_environment() -> None:
+    source_slot = BindingSlot("module", "source")
+    marker = BindingSlot("module", "cleanup_marker")
+    keys = (
+        CompletionKey.normal(),
+        CompletionKey.break_("loop"),
+        CompletionKey.continue_("loop"),
+        CompletionKey.return_(),
+        CompletionKey.exception(),
+        CompletionKey.invalid_control(),
+        CompletionKey.unknown_semantics(),
+    )
+    pending = CompletionMap(
+        {
+            key: BindingEnvironment().transfer(source_slot, BindingState.imported(f"pkg.{index}"))
+            for index, key in enumerate(keys)
+        }
+    )
+
+    result = CleanupRegion((StateOperation("mark", marker, BindingState.non_import()),)).execute(
+        pending
+    )
+
+    assert set(result) == set(keys)
+    for index, key in enumerate(keys):
+        assert result[key].get(source_slot).import_target == f"pkg.{index}"
+        assert result[key].get(marker).is_non_import
 
 
 def test_cleanup_terminal_override_and_exception_only_suppression() -> None:
@@ -117,6 +190,29 @@ def test_cleanup_terminal_override_and_exception_only_suppression() -> None:
 
     overridden = CleanupRegion().apply(pending, override=CompletionKey.return_())
     assert set(overridden) == {CompletionKey.return_()}
+
+
+def test_cleanup_terminal_result_supersedes_pending_channels() -> None:
+    slot = BindingSlot("module", "cleanup_result")
+    pending = CompletionMap(
+        {
+            CompletionKey.normal(): BindingEnvironment().transfer(
+                slot, BindingState.imported("body.normal")
+            ),
+            CompletionKey.break_("loop"): BindingEnvironment().transfer(
+                slot, BindingState.imported("body.break")
+            ),
+            CompletionKey.return_(): BindingEnvironment().transfer(
+                slot, BindingState.imported("body.return")
+            ),
+        }
+    )
+    cleanup_return = BindingEnvironment().transfer(slot, BindingState.imported("cleanup.return"))
+
+    result = resume_cleanup(pending, CompletionMap({CompletionKey.return_(): cleanup_return}))
+
+    assert set(result) == {CompletionKey.return_()}
+    assert result[CompletionKey.return_()].get(slot) == cleanup_return.get(slot)
 
 
 def test_completion_solver_preserves_targeted_channels_and_shared_use_meet() -> None:
