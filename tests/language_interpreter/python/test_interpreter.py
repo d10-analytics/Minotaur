@@ -4017,7 +4017,7 @@ def test_signature_references_match_between_nested_and_top_level_definitions(
 
 
 def test_duplicate_imports_are_deduplicated_to_one_node_per_triple(tmp_path: Path) -> None:
-    """AC-08 (a): repeated names in one import statement yield one node each."""
+    """Repeated names in one import statement yield one node each."""
     _write(
         tmp_path,
         "app.py",
@@ -4053,12 +4053,10 @@ def test_duplicate_imports_are_deduplicated_to_one_node_per_triple(tmp_path: Pat
 
 @pytest.mark.slow
 def test_unresolved_dedup_completes_25000_sites_within_three_seconds(tmp_path: Path) -> None:
-    """AC-08 (b): 25,000 distinct unresolved sites complete in <= 3 seconds.
+    """25,000 distinct unresolved sites complete in <= 3 seconds.
 
-    This is an absolute wall-clock gate on a single size point, not a scaling
-    comparison. It discriminates the set-based dedup (this branch) from the
-    O(n^2) scan it replaced: observed 0.56s on this branch vs 5.38s on main,
-    for 25,000 sites, measured 2026-08-23.
+    The fixed-size timing gate protects unresolved-import analysis from
+    performance regressions that exceed the three-second workload budget.
     """
     site_count = 25_000
     # Generate a module with site_count distinct unresolved import statements.
