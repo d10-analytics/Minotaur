@@ -219,6 +219,13 @@ def meet_states(
     if first == second:
         return first
     if first.is_uncertain or second.is_uncertain:
+        # An uncertainty with no candidates means the analysis has no
+        # provenance at all.  A later definite candidate cannot make that
+        # unknown state definite or even narrow it to one possibility.
+        if (first.is_uncertain and not first.possibilities) or (
+            second.is_uncertain and not second.possibilities
+        ):
+            return _uncertain(())
         possible = set(first.possibilities) | set(second.possibilities)
         if first.is_import and first.target is not None:
             possible.add(first.target)
@@ -254,6 +261,10 @@ class PrefixBinding:
     tombstone: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.tombstone, bool):
+            raise TypeError("prefix tombstone must be a boolean")
+        if self.target is None and not self.tombstone:
+            raise ValueError("prefix binding requires a target or tombstone")
         if self.tombstone and self.target is not None:
             raise ValueError("a prefix tombstone cannot carry a target")
         if self.target is not None and (not isinstance(self.target, str) or not self.target):
@@ -368,14 +379,11 @@ class PrefixEnvironment:
             right = other.entries.get(key)
             if left == right and left is not None:
                 result[key] = left
-            elif left is not None and right is not None and left.tombstone and right.tombstone:
+            elif left is not None or right is not None:
+                # Any disagreement (including one predecessor with no entry)
+                # is negative at this exact path.  Dropping a child here
+                # would let a parent import resurrect it during lookup.
                 result[key] = PrefixBinding.deleted()
-            # A missing entry must not erase a known tombstone: retaining it
-            # is what prevents a later parent lookup from resurrecting state.
-            elif left is not None and left.tombstone:
-                result[key] = left
-            elif right is not None and right.tombstone:
-                result[key] = right
         return PrefixEnvironment(result)
 
 
