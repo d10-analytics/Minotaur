@@ -222,12 +222,26 @@ def test_completion_solver_preserves_targeted_channels_and_shared_use_meet() -> 
         BasicBlock(
             "left",
             (StateOperation("left-bind", slot, BindingState.imported("pkg.left")),),
-            (NormalEdge("left", "join", CompletionKey.break_("loop")),),
+            (
+                NormalEdge(
+                    "left",
+                    "join",
+                    CompletionKey.break_("loop"),
+                    source_completions=(CompletionKey.normal(),),
+                ),
+            ),
         ),
         BasicBlock(
             "right",
             (StateOperation("right-bind", slot, BindingState.imported("pkg.right")),),
-            (NormalEdge("right", "join", CompletionKey.return_()),),
+            (
+                NormalEdge(
+                    "right",
+                    "join",
+                    CompletionKey.return_(),
+                    source_completions=(CompletionKey.normal(),),
+                ),
+            ),
         ),
         BasicBlock("join", (UseOperation("read", slot),)),
     )

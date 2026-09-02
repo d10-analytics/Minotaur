@@ -686,6 +686,21 @@ def _coerce_completion_key(value: CompletionKey | CompletionKind | str) -> Compl
     return CompletionKey(_coerce_completion_kind(value))
 
 
+def _completion_key_order(key: CompletionKey | None) -> tuple[str, str]:
+    """Deterministic ordering for a completion key, ``None`` first.
+
+    This is the single ordering definition shared by completion maps,
+    selector canonicalization, block-edge ordering, and completion-predecessor
+    ordering.  ``None`` marks a preserving edge and must order deterministically
+    without inventing a completion key; every other value orders by kind value
+    and then by its optional target region.
+    """
+
+    if key is None:
+        return ("", "")
+    return (key.kind.value, key.target or "")
+
+
 @dataclass(frozen=True, slots=True)
 class CompletionMap(Mapping[CompletionKey, BindingEnvironment]):
     """Immutable map of completion routing keys to environments."""
@@ -703,12 +718,7 @@ class CompletionMap(Mapping[CompletionKey, BindingEnvironment]):
             self,
             "entries",
             MappingProxyType(
-                dict(
-                    sorted(
-                        normalized.items(),
-                        key=lambda item: (item[0].kind.value, item[0].target or ""),
-                    )
-                )
+                dict(sorted(normalized.items(), key=lambda item: _completion_key_order(item[0])))
             ),
         )
 
@@ -904,6 +914,7 @@ class NormalEdge:
     source: str
     target: str
     completion: CompletionKey | None = None
+    source_completions: tuple[CompletionKey, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, str) or not self.source:
@@ -912,12 +923,34 @@ class NormalEdge:
             raise ValueError("normal edge target must be a non-empty string")
         if self.completion is not None and not isinstance(self.completion, CompletionKey):
             object.__setattr__(self, "completion", _coerce_completion_key(self.completion))
+        selector = self.source_completions
+        if selector is None:
+            if self.completion is not None:
+                raise ValueError("an explicit completion edge requires source completions")
+        else:
+            if self.completion is None:
+                raise ValueError("source completions require an explicit destination completion")
+            try:
+                keys = tuple(selector)
+            except TypeError as error:
+                raise TypeError("source completions must be finite") from error
+            if not keys:
+                raise ValueError("source completions cannot be empty")
+            if any(not isinstance(key, CompletionKey) for key in keys):
+                raise TypeError("source completions must be exact CompletionKey values")
+            if len({key for key in keys}) != len(keys):
+                raise ValueError("source completions cannot repeat a completion key")
+            object.__setattr__(
+                self,
+                "source_completions",
+                tuple(sorted(keys, key=_completion_key_order)),
+            )
 
     @property
-    def edge_id(self) -> tuple[str, str]:
-        """The stable identity of this edge."""
+    def edge_id(self) -> tuple[str, str, CompletionKey | None]:
+        """The stable route identity: source, target, and destination key."""
 
-        return (self.source, self.target)
+        return (self.source, self.target, self.completion)
 
     @property
     def key(self) -> CompletionKey | None:
@@ -1009,16 +1042,12 @@ def _normal_edges(block_id: str, edges: Sequence[NormalEdge | str]) -> tuple[Nor
             result.append(NormalEdge(block_id, edge))
         else:
             raise TypeError("normal edges must be NormalEdge or target strings")
-    if len({(edge.target, edge.completion) for edge in result}) != len(result):
+    if len({edge.edge_id for edge in result}) != len(result):
         raise ValueError("a block cannot contain duplicate normal edges")
     return tuple(
         sorted(
             result,
-            key=lambda edge: (
-                edge.target,
-                edge.completion.kind.value if edge.completion is not None else "",
-                edge.completion.target if edge.completion is not None else "",
-            ),
+            key=lambda edge: (edge.target,) + _completion_key_order(edge.completion),
         )
     )
 
@@ -1452,11 +1481,7 @@ class CompletionSolver(BindingSolver):
                         for edge in block.normal_edges
                         if edge.target == block_id
                     ),
-                    key=lambda edge: (
-                        edge.source,
-                        edge.completion.kind.value if edge.completion is not None else "",
-                        edge.completion.target if edge.completion is not None else "",
-                    ),
+                    key=lambda edge: (edge.source,) + _completion_key_order(edge.completion),
                 )
             )
             for block_id in self._ordered_ids
@@ -1482,10 +1507,21 @@ class CompletionSolver(BindingSolver):
                 predecessor_output = outputs.get(edge.source)
                 if predecessor_output is None:
                     continue
-                routed: dict[CompletionKey, BindingEnvironment] = {}
-                for key, environment in predecessor_output.items():
-                    routed[edge.completion or key] = environment
-                incoming = incoming.join(CompletionMap(routed))
+                if edge.completion is None:
+                    # A preserving edge forwards its complete predecessor map.
+                    routed: CompletionMap = predecessor_output
+                else:
+                    # A selected edge routes each present selected source key to
+                    # its one destination through the pointwise map join; absent
+                    # selected keys contribute nothing, and unselected keys never
+                    # traverse this edge.
+                    routed = CompletionMap()
+                    for source_key in edge.source_completions or ():
+                        environment = predecessor_output.entries.get(source_key)
+                        if environment is None:
+                            continue
+                        routed = routed.join(CompletionMap({edge.completion: environment}))
+                incoming = incoming.join(routed)
             if not incoming:
                 continue
             if inputs.get(block_id) == incoming and block_id in outputs:
