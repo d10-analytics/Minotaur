@@ -1623,3 +1623,77 @@ def test_equals_form_missing_config_exits_two_beside_a_valid_walk_up_config(
     assert not (root / "walkup.json").exists()
     assert list(root.glob("*.json")) == []
     assert list(root.glob("*.sha256")) == []
+
+
+def test_equals_form_empty_config_value_exits_two_naming_the_option_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """An empty ``--config=`` value is a config error, not a nonexistent path.
+
+    The D-05 raw-argv scanner turns ``--config=`` into an empty raw value;
+    before the empty-value guard ``Path("")`` collapsed to the working
+    directory and the locate phase reported ``config file does not exist: .``
+    — naming a real directory instead of the empty value.  Asserting exit 2,
+    stderr naming ``--config`` and the empty value (and never ``does not
+    exist``), plus no graph or stamp written, pins the corrected diagnostic.
+    """
+    root = _config_repo(tmp_path)
+
+    completed = _run_in(root, "analyze", "--config=")
+
+    assert completed.returncode == 2
+    assert "--config" in completed.stderr
+    assert "''" in completed.stderr
+    assert "does not exist" not in completed.stderr
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []
+
+
+def test_empty_config_value_never_falls_back_to_a_walk_up_config(tmp_path: Path) -> None:
+    """An empty ``--config=`` stays an error even beside a valid walk-up config.
+
+    An explicit ``--config`` with an empty value must never silently walk up
+    to a discoverable ``.minotaur.toml`` and analyze under it: the walk-up
+    config's graph must not be created and no fallback analysis may run.  If
+    the scanner ever treated the empty value as "no explicit config", this
+    invocation would succeed under the walk-up config and create
+    ``walkup.json`` instead of exiting 2.
+    """
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "def app():\n    return 1\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "walkup.json"\ntargets = ["src"]\n')
+
+    completed = _run_in(root, "analyze", "--config=")
+
+    assert completed.returncode == 2
+    assert "--config" in completed.stderr
+    assert "''" in completed.stderr
+    assert "does not exist" not in completed.stderr
+    assert not (root / "walkup.json").exists()
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []
+
+
+def test_space_separated_empty_config_value_is_rejected_like_the_equals_form(
+    tmp_path: Path,
+) -> None:
+    """``--config ""`` reaches the empty-value rejection via the space branch.
+
+    The D-05 scanner consumes a following token for ``--config VALUE``; an
+    empty token exercises that branch (not the ``--config=VALUE`` equals
+    branch) and must land on the same exit-2 rejection naming the option and
+    the empty value, with no fallback analysis under a walk-up config.
+    """
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "def app():\n    return 1\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "walkup.json"\ntargets = ["src"]\n')
+
+    completed = _run_in(root, "analyze", "--config", "")
+
+    assert completed.returncode == 2
+    assert "--config" in completed.stderr
+    assert "''" in completed.stderr
+    assert "does not exist" not in completed.stderr
+    assert not (root / "walkup.json").exists()
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []
