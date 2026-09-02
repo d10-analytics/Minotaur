@@ -1575,3 +1575,51 @@ def test_config_graph_spelling_keeps_sidecar_trust_until_an_explicit_override(
     assert explicit == 0
     assert validated == ["schema"]
     assert stamp_path(alternate).exists()
+
+
+def test_visualize_without_input_renders_content_from_the_config_graph(
+    tmp_path: Path,
+) -> None:
+    """AC-08: with --input omitted the config graph is the input and renders.
+
+    The AC-04 resolver-double proof only asserts exit 0 for a config-input
+    visualize; this asserts the rendered HTML actually carries content from the
+    config graph (the file ``analyze`` wrote to the configured ``graph``), so a
+    default that pointed at a different, existing graph would fail here.
+    """
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n')
+    primed = _run_in(root, "analyze")
+    assert primed.returncode == 0, primed.stderr
+    assert (root / "g.json").exists()
+
+    completed = _run_in(root, "visualize", "--output", str(root / "config.html"))
+
+    assert completed.returncode == 0, completed.stderr
+    assert "def app" in (root / "config.html").read_text(encoding="utf-8")
+
+
+def test_equals_form_missing_config_exits_two_beside_a_valid_walk_up_config(
+    tmp_path: Path,
+) -> None:
+    """D-05/R-02: ``--config=PATH`` names the missing path and never falls back.
+
+    The D-05 raw-argv scanner reads ``--config=VALUE`` with its own equals
+    branch; if that branch broke, an invocation with a valid walk-up config
+    present would silently analyze under the walk-up config instead of failing
+    on the explicitly named missing file.  Asserting exit 2, the named path on
+    stderr, and no graph or stamp written discriminates the two envelopes.
+    """
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "def app():\n    return 1\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "walkup.json"\ntargets = ["src"]\n')
+    missing = root / "missing.toml"
+
+    completed = _run_in(root, "analyze", f"--config={missing}")
+
+    assert completed.returncode == 2
+    assert str(missing) in completed.stderr
+    assert not (root / "walkup.json").exists()
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []
