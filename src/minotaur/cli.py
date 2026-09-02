@@ -93,9 +93,10 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
     parser itself must be built differently depending on the answer.  ``None``
     keeps the strict grammar: an invocation asking for help, ``query diff``,
     an unrecognized command, or no config discoverable from the working
-    directory.  An explicit ``--config`` value that does not exist raises a
-    :class:`ConfigError` naming the path, so the failure happens before any
-    parsing or analysis.
+    directory.  An explicit ``--config`` with an empty value or a value that
+    does not exist raises a :class:`ConfigError` naming the option or path, so
+    the failure happens before any parsing or analysis and never falls back to
+    walk-up discovery.
     """
     if any(token in ("-h", "--help") for token in raw_argv):
         return None
@@ -130,7 +131,10 @@ def _explicit_config(option_tokens: Sequence[str]) -> Path | None:
 
     ``--config VALUE`` consumes the following token and ``--config=VALUE``
     carries its own; a repeated option keeps its last value.  A missing value
-    is not guessed here — the parser reports that usage error itself.
+    is not guessed here — the parser reports that usage error itself.  An
+    empty value (``--config=`` or ``--config ""``) is rejected as a
+    :class:`ConfigError` naming the option: ``Path("")`` would collapse to
+    the working directory and be misreported as a nonexistent file.
     """
     value: str | None = None
     index = 0
@@ -144,6 +148,8 @@ def _explicit_config(option_tokens: Sequence[str]) -> Path | None:
         elif token.startswith("--config="):
             value = token.partition("=")[2]
         index += 1
+    if value == "":
+        raise ConfigError(f"--config requires a non-empty file path: got {value!r}")
     return Path(value) if value is not None else None
 
 
