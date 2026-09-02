@@ -152,7 +152,13 @@ def _as_path(value: Any) -> Path | None:
 
 
 def _as_targets(value: Any) -> tuple[Path, ...] | None:
-    if value is None:
+    """Convert parsed positional targets, treating "none given" as absent.
+
+    The relaxed grammar parses an omitted positional list as ``[]``; only a
+    non-empty list is an explicit override, otherwise the configured targets
+    would be silently suppressed by an empty explicit value.
+    """
+    if not value:
         return None
     return tuple(Path(target) for target in value)
 
