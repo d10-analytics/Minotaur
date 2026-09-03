@@ -408,6 +408,42 @@ def test_systems_dir_is_resolved_exactly_once_by_the_single_owner(
 
 
 # ---------------------------------------------------------------------------
+# read_toml_file seam (D-08): vocabulary-neutral, path-attributed errors
+# ---------------------------------------------------------------------------
+
+
+def test_read_toml_file_is_vocabulary_neutral_and_returns_the_raw_table(
+    tmp_path: Path,
+) -> None:
+    """The seam parses any TOML: no [minotaur] section or field checks apply."""
+    payload = _write(tmp_path, "notes/system.toml", '[system]\nname = "alpha"\n')
+
+    parsed = config.read_toml_file(payload)
+
+    assert parsed == {"system": {"name": "alpha"}}
+
+
+def test_read_toml_file_read_failure_raises_config_error_naming_the_path(
+    tmp_path: Path,
+) -> None:
+    """An unreadable file fails with a ConfigError that names the path."""
+    missing = tmp_path / "does-not-exist.toml"
+
+    with pytest.raises(ConfigError, match=re.escape(str(missing))):
+        config.read_toml_file(missing)
+
+
+def test_read_toml_file_parse_failure_raises_config_error_naming_the_path(
+    tmp_path: Path,
+) -> None:
+    """Invalid TOML fails with a ConfigError that names the path."""
+    broken = _write(tmp_path, "bad/system.toml", "[system\nname = nope\n")
+
+    with pytest.raises(ConfigError, match=re.escape(str(broken))):
+        config.read_toml_file(broken)
+
+
+# ---------------------------------------------------------------------------
 # AC-12: guarded tomllib/tomli shim and the pyproject.toml backport marker
 # ---------------------------------------------------------------------------
 
