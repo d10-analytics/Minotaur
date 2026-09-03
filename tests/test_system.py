@@ -163,6 +163,28 @@ def test_load_systems_returns_declarations_in_stable_declared_name_order(tmp_pat
     assert loaded[1] == System(name="omega", files=("src/o.py",))
 
 
+def test_results_order_by_declared_name_not_directory_scan_order(tmp_path: Path) -> None:
+    """load_systems orders by declared name, independent of directory order.
+
+    Directory scan order is reversed relative to the declared names here, so
+    this cell fails if the loader ever returns systems in sorted-directory
+    order instead of the documented declared-name order.
+    """
+    systems_dir = tmp_path / "systems"
+    _write_definition(
+        systems_dir, "z-directory", 'schema_version = 1\nname = "alpha"\nfiles = ["src/a.py"]\n'
+    )
+    _write_definition(
+        systems_dir, "a-directory", 'schema_version = 1\nname = "omega"\nfiles = ["src/o.py"]\n'
+    )
+
+    loaded = system.load_systems(systems_dir)
+
+    # Sorted directory scan would give ["omega", "alpha"]; declared-name
+    # order must give ["alpha", "omega"].
+    assert [item.name for item in loaded] == ["alpha", "omega"]
+
+
 def test_load_systems_without_a_systems_directory_is_the_empty_set(tmp_path: Path) -> None:
     assert system.load_systems(tmp_path / "no-such-systems") == ()
 
