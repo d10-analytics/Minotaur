@@ -821,3 +821,103 @@ def test_config_less_explicit_graph_root_answers_from_default_docs_systems(
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
         "imports: orders.mod.order (orders/mod.py)\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Reviewer-added cells (adversarial pass): participant-keying across distinct
+# outside files, the system-deps internal-edge/empty form, and the D-09
+# diagnosis-after-refresh ordering.
+# ---------------------------------------------------------------------------
+
+
+def test_surface_one_row_per_symbol_across_distinct_outside_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-05: rows key on the exposed symbol, never the calling file -- two
+    distinct outside files both calling ``order`` still yield exactly one
+    surface record, and a new outside caller changes no record set."""
+    root = _repo(tmp_path)
+    _write(root, "orders/__init__.py", "")
+    _write(root, "orders/mod.py", "def order():\n    pass\n")
+    _write(
+        root,
+        "a.py",
+        "from orders.mod import order\n\ndef fa():\n    order()\n",
+    )
+    _write(
+        root,
+        "b.py",
+        "from orders.mod import order\n\ndef fb():\n    order()\n",
+    )
+    _declare(root, "orders", ["orders/mod.py"])
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    status, out, err = _query(capsys, graph, root, "surface", "orders", "--json")
+    assert status == 0
+    assert err == ""
+    assert json.loads(out)["results"] == [
+        {
+            "category": "system: orders",
+            "kinds": ["calls"],
+            "path": "orders/mod.py",
+            "symbol": "orders.mod.order",
+        }
+    ]
+
+
+def test_system_deps_internal_edges_are_never_a_dependency_and_empty_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-07/R-07: within-system and same-file edges are internal and never a
+    dependency row; the empty result answers ``no dependencies`` / empty JSON
+    at exit 0."""
+    root = _repo(tmp_path)
+    _write(root, "solo/__init__.py", "")
+    _write(root, "solo/core.py", "def core():\n    pass\n")
+    _write(
+        root,
+        "solo/inner.py",
+        "from solo.core import core\n\ndef inner():\n    return core()\n",
+    )
+    _declare(root, "solo", ["solo/core.py", "solo/inner.py"])
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    status, out, err = _query(capsys, graph, root, "system-deps", "solo")
+    assert status == 0
+    assert err == ""
+    assert out == "no dependencies\n"
+
+    status, out, _ = _query(capsys, graph, root, "system-deps", "solo", "--json")
+    assert status == 0
+    assert json.loads(out)["results"] == []
+
+
+def test_absent_warning_is_computed_against_the_final_index_after_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-09/AC-11: the listed-but-absent diagnosis runs after refresh against
+    the final index -- a declared file created between analyze and query is
+    analyzed by the drift refresh, so no stale warning may survive on the
+    refresh path.  A diagnosis computed from the pre-refresh document would
+    keep warning about the now-analyzed file."""
+    root = _repo(tmp_path)
+    _orders_with_consumer(root)
+    _declare(root, "orders", ["orders/mod.py", "orders/new.py"])  # new.py absent on disk yet.
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    status, out, err = _query(capsys, graph, root, "consumers", "orders")
+    assert status == 0
+    assert "minotaur: warning: orders/new.py (listed by system orders)\n" in err
+
+    # Create the declared file and drift mod.py: the refresh must analyze
+    # new.py and the warning must not survive on the refreshed answer.
+    _write(root, "orders/new.py", "def new():\n    pass\n")
+    _write(root, "orders/mod.py", "def order():\n    return 2\n")
+    status, out, err = _query(capsys, graph, root, "consumers", "orders")
+    assert status == 0
+    assert "refreshed graph" in err
+    assert "warning:" not in err
+    assert "use.py (no_system)" in out
