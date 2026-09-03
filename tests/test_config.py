@@ -452,6 +452,11 @@ def test_config_reloads_through_the_tomli_fallback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     module = importlib.import_module("minotaur.config")
+    # Reload re-executes the module body, so every module-scope class (notably
+    # ConfigError) gets a NEW identity that no longer matches what other test
+    # modules captured at import time. Snapshot the state and restore it in the
+    # finally block so the reload leaves no re-aliased classes behind.
+    pre_state = dict(module.__dict__)
     real_tomllib = module.tomllib
     stand_in = types.ModuleType("tomli")
     loads_calls: list[str] = []
@@ -484,7 +489,8 @@ def test_config_reloads_through_the_tomli_fallback(
         assert loads_calls  # The real config file was parsed via the stand-in.
     finally:
         monkeypatch.undo()
-        importlib.reload(module)
+        module.__dict__.clear()
+        module.__dict__.update(pre_state)
 
 
 def test_pyproject_declares_the_tomli_backport_marker() -> None:
