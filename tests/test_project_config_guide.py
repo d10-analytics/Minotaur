@@ -91,6 +91,23 @@ def test_guide_documents_targets_and_graph_anchor_at_the_declared_root() -> None
     assert "resolves outside the root is rejected" in text
 
 
+def test_guide_documents_systems_dir_as_an_optional_known_field() -> None:
+    text = _guide_text()
+    assert "`systems_dir`" in text
+    assert "`systems_dir` — optional" in text
+    assert "defaults to `docs/systems`" in text
+    assert "inside the declared project root" in text
+
+
+def test_guide_documents_systems_dir_root_anchoring_and_default() -> None:
+    text = _guide_text()
+    assert (
+        "A relative `systems_dir` is likewise resolved relative to the declared project `root`"
+        in text
+    )
+    assert "When `systems_dir` is omitted it defaults to `docs/systems` inside that root" in text
+
+
 def test_guide_documents_the_python_310_tomli_fallback_mechanism() -> None:
     text = _guide_text()
     assert "effective on Python 3.10 only" in text
