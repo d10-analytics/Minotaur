@@ -40,6 +40,9 @@ The known fields inside `[minotaur]` are:
   [Path anchoring and defaults](#path-anchoring-and-defaults)).
 * `graph` — optional; the analyzed graph JSON path. It defaults to
   `minotaur-graph.json` inside the declared project root.
+* `systems_dir` — optional; the directory that holds the project's committed
+  system definitions. It defaults to `docs/systems` inside the declared
+  project root.
 
 Any other field is unknown to the current contract and is rejected, so a
 configuration can never silently carry fields the shipped commands do not
@@ -110,6 +113,9 @@ command from:
 * Relative `targets` entries and a relative `graph` are resolved relative to
   the declared project `root`. When `graph` is omitted, it defaults to
   `minotaur-graph.json` inside the project root.
+* A relative `systems_dir` is likewise resolved relative to the declared
+  project `root`. When `systems_dir` is omitted it defaults to `docs/systems`
+  inside that root.
 * Config-sourced paths are absolutized and canonicalized before any command
   consumes them, so analysis, queries, and visualization all see one absolute
   spelling.
