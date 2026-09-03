@@ -5,7 +5,9 @@ project contract.  One typed :class:`ProjectConfig` and one resolver entry
 (:func:`resolve_config`) locate, parse, validate, anchor, and merge the
 per-invocation project contract, so every current and future consumer reads
 the same resolved value set.  This module never analyzes source or writes
-graph output; it only resolves configuration.
+graph output; besides resolving the project contract it hosts the neutral
+file-read/parse seam (:func:`read_toml_file`) through which the system
+loader reads committed ``system.toml`` files.
 
 The resolver walks from the start directory (the current directory) toward
 the filesystem root and selects the nearest ``.minotaur.toml``.  Inside a Git
@@ -44,7 +46,8 @@ _CONFIG_FILENAME = ".minotaur.toml"
 _SECTION = "minotaur"
 _SCHEMA_VERSION = 1
 _DEFAULT_GRAPH_FILENAME = "minotaur-graph.json"
-_KNOWN_FIELDS = frozenset({"schema_version", "root", "graph", "targets"})
+_DEFAULT_SYSTEMS_DIR = "docs/systems"
+_KNOWN_FIELDS = frozenset({"schema_version", "root", "graph", "targets", "systems_dir"})
 
 
 class ConfigError(ValueError):
@@ -62,12 +65,15 @@ class _ParsedConfig:
     Anchoring happens here, against the config file's own directory and the
     declared project root, so every value is already absolute and canonical
     when the resolver merges it with explicit CLI values (which pass through
-    untouched and never undergo this anchoring).
+    untouched and never undergo this anchoring).  ``systems_dir`` follows the
+    same rule: a configured relative value anchors at the declared root, and
+    an omitted field already resolves the ``docs/systems`` default there.
     """
 
     root: Path
     graph: Path
     targets: tuple[Path, ...]
+    systems_dir: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,17 +81,22 @@ class ProjectConfig:
     """The resolved project contract for a single config-consuming invocation.
 
     ``config_file`` is the located or explicitly selected config that governed
-    the resolution, or ``None`` when discovery found no config.  ``root`` and
-    ``graph`` are always present: they come from an explicit CLI value or from
-    the config, and at least one source always exists for a config-consuming
-    invocation.  ``targets`` is ``None`` only for invocations that do not
-    consume targets (no explicit targets and no config supplying them).
+    the resolution, or ``None`` when discovery found no config.  ``root``,
+    ``graph``, and ``systems_dir`` are always present: ``root`` and ``graph``
+    come from an explicit CLI value or from the config, and at least one
+    source always exists for a config-consuming invocation.  ``systems_dir``
+    is the config's anchored value when a config governs, and otherwise the
+    ``docs/systems`` default under the resolved ``root``; it is always
+    emitted so every consumer reads one canonical value.  ``targets`` is
+    ``None`` only for invocations that do not consume targets (no explicit
+    targets and no config supplying them).
     """
 
     config_file: Path | None
     root: Path
     targets: tuple[Path, ...] | None
     graph: Path
+    systems_dir: Path
 
 
 def find_config(start: Path, *, config: Path | None = None) -> Path | None:
@@ -138,7 +149,11 @@ def resolve_config(
     value stays relative and an absolute value stays absolute.  The resolved
     ``root`` and ``graph`` always exist; when neither the config nor an
     explicit value supplies one, a :class:`ConfigError` naming the field is
-    raised rather than returning a partial contract.
+    raised rather than returning a partial contract.  ``systems_dir`` is the
+    config's anchored value (defaulting to ``docs/systems`` under the
+    config's declared root) when a config governs; otherwise it defaults to
+    ``docs/systems`` under the resolved root, so every successful resolution
+    carries one canonical ``systems_dir`` value.
     """
     located = find_config(start, config=config)
     parsed = _parse_config(located) if located is not None else None
@@ -160,7 +175,34 @@ def resolve_config(
         targets = parsed.targets
     else:
         targets = None
-    return ProjectConfig(config_file=located, root=root, targets=targets, graph=graph)
+    systems_dir = parsed.systems_dir if parsed is not None else root / _DEFAULT_SYSTEMS_DIR
+    return ProjectConfig(
+        config_file=located,
+        root=root,
+        targets=targets,
+        graph=graph,
+        systems_dir=systems_dir,
+    )
+
+
+def read_toml_file(path: Path) -> dict[str, object]:
+    """Read and TOML-parse one file, attributing failures to ``path``.
+
+    Config-vocabulary-neutral file-read/parse seam: it applies no
+    ``[minotaur]`` section or field checks and no anchoring, so callers read
+    any TOML file (the committed ``system.toml`` files read by the system
+    loader, for example) through the same guarded ``tomllib`` shim as the
+    project contract.  Read and parse failures raise a :class:`ConfigError`
+    naming the path, mirroring the project-config read/parse errors.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ConfigError(f"cannot read TOML file: {path}") from error
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError(f"invalid TOML in {path}: {error}") from error
 
 
 def _parse_config(path: Path) -> _ParsedConfig:
@@ -171,14 +213,7 @@ def _parse_config(path: Path) -> _ParsedConfig:
     violation has been rejected.
     """
     config_dir = path.resolve().parent
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise ConfigError(f"cannot read config file: {path}") from error
-    try:
-        raw = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as error:
-        raise ConfigError(f"invalid TOML in {path}: {error}") from error
+    raw = read_toml_file(path)
     section = raw.get(_SECTION)
     if section is None:
         raise ConfigError(f"missing [{_SECTION}] section in {path}")
@@ -191,7 +226,8 @@ def _parse_config(path: Path) -> _ParsedConfig:
     config_root = _config_root(section, config_dir)
     graph = _config_graph(section, config_root)
     targets = _config_targets(section, config_root)
-    return _ParsedConfig(root=config_root, graph=graph, targets=targets)
+    systems_dir = _config_systems_dir(section, config_root)
+    return _ParsedConfig(root=config_root, graph=graph, targets=targets, systems_dir=systems_dir)
 
 
 def _validate_schema_version(section: dict[object, object], path: Path) -> None:
@@ -254,6 +290,21 @@ def _config_targets(section: dict[object, object], config_root: Path) -> tuple[P
             ) from error
         anchored.append(target)
     return tuple(anchored)
+
+
+def _config_systems_dir(section: dict[object, object], config_root: Path) -> Path:
+    """Resolve ``systems_dir`` against the declared root, defaulting it.
+
+    The field is optional: a configured relative value is anchored at the
+    declared project root, and an omitted field defaults to ``docs/systems``
+    under that root.  A non-string value is rejected naming the field.
+    """
+    value = section.get("systems_dir")
+    if value is None:
+        return (config_root / _DEFAULT_SYSTEMS_DIR).resolve()
+    if not isinstance(value, str):
+        raise ConfigError("config systems_dir must be a string")
+    return (config_root / value).resolve()
 
 
 def _git_work_tree_root(start: Path) -> Path | None:

@@ -271,9 +271,9 @@ def test_present_config_is_validated_even_with_fully_explicit_values(tmp_path: P
             id="version-unsupported",
         ),
         pytest.param(
-            '[minotaur]\nschema_version = 1\ntargets = ["src"]\nsystems_dir = "sys"\n',
+            '[minotaur]\nschema_version = 1\ntargets = ["src"]\nsystems_dir = 5\n',
             "systems_dir",
-            id="future-field-systems-dir",
+            id="systems-dir-wrong-type",
         ),
         pytest.param(
             '[minotaur]\nschema_version = 1\ntargets = ["src"]\nexpectations_dir = "exp"\n',
@@ -321,6 +321,129 @@ def test_every_validation_violation_raises_config_error_naming_the_field(
 
 
 # ---------------------------------------------------------------------------
+# systems_dir field (D-08/R-02): acceptance, anchoring, default, single owner
+# ---------------------------------------------------------------------------
+
+
+def test_configured_systems_dir_is_accepted_and_anchored_at_the_declared_root(
+    tmp_path: Path,
+) -> None:
+    """A config with a relative systems_dir resolves with it anchored at root."""
+    _write(
+        tmp_path,
+        "cfg/.minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "../proj"\n'
+        'targets = ["a.py"]\nsystems_dir = "systems"\n',
+    )
+
+    resolved = resolve_config(tmp_path / "cfg")
+
+    project_root = (tmp_path / "proj").resolve()
+    assert resolved.systems_dir == (project_root / "systems").resolve()
+
+
+def test_omitted_systems_dir_defaults_to_docs_systems_under_the_declared_root(
+    tmp_path: Path,
+) -> None:
+    """An omitted systems_dir resolves the docs/systems default under root."""
+    _write(
+        tmp_path,
+        "cfg/.minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "../proj"\ntargets = ["a.py"]\n',
+    )
+
+    resolved = resolve_config(tmp_path / "cfg")
+
+    project_root = (tmp_path / "proj").resolve()
+    assert resolved.systems_dir == (project_root / "docs" / "systems").resolve()
+
+
+def test_omitted_systems_dir_defaults_under_the_config_directory_when_root_omitted(
+    tmp_path: Path,
+) -> None:
+    """With no root declared, the docs/systems default sits under the config dir."""
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    _write(cfg, ".minotaur.toml", '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n')
+
+    resolved = resolve_config(cfg)
+
+    assert resolved.systems_dir == (cfg / "docs" / "systems").resolve()
+
+
+def test_configless_explicit_root_still_emits_a_docs_systems_default(
+    tmp_path: Path,
+) -> None:
+    """D-11: with no located config, systems_dir defaults under the explicit root."""
+    root = tmp_path / "proj"
+
+    resolved = resolve_config(tmp_path, explicit_root=root, explicit_graph=root / "g.json")
+
+    assert resolved.config_file is None
+    assert resolved.systems_dir == root / "docs" / "systems"
+
+
+def test_systems_dir_is_resolved_exactly_once_by_the_single_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One resolution reads the config file exactly once through the one seam."""
+    cfg = _write(
+        tmp_path,
+        "cfg/.minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ntargets = ["a.py"]\nsystems_dir = "systems"\n',
+    )
+    calls: list[Path] = []
+    original = config.read_toml_file
+
+    def counting(path: Path) -> dict[str, object]:
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(config, "read_toml_file", counting)
+
+    resolved = resolve_config(cfg.parent)
+
+    assert calls == [cfg.resolve()]
+    assert resolved.systems_dir == (cfg.parent / "systems").resolve()
+
+
+# ---------------------------------------------------------------------------
+# read_toml_file seam (D-08): vocabulary-neutral, path-attributed errors
+# ---------------------------------------------------------------------------
+
+
+def test_read_toml_file_is_vocabulary_neutral_and_returns_the_raw_table(
+    tmp_path: Path,
+) -> None:
+    """The seam parses any TOML: no [minotaur] section or field checks apply."""
+    payload = _write(tmp_path, "notes/system.toml", '[system]\nname = "alpha"\n')
+
+    parsed = config.read_toml_file(payload)
+
+    assert parsed == {"system": {"name": "alpha"}}
+
+
+def test_read_toml_file_read_failure_raises_config_error_naming_the_path(
+    tmp_path: Path,
+) -> None:
+    """An unreadable file fails with a ConfigError that names the path."""
+    missing = tmp_path / "does-not-exist.toml"
+
+    with pytest.raises(ConfigError, match=re.escape(str(missing))):
+        config.read_toml_file(missing)
+
+
+def test_read_toml_file_parse_failure_raises_config_error_naming_the_path(
+    tmp_path: Path,
+) -> None:
+    """Invalid TOML fails with a ConfigError that names the path."""
+    broken = _write(tmp_path, "bad/system.toml", "[system\nname = nope\n")
+
+    with pytest.raises(ConfigError, match=re.escape(str(broken))):
+        config.read_toml_file(broken)
+
+
+# ---------------------------------------------------------------------------
 # AC-12: guarded tomllib/tomli shim and the pyproject.toml backport marker
 # ---------------------------------------------------------------------------
 
@@ -329,6 +452,11 @@ def test_config_reloads_through_the_tomli_fallback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     module = importlib.import_module("minotaur.config")
+    # Reload re-executes the module body, so every module-scope class (notably
+    # ConfigError) gets a NEW identity that no longer matches what other test
+    # modules captured at import time. Snapshot the state and restore it in the
+    # finally block so the reload leaves no re-aliased classes behind.
+    pre_state = dict(module.__dict__)
     real_tomllib = module.tomllib
     stand_in = types.ModuleType("tomli")
     loads_calls: list[str] = []
@@ -361,7 +489,8 @@ def test_config_reloads_through_the_tomli_fallback(
         assert loads_calls  # The real config file was parsed via the stand-in.
     finally:
         monkeypatch.undo()
-        importlib.reload(module)
+        module.__dict__.clear()
+        module.__dict__.update(pre_state)
 
 
 def test_pyproject_declares_the_tomli_backport_marker() -> None:

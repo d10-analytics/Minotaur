@@ -3,10 +3,10 @@
 A Minotaur project can pin the inputs of its source-analysis commands in a
 versioned `.minotaur.toml` file instead of repeating them on every command
 line. When such a file governs your invocation, `analyze`, `visualize`, and
-the config-consuming `query` subcommands (`callers`, `definitions`, `impact`,
-`unreferenced`, and `context`) fill their defaults from it, and you can run
-them from anywhere inside the project without spelling out the graph path and
-source root again.
+the config-consuming `query` subcommands (`callers`, `consumers`, `context`,
+`definitions`, `impact`, `surface`, `system-deps`, and `unreferenced`) fill
+their defaults from it, and you can run them from anywhere inside the project
+without spelling out the graph path and source root again.
 
 This guide documents the configuration contract the current CLI ships: the
 `.minotaur.toml` format and its schema version, how a configuration file is
@@ -40,6 +40,9 @@ The known fields inside `[minotaur]` are:
   [Path anchoring and defaults](#path-anchoring-and-defaults)).
 * `graph` — optional; the analyzed graph JSON path. It defaults to
   `minotaur-graph.json` inside the declared project root.
+* `systems_dir` — optional; the directory that holds the project's committed
+  system definitions. It defaults to `docs/systems` inside the declared
+  project root.
 
 Any other field is unknown to the current contract and is rejected, so a
 configuration can never silently carry fields the shipped commands do not
@@ -110,6 +113,9 @@ command from:
 * Relative `targets` entries and a relative `graph` are resolved relative to
   the declared project `root`. When `graph` is omitted, it defaults to
   `minotaur-graph.json` inside the project root.
+* A relative `systems_dir` is likewise resolved relative to the declared
+  project `root`. When `systems_dir` is omitted it defaults to `docs/systems`
+  inside that root.
 * Config-sourced paths are absolutized and canonicalized before any command
   consumes them, so analysis, queries, and visualization all see one absolute
   spelling.

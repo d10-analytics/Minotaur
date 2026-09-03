@@ -41,15 +41,31 @@ from minotaur.query import context as context_query
 from minotaur.query import diff as diff_query
 from minotaur.query import impact as impact_query
 from minotaur.query import symbols as symbols_query
+from minotaur.query import system as system_query
 from minotaur.query import unreferenced as unreferenced_query
 from minotaur.query.freshness import Drift, drift, recorded_selection
 from minotaur.query.index import GraphIndex
 from minotaur.query.render import QueryRecord, render_json
+from minotaur.system import System, absent_files, load_systems, resolve_system
 
 _CONFIG_CONSUMING_COMMANDS = frozenset({"analyze", "visualize"})
 _CONFIG_CONSUMING_QUERIES = frozenset(
-    {"callers", "context", "definitions", "impact", "unreferenced"}
+    {
+        "callers",
+        "consumers",
+        "context",
+        "definitions",
+        "impact",
+        "surface",
+        "system-deps",
+        "unreferenced",
+    }
 )
+#: The system boundary queries resolve a declared system name and strict-load
+#: the committed systems tree from the resolved ``systems_dir`` before any
+#: graph freshness decision (AC-12), so an invalid declaration exits 2 with
+#: no answer and no refresh or rewrite on every freshness state.
+_SYSTEM_QUERIES = frozenset({"surface", "consumers", "system-deps"})
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -402,6 +418,23 @@ def _report_stale(paths: Sequence[str]) -> None:
         print(f"minotaur: stale: {path}", file=sys.stderr)
 
 
+def _report_absent_files(systems: Sequence[System], index: GraphIndex) -> None:
+    """Print one ``warning:`` line per listed-but-absent file (D-10).
+
+    The warning follows the house ``minotaur: <kind>: <message>`` prefix
+    family with the deliberate ``warning:`` kind (never ``stale:``), one line
+    per listed-but-absent file of the queried system in deterministic order,
+    spelled exactly ``minotaur: warning: {path} (listed by system {name})``.
+    It runs only after the graph was loaded or refreshed, against the final
+    index (D-09), and never affects the query's own exit status.
+    """
+    for absent in absent_files(systems, index.nodes.values()):
+        print(
+            f"minotaur: warning: {absent.file} (listed by system {absent.system.name})",
+            file=sys.stderr,
+        )
+
+
 def _load_and_refresh_graph(
     graph_path: Path, root: Path, no_refresh: bool, *, validate: bool = False
 ) -> _QueryGraph:
@@ -514,6 +547,36 @@ def _run_unreferenced(
     )
 
 
+def _run_surface(
+    query: argparse.Namespace, index: GraphIndex, observed: Drift
+) -> Sequence[QueryRecord]:
+    return _run_system_query(system_query.surface, query, index)
+
+
+def _run_consumers(
+    query: argparse.Namespace, index: GraphIndex, observed: Drift
+) -> Sequence[QueryRecord]:
+    return _run_system_query(system_query.consumers, query, index)
+
+
+def _run_system_deps(
+    query: argparse.Namespace, index: GraphIndex, observed: Drift
+) -> Sequence[QueryRecord]:
+    return _run_system_query(system_query.system_deps, query, index)
+
+
+def _run_system_query(
+    producer: Callable[[Sequence[System], GraphIndex, System], Sequence[QueryRecord]],
+    query: argparse.Namespace,
+    index: GraphIndex,
+) -> Sequence[QueryRecord]:
+    # D-10/AC-11: the absent-file diagnosis runs after load or refresh against
+    # the final index, as one warning line per listed-but-absent file of the
+    # queried system, and never changes the answer or its exit status.
+    _report_absent_files((query.system,), index)
+    return producer(query.systems, index, query.system)
+
+
 def _run_diff(query: argparse.Namespace) -> str:
     validate: bool = query.validate
     old_path, new_path = Path(query.old), Path(query.new)
@@ -556,6 +619,18 @@ _GRAPH_QUERIES: Mapping[str, _GraphQuery] = {
         run=_run_unreferenced,
         render_text=unreferenced_query.render_text,
     ),
+    "surface": _GraphQuery(
+        run=_run_surface,
+        render_text=system_query.render_surface_text,
+    ),
+    "consumers": _GraphQuery(
+        run=_run_consumers,
+        render_text=system_query.render_consumers_text,
+    ),
+    "system-deps": _GraphQuery(
+        run=_run_system_deps,
+        render_text=system_query.render_system_deps_text,
+    ),
 }
 
 # Snapshot queries intentionally do not call _load_and_refresh_graph: diff
@@ -597,6 +672,17 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
             )
             arguments.graph = resolved.graph
             arguments.root = resolved.root
+            if arguments.name in _SYSTEM_QUERIES:
+                # AC-12 (D-09): the strict system-tree load runs here, in
+                # _query's system-query path, before _run_graph_query can
+                # invoke _load_and_refresh_graph -- so an invalid committed
+                # declaration exits 2 before any freshness refresh or rewrite
+                # can start, on every freshness state (clean graph, drifted
+                # graph, and --no-refresh alike).  The loaded systems and the
+                # resolved name are stashed on the namespace for the run
+                # handler, which consumes them after the graph is final.
+                arguments.systems = load_systems(resolved.systems_dir)
+                arguments.system = resolve_system(arguments.systems, arguments.system_name)
         if snapshot is not None:
             print(snapshot(arguments), end="")
             return 0
@@ -672,6 +758,18 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
         help="exclude symbols whose qualified name matches this regex (repeatable)",
     )
     unreferenced_parser.add_argument("--text-fallback", action="store_true")
+    surface_parser = commands.add_parser(
+        "surface", help="show a declared system's symbols reached from outside"
+    )
+    surface_parser.add_argument("system_name", metavar="SYSTEM_NAME")
+    consumers_parser = commands.add_parser(
+        "consumers", help="list files outside a declared system that use it"
+    )
+    consumers_parser.add_argument("system_name", metavar="SYSTEM_NAME")
+    system_deps_parser = commands.add_parser(
+        "system-deps", help="list the targets a declared system depends on"
+    )
+    system_deps_parser.add_argument("system_name", metavar="SYSTEM_NAME")
     diff_parser = commands.add_parser("diff", help="compare two analyzed graph snapshots")
     diff_parser.add_argument("old", metavar="OLD")
     diff_parser.add_argument("new", metavar="NEW")
@@ -685,6 +783,9 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
         definitions_parser,
         impact_parser,
         unreferenced_parser,
+        surface_parser,
+        consumers_parser,
+        system_deps_parser,
         context_parser,
     ):
         command.add_argument(

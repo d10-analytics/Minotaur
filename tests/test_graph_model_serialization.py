@@ -463,7 +463,7 @@ def test_jcs_nested_structure() -> None:
 
 
 def _collect_graph_fixtures() -> list[Path]:
-    """Return all nine raw JSON graph fixtures under tests/ and examples/."""
+    """Return all ten raw JSON graph fixtures under tests/ and examples/."""
     paths: list[Path] = []
     for directory in [REPO_ROOT / "tests", REPO_ROOT / "examples"]:
         paths.extend(sorted(directory.rglob("*.json")))
@@ -477,21 +477,21 @@ def _collect_graph_fixtures() -> list[Path]:
 # ``GraphDocument.from_dict`` and the in-process serializer; it includes the
 # dangling-relationship fixture because model construction does not validate
 # relationship endpoints. The strict-load set feeds ``load_graph_bytes`` and
-# therefore contains only the four example graphs: strict loading validates
+# therefore contains only the five example graphs: strict loading validates
 # relationship endpoints and must exclude that dangling fixture. Keeping the
 # sets separate preserves both model-constructible coverage and strict-load
 # coverage without making either consumer claim the wrong admission boundary.
 
 
 def _collect_model_constructible_graph_fixtures() -> list[Path]:
-    """Return the four examples plus the model-constructible dangling graph."""
+    """Return the five examples plus the model-constructible dangling graph."""
     dangling = REPO_ROOT / "tests/fixtures/minotaur-graph-v1/invalid/dangling-relationship.json"
     examples = sorted((REPO_ROOT / "examples").rglob("*.json"))
     return examples + [dangling]
 
 
 def _collect_loadable_graph_fixtures() -> list[Path]:
-    """Return the four example graphs accepted by strict graph loading."""
+    """Return the five example graphs accepted by strict graph loading."""
     return sorted((REPO_ROOT / "examples").rglob("*.json"))
 
 

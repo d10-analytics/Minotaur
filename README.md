@@ -32,6 +32,9 @@ Minotaur is in early development. Its current implementation includes:
   (each invocation selects one language: `.py` or `.js`);
 - fixed agent-facing graph queries for callers, definitions, impact,
   unreferenced symbols, snapshot diffs, and source context;
+- committed system definitions that name subsystem boundaries, with the
+  `surface`, `consumers`, and `system-deps` queries reporting who reaches
+  across a declared boundary;
 - a self-contained HTML explorer with filters, themes, source excerpts, and
   call-site inspection.
 
@@ -49,6 +52,15 @@ The query family turns that graph into practical navigation and review tools:
 candidate list for a dead-code audit. `context` reads the surrounding source
 at a reported location, while `diff` compares two graph snapshots so changes
 in the analyzed structure are easy to review.
+
+Declared system boundaries add three graph queries of their own: `surface`
+lists the in-scope symbols that files outside a system reach, `consumers`
+lists the outside files that use it, and `system-deps` lists the other
+systems and unlisted targets it depends on. See the
+[system definitions guide](docs/guides/system-definitions.md) for the
+membership model, the [system walkthrough](examples/system-walkthrough/) for
+executed output, and the [system definition format](docs/formats/system-definition-v1.md)
+for the committed `system.toml` contract.
 
 Queries run against any analyzed graph, including the checked-in example:
 

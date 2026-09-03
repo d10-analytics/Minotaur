@@ -357,7 +357,7 @@ def test_schema_verdicts_are_unchanged_for_all_graph_fixtures() -> None:
         },
     }
     fixtures = _collect_graph_fixtures()
-    assert len(fixtures) == 9
+    assert len(fixtures) == 10
     for fixture_path in fixtures:
         relative = str(fixture_path.relative_to(ROOT))
         errors = sorted(
