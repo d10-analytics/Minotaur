@@ -32,20 +32,22 @@ That is the whole product. Everything in the repository serves it.
 | Primitive | What it is | Where it lives today |
 | --- | --- | --- |
 | **Facts** | A canonical, validated graph of what the source establishes: definitions, containment, imports, calls, references, each with provenance and location evidence. Unresolved references are explicit nodes, never inferred edges. | `graph_model/`, `language_interpreter/` |
-| **Questions** | Fixed queries that answer one structural question each from a graph: `callers`, `definitions`, `impact`, `unreferenced`, `context`. | `query/` |
-| **Scopes** | A named boundary that makes a question answerable about *part* of a codebase — "when I say `parsers`, I mean these paths." A scope is a lens, not a claim: it says what you are asking about, not what is true. | *planned* — system definitions |
+| **Questions** | Fixed queries that answer one structural question each from a graph: `callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`, `system-deps`, `context`. | `query/` |
+| **Scopes** | A named boundary that makes a question answerable about *part* of a codebase — "when I say `orders`, I mean these files." A scope is a lens, not a claim: it says what you are asking about, not what is true. Shipped as committed `system.toml` definitions (one directory per system under `docs/systems`, format v1). | shipped — committed system definitions |
 
 Two operations compare answers:
 
 | Operation | Compares | Status |
 | --- | --- | --- |
 | **`diff`** | the same question across two snapshots | shipped |
-| **Expectations** | the current answer against a declared answer | *planned* |
+| **Expectations** | the current answer against a declared answer | *planned* — the later expectations package (03) |
 
 An expectation is a persisted question with the answer its author believes
 is true — "callers of `open_channel` ⊆ {`client.py`}", "system `core`
-imports nothing from `qtpy`". Minotaur runs the question and reports the
-difference. It is `diff` with one side declared instead of analyzed.
+imports nothing from `qtpy`". The planned expectations package (03) runs the
+question and reports the difference. It is `diff` with one side declared
+instead of analyzed, and it ships later; nothing shipped compares a declared
+answer today.
 
 Freshness (content hashes, drift detection, the trusted-load sidecar)
 guarantees that every answer is about the tree you think it is about.
@@ -53,46 +55,63 @@ guarantees that every answer is about the tree you think it is about.
 ## 3. Principles
 
 1. **Source is the only author of truth.** Every Minotaur artifact is derived
-   from source and can be regenerated. Declared inputs (scopes, expectations)
-   are questions and beliefs, never facts; they are checked, not trusted.
+   from source and can be regenerated. Declared inputs are questions and
+   beliefs, never facts. A shipped scope is a read-only lens that nothing
+   checks; declared expectations — the beliefs — arrive with the later
+   expectations package (03), which will check them against answers rather
+   than trust them.
 2. **Unresolved is an answer.** A reference the interpreter cannot resolve is
    recorded as an unresolved node with its location. Minotaur never guesses a
    likely target and never attaches a confidence score.
 3. **Reproducible at a commit.** A graph records its source-control snapshot
    and per-file content digests. Two people running the same question at the
    same commit get the same answer.
-4. **Differences are reported, not enforced.** Minotaur says what differs
-   from what was declared. What a difference *means* — a defect, accepted
-   debt, a stale declaration — is the caller's judgment. There is no
+4. **Differences are reported, not enforced.** `diff` reports what differs
+   between two snapshots, and the later expectations package (03) will report
+   what differs from what was declared. What a difference *means* — a defect,
+   accepted debt, a stale declaration — is the caller's judgment. There is no
    suppression, baseline, ratchet, or severity vocabulary.
 5. **Exit status is a fact, not a policy.** A question that could not be
-   answered exits `2`. An expectation that differs exits `1`, exactly as a
-   `diff` tool does, so scripts can branch on it. Nothing else is encoded in
-   exit codes.
+   answered exits `2`. When the later expectations package (03) ships, an
+   expectation that differs will exit `1`, exactly as a `diff` tool does, so
+   scripts can branch on it; nothing else is encoded in exit codes, and no
+   shipped query compares an expectation today.
 6. **Nothing repository-specific.** Minotaur knows languages, not products.
    Framework conventions and product knowledge enter only through declared,
-   inspectable inputs (exclusion patterns, curated-rule edges with a rule
-   id, scopes, expectations) that live in the repository they describe.
+   inspectable inputs that live in the repository they describe: exclusion
+   patterns and scopes today, with expectations (03) and curated-rule edges
+   carrying a rule id (04) as declared inputs of their later packages.
 
-## 4. Scopes and expectations under this framing
+## 4. System definitions under this framing
 
-A **system definition** is a scope: a committed file naming a boundary
-(paths), the systems it declares dependencies on, and any curated-rule edges
-static analysis cannot see (registry dispatch, framework callbacks) with a
-rule id. It references qualified names and paths, never node ids. Its only
-job is to let questions be asked about a named part of the codebase:
-`surface` (what the system exposes), `consumers` (who outside uses it),
-`system-deps` (what it actually depends on).
+A **system definition** is a scope, shipped in this version: a committed
+file naming a boundary by listing individual repository files, one directory
+per system under `docs/systems`. Its only job is to let questions be asked
+about a named part of the codebase: `surface` (what the system exposes),
+`consumers` (who outside uses it), `system-deps` (what it actually depends
+on). Relationships are computed from the analyzed graph only — a definition
+declares no dependencies and no expectations, and no hand-recorded
+relationship data. It lists root-relative file paths only: it names a unique
+system and its files, references no qualified names, and never node ids. A
+scope is a lens, not a claim.
 
-An **expectation** is a question plus a declared answer, usually scoped to a
-system. The declared dependencies in a system definition *are* expectations
-("this system depends only on these"); free-standing expectations cover
-ownership and containment claims that are not dependency-shaped ("this name
-is defined in exactly one place"). Both are evaluated by the same comparison
-and reported the same way.
+Two later packages extend what a definition may carry, and neither is
+shipped with v1:
 
-Scopes without expectations are documentation with nothing to check;
-expectations without scopes are glob soup. They are one design.
+* **Expectations (03)** — a question plus the answer its author believes is
+  true, usually scoped to a system: "this system depends only on these".
+  Declared dependencies and the exit-`1` difference policy belong to this
+  later package; free-standing expectations will cover ownership and
+  containment claims that are not dependency-shaped ("this name is defined in
+  exactly one place"). Nothing compares a declared answer against the
+  analyzed graph today.
+* **Curated relationships (04)** — declared edges static analysis cannot see
+  (registry dispatch, framework callbacks), each carrying a rule id, that
+  boundary queries may include alongside the graph's own edges.
+
+Until those packages ship, a system definition is exactly the committed
+scope above: relationships come from the analyzed graph only, and nothing in
+the shipped package is checked against a declared expectation.
 
 ## 5. Does a proposed feature belong in Minotaur?
 

@@ -24,12 +24,14 @@ imports would resolve under a different root; see the
 [Python analysis guide](analyze-python.md) for details.
 
 For a step-by-step tour of these commands with real output, see the
-[query walkthrough](../../examples/query-walkthrough/).
+[query walkthrough](../../examples/query-walkthrough/). The declared-system
+queries (`surface`, `consumers`, and `system-deps`) have their own
+[system walkthrough](../../examples/system-walkthrough/).
 
 ## Common freshness behavior
 
-`callers`, `definitions`, `impact`, and `unreferenced` accept the following
-common options:
+`callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`,
+and `system-deps` accept the following common options:
 
 ```text
 --graph GRAPH --root ROOT [--no-refresh] [--json]
@@ -196,6 +198,70 @@ since that mode intentionally answers from graph relationships only; see the
 ["stale graph + `--text-fallback` + `--no-refresh`" row](../concepts/freshness.md)
 in the freshness contract.
 
+### Answer system boundary questions
+
+`surface`, `consumers`, and `system-deps` answer questions about a *declared
+system*: a named boundary defined by committed `system.toml` definitions under
+the resolved `systems_dir` (default `docs/systems`). Each takes the system's
+name, resolves it against the strictly loaded systems tree, and reports who
+reaches across the boundary from relationships in the analyzed graph only.
+Membership is the exact-file test "is this file listed", and every endpoint
+classifies as `system: <name>`, `no_system` (path-carrying but listed by no
+system), or `external` (path-less upstream) — spelled identically in text and
+JSON, with no target ever silently attributed to a system.
+
+The model is documented in the
+[system definitions guide](system-definitions.md), the committed file
+contract in the [system definition format v1](../formats/system-definition-v1.md),
+and the executed example in the [system walkthrough](../../examples/system-walkthrough/).
+
+```bash
+minotaur query surface orders --graph GRAPH.json --root ROOT
+minotaur query consumers orders --graph GRAPH.json --root ROOT
+minotaur query system-deps orders --graph GRAPH.json --root ROOT
+```
+
+The three queries report two consumption layers with explicit kinds —
+symbol-layer `calls`/`references` and module-layer `imports`:
+
+* `surface` lists the in-scope symbols that files outside the system reach
+  through `calls` or `references`. An import of the system's module is never
+  surface; the module is not an implicit callable boundary. Text output is
+  `path  symbol  kinds` per record; an empty result prints
+  `no exposed symbols`.
+* `consumers` lists the outside files participating in boundary relationships,
+  one record per file, with the distinct kinds that file contributes and the
+  in-scope targets it reaches. An outside file that only imports a system
+  module is a consumer through `imports` even when no call resolves. An empty
+  result prints `no consumers`.
+* `system-deps` lists the target categories of the system's own outgoing
+  boundary relationships: each named target system plus explicit `no_system`
+  and `external` rows, with per-target endpoint detail. Same-system and
+  same-file edges are internal and never a dependency. An empty result prints
+  `no dependencies`.
+
+All three key records on the semantic participant — the exposed symbol, the
+consumer file, or the target category — never on the call site, and they are
+returned in stable sorted order, so the same graph and systems always produce
+the same bytes.
+
+The system queries run in the shared graph-query loop, so `--no-refresh` and
+`--json` behave exactly as they do for the other graph queries; the JSON
+envelope and records carry semantic labels and root-relative paths, never
+node IDs. Text output:
+
+```text
+shop/checkout.py (no_system)  calls: shop.orders.create_order (shop/orders.py); imports: shop.orders.create_order (shop/orders.py)
+```
+
+An unknown system name exits `2` and lists up to five nearest declared
+systems; a system whose boundary has no matches is a successful empty result.
+Because the system tree is strict-loaded before any answer, an invalid
+committed definition anywhere fails with a file-attributed error at exit `2`
+before any freshness refresh can start, and a listed file absent from the
+analyzed graph is reported as a `minotaur: warning:` line (one per absent
+file of the queried system) without changing the answer or its exit status.
+
 ### Compare snapshots
 
 Compare two analyzed graph files without a source root:
@@ -263,9 +329,9 @@ uses the same records as text, and contains no node IDs, SHA-256 node digests,
 or evidence/provenance blocks. Empty result sets are represented by an empty
 `results` array (or the corresponding empty diff arrays).
 
-`callers`, `definitions`, `impact`, and `unreferenced` also report the
-freshness of the answer alongside it, so an agent reading only stdout learns
-what stderr would have told it:
+`callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`,
+and `system-deps` also report the freshness of the answer alongside it, so an
+agent reading only stdout learns what stderr would have told it:
 
 ```json
 {"query":"definitions","refreshed":true,"results":[],"stale":["src/example.py"]}
@@ -284,9 +350,10 @@ Exit statuses are:
   `query` subcommand also exits `0`, matching every other argparse-based
   program);
 * `1` — a graph refresh completed but source diagnostics were reported; and
-* `2` — argument, graph-load, selection, unknown-symbol, or ambiguous-symbol
-  error (a symbol name that matches several definitions is never answered
-  from an arbitrary one of them).
+* `2` — argument, graph-load, selection, unknown-symbol, unknown-system,
+  ambiguous-symbol, or committed-definition error (a symbol name that matches
+  several definitions is never answered from an arbitrary one of them, and a
+  system query never answers from a partial or invalid systems tree).
 
 The commands never execute or import the analyzed source. Dynamic dispatch,
 reflection, generated code, and configuration-dependent behavior remain
