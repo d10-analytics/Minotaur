@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model import loading
 from minotaur.graph_model.loading import load_graph_file, stamp_path
 
 
@@ -1183,3 +1184,516 @@ class TestStampAfterValidation:
         # The sidecar does NOT match the replaced file.
         replaced_digest = hashlib.sha256(output.read_bytes()).hexdigest()
         assert replaced_digest != original_digest
+
+
+# ---------------------------------------------------------------------------
+# Project configuration through the CLI (T02: AC-01..AC-05, AC-07..AC-10,
+# AC-13). Discovery-sensitive tests run from cwds inside tmp_path Git
+# repositories so the D-07 boundary makes them independent of anything above
+# the temporary repo; in-process runs monkeypatch.chdir into the same repos.
+# ---------------------------------------------------------------------------
+
+_MINOTAUR_CONFIG = "[minotaur]\nschema_version = 1\n"
+
+
+def _config_repo(tmp_path: Path, name: str = "repo") -> Path:
+    """A Git work tree whose root is the discovery stop point for its tests."""
+    root = tmp_path / name
+    root.mkdir()
+    assert _git(root, "init", "-q").returncode == 0
+    assert _git(root, "config", "user.email", "tests@example.invalid").returncode == 0
+    assert _git(root, "config", "user.name", "Minotaur Tests").returncode == 0
+    return root
+
+
+def _write_config(root: Path, body: str) -> Path:
+    config = root / ".minotaur.toml"
+    config.write_text(body, encoding="utf-8")
+    return config
+
+
+def _run_in(cwd: Path, *argv: str) -> subprocess.CompletedProcess[str]:
+    """Run one CLI invocation from ``cwd`` (subprocess inherits the env)."""
+    return subprocess.run(
+        [sys.executable, "-m", "minotaur", *argv],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _file_paths(graph: dict[str, object]) -> set[str]:
+    return {node["path"] for node in graph["nodes"] if node["node_class"] == "file"}
+
+
+def test_analyze_from_nested_directory_uses_discovered_config_only(
+    tmp_path: Path,
+) -> None:
+    """AC-01: no flags plus a nested cwd discovers the config and its targets."""
+    root = _config_repo(tmp_path)
+    _write(root, "app/one.py", "def one():\n    return 1\n")
+    _write(root, "app/two.py", "def two():\n    return 2\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "minotaur-graph.json"\ntargets = ["app"]\n',
+    )
+    nested = root / "work"
+    nested.mkdir()
+
+    completed = _run_in(nested, "analyze")
+
+    graph_path = root / "minotaur-graph.json"
+    assert completed.returncode == 0, completed.stderr
+    assert graph_path.exists()
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert _file_paths(graph) == {"app/one.py", "app/two.py"}
+
+
+def test_analyze_explicit_output_and_targets_override_only_their_fields(
+    tmp_path: Path,
+) -> None:
+    """AC-02: an explicit --output and positionals override per field."""
+    root = _config_repo(tmp_path)
+    _write(root, "app/one.py", "def one():\n    return 1\n")
+    _write(root, "extra.py", "def extra():\n    return 1\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "configured.json"\ntargets = ["app"]\n',
+    )
+
+    completed = _run_in(root, "analyze", "--output", "out.json", "extra.py")
+
+    assert completed.returncode == 0, completed.stderr
+    assert not (root / "configured.json").exists()
+    graph = json.loads((root / "out.json").read_text(encoding="utf-8"))
+    assert _file_paths(graph) == {"extra.py"}
+    assert graph["extensions"]["minotaur"]["selection"] == ["extra.py"]
+
+
+def test_analyze_explicit_root_override_reanchors_only_selection(
+    tmp_path: Path,
+) -> None:
+    """AC-02: an explicit --root changes selection anchoring, not the graph."""
+    repo = _config_repo(tmp_path)
+    project = repo / "project"
+    _write(project, "src/app.py", "def app():\n    return 1\n")
+    _write_config(
+        project,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n',
+    )
+
+    completed = _run_in(project, "analyze", "--root", str(repo))
+
+    assert completed.returncode == 0, completed.stderr
+    graph = json.loads((project / "g.json").read_text(encoding="utf-8"))
+    assert _file_paths(graph) == {"project/src/app.py"}
+
+
+def test_no_config_usage_error_writes_no_graph_or_stamp(tmp_path: Path) -> None:
+    """AC-03: no config keeps argparse's exact usage error and writes nothing."""
+    root = _config_repo(tmp_path)
+
+    completed = _run_in(root, "analyze", "--root", str(root))
+
+    assert completed.returncode == 2
+    assert "the following arguments are required" in completed.stderr
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []
+
+
+def test_resolver_double_observes_each_consumer_once_never_diff_or_help(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-04(1): one resolver call per config-consuming trigger; none for help/diff."""
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n',
+    )
+    nested = root / "work"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    # Prime the configured graph while the double is not yet active.
+    assert cli.main(["analyze"]) == 0
+
+    original = cli.resolve_config
+    calls: list[dict[str, object]] = []
+
+    def recording(start: Path, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return original(start, **kwargs)
+
+    monkeypatch.setattr(cli, "resolve_config", recording)
+
+    with pytest.raises(SystemExit) as help_info:
+        cli.main(["analyze", "--help"])
+    assert help_info.value.code == 0
+    assert calls == []
+    graph = root / "g.json"
+    assert cli.main(["query", "diff", str(graph), str(graph)]) == 0
+    assert calls == []
+
+    assert cli.main(["analyze"]) == 0
+    assert len(calls) == 1
+    calls.clear()
+    assert cli.main(["query", "unreferenced"]) == 0
+    assert len(calls) == 1
+    calls.clear()
+    assert cli.main(["query", "context", "--site", "src/app.py:1"]) == 0
+    assert len(calls) == 1
+    calls.clear()
+    assert cli.main(["visualize", "--output", str(root / "view.html")]) == 0
+    assert len(calls) == 1
+    calls.clear()
+    assert cli.main(["analyze", "--output", str(root / "mixed.json"), str(root / "src")]) == 0
+    assert len(calls) == 1
+    assert calls[0]["explicit_graph"] == Path(root / "mixed.json")
+    assert calls[0]["explicit_targets"] == (Path(root / "src"),)
+
+
+def test_no_module_other_than_config_imports_a_toml_parser() -> None:
+    """AC-04(2): consumer-side TOML re-resolution fails this source-text check."""
+    package = Path(__file__).parents[1] / "src" / "minotaur"
+    offenders = []
+    for module in sorted(package.rglob("*.py")):
+        relative = module.relative_to(package)
+        if relative == Path("config.py"):
+            continue
+        text = module.read_text(encoding="utf-8")
+        if "import tomllib" in text or "import tomli" in text:
+            offenders.append(str(module))
+    assert offenders == []
+
+
+def test_every_config_validation_violation_exits_two_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """AC-05: each R-05/R-06 failure exits 2, names the field, writes no graph."""
+    cases: list[tuple[str, str, str]] = [
+        (
+            "unsupported-schema-version",
+            '[minotaur]\nschema_version = 2\ntargets = ["src"]\n',
+            "schema_version",
+        ),
+        (
+            "unknown-field",
+            _MINOTAUR_CONFIG + 'bogus = 1\ntargets = ["src"]\n',
+            "bogus",
+        ),
+        (
+            "wrong-targets-type",
+            _MINOTAUR_CONFIG + 'targets = "src"\n',
+            "list of strings",
+        ),
+        ("missing-schema-version", '[minotaur]\ntargets = ["src"]\n', "schema_version"),
+        ("missing-targets", "[minotaur]\nschema_version = 1\n", "targets"),
+        ("empty-targets", "[minotaur]\nschema_version = 1\ntargets = []\n", "not be empty"),
+        (
+            "escaping-target",
+            _MINOTAUR_CONFIG + 'root = "."\ntargets = ["../escape"]\n',
+            "escapes root",
+        ),
+        (
+            "systems-dir-field",
+            _MINOTAUR_CONFIG + 'systems_dir = "systems"\ntargets = ["src"]\n',
+            "systems_dir",
+        ),
+        (
+            "expectations-dir-field",
+            _MINOTAUR_CONFIG + 'expectations_dir = "expect"\ntargets = ["src"]\n',
+            "expectations_dir",
+        ),
+        (
+            "server-settings-field",
+            _MINOTAUR_CONFIG + 'server = {host = "x"}\ntargets = ["src"]\n',
+            "server",
+        ),
+    ]
+    for label, body, expected in cases:
+        root = _config_repo(tmp_path, label)
+        _write_config(root, body)
+        completed = _run_in(root, "analyze")
+        assert completed.returncode == 2, label
+        assert expected in completed.stderr, label
+        assert list(root.glob("*.json")) == [], label
+        assert list(root.glob("*.sha256")) == [], label
+
+
+def test_nonexistent_explicit_config_exits_two_names_path_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """AC-05: a --config path that does not exist fails before parsing."""
+    root = _config_repo(tmp_path)
+    missing = root / "missing.toml"
+
+    completed = _run_in(root, "analyze", "--config", str(missing))
+
+    assert completed.returncode == 2
+    assert str(missing) in completed.stderr
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []
+
+
+def test_fully_explicit_analyze_beside_invalid_config_exits_two_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """AC-07: a present config is validated even when every flag is explicit."""
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "def app():\n    return 1\n")
+    _write_config(root, '[minotaur]\nschema_version = 99\ntargets = ["src"]\n')
+    output = root / "out.json"
+
+    completed = _run_in(root, "analyze", "--root", str(root), "--output", str(output), "src")
+
+    assert completed.returncode == 2
+    assert "schema_version" in completed.stderr
+    assert not output.exists()
+    assert not stamp_path(output).exists()
+
+
+def test_visualize_input_defaults_and_excerpts_follow_config_root_existence(
+    tmp_path: Path,
+) -> None:
+    """AC-08: config input default; source-root default only when root exists."""
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+    explicit_graph = tmp_path / "explicit.json"
+    primed = _run_in(root, "analyze", "--root", str(root), "--output", str(explicit_graph), "src")
+    assert primed.returncode == 0, primed.stderr
+
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n')
+    with_root = _run_in(
+        root, "visualize", "--input", str(explicit_graph), "--output", str(root / "with.html")
+    )
+    assert with_root.returncode == 0, with_root.stderr
+    assert "def app" in (root / "with.html").read_text(encoding="utf-8")
+
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "absent"\ngraph = "g.json"\ntargets = ["src"]\n')
+    without_root = _run_in(
+        root, "visualize", "--input", str(explicit_graph), "--output", str(root / "without.html")
+    )
+    assert without_root.returncode == 0, without_root.stderr
+    assert "def app" not in (root / "without.html").read_text(encoding="utf-8")
+
+
+def test_visualize_requires_output_even_when_config_is_present(tmp_path: Path) -> None:
+    """AC-08: --output stays required beside a config; usage error exits 2."""
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "def app():\n    return 1\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n')
+    primed = _run_in(root, "analyze")
+    assert primed.returncode == 0, primed.stderr
+
+    completed = _run_in(root, "visualize")
+
+    assert completed.returncode == 2
+    assert "--output" in completed.stderr
+    assert "the following arguments are required" in completed.stderr
+
+
+def test_query_context_fills_graph_and_root_from_config_and_diff_stays_free(
+    tmp_path: Path,
+) -> None:
+    """AC-09: config-only context answers; diff beside an invalid config answers."""
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n')
+    nested = root / "nested"
+    nested.mkdir()
+    primed = _run_in(nested, "analyze")
+    assert primed.returncode == 0, primed.stderr
+
+    context_run = _run_in(nested, "query", "context", "--site", "src/app.py:3")
+    assert context_run.returncode == 0, context_run.stderr
+    assert "def app()" in context_run.stdout
+
+    _write_config(root, "[minotaur]\nschema_version = 99\n")
+    diff = _run_in(nested, "query", "diff", str(root / "g.json"), str(root / "g.json"))
+    assert diff.returncode == 0, diff.stderr
+
+
+def test_config_targets_do_not_leak_into_unreferenced_path_filters(
+    tmp_path: Path,
+) -> None:
+    """AC-10: config targets stay analysis-only; query filters stay root-relative."""
+    root = _config_repo(tmp_path)
+    _write(root, "app/mod.py", "def mod_symbol():\n    return 1\n")
+    _write(root, "extra/other.py", "def other_symbol():\n    return 1\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["app"]\n')
+    nested = root / "nested"
+    nested.mkdir()
+    primed = _run_in(root, "analyze", "--output", "g.json", "--force", "app", "extra")
+    assert primed.returncode == 0, primed.stderr
+
+    unfiltered = _run_in(nested, "query", "unreferenced")
+    assert unfiltered.returncode == 0, unfiltered.stderr
+    assert "mod_symbol" in unfiltered.stdout
+    assert "other_symbol" in unfiltered.stdout
+
+    filtered = _run_in(nested, "query", "unreferenced", "extra")
+    assert filtered.returncode == 0, filtered.stderr
+    assert "other_symbol" in filtered.stdout
+    assert "mod_symbol" not in filtered.stdout
+
+
+def test_config_graph_spelling_keeps_sidecar_trust_until_an_explicit_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-13: one canonical config graph spelling; explicit override revalidates safely."""
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+    (root / "graphs").mkdir()
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "graphs/tracked.json"\ntargets = ["src"]\n',
+    )
+    nested = root / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    assert cli.main(["analyze"]) == 0
+    tracked = (root / "graphs" / "tracked.json").resolve()
+    assert tracked.exists()
+    assert stamp_path(tracked).exists()
+
+    original = loading._validate_wire_shape
+    validated: list[str] = []
+
+    def record(raw: object) -> None:
+        validated.append("schema")
+        original(raw)
+
+    monkeypatch.setattr(loading, "_validate_wire_shape", record)
+
+    assert cli.main(["query", "unreferenced"]) == 0
+    assert validated == []
+
+    alternate = root / "alternate.json"
+    alternate.write_bytes(tracked.read_bytes())
+    explicit = cli.main(["query", "unreferenced", "--graph", str(alternate), "--root", str(root)])
+    assert explicit == 0
+    assert validated == ["schema"]
+    assert stamp_path(alternate).exists()
+
+
+def test_visualize_without_input_renders_content_from_the_config_graph(
+    tmp_path: Path,
+) -> None:
+    """AC-08: with --input omitted the config graph is the input and renders.
+
+    The AC-04 resolver-double proof only asserts exit 0 for a config-input
+    visualize; this asserts the rendered HTML actually carries content from the
+    config graph (the file ``analyze`` wrote to the configured ``graph``), so a
+    default that pointed at a different, existing graph would fail here.
+    """
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n')
+    primed = _run_in(root, "analyze")
+    assert primed.returncode == 0, primed.stderr
+    assert (root / "g.json").exists()
+
+    completed = _run_in(root, "visualize", "--output", str(root / "config.html"))
+
+    assert completed.returncode == 0, completed.stderr
+    assert "def app" in (root / "config.html").read_text(encoding="utf-8")
+
+
+def test_equals_form_missing_config_exits_two_beside_a_valid_walk_up_config(
+    tmp_path: Path,
+) -> None:
+    """D-05/R-02: ``--config=PATH`` names the missing path and never falls back.
+
+    The D-05 raw-argv scanner reads ``--config=VALUE`` with its own equals
+    branch; if that branch broke, an invocation with a valid walk-up config
+    present would silently analyze under the walk-up config instead of failing
+    on the explicitly named missing file.  Asserting exit 2, the named path on
+    stderr, and no graph or stamp written discriminates the two envelopes.
+    """
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "def app():\n    return 1\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "walkup.json"\ntargets = ["src"]\n')
+    missing = root / "missing.toml"
+
+    completed = _run_in(root, "analyze", f"--config={missing}")
+
+    assert completed.returncode == 2
+    assert str(missing) in completed.stderr
+    assert not (root / "walkup.json").exists()
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []
+
+
+def test_equals_form_empty_config_value_exits_two_naming_the_option_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """An empty ``--config=`` value is a config error, not a nonexistent path.
+
+    The D-05 raw-argv scanner turns ``--config=`` into an empty raw value;
+    before the empty-value guard ``Path("")`` collapsed to the working
+    directory and the locate phase reported ``config file does not exist: .``
+    — naming a real directory instead of the empty value.  Asserting exit 2,
+    stderr naming ``--config`` and the empty value (and never ``does not
+    exist``), plus no graph or stamp written, pins the corrected diagnostic.
+    """
+    root = _config_repo(tmp_path)
+
+    completed = _run_in(root, "analyze", "--config=")
+
+    assert completed.returncode == 2
+    assert "--config" in completed.stderr
+    assert "''" in completed.stderr
+    assert "does not exist" not in completed.stderr
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []
+
+
+def test_empty_config_value_never_falls_back_to_a_walk_up_config(tmp_path: Path) -> None:
+    """An empty ``--config=`` stays an error even beside a valid walk-up config.
+
+    An explicit ``--config`` with an empty value must never silently walk up
+    to a discoverable ``.minotaur.toml`` and analyze under it: the walk-up
+    config's graph must not be created and no fallback analysis may run.  If
+    the scanner ever treated the empty value as "no explicit config", this
+    invocation would succeed under the walk-up config and create
+    ``walkup.json`` instead of exiting 2.
+    """
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "def app():\n    return 1\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "walkup.json"\ntargets = ["src"]\n')
+
+    completed = _run_in(root, "analyze", "--config=")
+
+    assert completed.returncode == 2
+    assert "--config" in completed.stderr
+    assert "''" in completed.stderr
+    assert "does not exist" not in completed.stderr
+    assert not (root / "walkup.json").exists()
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []
+
+
+def test_space_separated_empty_config_value_is_rejected_like_the_equals_form(
+    tmp_path: Path,
+) -> None:
+    """``--config ""`` reaches the empty-value rejection via the space branch.
+
+    The D-05 scanner consumes a following token for ``--config VALUE``; an
+    empty token exercises that branch (not the ``--config=VALUE`` equals
+    branch) and must land on the same exit-2 rejection naming the option and
+    the empty value, with no fallback analysis under a walk-up config.
+    """
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "def app():\n    return 1\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "walkup.json"\ntargets = ["src"]\n')
+
+    completed = _run_in(root, "analyze", "--config", "")
+
+    assert completed.returncode == 2
+    assert "--config" in completed.stderr
+    assert "''" in completed.stderr
+    assert "does not exist" not in completed.stderr
+    assert not (root / "walkup.json").exists()
+    assert list(root.glob("*.json")) == []
+    assert list(root.glob("*.sha256")) == []

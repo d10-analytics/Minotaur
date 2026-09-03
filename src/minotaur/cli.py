@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from minotaur.config import ConfigError, find_config, resolve_config
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import (
     GraphLoadError,
@@ -45,6 +46,11 @@ from minotaur.query.freshness import Drift, drift, recorded_selection
 from minotaur.query.index import GraphIndex
 from minotaur.query.render import QueryRecord, render_json
 
+_CONFIG_CONSUMING_COMMANDS = frozenset({"analyze", "visualize"})
+_CONFIG_CONSUMING_QUERIES = frozenset(
+    {"callers", "context", "definitions", "impact", "unreferenced"}
+)
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the console entry point and return its process exit status.
@@ -53,19 +59,140 @@ def main(argv: Sequence[str] | None = None) -> int:
     asks an interpreter to read source.  That ordering gives users a useful
     safety promise: a bad path, unsupported file, or unsafe output request
     cannot leave behind a graph that looks like a successful analysis.
+
+    Project configuration (D-05) wraps that promise without duplicating any
+    owner: a locate-only step classifies the raw invocation and finds the
+    governing ``.minotaur.toml`` (walk-up or ``--config``) before the parser
+    is built, so the strict no-config grammar relaxes only for
+    config-consuming commands when a config was located.  After parsing, each
+    config-consuming command runs the shared resolver exactly once and hands
+    every owner one resolved value set.  ``--help`` and ``query diff`` never
+    locate, parse, or validate a config.
     """
-    parser = _parser()
-    arguments = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        located = _locate_config(raw_argv)
+    except ConfigError as error:
+        _error(str(error))
+        return 2
+    parser = _parser(config_located=located is not None)
+    arguments = parser.parse_args(raw_argv)
     if arguments.command == "visualize":
-        return _visualize(arguments)
+        return _visualize(arguments, located)
     if arguments.command == "query":
-        return _query(arguments)
+        return _query(arguments, located)
     if arguments.command != "analyze":  # pragma: no cover - argparse enforces this.
         parser.error("a command is required")
+    return _analyze(arguments, located)
 
-    root = Path(arguments.root).resolve()
-    targets = tuple(Path(target) for target in arguments.targets)
+
+def _locate_config(raw_argv: Sequence[str]) -> Path | None:
+    """Locate the governing config without parsing or validating it (D-05).
+
+    ``raw_argv`` is scanned as plain tokens, not with argparse, because the
+    parser itself must be built differently depending on the answer.  ``None``
+    keeps the strict grammar: an invocation asking for help, ``query diff``,
+    an unrecognized command, or no config discoverable from the working
+    directory.  An explicit ``--config`` with an empty value or a value that
+    does not exist raises a :class:`ConfigError` naming the option or path, so
+    the failure happens before any parsing or analysis and never falls back to
+    walk-up discovery.
+    """
+    if any(token in ("-h", "--help") for token in raw_argv):
+        return None
+    command_index = _first_bare_token(raw_argv, 0)
+    if command_index is None:
+        return None
+    command = raw_argv[command_index]
+    if command == "query":
+        subcommand_index = _first_bare_token(raw_argv, command_index + 1)
+        if subcommand_index is None:
+            return None
+        if raw_argv[subcommand_index] not in _CONFIG_CONSUMING_QUERIES:
+            return None
+        option_tokens = raw_argv[subcommand_index + 1 :]
+    elif command in _CONFIG_CONSUMING_COMMANDS:
+        option_tokens = raw_argv[command_index + 1 :]
+    else:
+        return None
+    return find_config(Path.cwd(), config=_explicit_config(option_tokens))
+
+
+def _first_bare_token(tokens: Sequence[str], start: int) -> int | None:
+    """Return the index of the first non-option token at or after ``start``."""
+    for index in range(start, len(tokens)):
+        if not tokens[index].startswith("-"):
+            return index
+    return None
+
+
+def _explicit_config(option_tokens: Sequence[str]) -> Path | None:
+    """Read the raw ``--config`` value with argparse ``store`` semantics.
+
+    ``--config VALUE`` consumes the following token and ``--config=VALUE``
+    carries its own; a repeated option keeps its last value.  A missing value
+    is not guessed here — the parser reports that usage error itself.  An
+    empty value (``--config=`` or ``--config ""``) is rejected as a
+    :class:`ConfigError` naming the option: ``Path("")`` would collapse to
+    the working directory and be misreported as a nonexistent file.
+    """
+    value: str | None = None
+    index = 0
+    while index < len(option_tokens):
+        token = option_tokens[index]
+        if token == "--config":
+            if index + 1 < len(option_tokens) and not option_tokens[index + 1].startswith("-"):
+                value = option_tokens[index + 1]
+                index += 2
+                continue
+        elif token.startswith("--config="):
+            value = token.partition("=")[2]
+        index += 1
+    if value == "":
+        raise ConfigError(f"--config requires a non-empty file path: got {value!r}")
+    return Path(value) if value is not None else None
+
+
+def _as_path(value: Any) -> Path | None:
+    return Path(value) if value is not None else None
+
+
+def _as_targets(value: Any) -> tuple[Path, ...] | None:
+    """Convert parsed positional targets, treating "none given" as absent.
+
+    The relaxed grammar parses an omitted positional list as ``[]``; only a
+    non-empty list is an explicit override, otherwise the configured targets
+    would be silently suppressed by an empty explicit value.
+    """
+    if not value:
+        return None
+    return tuple(Path(target) for target in value)
+
+
+def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
+    """Run one ``analyze`` invocation against its resolved project contract.
+
+    The resolver runs before selection, output preflight, or any graph write,
+    so a config that fails validation (R-05/R-06) exits 2 naming the field or
+    path and creates no graph and no stamp sidecar.  Config-sourced root,
+    graph, and targets reach the owners in one canonical absolute spelling;
+    explicit values keep their caller spelling and win per field (R-03).
+    """
     try:
+        resolved = resolve_config(
+            Path.cwd(),
+            config=located,
+            explicit_root=_as_path(arguments.root),
+            explicit_graph=_as_path(arguments.output),
+            explicit_targets=_as_targets(arguments.targets),
+        )
+        root = resolved.root.resolve()
+        targets = resolved.targets
+        if targets is None:  # pragma: no cover - grammar or config validation supplies targets.
+            raise ConfigError(
+                "no analysis targets: pass positional targets or a config file with targets"
+            )
+        output = resolved.graph
         # Validate the current workspace and targets before considering a
         # clean-output skip. A deleted root or explicitly selected file must
         # remain a command error even when an old graph happens to load.
@@ -74,22 +201,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         # can load is ours to refresh after drift, while an unrelated existing
         # file still follows the normal refusal path below.
         refresh_force = arguments.force
-        if Path(arguments.output).exists() and not arguments.force:
+        if output.exists() and not arguments.force:
             try:
-                existing = load_graph_file(Path(arguments.output))
+                existing = load_graph_file(output)
             except (GraphLoadError, OSError, ValueError):
                 existing = None
             if existing is not None:
                 # Both of these repeat work ``_analyze_selection`` will also
                 # do below when the graph turns out not to be clean:
-                # ``select_sources`` (line 59, above) is re-run inside
-                # ``_analyze_selection``, and ``_git_source_control`` runs its
-                # three ``git`` subprocesses again there too. The duplication
-                # is accepted rather than threaded through as a parameter
-                # because it only costs cheap directory walks and subprocess
-                # calls, while a clean-graph skip avoids a full re-parse of
-                # every selected source file — the expensive part stays paid
-                # once either way.
+                # ``select_sources`` is re-run inside ``_analyze_selection``,
+                # and ``_git_source_control`` runs its three ``git``
+                # subprocesses again there too. The duplication is accepted
+                # rather than threaded through as a parameter because it only
+                # costs cheap directory walks and subprocess calls, while a
+                # clean-graph skip avoids a full re-parse of every selected
+                # source file — the expensive part stays paid once either way.
                 current_selection = _target_selection(root, targets)
                 current_source_control = _git_source_control(root)
                 if (
@@ -102,7 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # A valid graph with drift was previously produced by this
                 # command, so replacement is safe after the freshness check.
                 refresh_force = True
-        result = _analyze_selection(root, targets, Path(arguments.output), refresh_force)
+        result = _analyze_selection(root, targets, output, refresh_force)
     except (OSError, SelectionError, ValueError) as error:
         _error(str(error))
         return 2
@@ -442,7 +568,7 @@ _SNAPSHOT_QUERIES: Mapping[str, Callable[[argparse.Namespace], str]] = {
 }
 
 
-def _query(arguments: argparse.Namespace) -> int:
+def _query(arguments: argparse.Namespace, located: Path | None) -> int:
     """Dispatch a fixed query against one graph snapshot.
 
     The query subcommands are registered directly on the main parser (see
@@ -452,9 +578,25 @@ def _query(arguments: argparse.Namespace) -> int:
     ``--help`` (exit 0) and usage errors (exit 2) exactly as it does for
     ``analyze`` and ``visualize``, instead of this function collapsing both
     outcomes to a single hard-coded exit 2.
+
+    ``query diff`` consumes two explicit graph files and never locates,
+    parses, or validates a config (D-05), so it answers straight from its
+    arguments.  Every other query resolves exactly once and substitutes one
+    resolved value set into the namespace before the snapshot or graph-query
+    owner reads it, so config-sourced ``graph`` and ``root`` reach loads,
+    refreshes, and stamps in a single canonical spelling.
     """
     try:
         snapshot = _SNAPSHOT_QUERIES.get(arguments.name)
+        if arguments.name != "diff":
+            resolved = resolve_config(
+                Path.cwd(),
+                config=located,
+                explicit_root=_as_path(arguments.root),
+                explicit_graph=_as_path(arguments.graph),
+            )
+            arguments.graph = resolved.graph
+            arguments.root = resolved.root
         if snapshot is not None:
             print(snapshot(arguments), end="")
             return 0
@@ -493,7 +635,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
     return 1 if graph.diagnostics else 0
 
 
-def _add_query_subparsers(query: argparse.ArgumentParser) -> None:
+def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: bool = False) -> None:
     """Register the query subcommands directly on the ``query`` subparser.
 
     Nesting these on the main parser (instead of parsing a captured
@@ -502,6 +644,11 @@ def _add_query_subparsers(query: argparse.ArgumentParser) -> None:
     list the subcommands: argparse owns the whole invocation in one
     ``parse_args`` call, so its help and error handling behave the same way
     here as they do for ``analyze`` and ``visualize``.
+
+    ``query diff`` is the one config-free subcommand: it keeps the strict
+    grammar and never gains a ``--config`` option.  The remaining subcommands
+    consume config ``graph``/``root``, so when a config was located their
+    ``--graph``/``--root`` declarations relax and ``--config`` is registered.
     """
     commands = query.add_subparsers(dest="name", required=True)
     callers_parser = commands.add_parser("callers", help="find callers of a qualified symbol")
@@ -540,13 +687,19 @@ def _add_query_subparsers(query: argparse.ArgumentParser) -> None:
         unreferenced_parser,
         context_parser,
     ):
-        command.add_argument("--graph", required=True, help="analyzed graph JSON file")
-        command.add_argument("--root", required=True, help="source root used for freshness checks")
+        command.add_argument(
+            "--graph", required=not config_located, help="analyzed graph JSON file"
+        )
+        command.add_argument(
+            "--root", required=not config_located, help="source root used for freshness checks"
+        )
         command.add_argument(
             "--no-refresh", action="store_true", help="answer from the graph as-is"
         )
         command.add_argument("--json", action="store_true", help="emit stable JSON records")
         _add_validate_flag(command)
+        if config_located:
+            command.add_argument("--config", metavar="CONFIG", help="explicit project config file")
     _add_validate_flag(diff_parser)
 
 
@@ -616,37 +769,88 @@ def _add_validate_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(config_located: bool = False) -> argparse.ArgumentParser:
+    """Build the CLI parser, toggling config-defaultable declarations (D-05).
+
+    With ``config_located`` false the parser is today's strict grammar:
+    ``analyze --root``/``--output``/``targets`` and the query subcommand
+    ``--graph``/``--root`` remain required and no ``--config`` option exists,
+    so no-config usage errors keep argparse's exact exit-``2`` text.  With a
+    config located, only those declarations relax (argparse never receives a
+    configuration value as a default); the resolver fills whatever the
+    command line left out after parsing.  ``--config`` is registered per
+    command on the config-consuming commands, never on ``query diff``.
+    """
     parser = argparse.ArgumentParser(prog="minotaur")
     commands = parser.add_subparsers(dest="command", required=True)
     analyze = commands.add_parser("analyze", help="analyze selected supported source files")
-    analyze.add_argument("--root", required=True, help="existing source root")
-    analyze.add_argument("--output", required=True, help="destination graph JSON file")
+    analyze.add_argument("--root", required=not config_located, help="existing source root")
+    analyze.add_argument(
+        "--output", required=not config_located, help="destination graph JSON file"
+    )
     analyze.add_argument("--force", action="store_true", help="replace an existing output file")
-    analyze.add_argument("targets", nargs="+", metavar="TARGET", help="source files or directories")
+    if config_located:
+        analyze.add_argument(
+            "targets",
+            nargs="*",
+            default=None,
+            metavar="TARGET",
+            help="source files or directories",
+        )
+        analyze.add_argument("--config", metavar="CONFIG", help="explicit project config file")
+    else:
+        analyze.add_argument(
+            "targets", nargs="+", metavar="TARGET", help="source files or directories"
+        )
     visualize = commands.add_parser(
         "visualize", help="render a portable interactive graph HTML file"
     )
-    visualize.add_argument("--input", required=True, help="canonical Minotaur graph JSON file")
+    visualize.add_argument(
+        "--input", required=not config_located, help="canonical Minotaur graph JSON file"
+    )
     visualize.add_argument("--output", required=True, help="destination HTML file")
     visualize.add_argument("--source-root", help="optional source root for embedded excerpts")
     visualize.add_argument("--force", action="store_true", help="replace an existing output file")
     _add_validate_flag(visualize)
+    if config_located:
+        visualize.add_argument("--config", metavar="CONFIG", help="explicit project config file")
     query = commands.add_parser("query", help="query an analyzed graph")
-    _add_query_subparsers(query)
+    _add_query_subparsers(query, config_located=config_located)
     return parser
 
 
-def _visualize(arguments: argparse.Namespace) -> int:
+def _visualize(arguments: argparse.Namespace, located: Path | None) -> int:
     """Load a verified graph and write a self-contained visualizer atomically.
 
     Visualization deliberately reuses the graph-loading boundary instead of
     accepting convenient partial JSON. A polished interactive display lends
     input credibility, so it must never be the first consumer to relax the
     canonical graph contract.
+
+    ``visualize`` shares the configuration owner with partial defaults (D-09):
+    with a config located, ``--input`` defaults from config ``graph`` and
+    ``--source-root`` from config ``root`` only when that root exists as a
+    directory (otherwise excerpts stay disabled); ``--output`` remains
+    required.  With no config the strict grammar requires ``--input`` and no
+    resolution runs, because this command has no explicit root to source one
+    from.
     """
-    input_path = Path(arguments.input)
     try:
+        source_root: Path | None
+        if located is not None:
+            resolved = resolve_config(
+                Path.cwd(),
+                config=located,
+                explicit_graph=_as_path(arguments.input),
+            )
+            input_path = resolved.graph
+            if arguments.source_root is None and resolved.root.is_dir():
+                source_root = resolved.root
+            else:
+                source_root = _as_path(arguments.source_root)
+        else:
+            input_path = Path(arguments.input)
+            source_root = _as_path(arguments.source_root)
         loaded = load_graph_file(input_path, validate=arguments.validate)
         # D-12: a freshness guard was considered for visualize but declined;
         # rendering need not have a source root and remains cheap to repeat.
@@ -658,7 +862,6 @@ def _visualize(arguments: argparse.Namespace) -> int:
         # `loaded.digest` is immutable, so deferring the stamp changes nothing
         # about what gets written to the sidecar.
         _stamp_if_validated(input_path, loaded)
-        source_root = Path(arguments.source_root) if arguments.source_root is not None else None
         excerpts = prepare_excerpts(loaded.canonical, source_root)
         content = render_html(build_presentation(loaded.canonical, excerpts))
         _write_atomically(output, content)
