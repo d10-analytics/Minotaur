@@ -271,9 +271,9 @@ def test_present_config_is_validated_even_with_fully_explicit_values(tmp_path: P
             id="version-unsupported",
         ),
         pytest.param(
-            '[minotaur]\nschema_version = 1\ntargets = ["src"]\nsystems_dir = "sys"\n',
+            '[minotaur]\nschema_version = 1\ntargets = ["src"]\nsystems_dir = 5\n',
             "systems_dir",
-            id="future-field-systems-dir",
+            id="systems-dir-wrong-type",
         ),
         pytest.param(
             '[minotaur]\nschema_version = 1\ntargets = ["src"]\nexpectations_dir = "exp"\n',
@@ -318,6 +318,93 @@ def test_every_validation_violation_raises_config_error_naming_the_field(
 
     with pytest.raises(ConfigError, match=expected):
         resolve_config(cfg.parent)
+
+
+# ---------------------------------------------------------------------------
+# systems_dir field (D-08/R-02): acceptance, anchoring, default, single owner
+# ---------------------------------------------------------------------------
+
+
+def test_configured_systems_dir_is_accepted_and_anchored_at_the_declared_root(
+    tmp_path: Path,
+) -> None:
+    """A config with a relative systems_dir resolves with it anchored at root."""
+    _write(
+        tmp_path,
+        "cfg/.minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "../proj"\n'
+        'targets = ["a.py"]\nsystems_dir = "systems"\n',
+    )
+
+    resolved = resolve_config(tmp_path / "cfg")
+
+    project_root = (tmp_path / "proj").resolve()
+    assert resolved.systems_dir == (project_root / "systems").resolve()
+
+
+def test_omitted_systems_dir_defaults_to_docs_systems_under_the_declared_root(
+    tmp_path: Path,
+) -> None:
+    """An omitted systems_dir resolves the docs/systems default under root."""
+    _write(
+        tmp_path,
+        "cfg/.minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "../proj"\ntargets = ["a.py"]\n',
+    )
+
+    resolved = resolve_config(tmp_path / "cfg")
+
+    project_root = (tmp_path / "proj").resolve()
+    assert resolved.systems_dir == (project_root / "docs" / "systems").resolve()
+
+
+def test_omitted_systems_dir_defaults_under_the_config_directory_when_root_omitted(
+    tmp_path: Path,
+) -> None:
+    """With no root declared, the docs/systems default sits under the config dir."""
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    _write(cfg, ".minotaur.toml", '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n')
+
+    resolved = resolve_config(cfg)
+
+    assert resolved.systems_dir == (cfg / "docs" / "systems").resolve()
+
+
+def test_configless_explicit_root_still_emits_a_docs_systems_default(
+    tmp_path: Path,
+) -> None:
+    """D-11: with no located config, systems_dir defaults under the explicit root."""
+    root = tmp_path / "proj"
+
+    resolved = resolve_config(tmp_path, explicit_root=root, explicit_graph=root / "g.json")
+
+    assert resolved.config_file is None
+    assert resolved.systems_dir == root / "docs" / "systems"
+
+
+def test_systems_dir_is_resolved_exactly_once_by_the_single_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One resolution reads the config file exactly once through the one seam."""
+    cfg = _write(
+        tmp_path,
+        "cfg/.minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ntargets = ["a.py"]\nsystems_dir = "systems"\n',
+    )
+    calls: list[Path] = []
+    original = config.read_toml_file
+
+    def counting(path: Path) -> dict[str, object]:
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(config, "read_toml_file", counting)
+
+    resolved = resolve_config(cfg.parent)
+
+    assert calls == [cfg.resolve()]
+    assert resolved.systems_dir == (cfg.parent / "systems").resolve()
 
 
 # ---------------------------------------------------------------------------

@@ -1396,11 +1396,6 @@ def test_every_config_validation_violation_exits_two_and_writes_nothing(
             "escapes root",
         ),
         (
-            "systems-dir-field",
-            _MINOTAUR_CONFIG + 'systems_dir = "systems"\ntargets = ["src"]\n',
-            "systems_dir",
-        ),
-        (
             "expectations-dir-field",
             _MINOTAUR_CONFIG + 'expectations_dir = "expect"\ntargets = ["src"]\n',
             "expectations_dir",
@@ -1419,6 +1414,22 @@ def test_every_config_validation_violation_exits_two_and_writes_nothing(
         assert expected in completed.stderr, label
         assert list(root.glob("*.json")) == [], label
         assert list(root.glob("*.sha256")) == [], label
+
+
+def test_config_with_systems_dir_still_analyzes_at_exit_zero(tmp_path: Path) -> None:
+    """AC-01: a located config carrying systems_dir is accepted and analyzes."""
+    root = _config_repo(tmp_path)
+    _write(root, "app/one.py", "def one():\n    return 1\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["app"]\n'
+        'systems_dir = "docs/systems"\n',
+    )
+
+    completed = _run_in(root, "analyze")
+
+    assert completed.returncode == 0, completed.stderr
+    assert (root / "g.json").is_file()
 
 
 def test_nonexistent_explicit_config_exits_two_names_path_and_writes_nothing(
