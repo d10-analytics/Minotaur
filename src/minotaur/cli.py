@@ -35,7 +35,7 @@ from minotaur.language_interpreter.contract import (
     Diagnostic,
 )
 from minotaur.language_interpreter.registry import InterpreterRegistration, default_registry
-from minotaur.language_interpreter.selection import SelectionError, select_sources
+from minotaur.language_interpreter.selection import SelectionError, SourceSelection, select_sources
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query import context as context_query
 from minotaur.query import diff as diff_query
@@ -195,6 +195,13 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
     explicit values keep their caller spelling and win per field (R-03).
     """
     try:
+        scope = getattr(arguments, "scope", None)
+        if scope is not None and arguments.targets:
+            raise ValueError("--scope cannot be combined with positional targets")
+        if scope is not None and arguments.output is not None:
+            raise ValueError("--scope cannot be combined with --output")
+        if scope is not None and located is None:
+            raise ValueError("--scope requires a located project config")
         resolved = resolve_config(
             Path.cwd(),
             config=located,
@@ -203,12 +210,19 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
             explicit_targets=_as_targets(arguments.targets),
         )
         root = resolved.root.resolve()
-        targets = resolved.targets
+        targets: tuple[Path, ...] | None
+        if scope is not None:
+            systems = load_systems(resolved.systems_dir)
+            selected_system = resolve_system(systems, scope)
+            targets = tuple(root / relative for relative in selected_system.files)
+            output = resolved.systems_dir / selected_system.name / "graph.json"
+        else:
+            targets = resolved.targets
+            output = resolved.graph
         if targets is None:  # pragma: no cover - grammar or config validation supplies targets.
             raise ConfigError(
                 "no analysis targets: pass positional targets or a config file with targets"
             )
-        output = resolved.graph
         # Validate the current workspace and targets before considering a
         # clean-output skip. A deleted root or explicitly selected file must
         # remain a command error even when an old graph happens to load.
@@ -223,28 +237,18 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
             except (GraphLoadError, OSError, ValueError):
                 existing = None
             if existing is not None:
-                # Both of these repeat work ``_analyze_selection`` will also
-                # do below when the graph turns out not to be clean:
-                # ``select_sources`` is re-run inside ``_analyze_selection``,
-                # and ``_git_source_control`` runs its three ``git``
-                # subprocesses again there too. The duplication is accepted
-                # rather than threaded through as a parameter because it only
-                # costs cheap directory walks and subprocess calls, while a
-                # clean-graph skip avoids a full re-parse of every selected
-                # source file — the expensive part stays paid once either way.
                 current_selection = _target_selection(root, targets)
-                current_source_control = _git_source_control(root)
                 if (
                     drift(existing.document, root).is_clean
                     and recorded_selection(existing.document) == current_selection
-                    and current_source_control == existing.document.source_control
                 ):
                     print("minotaur: graph is up to date, skipping analysis", file=sys.stderr)
                     return 0
                 # A valid graph with drift was previously produced by this
                 # command, so replacement is safe after the freshness check.
                 refresh_force = True
-        result = _analyze_selection(root, targets, output, refresh_force)
+        metadata_targets = targets if scope is not None else None
+        result = _analyze_selection(root, targets, output, refresh_force, metadata_targets)
     except (OSError, SelectionError, ValueError) as error:
         _error(str(error))
         return 2
@@ -270,27 +274,8 @@ def _analyze_selection(
     this function so selection, metadata, output preflight, and diagnostics
     cannot drift between the two write paths.
     """
-    workspace, selection = select_sources(root, targets, default_registry())
-    recorded_targets = targets if metadata_targets is None else metadata_targets
+    workspace, selection, result = _produce_selection(root, targets, metadata_targets)
     output = _preflight_output(output_path, selection.files, force)
-    result = _dispatch(workspace, selection.files)
-    source_control = _git_source_control(workspace.root)
-    if source_control is not None:
-        result = replace(
-            result,
-            document=replace(result.document, source_control=source_control),
-        )
-    result = replace(
-        result,
-        document=replace(
-            result.document,
-            extensions=_with_selection_extension(
-                result.document.extensions,
-                workspace.root,
-                recorded_targets,
-            ),
-        ),
-    )
     content = serialize(result.document)
     # The graph is written to the resolved path so the atomic replace targets
     # the real file rather than swapping a symlink out for a regular file.  The
@@ -315,6 +300,40 @@ def _analyze_selection(
         ) from error
     _warn_unresolved_imports(result.document, workspace.root)
     return result
+
+
+def _produce_selection(
+    root: Path,
+    targets: tuple[Path, ...],
+    metadata_targets: tuple[Path, ...] | None = None,
+) -> tuple[Workspace, SourceSelection, AnalysisResult]:
+    """Produce one selected graph document in memory, without filesystem writes.
+
+    Selection, interpreter dispatch, recorded target metadata, and Git
+    provenance are deliberately shared by every graph-writing path.  Callers
+    own output preflight, serialization, atomic writes, sidecars, and warnings.
+    """
+    workspace, selection = select_sources(root, targets, default_registry())
+    result = _dispatch(workspace, selection.files)
+    source_control = _git_source_control(workspace.root)
+    if source_control is not None:
+        result = replace(
+            result,
+            document=replace(result.document, source_control=source_control),
+        )
+    recorded_targets = targets if metadata_targets is None else metadata_targets
+    result = replace(
+        result,
+        document=replace(
+            result.document,
+            extensions=_with_selection_extension(
+                result.document.extensions,
+                workspace.root,
+                recorded_targets,
+            ),
+        ),
+    )
+    return workspace, selection, result
 
 
 _ROOT_MISMATCH_WARNING_RATIO = 0.05
@@ -889,6 +908,12 @@ def _parser(config_located: bool = False) -> argparse.ArgumentParser:
     analyze.add_argument(
         "--output", required=not config_located, help="destination graph JSON file"
     )
+    if config_located:
+        analyze.add_argument(
+            "--scope",
+            metavar="NAME",
+            help="analyze one committed system into its system graph",
+        )
     analyze.add_argument("--force", action="store_true", help="replace an existing output file")
     if config_located:
         analyze.add_argument(
