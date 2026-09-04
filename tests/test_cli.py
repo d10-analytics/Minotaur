@@ -843,7 +843,6 @@ def test_analyze_warns_when_imports_only_resolve_under_a_different_root(
 def test_missing_target_error_explains_working_directory_resolution(
     tmp_path: Path, capsys: object
 ) -> None:
-
     status = cli.main(
         ["analyze", "--root", str(tmp_path), "--output", str(tmp_path / "g.json"), "nope"]
     )
