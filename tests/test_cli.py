@@ -495,7 +495,7 @@ def test_analyze_clean_skip_runs_no_git_probes(
         calls.append((args, kwargs))
         raise AssertionError("clean analyze skip must not probe Git")
 
-    monkeypatch.setattr(cli.subprocess, "run", fail_probe)
+    monkeypatch.setattr(git, "run_git", fail_probe)
     status = cli.main(
         [
             "analyze",
@@ -529,7 +529,7 @@ def test_analyze_ignores_git_probe_failures(
             return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
         raise OSError("git unavailable")
 
-    monkeypatch.setattr(git, "run_git", fail_git)
+    monkeypatch.setattr(git.subprocess, "run", fail_git)
     result = cli._analyze_selection(root, (root,), output, False)
 
     assert calls == 3
@@ -952,7 +952,7 @@ class TestValidateFlag:
     ) -> None:
         output_old = _stamped_graph(tmp_path)
         root2 = tmp_path / "src2"
-        _write(root2, "b.py", "y = 2\n")
+        _write(root2, "b.py", "def b():\n    pass\n")
         output_new = tmp_path / "graph2.json"
         assert (
             cli.main(["analyze", "--root", str(root2), "--output", str(output_new), str(root2)])
@@ -1114,7 +1114,7 @@ class TestStampAfterValidation:
         old_path, _ = _unstamped_graph(tmp_path)
         # Create a second unstamped graph in a subdirectory.
         root2 = tmp_path / "src2"
-        _write(root2, "b.py", "y = 2\n")
+        _write(root2, "b.py", "def b():\n    pass\n")
         new_path = tmp_path / "graph2.json"
         assert (
             cli.main(["analyze", "--root", str(root2), "--output", str(new_path), str(root2)]) == 0
