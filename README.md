@@ -32,6 +32,9 @@ Minotaur is in early development. Its current implementation includes:
   (each invocation selects one language: `.py` or `.js`);
 - fixed agent-facing graph queries for callers, definitions, impact,
   unreferenced symbols, snapshot diffs, and source context;
+- committed graph artifacts with per-file content digests and last-generation
+  Git provenance, so reviewed graphs remain reproducible while unchanged
+  content stays byte-stable across commit and branch changes;
 - committed system definitions that name subsystem boundaries, with the
   `surface`, `consumers`, and `system-deps` queries reporting who reaches
   across a declared boundary;
@@ -41,7 +44,11 @@ Minotaur is in early development. Its current implementation includes:
 ## Query workflow
 
 The query workflow has two steps: analyze supported source to build a graph,
-then ask focused questions against that snapshot. For example,
+then ask focused questions against that snapshot. In a configured repository,
+the analyzed whole-repository graph and per-system graphs are committed
+artifacts; their per-file content digests decide freshness, while
+`source_control` records the commit and branch of their last real generation
+as provenance. For example,
 `minotaur analyze --root src --output graph.json src` records the structure and
 source evidence that later queries can navigate without importing or executing
 the project.
@@ -51,7 +58,10 @@ The query family turns that graph into practical navigation and review tools:
 `impact` shows what depends on it if it changes, and `unreferenced` produces a
 candidate list for a dead-code audit. `context` reads the surrounding source
 at a reported location, while `diff` compares two graph snapshots so changes
-in the analyzed structure are easy to review.
+in the analyzed structure are easy to review. `diff` supports committed-reference
+mode (`minotaur query diff` or `minotaur query diff --scope NAME`, which
+requires the located project configuration) and explicit two-snapshot mode
+(`minotaur query diff OLD NEW`, which is configuration-free).
 
 Declared system boundaries add three graph queries of their own: `surface`
 lists the in-scope symbols that files outside a system reach, `consumers`

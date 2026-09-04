@@ -40,9 +40,12 @@ and `system-deps` accept the following common options:
 `--no-refresh` answers from the existing graph and reports drift without
 rewriting it; omit it when current source facts are required. `--json` exposes
 the `refreshed` and `stale` fields alongside query results. `context` reads
-current source without refreshing, while `diff` compares graph files and does
-not inspect a source root. For the complete order-of-operations contract,
-including detected and intentionally undetected changes, see
+current source without refreshing. The explicit `diff OLD NEW` mode compares
+graph files without a source root or configuration; the committed-reference
+mode compares the graph read from `HEAD` with the current working tree and
+therefore requires a located project configuration. For the complete
+order-of-operations contract, including detected and intentionally undetected
+changes, see
 [Graph freshness and snapshot order](../concepts/freshness.md).
 
 The `--validate` option on graph-reading commands forces full schema and
@@ -264,7 +267,22 @@ file of the queried system) without changing the answer or its exit status.
 
 ### Compare snapshots
 
-Compare two analyzed graph files without a source root:
+Compare the committed graph at `HEAD` with the current working tree from a
+configured project:
+
+```bash
+minotaur query diff
+minotaur query diff --scope NAME
+```
+
+The committed-reference mode requires a located `.minotaur.toml`; the whole
+repository is the default scope, and `--scope NAME` selects one committed
+system. The graph and sidecar are read from `HEAD`, while the current selection
+is analyzed in memory. This mode never rewrites the committed graph, sidecar,
+or any other file.
+
+Compare two analyzed graph files explicitly, without a source root or
+configuration:
 
 ```bash
 minotaur query diff OLD.json NEW.json
@@ -346,11 +364,15 @@ staleness in its result instead.
 
 Exit statuses are:
 
-* `0` — results were printed, including an empty result set (`--help` on any
-  `query` subcommand also exits `0`, matching every other argparse-based
-  program);
-* `1` — a graph refresh completed but source diagnostics were reported; and
-* `2` — argument, graph-load, selection, unknown-symbol, unknown-system,
+* `0` — the compared structures are identical (ordinary graph queries also
+  use `0` for a successful result, including an empty result set, and `--help`
+  exits `0`);
+* `1` — `diff` found structures differing in any recorded way, including an
+  added, removed, or relocated symbol or a relationship change. For the other
+  graph queries, `1` means a graph refresh completed with source diagnostics;
+* `2` — `diff` encountered an argument, configuration, graph-load, or analysis
+  error, or another query encountered an argument, graph-load, selection,
+  unknown-symbol, unknown-system,
   ambiguous-symbol, or committed-definition error (a symbol name that matches
   several definitions is never answered from an arbitrary one of them, and a
   system query never answers from a partial or invalid systems tree).
