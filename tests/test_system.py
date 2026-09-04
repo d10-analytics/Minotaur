@@ -161,6 +161,8 @@ def test_load_systems_returns_declarations_in_stable_declared_name_order(tmp_pat
     assert [item.name for item in loaded] == ["alpha", "omega"]
     assert loaded[0] == System(name="alpha", files=("src/a/one.py", "src/a/two.py"))
     assert loaded[1] == System(name="omega", files=("src/o.py",))
+    assert loaded[0].definition_directory == systems_dir / "a-directory"
+    assert loaded[1].definition_directory == systems_dir / "b-directory"
 
 
 def test_results_order_by_declared_name_not_directory_scan_order(tmp_path: Path) -> None:

@@ -1331,14 +1331,20 @@ def _file_paths(graph: dict[str, object]) -> set[str]:
     return {node["path"] for node in graph["nodes"] if node["node_class"] == "file"}
 
 
-def _scope_project(tmp_path: Path, *, files: str = "src/auth/api.py") -> Path:
+def _scope_project(
+    tmp_path: Path,
+    *,
+    files: str = "src/auth/api.py",
+    directory: str = "auth",
+    declared_name: str = "auth",
+) -> Path:
     root = _config_repo(tmp_path, "scope-project")
     _write(root, "src/auth/api.py", "from external import helper\nhelper()\n")
     _write(root, "src/other.py", "def other():\n    return 1\n")
-    systems = root / "docs" / "systems" / "auth"
+    systems = root / "docs" / "systems" / directory
     systems.mkdir(parents=True)
     (systems / "system.toml").write_text(
-        'schema_version = 1\nname = "auth"\nfiles = ['
+        f'schema_version = 1\nname = "{declared_name}"\nfiles = ['
         + ", ".join(f'"{entry}"' for entry in files.split(","))
         + "]\n",
         encoding="utf-8",
@@ -1351,6 +1357,32 @@ def _scope_project(tmp_path: Path, *, files: str = "src/auth/api.py") -> Path:
     assert _git(root, "add", ".").returncode == 0
     assert _git(root, "commit", "-m", "scope fixtures").returncode == 0
     return root
+
+
+@pytest.mark.parametrize(
+    ("directory", "declared_name"),
+    [("actual", "declared"), ("safe", "../escape")],
+)
+def test_analyze_scope_writes_beside_validated_definition_directory(
+    tmp_path: Path, directory: str, declared_name: str
+) -> None:
+    root = _scope_project(
+        tmp_path,
+        directory=directory,
+        declared_name=declared_name,
+    )
+    definition_directory = root / "docs" / "systems" / directory
+    output = definition_directory / "graph.json"
+    name_composed_output = root / "docs" / "systems" / declared_name / "graph.json"
+
+    completed = _run_in(root, "analyze", "--scope", declared_name)
+
+    assert completed.returncode == 0, completed.stderr
+    assert output.is_file()
+    assert stamp_path(output).is_file()
+    assert not name_composed_output.exists()
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert _file_paths(graph) == {"src/auth/api.py"}
 
 
 def test_analyze_scope_writes_truthful_schema_graph_and_sidecar(tmp_path: Path) -> None:
