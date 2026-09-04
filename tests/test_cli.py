@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from minotaur import cli
+from minotaur import cli, git
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import load_graph_file, stamp_path
 
@@ -529,7 +529,7 @@ def test_analyze_ignores_git_probe_failures(
             return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
         raise OSError("git unavailable")
 
-    monkeypatch.setattr(cli.subprocess, "run", fail_git)
+    monkeypatch.setattr(git, "run_git", fail_git)
     result = cli._analyze_selection(root, (root,), output, False)
 
     assert calls == 3
@@ -972,8 +972,8 @@ class TestValidateFlag:
         monkeypatch.setattr("minotaur.graph_model.loading._validate_wire_shape", fail_on_second)
         # L-4: without --validate, both graphs are stamped, so the trusted
         # load path never calls the broken schema seam and the command
-        # succeeds despite the monkeypatch.
-        assert cli.main(["query", "diff", str(output_old), str(output_new)]) == 0
+        # reports the structural difference despite the monkeypatch.
+        assert cli.main(["query", "diff", str(output_old), str(output_new)]) == 1
         with pytest.raises(AssertionError, match="schema forced on NEW"):
             cli.main(["query", "diff", "--validate", str(output_old), str(output_new)])
 
@@ -1110,7 +1110,7 @@ class TestStampAfterValidation:
         self._assert_sidecar_matches_bytes(output)
 
     def test_query_diff_stamps_both_graphs(self, tmp_path: Path) -> None:
-        """AC-18 (a): query diff exits 0 and stamps OLD and NEW."""
+        """AC-18 (a): query diff exits 1 and stamps OLD and NEW."""
         old_path, _ = _unstamped_graph(tmp_path)
         # Create a second unstamped graph in a subdirectory.
         root2 = tmp_path / "src2"
@@ -1124,7 +1124,7 @@ class TestStampAfterValidation:
         assert not stamp_path(new_path).exists()
 
         status = cli.main(["query", "diff", str(old_path), str(new_path)])
-        assert status == 0
+        assert status == 1
         self._assert_sidecar_matches_bytes(old_path)
         self._assert_sidecar_matches_bytes(new_path)
 

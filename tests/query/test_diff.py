@@ -39,7 +39,7 @@ def test_diff_matches_symbols_by_kind_and_label_and_reports_call_edge(
     status = cli.main(["query", "diff", str(old_graph), str(new_graph)])
     output = capsys.readouterr().out  # type: ignore[attr-defined]
 
-    assert status == 0
+    assert status == 1
     assert output == "+ mod.g\n- mod.h\n~ mod.f (relocated mod.py:1→2)\n+ calls mod.f → mod.g\n"
     assert "node:sha256:" not in output
 
@@ -86,7 +86,7 @@ def test_diff_keeps_unresolved_relationship_when_origin_id_relocates(
     assert _analyze(old_root, old_graph) == 0
     assert _analyze(new_root, new_graph) == 0
 
-    assert cli.main(["query", "diff", str(old_graph), str(new_graph), "--json"]) == 0
+    assert cli.main(["query", "diff", str(old_graph), str(new_graph), "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["relationships_added"] == []

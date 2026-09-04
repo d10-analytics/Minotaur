@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from minotaur import config
+from minotaur import config, git
 from minotaur.config import ConfigError, find_config, resolve_config
 
 _CONFIG = '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
@@ -107,7 +107,7 @@ def test_discovery_continues_when_git_probe_is_unavailable(
     def unavailable(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         raise OSError("git unavailable")
 
-    monkeypatch.setattr(config.subprocess, "run", unavailable)
+    monkeypatch.setattr(git.subprocess, "run", unavailable)
 
     resolved = resolve_config(start)
 
