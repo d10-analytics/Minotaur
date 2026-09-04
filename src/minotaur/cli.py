@@ -274,8 +274,11 @@ def _analyze_selection(
     this function so selection, metadata, output preflight, and diagnostics
     cannot drift between the two write paths.
     """
-    workspace, selection, result = _produce_selection(root, targets, metadata_targets)
+    workspace, selection = select_sources(root, targets, default_registry())
     output = _preflight_output(output_path, selection.files, force)
+    _, _, result = _produce_selection(
+        root, targets, metadata_targets, prepared=(workspace, selection)
+    )
     content = serialize(result.document)
     # The graph is written to the resolved path so the atomic replace targets
     # the real file rather than swapping a symlink out for a regular file.  The
@@ -306,6 +309,8 @@ def _produce_selection(
     root: Path,
     targets: tuple[Path, ...],
     metadata_targets: tuple[Path, ...] | None = None,
+    *,
+    prepared: tuple[Workspace, SourceSelection] | None = None,
 ) -> tuple[Workspace, SourceSelection, AnalysisResult]:
     """Produce one selected graph document in memory, without filesystem writes.
 
@@ -313,7 +318,10 @@ def _produce_selection(
     provenance are deliberately shared by every graph-writing path.  Callers
     own output preflight, serialization, atomic writes, sidecars, and warnings.
     """
-    workspace, selection = select_sources(root, targets, default_registry())
+    if prepared is None:
+        workspace, selection = select_sources(root, targets, default_registry())
+    else:
+        workspace, selection = prepared
     result = _dispatch(workspace, selection.files)
     source_control = _git_source_control(workspace.root)
     if source_control is not None:
