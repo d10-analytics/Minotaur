@@ -605,6 +605,18 @@ def test_freshness_documents_content_keyed_reuse_and_last_generation_provenance(
     assert "content digests are the freshness authority" in python_guide
     assert "last real generation in `source_control`" in python_guide
     assert "freshness gate or substitute for content digests" in javascript_guide
+    assert (
+        "Explicit `diff OLD NEW` remains graph-only: it compares two supplied graph documents "
+        "and does not inspect a source root or configuration" in freshness
+    )
+    assert (
+        "Committed-reference `diff` reads the committed graph and sidecar from `HEAD`, analyzes "
+        "the current configured selection in memory, and compares the two structures" in freshness
+    )
+    assert "it does not write or stamp a graph or sidecar" in freshness
+    assert (
+        "`diff` compares two graph documents and does not inspect a source root." not in freshness
+    )
 
     assert "recorded commit and branch still match the current checkout" not in python_guide
     assert "A Git commit or branch change also causes re-analysis" not in python_guide
