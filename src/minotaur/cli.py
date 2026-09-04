@@ -215,7 +215,12 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
             systems = load_systems(resolved.systems_dir)
             selected_system = resolve_system(systems, scope)
             targets = tuple(root / relative for relative in selected_system.files)
-            output = resolved.systems_dir / selected_system.name / "graph.json"
+            definition_directory = selected_system.definition_directory
+            if (
+                definition_directory is None
+            ):  # pragma: no cover - only valid loader results reach here.
+                raise ValueError(f"system definition directory unavailable: {selected_system.name}")
+            output = definition_directory / "graph.json"
         else:
             targets = resolved.targets
             output = resolved.graph

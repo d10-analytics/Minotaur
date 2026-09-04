@@ -37,6 +37,7 @@ from __future__ import annotations
 import difflib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from enum import Enum
 from pathlib import Path
 
@@ -144,10 +145,15 @@ class System:
     declaration order, deduplicated (a path declared twice in one definition
     appears once).  Name uniqueness and the absence of cross-system file
     overlap are guaranteed by the loader, so a file is in at most one system.
+    ``definition_directory`` is loader-owned provenance used by committed
+    artifact writers; it is not part of the declaration contract or identity.
     """
 
     name: str
     files: tuple[str, ...]
+    definition_directory: Path | None = dataclass_field(
+        default=None, compare=False, repr=False, kw_only=True
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,7 +361,7 @@ def _parse_definition(path: Path) -> System:
     # this version; it belongs here, at the file-list validation site, and
     # should be added only if real repositories demonstrate the need.
     entries = tuple(_require_file_entry(entry, path) for entry in files_value)
-    return System(name=name, files=_dedupe(entries))
+    return System(name=name, files=_dedupe(entries), definition_directory=path.parent)
 
 
 def _require_file_entry(entry: object, path: Path) -> str:
