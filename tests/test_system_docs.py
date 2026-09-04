@@ -331,6 +331,10 @@ def test_readme_documents_committed_graph_provenance_and_both_diff_modes() -> No
     assert "committed-reference mode" in text
     assert "explicit two-snapshot mode" in text
     assert "which is configuration-free" in text
+    assert (
+        "review the graph and its sidecar alongside the source change, and commit them together"
+        in text
+    )
 
 
 def test_readme_names_the_three_system_queries_in_prose() -> None:
