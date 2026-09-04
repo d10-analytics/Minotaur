@@ -224,12 +224,13 @@ def test_all_query_renderers_hide_graph_internals_in_text_and_json(
         invocation = (*query_args, *common)
         json_invocation = (*invocation, "--json")
 
-    assert cli.main(["query", *invocation]) == 0
+    expected_status = 1 if query_name == "diff" else 0
+    assert cli.main(["query", *invocation]) == expected_status
     text_output = capsys.readouterr().out
     for internal in ("node:sha256:", "sha256", "digest", "provenance", "evidence"):
         assert internal not in text_output
 
-    assert cli.main(["query", *json_invocation]) == 0
+    assert cli.main(["query", *json_invocation]) == expected_status
     json_output = capsys.readouterr().out
     for internal in ("node:sha256:", "sha256", "digest", "provenance", "evidence"):
         assert internal not in json_output
