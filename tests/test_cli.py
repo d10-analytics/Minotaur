@@ -1385,6 +1385,24 @@ def test_analyze_scope_writes_beside_validated_definition_directory(
     assert _file_paths(graph) == {"src/auth/api.py"}
 
 
+def test_analyze_scope_absolute_name_cannot_redirect_output(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside-output"
+    outside.mkdir()
+    root = _scope_project(
+        tmp_path,
+        directory="actual",
+        declared_name=str(outside),
+    )
+
+    completed = _run_in(root, "analyze", "--scope", str(outside))
+
+    assert completed.returncode == 0, completed.stderr
+    assert (root / "docs" / "systems" / "actual" / "graph.json").is_file()
+    assert not (outside / "graph.json").exists()
+
+
 def test_analyze_scope_writes_truthful_schema_graph_and_sidecar(tmp_path: Path) -> None:
     root = _scope_project(tmp_path)
     completed = _run_in(root, "analyze", "--scope", "auth")
