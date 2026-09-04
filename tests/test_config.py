@@ -114,6 +114,33 @@ def test_discovery_continues_when_git_probe_is_unavailable(
     assert resolved.config_file == top.resolve()
 
 
+def test_discovery_uses_shared_work_tree_root_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A config above the shared owner's reported root must not bind. Replacing
+    # the lower-level probe as well makes this fail if discovery bypasses the
+    # shared work_tree_root owner and calls run_git directly.
+    outer = _write(tmp_path, ".minotaur.toml", _CONFIG)
+    repo = tmp_path / "repo"
+    start = repo / "nested"
+    start.mkdir(parents=True)
+    calls: list[Path] = []
+
+    def shared_owner(path: Path) -> Path:
+        calls.append(path)
+        return repo.resolve()
+
+    def bypassed_probe(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("config discovery bypassed the shared Git owner")
+
+    monkeypatch.setattr(git, "work_tree_root", shared_owner)
+    monkeypatch.setattr(git, "run_git", bypassed_probe)
+
+    assert find_config(start) is None
+    assert calls == [start]
+    assert outer.exists()
+
+
 def test_explicit_config_selection_disables_walk_and_never_merges(tmp_path: Path) -> None:
     _write(
         tmp_path, "start/.minotaur.toml", '[minotaur]\nschema_version = 1\ntargets = ["near.py"]\n'
