@@ -110,12 +110,13 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
 
     ``raw_argv`` is scanned as plain tokens, not with argparse, because the
     parser itself must be built differently depending on the answer.  ``None``
-    keeps the strict grammar: an invocation asking for help, ``query diff``,
-    an unrecognized command, or no config discoverable from the working
-    directory.  An explicit ``--config`` with an empty value or a value that
-    does not exist raises a :class:`ConfigError` naming the option or path, so
-    the failure happens before any parsing or analysis and never falls back to
-    walk-up discovery.
+    keeps the strict grammar for explicit graph positionals, an unrecognized
+    command, or no config discoverable from the working directory. Configured
+    ``query diff --help`` is locate-only: it can expose the committed-mode
+    grammar without parsing or validating the config. An explicit
+    ``--config`` with an empty value or a value that does not exist raises a
+    :class:`ConfigError` naming the option or path, so the failure happens
+    before any parsing or analysis and never falls back to walk-up discovery.
     """
     command_index = _first_bare_token(raw_argv, 0)
     if command_index is None:
@@ -790,11 +791,12 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
     ``analyze`` and ``visualize``, instead of this function collapsing both
     outcomes to a single hard-coded exit 2.
 
-    ``query diff`` consumes two explicit graph files and never locates,
-    parses, or validates a config (D-05), so it answers straight from its
-    arguments.  Every other query resolves exactly once and substitutes one
-    resolved value set into the namespace before the snapshot or graph-query
-    owner reads it, so config-sourced ``graph`` and ``root`` reach loads,
+    ``query diff`` with two explicit graph files never locates, parses, or
+    validates a config (D-05), so it answers straight from its arguments;
+    committed mode resolves the located config exactly once. Every other query
+    resolves exactly once and substitutes one resolved value set into the
+    namespace before the snapshot or graph-query owner reads it, so
+    config-sourced ``graph`` and ``root`` reach loads,
     refreshes, and stamps in a single canonical spelling.
     """
     try:
@@ -873,10 +875,12 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
     ``parse_args`` call, so its help and error handling behave the same way
     here as they do for ``analyze`` and ``visualize``.
 
-    ``query diff`` is the one config-free subcommand: it keeps the strict
-    grammar and never gains a ``--config`` option.  The remaining subcommands
-    consume config ``graph``/``root``, so when a config was located their
-    ``--graph``/``--root`` declarations relax and ``--config`` is registered.
+    ``query diff`` keeps the strict config-free grammar when explicit OLD NEW
+    positionals are present. When a config is located, its OLD/NEW positionals
+    become optional and the committed mode registers ``--scope`` and
+    ``--config``. The remaining subcommands consume config ``graph``/``root``,
+    so when a config was located their declarations relax and ``--config`` is
+    registered.
     """
     commands = query.add_subparsers(dest="name", required=True)
     callers_parser = commands.add_parser("callers", help="find callers of a qualified symbol")
@@ -1048,7 +1052,8 @@ def _parser(config_located: bool = False) -> argparse.ArgumentParser:
     config located, only those declarations relax (argparse never receives a
     configuration value as a default); the resolver fills whatever the
     command line left out after parsing.  ``--config`` is registered per
-    command on the config-consuming commands, never on ``query diff``.
+    command on config-consuming commands and on the config-located committed
+    ``query diff`` mode.
     """
     parser = argparse.ArgumentParser(prog="minotaur")
     commands = parser.add_subparsers(dest="command", required=True)
