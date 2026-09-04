@@ -83,8 +83,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     is built, so the strict no-config grammar relaxes only for
     config-consuming commands when a config was located.  After parsing, each
     config-consuming command runs the shared resolver exactly once and hands
-    every owner one resolved value set.  ``--help`` and ``query diff`` never
-    locate, parse, or validate a config.
+    every owner one resolved value set.  Help only performs locate-only
+    discovery for the config-capable committed ``query diff`` grammar; it
+    never parses or validates the located config. Explicit OLD NEW help stays
+    config-free.
     """
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -115,8 +117,6 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
     the failure happens before any parsing or analysis and never falls back to
     walk-up discovery.
     """
-    if any(token in ("-h", "--help") for token in raw_argv):
-        return None
     command_index = _first_bare_token(raw_argv, 0)
     if command_index is None:
         return None
@@ -132,6 +132,9 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
             option_tokens = raw_argv[subcommand_index + 1 :]
             if _diff_positional_tokens(option_tokens):
                 return None
+            # Config discovery is locate-only here. A config is never parsed
+            # or validated on the help path; explicit OLD NEW help returned
+            # above remains config-free.
             return find_config(Path.cwd(), config=_explicit_config(option_tokens))
         if subcommand not in _CONFIG_CONSUMING_QUERIES:
             return None
@@ -139,6 +142,8 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
     elif command in _CONFIG_CONSUMING_COMMANDS:
         option_tokens = raw_argv[command_index + 1 :]
     else:
+        return None
+    if any(token in ("-h", "--help") for token in raw_argv):
         return None
     return find_config(Path.cwd(), config=_explicit_config(option_tokens))
 
@@ -907,7 +912,30 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
         "system-deps", help="list the targets a declared system depends on"
     )
     system_deps_parser.add_argument("system_name", metavar="SYSTEM_NAME")
-    diff_parser = commands.add_parser("diff", help="compare two analyzed graph snapshots")
+    if config_located:
+        diff_description = (
+            "Compare the current working tree with the committed graph at HEAD "
+            "(or compare two explicit graph snapshots)."
+        )
+        diff_epilog = (
+            "Modes: with no OLD and NEW, use the located project config and "
+            "optionally --scope NAME; with OLD NEW, compare those explicit files "
+            "without using project config. Exit status: 0 means structures are "
+            "identical, 1 means structures differ, and 2 means the command "
+            "could not complete; the caller decides the consequence."
+        )
+    else:
+        diff_description = "Compare two explicit analyzed graph snapshots."
+        diff_epilog = (
+            "Exit status: 0 means structures are identical, 1 means structures "
+            "differ, and 2 means the command could not complete."
+        )
+    diff_parser = commands.add_parser(
+        "diff",
+        help="compare analyzed graph snapshots",
+        description=diff_description,
+        epilog=diff_epilog,
+    )
     diff_parser.add_argument("old", nargs="?" if config_located else None, metavar="OLD")
     diff_parser.add_argument("new", nargs="?" if config_located else None, metavar="NEW")
     diff_parser.add_argument("--json", action="store_true", help="emit stable JSON records")
