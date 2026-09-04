@@ -583,3 +583,28 @@ def test_freshness_document_links_and_first_read_anchor_resolve() -> None:
     for document, relative_link in inbound_links.items():
         assert relative_link in document.read_text(encoding="utf-8")
         assert (document.parent / relative_link).resolve() == javascript.resolve()
+
+
+def test_freshness_documents_content_keyed_reuse_and_last_generation_provenance() -> None:
+    """Pin the content-keyed freshness wording across freshness and language guides."""
+    repository = Path(__file__).resolve().parents[2]
+    freshness = (repository / "docs/concepts/freshness.md").read_text(encoding="utf-8")
+    python_guide = (repository / "docs/guides/analyze-python.md").read_text(encoding="utf-8")
+    javascript_guide = (repository / "docs/guides/analyze-javascript.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "source content is clean" in freshness
+    assert "requested target selection equals the graph's recorded selection" in freshness
+    assert "Git `source_control` is not a gate" in freshness
+    assert "last-generation provenance" in freshness
+    assert "stamp lagging `HEAD`" in freshness
+    assert "content digests are the freshness authority" in python_guide
+    assert "last real generation in `source_control`" in python_guide
+    assert "freshness gate or substitute for content digests" in javascript_guide
+
+    assert "recorded commit and branch still match the current checkout" not in python_guide
+    assert "A Git commit or branch change also causes re-analysis" not in python_guide
+    assert "Git snapshot context are current" not in javascript_guide
+    assert "Git branch/commit metadata equals the graph's metadata" not in freshness
+    assert "checks three conditions" not in freshness

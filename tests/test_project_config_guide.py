@@ -108,6 +108,17 @@ def test_guide_documents_systems_dir_root_anchoring_and_default() -> None:
     assert "When `systems_dir` is omitted it defaults to `docs/systems` inside that root" in text
 
 
+def test_guide_documents_diff_mode_configuration_boundary() -> None:
+    text = _guide_text()
+    assert (
+        "The explicit two-file form, `query diff OLD NEW`, never locates, parses, or validates "
+        "a configuration file"
+    ) in text
+    assert "The committed-reference form, `query diff` with no positional graphs" in text
+    assert "requires a located configuration" in text
+    assert "Its help path only locates the file to expose the configured grammar" in text
+
+
 def test_guide_documents_the_python_310_tomli_fallback_mechanism() -> None:
     text = _guide_text()
     assert "effective on Python 3.10 only" in text
