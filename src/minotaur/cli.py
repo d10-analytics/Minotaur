@@ -932,7 +932,8 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
         diff_description = "Compare two explicit analyzed graph snapshots."
         diff_epilog = (
             "Exit status: 0 means structures are identical, 1 means structures "
-            "differ, and 2 means the command could not complete."
+            "differ, and 2 means the command could not complete; the caller "
+            "decides the consequence."
         )
     diff_parser = commands.add_parser(
         "diff",
