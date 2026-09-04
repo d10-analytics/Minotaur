@@ -32,10 +32,11 @@ literal because agents commonly parse these messages and JSON fields.
 | Delete the sidecar, then read the graph | not an error | `load_graph_file` treats a missing or unreadable sidecar as untrusted and runs the full validation once; the read command re-stamps after it passes (AC-03 scenario (i)) | No diagnostic; the read is slower once; a new `<GRAPH>.sha256` appears | None needed |
 | Read with `--validate` regardless of sidecar state | yes — always the full pass | `load_graph_file(..., validate=True)` never consults the sidecar (AC-03 scenario (k)) | Same output as an untrusted read; after a passing read the sidecar is rewritten with the verified digest (`_stamp_if_validated` in `minotaur/cli.py`), so a mismatched stamp is repaired | Use after any external graph edit |
 | Hand-edit graph bytes and regenerate its sidecar, then read it | graph-file integrity is not detected on the trusted path | `load_graph_file` and `validate_document(..., verify_node_ids=False)` in `minotaur/graph_model/loading.py` (AC-18: `test_regenerated_sidecar_trusts_hand_edited_graph_until_validate`) | The trusted read loads without a finding; `--validate` runs the full check and reports a node-ID mismatch; exit `2` for the invalid validated read | Pass `--validate` after external graph edits |
-| Run `analyze` with an existing graph and a clean source selection | clean-skip only when all three conditions hold | The probe in `minotaur/cli.py` compares `drift(...).is_clean`, `recorded_selection`, and Git `source_control` (AC-03 scenario (h), after (f)) | `minotaur: graph is up to date, skipping analysis`; exit `0` | `--force` bypasses the probe |
-| Query a graph whose bytes are clean but its selection metadata differs from the requested analyze targets | queries compare drift only | `_load_and_refresh_graph` calls `drift`; the analyze probe additionally compares selection and source control (`minotaur/cli.py`; AC-18: `test_query_ignores_selection_mismatch_but_analyze_reconciles_it`) | Query may answer without refresh; `analyze` re-runs instead of printing the clean-skip line | Use `analyze` to reconcile the recorded target set |
+| Run `analyze` with an existing graph and a clean source selection | clean-skip only when content and selection are current | The probe in `minotaur/cli.py` compares `drift(...).is_clean` and `recorded_selection` (AC-03 scenario (h), after (f)); Git `source_control` is not a gate | `minotaur: graph is up to date, skipping analysis`; exit `0` | `--force` bypasses the probe |
+| Query a graph whose bytes are clean but its selection metadata differs from the requested analyze targets | queries compare drift only | `_load_and_refresh_graph` calls `drift`; the analyze probe additionally compares selection (`minotaur/cli.py`; AC-18: `test_query_ignores_selection_mismatch_but_analyze_reconciles_it`) | Query may answer without refresh; `analyze` re-runs instead of printing the clean-skip line | Use `analyze` to reconcile the recorded target set |
 | An edit lands after `drift()` and before the answer is printed | no concurrency detection | No lock or `flock`/`fcntl` guard exists around freshness and answer production (`minotaur/query/freshness.py`, `minotaur/cli.py`; AC-18: `test_edit_after_drift_is_not_detected_between_drift_and_answer`) | The answer can describe the pre-edit snapshot; no special diagnostic is promised | Coordinate writers externally when a consistent multi-process snapshot matters |
-| Run `query diff` | no source freshness check | `_run_diff` in `minotaur/cli.py` loads and compares two graph files directly (AC-18: `test_diff_does_not_call_source_drift`) | The normal diff text or JSON; exit `0` for a valid comparison; no `stale` field is added | Use a freshness-checked graph query first when comparing current source |
+| Run explicit `query diff OLD NEW` | no source freshness check | `_run_explicit_diff` in `minotaur/cli.py` loads and compares two graph files directly (AC-18: `test_diff_does_not_call_source_drift`) | The normal diff text or JSON; exit `0` when identical and `1` when structures differ; no `stale` field is added | Use a freshness-checked graph query first when comparing current source |
+| Run committed-reference `query diff` | no graph-file/source refresh or side effect | `_run_committed_diff` reads the graph and sidecar from `HEAD`, then analyzes the current selection in memory | The normal diff text or JSON; exit `0` when identical and `1` when structures differ; errors exit `2`; no `stale` field and no graph or sidecar rewrite | Provide a located config; use explicit `OLD NEW` for the config-free mode |
 | Run `visualize --source-root` after source drift | no source freshness check | `_visualize` in `minotaur/cli.py` does not call `drift`; `prepare_excerpts` in `minotaur/graph_visualizer/source.py` reads current bytes (AC-18: `test_visualize_source_root_does_not_call_source_drift`) | Exit `0` with no stale warning; embedded excerpts use current-file bytes against snapshot line ranges | Re-run `analyze` first, or omit `--source-root` to avoid embedding current source excerpts |
 | Run `query context` | no graph refresh; per-file hash comparison only | `_run_context` and `context` in `minotaur/cli.py` and `minotaur/query/context.py` (AC-18: `test_context_does_not_call_source_drift_and_no_refresh_is_a_noop`) | Text begins `[file changed since analysis]` when bytes differ (`[file hash unavailable]` when the file cannot be read), or the JSON envelope's `results[0].stale` is `true` (`hash_available: false` for the unreadable case) — `context` has no top-level `stale` array; exit `0` | Read the marker as a current-source warning, not as a graph refresh |
 | Run `query context --no-refresh` | latent no-op | The shared parser accepts the option, but `_run_context` never reads it (`minotaur/cli.py`; AC-18: `test_context_does_not_call_source_drift_and_no_refresh_is_a_noop`) | Stdout, stderr, and exit code are byte-identical to `context` without the flag | Do not rely on the flag to suppress context's per-file hash marker |
@@ -159,15 +160,17 @@ current source should be embedded.
 
 ### Analyze clean-skip
 
-The analyze command has to preserve more than query freshness: it also keeps
-selection metadata and Git snapshot identity coherent. That is why its probe
-checks three conditions even when a query would consider the source bytes clean.
+The analyze command preserves the selected content and selection metadata. Its
+probe skips only when content is clean and the requested selection equals the
+recorded selection; Git snapshot identity is not a condition. The recorded
+commit and branch remain last-generation provenance and may lag `HEAD`.
 
 ### Query drift comparison
 
 The query path intentionally asks only whether the recorded source bytes and
-directory additions have drifted. Target-set and source-control reconciliation
-belongs to `analyze`, which can be invoked with the desired targets.
+directory additions have drifted. Target-set reconciliation belongs to
+`analyze`, which can be invoked with the desired targets; source-control
+metadata is not a freshness authority.
 
 ### Concurrent edit
 
@@ -177,9 +180,12 @@ after the comparison; callers needing serialization must provide coordination.
 
 ### `diff`
 
-`diff` compares two supplied snapshots and has no source root argument. Its
-result is therefore about graph-to-graph structure, not whether either graph
-still matches files on disk.
+Explicit `diff OLD NEW` compares two graph documents and does not inspect a
+source root. Committed-reference `diff` reads the committed `HEAD` graph and
+analyzes the current configured selection in memory; it does not write graph
+or sidecar files. Neither mode runs a graph freshness refresh. Both modes
+report `0` for identical structures, `1` for any recorded structural
+difference, and `2` for errors.
 
 ### `context`
 
@@ -240,30 +246,37 @@ user-facing graph-reading command run against it pays the full schema and
 node-ID validation cost once, then writes the sidecar so later reads on the
 trusted path are fast. This one-time cost applies to `query callers`,
 `query definitions`, `query impact`, `query unreferenced`, `query context`,
-`query diff`, and `visualize` — every command that loads a graph file through
-`load_graph_file` and can stamp it via `_stamp_if_validated` in
-`minotaur/cli.py`. `analyze`'s own clean-skip probe deliberately does not
-create a sidecar, since it is reusing an existing graph rather than reading a
-foreign one. No manual migration or conversion step is needed.
+explicit `query diff OLD NEW`, and `visualize` — every command that loads an
+on-disk graph through `load_graph_file` and can stamp it via
+`_stamp_if_validated` in `minotaur/cli.py`. Committed-reference `query diff`
+reads graph and sidecar bytes from `HEAD`, validates them in memory, and never
+creates or rewrites a working-tree sidecar. `analyze`'s own clean-skip probe
+deliberately does not create a sidecar, since it is reusing an existing graph
+rather than reading a foreign one. No manual migration or conversion step is
+needed.
 
 ## Analyze's clean-skip probe
 
-`analyze` has a stricter probe than a query. It skips only when the source drift
-is clean, the requested target selection equals the graph's recorded selection,
-and the current Git branch/commit metadata equals the graph's metadata. Queries
-compare only source drift. Thus a branch change whose selected bytes are
-identical can leave a query graph fresh while still causing `analyze` to write a
-new snapshot with current source-control identity.
+`analyze` has a stricter probe than a query. It skips when the source content is
+clean and the requested target selection equals the graph's recorded selection.
+The recorded Git commit and branch are provenance from the last real
+generation, not freshness gates. Thus a branch change or commit advance whose
+selected bytes are identical leaves the graph bytes stable and may leave its
+stamp lagging `HEAD`; a content or selection change, or `--force`, regenerates
+the graph and records the then-current commit and branch.
 
 ## Snapshot queries and concurrency
 
-`diff` compares two graph documents and does not inspect a source root.
-`context` reads current source and compares the requested file's recorded hash,
-but it does not refresh the graph. Its accepted `--no-refresh` spelling is a
-latent no-op and is pinned as current behavior. There is no concurrency lock
-between freshness detection and answer production or between two refreshers;
-atomic writes prevent torn individual files, but concurrent writers remain
-last-writer-wins.
+Explicit `diff OLD NEW` remains graph-only: it compares two supplied graph
+documents and does not inspect a source root or configuration. Committed-reference
+`diff` reads the committed graph and sidecar from `HEAD`, analyzes
+the current configured selection in memory, and compares the two structures;
+it does not write or stamp a graph or sidecar. `context` reads current source
+and compares the requested file's recorded hash, but it does not refresh the
+graph. Its accepted `--no-refresh` spelling is a latent no-op and is pinned as
+current behavior. There is no concurrency lock between freshness detection
+and answer production or between two refreshers; atomic writes prevent torn
+individual files, but concurrent writers remain last-writer-wins.
 
 ## For agents
 

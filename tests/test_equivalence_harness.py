@@ -393,15 +393,32 @@ def test_fixture_pin_is_a_full_sha_and_fixture_commit_is_its_immediate_child() -
 
 
 def test_every_non_control_query_answers_on_the_committed_fixture_root(
-    baseline_src: Path,
+    baseline_src: Path, tmp_path: Path
 ) -> None:
-    """The whole committed workload really runs, on the real fixture root."""
+    """The unchanged query workload remains equivalent across source trees.
+
+    ``query diff`` deliberately changed its valid-difference status from 0 to
+    1 in this feature. Keep that breaking contract out of the historical
+    cross-version equivalence workload and prove it directly below.
+    """
+
+    source_workload = json.loads(
+        (ROOT / "scripts" / "equivalence_queries.json").read_text(encoding="utf-8")
+    )
+    fixture_workload = source_workload[FIXTURE_ROOT.name]
+    fixture_workload["queries"] = [
+        item for item in fixture_workload["queries"] if item.get("command") != "diff"
+    ]
+    workload_path = tmp_path / "equivalence-without-diff.json"
+    workload_path.write_text(json.dumps(source_workload), encoding="utf-8")
 
     result = _run(
         "--baseline-src",
         str(baseline_src),
         "--branch-src",
         str(ROOT / "src"),
+        "--queries",
+        str(workload_path),
         "--root",
         str(FIXTURE_ROOT),
     )
@@ -409,14 +426,35 @@ def test_every_non_control_query_answers_on_the_committed_fixture_root(
     assert "VACUOUS" not in result.stderr
     summary = next(line for line in result.stdout.splitlines() if " summary: " in line)
     answered, expected = summary.split("queries_answered=")[1].split("/")
-    workload = json.loads((ROOT / "scripts/equivalence_queries.json").read_text())[
-        FIXTURE_ROOT.name
-    ]
+    workload = fixture_workload
     non_answers = sum(1 for item in workload["queries"] if item.get("expect") in {"empty", "error"})
     assert non_answers >= 4
     assert int(answered) == int(expected) - non_answers, summary
     assert int(expected) == len(workload["queries"]), summary
     assert "DIFFERENT" not in result.stdout
+
+
+def test_equivalence_side_diff_selection_uses_exit_one_for_valid_difference(
+    harness: types.ModuleType, tmp_path: Path
+) -> None:
+    """The harness-side explicit diff expectation follows deliberate exits."""
+    root = tmp_path / "diff-root"
+    root.mkdir()
+    source = root / "app.py"
+    source.write_text("def initial():\n    pass\n", encoding="utf-8")
+    side = harness.Side("branch", ROOT / "src")
+    old_graph = root / "old.json"
+    new_graph = root / "new.json"
+    assert harness._analyze(side, root, old_graph).returncode == 0
+    source.write_text("def initial():\n    pass\n\ndef added():\n    pass\n", encoding="utf-8")
+    assert harness._analyze(side, root, new_graph).returncode == 0
+    result = harness._run(
+        side,
+        ["-m", "minotaur", "query", "diff", str(old_graph), str(new_graph)],
+        cwd=root,
+    )
+    assert result.returncode == 1
+    assert b"added" in result.stdout
 
 
 def test_a_query_that_produces_no_output_fails_the_run(baseline_src: Path, tmp_path: Path) -> None:

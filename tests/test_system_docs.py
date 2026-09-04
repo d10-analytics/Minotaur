@@ -192,10 +192,12 @@ def test_purpose_file_exists() -> None:
     assert PURPOSE.is_file(), f"purpose page file missing: {PURPOSE}"
 
 
-def test_purpose_section_2_marks_scopes_shipped_and_expectations_planned() -> None:
+def test_purpose_section_2_marks_scopes_shipped_and_expectations_archived() -> None:
     text = _collapsed(PURPOSE)
     assert "shipped — committed system definitions" in text
-    assert "*planned* — the later expectations package (03)" in text
+    assert "*archived/deferred* — no implementation is planned" in text
+    assert "declared-answer concept is archived/deferred" in text
+    assert "planned expectations package" not in text
     assert "*planned* — system definitions" not in text
     assert "`surface`, `consumers`, `system-deps`, `context`" in text
 
@@ -212,8 +214,8 @@ def test_purpose_section_4_describes_a_definition_as_a_computed_scope_only() -> 
 
 def test_purpose_section_4_time_phases_expectations_and_curated_relationships() -> None:
     text = _collapsed(PURPOSE)
-    assert "Expectations (03)" in text
-    assert "exit-`1` difference policy belong to this later package" in text
+    assert "**Expectations (03)** — archived/deferred" in text
+    assert "No implementation is planned" in text
     assert "Curated relationships (04)" in text
     assert "static analysis cannot see" in text
     assert "carrying a rule id" in text
@@ -233,16 +235,32 @@ def test_purpose_never_claims_shipped_v1_expectation_or_curated_behavior() -> No
 def test_purpose_section_3_principles_do_not_read_scopes_as_checked() -> None:
     text = _collapsed(PURPOSE)
     assert "A shipped scope is a read-only lens that nothing checks" in text
-    assert "the later expectations package (03), which will check them against answers" in text
+    assert "The declared-answer concept is archived/deferred and has no implementation" in text
     assert "checked, not trusted" not in text
 
 
-def test_purpose_section_3_attributes_exit_1_to_the_later_expectations_package() -> None:
+def test_purpose_section_3_documents_diff_exit_facts_without_expectation_policy() -> None:
+    text = _collapsed(PURPOSE)
+    assert "A `diff` whose compared structures differ exits `1`" in text
+    assert "an identical comparison exits `0`" in text
+    assert "no shipped query compares a declared answer" in text
+    assert "When the later expectations package (03) ships" not in text
+
+
+def test_purpose_documents_committed_diff_and_content_keyed_reproducibility() -> None:
     text = _collapsed(PURPOSE)
     assert (
-        "When the later expectations package (03) ships, an expectation that differs will exit `1`"
-        in text
+        "the committed structure at `HEAD` against the current working tree, or the same "
+        "question across two explicit snapshots" in text
     )
+    assert (
+        "records the `source_control` commit/branch of its last real generation plus "
+        "per-file content digests" in text
+    )
+    assert "identical content never rewrites" in text
+    assert "committed bytes stay stable across commit advances and branch switches" in text
+    assert "content digests, not the stamp, are the freshness authority" in text
+    assert "stamp may legitimately lag `HEAD`" in text
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +305,36 @@ def test_query_reference_keeps_the_system_query_model_claims() -> None:
     assert "an empty result prints `no exposed symbols`" in text
     assert "An empty result prints `no consumers`" in text
     assert "An empty result prints `no dependencies`" in text
+
+
+def test_query_reference_documents_both_diff_modes_and_deliberate_exit_semantics() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert "Compare the committed graph at `HEAD` with the current working tree" in text
+    assert "minotaur query diff --scope NAME" in text
+    assert "requires a located `.minotaur.toml`" in text
+    assert "Compare two analyzed graph files explicitly" in text
+    assert "`diff` found structures differing in any recorded way" in text
+    assert "including an added, removed, or relocated symbol or a relationship change" in text
+    assert (
+        "For the other graph queries, `1` means a graph refresh completed with source diagnostics"
+        in text
+    )
+
+
+def test_readme_documents_committed_graph_provenance_and_both_diff_modes() -> None:
+    text = _collapsed(README)
+    assert (
+        "committed graph artifacts with per-file content digests and last-generation Git "
+        "provenance" in text
+    )
+    assert "content stays byte-stable across commit and branch changes" in text
+    assert "committed-reference mode" in text
+    assert "explicit two-snapshot mode" in text
+    assert "which is configuration-free" in text
+    assert (
+        "review the graph and its sidecar alongside the source change, and commit them together"
+        in text
+    )
 
 
 def test_readme_names_the_three_system_queries_in_prose() -> None:

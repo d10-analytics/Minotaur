@@ -39,15 +39,11 @@ Two operations compare answers:
 
 | Operation | Compares | Status |
 | --- | --- | --- |
-| **`diff`** | the same question across two snapshots | shipped |
-| **Expectations** | the current answer against a declared answer | *planned* — the later expectations package (03) |
+| **`diff`** | the committed structure at `HEAD` against the current working tree, or the same question across two explicit snapshots | shipped |
+| **Expectations** | the current answer against a declared answer | *archived/deferred* — no implementation is planned |
 
-An expectation is a persisted question with the answer its author believes
-is true — "callers of `open_channel` ⊆ {`client.py`}", "system `core`
-imports nothing from `qtpy`". The planned expectations package (03) runs the
-question and reports the difference. It is `diff` with one side declared
-instead of analyzed, and it ships later; nothing shipped compares a declared
-answer today.
+The declared-answer concept is archived/deferred. No authored expected sets,
+expectation files, or `expect`-style evaluation command ship in this package.
 
 Freshness (content hashes, drift detection, the trusted-load sidecar)
 guarantees that every answer is about the tree you think it is about.
@@ -57,30 +53,32 @@ guarantees that every answer is about the tree you think it is about.
 1. **Source is the only author of truth.** Every Minotaur artifact is derived
    from source and can be regenerated. Declared inputs are questions and
    beliefs, never facts. A shipped scope is a read-only lens that nothing
-   checks; declared expectations — the beliefs — arrive with the later
-   expectations package (03), which will check them against answers rather
-   than trust them.
+   checks. The declared-answer concept is archived/deferred and has no
+   implementation in this package.
 2. **Unresolved is an answer.** A reference the interpreter cannot resolve is
    recorded as an unresolved node with its location. Minotaur never guesses a
    likely target and never attaches a confidence score.
-3. **Reproducible at a commit.** A graph records its source-control snapshot
-   and per-file content digests. Two people running the same question at the
-   same commit get the same answer.
+3. **Reproducible at a commit.** A graph records the `source_control`
+   commit/branch of its last real generation plus per-file content digests.
+   Regeneration is gated on the analyzed content: identical content never
+   rewrites, so committed bytes stay stable across commit advances and branch
+   switches; a content change regenerates and re-records the snapshot. The
+   content digests, not the stamp, are the freshness authority, so the stamp
+   may legitimately lag `HEAD`.
 4. **Differences are reported, not enforced.** `diff` reports what differs
-   between two snapshots, and the later expectations package (03) will report
-   what differs from what was declared. What a difference *means* — a defect,
-   accepted debt, a stale declaration — is the caller's judgment. There is no
-   suppression, baseline, ratchet, or severity vocabulary.
+   between two snapshots. What a difference *means* — a defect or accepted
+   debt — is the caller's judgment. There is no suppression, baseline, ratchet,
+   or severity vocabulary.
 5. **Exit status is a fact, not a policy.** A question that could not be
-   answered exits `2`. When the later expectations package (03) ships, an
-   expectation that differs will exit `1`, exactly as a `diff` tool does, so
-   scripts can branch on it; nothing else is encoded in exit codes, and no
-   shipped query compares an expectation today.
+   answered exits `2`. A `diff` whose compared structures differ exits `1`,
+   while an identical comparison exits `0`; scripts can branch on those facts.
+   Nothing else is encoded in exit codes, and no shipped query compares a
+   declared answer.
 6. **Nothing repository-specific.** Minotaur knows languages, not products.
    Framework conventions and product knowledge enter only through declared,
    inspectable inputs that live in the repository they describe: exclusion
-   patterns and scopes today, with expectations (03) and curated-rule edges
-   carrying a rule id (04) as declared inputs of their later packages.
+   patterns and scopes today, with curated-rule edges carrying a rule id (04)
+   as a declared input of that later package.
 
 ## 4. System definitions under this framing
 
@@ -98,13 +96,9 @@ scope is a lens, not a claim.
 Two later packages extend what a definition may carry, and neither is
 shipped with v1:
 
-* **Expectations (03)** — a question plus the answer its author believes is
-  true, usually scoped to a system: "this system depends only on these".
-  Declared dependencies and the exit-`1` difference policy belong to this
-  later package; free-standing expectations will cover ownership and
-  containment claims that are not dependency-shaped ("this name is defined in
-  exactly one place"). Nothing compares a declared answer against the
-  analyzed graph today.
+* **Expectations (03)** — archived/deferred: a question plus the answer its
+  author believes is true. No implementation is planned, and nothing compares
+  a declared answer against the analyzed graph today.
 * **Curated relationships (04)** — declared edges static analysis cannot see
   (registry dispatch, framework callbacks), each carrying a rule id, that
   boundary queries may include alongside the graph's own edges.

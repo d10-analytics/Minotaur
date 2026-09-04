@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 import tempfile
 from collections import defaultdict
@@ -13,12 +12,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from minotaur import git
 from minotaur.config import ConfigError, find_config, resolve_config
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import (
     GraphLoadError,
     LoadedGraph,
     graph_digest,
+    load_graph_blob,
     load_graph_file,
     stamp_path,
 )
@@ -35,7 +36,7 @@ from minotaur.language_interpreter.contract import (
     Diagnostic,
 )
 from minotaur.language_interpreter.registry import InterpreterRegistration, default_registry
-from minotaur.language_interpreter.selection import SelectionError, select_sources
+from minotaur.language_interpreter.selection import SelectionError, SourceSelection, select_sources
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query import context as context_query
 from minotaur.query import diff as diff_query
@@ -82,8 +83,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     is built, so the strict no-config grammar relaxes only for
     config-consuming commands when a config was located.  After parsing, each
     config-consuming command runs the shared resolver exactly once and hands
-    every owner one resolved value set.  ``--help`` and ``query diff`` never
-    locate, parse, or validate a config.
+    every owner one resolved value set.  Help only performs locate-only
+    discovery for the config-capable committed ``query diff`` grammar; it
+    never parses or validates the located config. Explicit OLD NEW help stays
+    config-free.
     """
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -107,15 +110,14 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
 
     ``raw_argv`` is scanned as plain tokens, not with argparse, because the
     parser itself must be built differently depending on the answer.  ``None``
-    keeps the strict grammar: an invocation asking for help, ``query diff``,
-    an unrecognized command, or no config discoverable from the working
-    directory.  An explicit ``--config`` with an empty value or a value that
-    does not exist raises a :class:`ConfigError` naming the option or path, so
-    the failure happens before any parsing or analysis and never falls back to
-    walk-up discovery.
+    keeps the strict grammar for explicit graph positionals, an unrecognized
+    command, or no config discoverable from the working directory. Configured
+    ``query diff --help`` is locate-only: it can expose the committed-mode
+    grammar without parsing or validating the config. An explicit
+    ``--config`` with an empty value or a value that does not exist raises a
+    :class:`ConfigError` naming the option or path, so the failure happens
+    before any parsing or analysis and never falls back to walk-up discovery.
     """
-    if any(token in ("-h", "--help") for token in raw_argv):
-        return None
     command_index = _first_bare_token(raw_argv, 0)
     if command_index is None:
         return None
@@ -124,14 +126,44 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
         subcommand_index = _first_bare_token(raw_argv, command_index + 1)
         if subcommand_index is None:
             return None
-        if raw_argv[subcommand_index] not in _CONFIG_CONSUMING_QUERIES:
+        subcommand = raw_argv[subcommand_index]
+        if subcommand == "diff":
+            # Explicit OLD NEW remains config-free. A bare committed-mode
+            # invocation (possibly carrying --scope/--config) consumes config.
+            option_tokens = raw_argv[subcommand_index + 1 :]
+            if _diff_positional_tokens(option_tokens):
+                return None
+            # Config discovery is locate-only here. A config is never parsed
+            # or validated on the help path; explicit OLD NEW help returned
+            # above remains config-free.
+            return find_config(Path.cwd(), config=_explicit_config(option_tokens))
+        if subcommand not in _CONFIG_CONSUMING_QUERIES:
             return None
         option_tokens = raw_argv[subcommand_index + 1 :]
     elif command in _CONFIG_CONSUMING_COMMANDS:
         option_tokens = raw_argv[command_index + 1 :]
     else:
         return None
+    if any(token in ("-h", "--help") for token in raw_argv):
+        return None
     return find_config(Path.cwd(), config=_explicit_config(option_tokens))
+
+
+def _diff_positional_tokens(tokens: Sequence[str]) -> tuple[str, ...]:
+    """Return graph positionals, ignoring values belonging to diff options."""
+    positionals: list[str] = []
+    expects_value = False
+    for token in tokens:
+        if expects_value:
+            expects_value = False
+            continue
+        if token in ("--scope", "--config"):
+            expects_value = True
+        elif token.startswith(("--scope=", "--config=", "-")):
+            continue
+        else:
+            positionals.append(token)
+    return tuple(positionals)
 
 
 def _first_bare_token(tokens: Sequence[str], start: int) -> int | None:
@@ -195,6 +227,13 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
     explicit values keep their caller spelling and win per field (R-03).
     """
     try:
+        scope = getattr(arguments, "scope", None)
+        if scope is not None and arguments.targets:
+            raise ValueError("--scope cannot be combined with positional targets")
+        if scope is not None and arguments.output is not None:
+            raise ValueError("--scope cannot be combined with --output")
+        if scope is not None and located is None:
+            raise ValueError("--scope requires a located project config")
         resolved = resolve_config(
             Path.cwd(),
             config=located,
@@ -203,12 +242,24 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
             explicit_targets=_as_targets(arguments.targets),
         )
         root = resolved.root.resolve()
-        targets = resolved.targets
+        targets: tuple[Path, ...] | None
+        if scope is not None:
+            systems = load_systems(resolved.systems_dir)
+            selected_system = resolve_system(systems, scope)
+            targets = tuple(root / relative for relative in selected_system.files)
+            definition_directory = selected_system.definition_directory
+            if (
+                definition_directory is None
+            ):  # pragma: no cover - only valid loader results reach here.
+                raise ValueError(f"system definition directory unavailable: {selected_system.name}")
+            output = definition_directory / "graph.json"
+        else:
+            targets = resolved.targets
+            output = resolved.graph
         if targets is None:  # pragma: no cover - grammar or config validation supplies targets.
             raise ConfigError(
                 "no analysis targets: pass positional targets or a config file with targets"
             )
-        output = resolved.graph
         # Validate the current workspace and targets before considering a
         # clean-output skip. A deleted root or explicitly selected file must
         # remain a command error even when an old graph happens to load.
@@ -223,28 +274,18 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
             except (GraphLoadError, OSError, ValueError):
                 existing = None
             if existing is not None:
-                # Both of these repeat work ``_analyze_selection`` will also
-                # do below when the graph turns out not to be clean:
-                # ``select_sources`` is re-run inside ``_analyze_selection``,
-                # and ``_git_source_control`` runs its three ``git``
-                # subprocesses again there too. The duplication is accepted
-                # rather than threaded through as a parameter because it only
-                # costs cheap directory walks and subprocess calls, while a
-                # clean-graph skip avoids a full re-parse of every selected
-                # source file — the expensive part stays paid once either way.
                 current_selection = _target_selection(root, targets)
-                current_source_control = _git_source_control(root)
                 if (
                     drift(existing.document, root).is_clean
                     and recorded_selection(existing.document) == current_selection
-                    and current_source_control == existing.document.source_control
                 ):
                     print("minotaur: graph is up to date, skipping analysis", file=sys.stderr)
                     return 0
                 # A valid graph with drift was previously produced by this
                 # command, so replacement is safe after the freshness check.
                 refresh_force = True
-        result = _analyze_selection(root, targets, output, refresh_force)
+        metadata_targets = targets if scope is not None else None
+        result = _analyze_selection(root, targets, output, refresh_force, metadata_targets)
     except (OSError, SelectionError, ValueError) as error:
         _error(str(error))
         return 2
@@ -271,25 +312,9 @@ def _analyze_selection(
     cannot drift between the two write paths.
     """
     workspace, selection = select_sources(root, targets, default_registry())
-    recorded_targets = targets if metadata_targets is None else metadata_targets
     output = _preflight_output(output_path, selection.files, force)
-    result = _dispatch(workspace, selection.files)
-    source_control = _git_source_control(workspace.root)
-    if source_control is not None:
-        result = replace(
-            result,
-            document=replace(result.document, source_control=source_control),
-        )
-    result = replace(
-        result,
-        document=replace(
-            result.document,
-            extensions=_with_selection_extension(
-                result.document.extensions,
-                workspace.root,
-                recorded_targets,
-            ),
-        ),
+    _, _, result = _produce_selection(
+        root, targets, metadata_targets, prepared=(workspace, selection)
     )
     content = serialize(result.document)
     # The graph is written to the resolved path so the atomic replace targets
@@ -315,6 +340,45 @@ def _analyze_selection(
         ) from error
     _warn_unresolved_imports(result.document, workspace.root)
     return result
+
+
+def _produce_selection(
+    root: Path,
+    targets: tuple[Path, ...],
+    metadata_targets: tuple[Path, ...] | None = None,
+    *,
+    prepared: tuple[Workspace, SourceSelection] | None = None,
+) -> tuple[Workspace, SourceSelection, AnalysisResult]:
+    """Produce one selected graph document in memory, without filesystem writes.
+
+    Selection, interpreter dispatch, recorded target metadata, and Git
+    provenance are deliberately shared by every graph-writing path.  Callers
+    own output preflight, serialization, atomic writes, sidecars, and warnings.
+    """
+    if prepared is None:
+        workspace, selection = select_sources(root, targets, default_registry())
+    else:
+        workspace, selection = prepared
+    result = _dispatch(workspace, selection.files)
+    source_control = _git_source_control(workspace.root)
+    if source_control is not None:
+        result = replace(
+            result,
+            document=replace(result.document, source_control=source_control),
+        )
+    recorded_targets = targets if metadata_targets is None else metadata_targets
+    result = replace(
+        result,
+        document=replace(
+            result.document,
+            extensions=_with_selection_extension(
+                result.document.extensions,
+                workspace.root,
+                recorded_targets,
+            ),
+        ),
+    )
+    return workspace, selection, result
 
 
 _ROOT_MISMATCH_WARNING_RATIO = 0.05
@@ -354,14 +418,14 @@ def _warn_unresolved_imports(document: GraphDocument, root: Path) -> None:
 
 def _git_source_control(root: Path) -> SourceControl | None:
     """Return the Git snapshot metadata for ``root``, when it is available."""
-    work_tree = _run_git(root, ("rev-parse", "--is-inside-work-tree"))
+    work_tree = git.run_git(root, ("rev-parse", "--is-inside-work-tree"))
     if work_tree is None:
         return None
     if work_tree.returncode != 0 or work_tree.stdout.strip() != "true":
         return None
 
-    commit_result = _run_git(root, ("rev-parse", "HEAD"))
-    branch_result = _run_git(root, ("branch", "--show-current"))
+    commit_result = git.run_git(root, ("rev-parse", "HEAD"))
+    branch_result = git.run_git(root, ("branch", "--show-current"))
     commit = (
         commit_result.stdout.strip()
         if commit_result is not None and commit_result.returncode == 0
@@ -375,20 +439,6 @@ def _git_source_control(root: Path) -> SourceControl | None:
     if not commit and not branch:
         return None
     return SourceControl(system="git", commit=commit or None, branch=branch or None)
-
-
-def _run_git(root: Path, arguments: Sequence[str]) -> subprocess.CompletedProcess[str] | None:
-    """Run one Git probe, treating unavailable or failed commands as unknown."""
-    try:
-        return subprocess.run(
-            ["git", *arguments],
-            cwd=root,
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,15 +627,90 @@ def _run_system_query(
     return producer(query.systems, index, query.system)
 
 
-def _run_diff(query: argparse.Namespace) -> str:
-    validate: bool = query.validate
+def _diff_output(
+    query: argparse.Namespace, old: GraphDocument, new: GraphDocument
+) -> tuple[str, bool]:
+    """Render one diff and report whether it contains any structural change."""
+    result = diff_query.diff(old, new)
+    changed = any(
+        (
+            result.added,
+            result.removed,
+            result.relocated,
+            result.relationships_added,
+            result.relationships_removed,
+        )
+    )
+    output = diff_query.render_json(result) if query.json else diff_query.render_text(result)
+    return output, changed
+
+
+def _run_explicit_diff(query: argparse.Namespace) -> int:
+    """Print explicit-mode output and return the structure-based exit code."""
     old_path, new_path = Path(query.old), Path(query.new)
-    old_loaded = load_graph_file(old_path, validate=validate)
+    old_loaded = load_graph_file(old_path, validate=query.validate)
     _stamp_if_validated(old_path, old_loaded)
-    new_loaded = load_graph_file(new_path, validate=validate)
+    new_loaded = load_graph_file(new_path, validate=query.validate)
     _stamp_if_validated(new_path, new_loaded)
-    result = diff_query.diff(old_loaded.document, new_loaded.document)
-    return diff_query.render_json(result) if query.json else diff_query.render_text(result)
+    output, changed = _diff_output(query, old_loaded.document, new_loaded.document)
+    print(output, end="")
+    return 1 if changed else 0
+
+
+def _committed_graph_path(resolved: Any, scope: System | None) -> Path:
+    """Return the configured or loader-provenanced graph for a scope."""
+    if scope is None:
+        return Path(resolved.graph)
+    if scope.definition_directory is None:
+        raise ValueError(f"system definition directory unavailable: {scope.name}")
+    return scope.definition_directory / "graph.json"
+
+
+def _load_committed_old(graph_path: Path, *, root: Path, validate: bool) -> LoadedGraph:
+    """Load the strict committed graph pair, or the read-only disk fallback."""
+    work_tree = git.work_tree_root(root)
+    if work_tree is None:
+        # Outside Git (or with an unavailable probe), disk is the deliberate
+        # fallback. load_graph_file itself only reads; this path never stamps.
+        return load_graph_file(graph_path, validate=validate)
+    try:
+        relative = graph_path.resolve().relative_to(work_tree).as_posix()
+    except ValueError as error:
+        raise ValueError(f"committed graph is outside the Git work tree: {graph_path}") from error
+    content = git.read_head_blob(work_tree, relative)
+    if content is None:
+        raise ValueError(f"committed graph is absent at HEAD: {graph_path}")
+    sidecar_relative = f"{relative}.sha256"
+    sidecar = git.read_head_blob(work_tree, sidecar_relative)
+    if sidecar is None:
+        raise ValueError(f"committed graph sidecar is absent at HEAD: {graph_path}.sha256")
+    return load_graph_blob(content, sidecar, validate=validate)
+
+
+def _run_committed_diff(query: argparse.Namespace, located: Path) -> int:
+    """Compare the current in-memory selection with its committed HEAD graph."""
+    resolved = resolve_config(Path.cwd(), config=located)
+    scope_name = getattr(query, "scope", None)
+    systems: tuple[System, ...] = ()
+    scope: System | None = None
+    if scope_name is not None:
+        systems = load_systems(resolved.systems_dir)
+        scope = resolve_system(systems, scope_name)
+        targets = tuple(resolved.root / relative for relative in scope.files)
+        metadata_targets: tuple[Path, ...] | None = targets
+    else:
+        if resolved.targets is None:
+            raise ConfigError("no analysis targets configured")
+        targets = resolved.targets
+        metadata_targets = None
+    graph_path = _committed_graph_path(resolved, scope)
+    old_loaded = _load_committed_old(graph_path, root=resolved.root, validate=query.validate)
+    _, _, produced = _produce_selection(resolved.root, targets, metadata_targets=metadata_targets)
+    for diagnostic in produced.diagnostics:
+        print(_format_diagnostic(diagnostic), file=sys.stderr)
+    output, changed = _diff_output(query, old_loaded.document, produced.document)
+    print(output, end="")
+    return 1 if changed else 0
 
 
 def _run_context(query: argparse.Namespace) -> str:
@@ -633,12 +758,11 @@ _GRAPH_QUERIES: Mapping[str, _GraphQuery] = {
     ),
 }
 
-# Snapshot queries intentionally do not call _load_and_refresh_graph: diff
-# compares two graphs as they were recorded, and context needs the current
-# excerpt while its per-file hash check makes a changed source explicit in the
-# result.  They also keep their own JSON envelopes, which are not record lists.
+# The context snapshot query intentionally does not call _load_and_refresh_graph:
+# it needs the current excerpt while its per-file hash check makes a changed
+# source explicit in the result. It keeps its own JSON envelope, which is not a
+# record list.
 _SNAPSHOT_QUERIES: Mapping[str, Callable[[argparse.Namespace], str]] = {
-    "diff": _run_diff,
     "context": _run_context,
 }
 
@@ -654,14 +778,21 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
     ``analyze`` and ``visualize``, instead of this function collapsing both
     outcomes to a single hard-coded exit 2.
 
-    ``query diff`` consumes two explicit graph files and never locates,
-    parses, or validates a config (D-05), so it answers straight from its
-    arguments.  Every other query resolves exactly once and substitutes one
-    resolved value set into the namespace before the snapshot or graph-query
-    owner reads it, so config-sourced ``graph`` and ``root`` reach loads,
+    ``query diff`` with two explicit graph files never locates, parses, or
+    validates a config (D-05), so it answers straight from its arguments;
+    committed mode resolves the located config exactly once. Every other query
+    resolves exactly once and substitutes one resolved value set into the
+    namespace before the snapshot or graph-query owner reads it, so
+    config-sourced ``graph`` and ``root`` reach loads,
     refreshes, and stamps in a single canonical spelling.
     """
     try:
+        if arguments.name == "diff":
+            if arguments.old is None and located is not None:
+                return _run_committed_diff(arguments, located)
+            if arguments.old is None or arguments.new is None:
+                raise ValueError("diff requires either OLD NEW or a located project config")
+            return _run_explicit_diff(arguments)
         snapshot = _SNAPSHOT_QUERIES.get(arguments.name)
         if arguments.name != "diff":
             resolved = resolve_config(
@@ -731,10 +862,12 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
     ``parse_args`` call, so its help and error handling behave the same way
     here as they do for ``analyze`` and ``visualize``.
 
-    ``query diff`` is the one config-free subcommand: it keeps the strict
-    grammar and never gains a ``--config`` option.  The remaining subcommands
-    consume config ``graph``/``root``, so when a config was located their
-    ``--graph``/``--root`` declarations relax and ``--config`` is registered.
+    ``query diff`` keeps the strict config-free grammar when explicit OLD NEW
+    positionals are present. When a config is located, its OLD/NEW positionals
+    become optional and the committed mode registers ``--scope`` and
+    ``--config``. The remaining subcommands consume config ``graph``/``root``,
+    so when a config was located their declarations relax and ``--config`` is
+    registered.
     """
     commands = query.add_subparsers(dest="name", required=True)
     callers_parser = commands.add_parser("callers", help="find callers of a qualified symbol")
@@ -770,10 +903,37 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
         "system-deps", help="list the targets a declared system depends on"
     )
     system_deps_parser.add_argument("system_name", metavar="SYSTEM_NAME")
-    diff_parser = commands.add_parser("diff", help="compare two analyzed graph snapshots")
-    diff_parser.add_argument("old", metavar="OLD")
-    diff_parser.add_argument("new", metavar="NEW")
+    if config_located:
+        diff_description = (
+            "Compare the current working tree with the committed graph at HEAD "
+            "(or compare two explicit graph snapshots)."
+        )
+        diff_epilog = (
+            "Modes: with no OLD and NEW, use the located project config and "
+            "optionally --scope NAME; with OLD NEW, compare those explicit files "
+            "without using project config. Exit status: 0 means structures are "
+            "identical, 1 means structures differ, and 2 means the command "
+            "could not complete; the caller decides the consequence."
+        )
+    else:
+        diff_description = "Compare two explicit analyzed graph snapshots."
+        diff_epilog = (
+            "Exit status: 0 means structures are identical, 1 means structures "
+            "differ, and 2 means the command could not complete; the caller "
+            "decides the consequence."
+        )
+    diff_parser = commands.add_parser(
+        "diff",
+        help="compare analyzed graph snapshots",
+        description=diff_description,
+        epilog=diff_epilog,
+    )
+    diff_parser.add_argument("old", nargs="?" if config_located else None, metavar="OLD")
+    diff_parser.add_argument("new", nargs="?" if config_located else None, metavar="NEW")
     diff_parser.add_argument("--json", action="store_true", help="emit stable JSON records")
+    if config_located:
+        diff_parser.add_argument("--scope", metavar="NAME", help="compare one committed system")
+        diff_parser.add_argument("--config", metavar="CONFIG", help="explicit project config file")
     context_parser = commands.add_parser("context", help="show source context around a line")
     context_parser.add_argument("--site", required=True, metavar="PATH:LINE")
     context_parser.add_argument("--before", type=int, default=3)
@@ -880,7 +1040,8 @@ def _parser(config_located: bool = False) -> argparse.ArgumentParser:
     config located, only those declarations relax (argparse never receives a
     configuration value as a default); the resolver fills whatever the
     command line left out after parsing.  ``--config`` is registered per
-    command on the config-consuming commands, never on ``query diff``.
+    command on config-consuming commands and on the config-located committed
+    ``query diff`` mode.
     """
     parser = argparse.ArgumentParser(prog="minotaur")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -889,6 +1050,12 @@ def _parser(config_located: bool = False) -> argparse.ArgumentParser:
     analyze.add_argument(
         "--output", required=not config_located, help="destination graph JSON file"
     )
+    if config_located:
+        analyze.add_argument(
+            "--scope",
+            metavar="NAME",
+            help="analyze one committed system into its system graph",
+        )
     analyze.add_argument("--force", action="store_true", help="replace an existing output file")
     if config_located:
         analyze.add_argument(

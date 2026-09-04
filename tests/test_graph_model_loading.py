@@ -29,6 +29,7 @@ from minotaur.graph_model.loading import (
     GraphLoadError,
     _validate_wire_shape,
     graph_digest,
+    load_graph_blob,
     load_graph_bytes,
     load_graph_file,
     stamp_path,
@@ -423,6 +424,28 @@ class TestStampAwareLoader:
             loaded = load_graph_file(graph_path)
         assert loaded.validated is False
         assert loaded.digest == hashlib.sha256(data).hexdigest()
+
+    def test_blob_matching_sidecar_uses_trusted_path_without_writes(self) -> None:
+        """HEAD-loaded bytes can use the same trust rule without a path."""
+        data = _EXAMPLE_GRAPH.read_bytes()
+        loaded = load_graph_blob(data, graph_digest(data).encode("ascii"))
+        assert loaded.validated is False
+        assert loaded.digest == graph_digest(data)
+
+    def test_blob_mismatched_or_missing_sidecar_full_validates(self) -> None:
+        """A blob sidecar is only an exact digest hint, never an integrity claim."""
+        data = _EXAMPLE_GRAPH.read_bytes()
+        mismatched = load_graph_blob(data, b"0" * 64)
+        absent = load_graph_blob(data)
+        assert mismatched.validated is True
+        assert absent.validated is True
+
+    def test_blob_loader_has_no_filesystem_side_effects(self, tmp_path: Path) -> None:
+        """Blob loading does not create a graph or sidecar artifact."""
+        before = tuple(tmp_path.iterdir())
+        data = _EXAMPLE_GRAPH.read_bytes()
+        load_graph_blob(data, graph_digest(data).encode("ascii"))
+        assert tuple(tmp_path.iterdir()) == before
 
     def test_flipped_byte_raises(self, tmp_path: Path) -> None:
         """Flipping one graph byte makes the digest mismatch, running the seam."""

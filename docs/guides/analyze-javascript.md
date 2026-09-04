@@ -27,8 +27,9 @@ minotaur analyze --root ROOT --output GRAPH.json [--force] TARGET [TARGET ...]
 Every selected target must resolve beneath `ROOT`; directory targets are
 scanned recursively using the shared exclusion, symlink, and extension rules.
 The root-relative POSIX path is used for graph paths and module labels. An
-existing graph can be reused when its recorded selection, source bytes, and
-Git snapshot context are current; use `--force` to request a new snapshot.
+existing graph can be reused when its recorded selection and source bytes are
+current; Git commit and branch metadata do not gate reuse. Use `--force` to
+request a new snapshot.
 The command writes canonical JSON atomically and returns `1` when a valid
 partial graph also carries parse or source-read diagnostics.
 
@@ -115,6 +116,9 @@ Each JavaScript file node carries the lowercase SHA-256 digest of its exact
 source bytes in
 `extensions["minotaur-javascript"]["content_sha256"]`. The CLI records the
 sorted root-relative selection in the shared
-`extensions["minotaur"]["selection"]` document extension. These are metadata,
-not node-identity inputs; use the freshness guide for the complete observable
-refresh contract.
+`extensions["minotaur"]["selection"]` document extension. When the root is in
+a Git work tree, `source_control` records the commit and branch at which the
+graph was last actually generated. That stamp is provenance, never a
+freshness gate or substitute for content digests, and may lag `HEAD`. These
+values are metadata, not node-identity inputs; use the freshness guide for the
+complete observable refresh contract.

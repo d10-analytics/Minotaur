@@ -51,9 +51,12 @@ honor.
 ## Locating a configuration file
 
 `analyze`, `visualize`, and the config-consuming `query` subcommands look for
-a `.minotaur.toml` when they run. `query diff` and any `--help` invocation
-never locate, parse, or validate a configuration file; they answer strictly
-from their own arguments.
+a `.minotaur.toml` when they run. The explicit two-file form, `query diff OLD
+NEW`, never locates, parses, or validates a configuration file; it is strictly
+config-free. The committed-reference form, `query diff` with no positional
+graphs (optionally with `--scope NAME`), requires a located configuration. Its
+help path only locates the file to expose the configured grammar; it does not
+parse or validate that configuration.
 
 Discovery starts in the current working directory and walks up through its
 parent directories toward the filesystem root, and the nearest
