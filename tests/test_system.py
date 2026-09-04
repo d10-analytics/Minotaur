@@ -235,6 +235,17 @@ def test_narrative_files_inside_a_system_directory_are_ignored(tmp_path: Path) -
     assert loaded == (System(name="auth", files=("src/auth/api.py",)),)
 
 
+def test_committed_graph_and_sidecar_inside_system_directory_are_ignored(tmp_path: Path) -> None:
+    """AC-04: committed artifacts beside system.toml do not alter loading."""
+    systems_dir = tmp_path / "systems"
+    _write_definition(systems_dir, "auth", _VALID)
+    system_dir = systems_dir / "auth"
+    (system_dir / "graph.json").write_text('{"not": "a fixture"}\n', encoding="utf-8")
+    (system_dir / "graph.json.sha256").write_text("0" * 64 + "\n", encoding="ascii")
+
+    assert system.load_systems(systems_dir) == (System(name="auth", files=("src/auth/api.py",)),)
+
+
 # ---------------------------------------------------------------------------
 # AC-03: every invalid shape raises a typed, file-attributed error
 # ---------------------------------------------------------------------------

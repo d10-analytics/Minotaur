@@ -352,7 +352,9 @@ def test_analyze_records_git_snapshot_and_omits_it_for_non_git_root(tmp_path: Pa
     assert "source_control" not in non_git_graph
 
 
-def test_analyze_refreshes_git_snapshot_after_unselected_commit(tmp_path: Path) -> None:
+def test_analyze_skips_after_unselected_commit_and_keeps_original_git_snapshot(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "source"
     selected = _write(root, "selected.py", "value = 1\n")
     unselected = _write(root, "unselected.py", "value = 1\n")
@@ -366,6 +368,9 @@ def test_analyze_refreshes_git_snapshot_after_unselected_commit(tmp_path: Path) 
     first = _run(root, output, selected)
     first_graph = json.loads(output.read_text(encoding="utf-8"))
     first_commit = first_graph["source_control"]["commit"]
+    first_bytes = output.read_bytes()
+    first_sidecar = stamp_path(output).read_bytes()
+    first_mtime = output.stat().st_mtime_ns
 
     unselected.write_text("value = 2\n", encoding="utf-8")
     assert _git(root, "add", "unselected.py").returncode == 0
@@ -377,11 +382,16 @@ def test_analyze_refreshes_git_snapshot_after_unselected_commit(tmp_path: Path) 
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
     assert first_commit != expected_commit
-    assert second_graph["source_control"]["commit"] == expected_commit
-    assert "graph is up to date, skipping analysis" not in second.stderr
+    assert second_graph["source_control"]["commit"] == first_commit
+    assert output.read_bytes() == first_bytes
+    assert stamp_path(output).read_bytes() == first_sidecar
+    assert output.stat().st_mtime_ns == first_mtime
+    assert "graph is up to date, skipping analysis" in second.stderr
 
 
-def test_analyze_refreshes_git_snapshot_after_branch_change(tmp_path: Path) -> None:
+def test_analyze_skips_after_branch_change_and_keeps_original_git_snapshot(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "source"
     selected = _write(root, "selected.py", "value = 1\n")
     assert _git(root, "init").returncode == 0
@@ -394,6 +404,8 @@ def test_analyze_refreshes_git_snapshot_after_branch_change(tmp_path: Path) -> N
     first = _run(root, output, selected)
     first_graph = json.loads(output.read_text(encoding="utf-8"))
     first_bytes = output.read_bytes()
+    first_sidecar = stamp_path(output).read_bytes()
+    first_mtime = output.stat().st_mtime_ns
     original_branch = first_graph["source_control"]["branch"]
 
     assert _git(root, "switch", "-c", "alternate").returncode == 0
@@ -403,9 +415,102 @@ def test_analyze_refreshes_git_snapshot_after_branch_change(tmp_path: Path) -> N
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
     assert original_branch != "alternate"
-    assert output.read_bytes() != first_bytes
-    assert second_graph["source_control"]["branch"] == "alternate"
-    assert "graph is up to date, skipping analysis" not in second.stderr
+    assert output.read_bytes() == first_bytes
+    assert stamp_path(output).read_bytes() == first_sidecar
+    assert output.stat().st_mtime_ns == first_mtime
+    assert second_graph["source_control"]["branch"] == original_branch
+    assert "graph is up to date, skipping analysis" in second.stderr
+
+
+def test_analyze_refreshes_git_snapshot_after_selected_content_change(tmp_path: Path) -> None:
+    root = _config_repo(tmp_path, "source")
+    selected = _write(root, "selected.py", "value = 1\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "graph.json"\ntargets = ["selected.py"]\n',
+    )
+    assert _git(root, "add", "selected.py", ".minotaur.toml").returncode == 0
+    assert _git(root, "commit", "-m", "initial").returncode == 0
+
+    first = _run_in(root, "analyze")
+    first_graph = json.loads((root / "graph.json").read_text(encoding="utf-8"))
+    first_commit = first_graph["source_control"]["commit"]
+    selected.write_text("value = 2\n", encoding="utf-8")
+    assert _git(root, "add", "selected.py").returncode == 0
+    assert _git(root, "commit", "-m", "selected change").returncode == 0
+    expected_commit = _git(root, "rev-parse", "HEAD").stdout.strip()
+
+    changed = _run_in(root, "analyze")
+    changed_graph = json.loads((root / "graph.json").read_text(encoding="utf-8"))
+
+    assert first.returncode == 0, first.stderr
+    assert changed.returncode == 0, changed.stderr
+    assert first_commit != expected_commit
+    assert changed_graph["source_control"]["commit"] == expected_commit
+    assert "graph is up to date, skipping analysis" not in changed.stderr
+
+
+def test_analyze_force_refreshes_git_snapshot(tmp_path: Path) -> None:
+    root = _config_repo(tmp_path, "source")
+    selected = _write(root, "selected.py", "value = 1\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "graph.json"\ntargets = ["selected.py"]\n',
+    )
+    assert _git(root, "add", "selected.py", ".minotaur.toml").returncode == 0
+    assert _git(root, "commit", "-m", "initial").returncode == 0
+    first = _run_in(root, "analyze")
+    first_bytes = (root / "graph.json").read_bytes()
+    first_commit = json.loads(first_bytes)["source_control"]["commit"]
+
+    selected.write_text("value = 2\n", encoding="utf-8")
+    assert _git(root, "add", "selected.py").returncode == 0
+    assert _git(root, "commit", "-m", "force source change").returncode == 0
+    expected_commit = _git(root, "rev-parse", "HEAD").stdout.strip()
+    forced = _run_in(root, "analyze", "--force")
+    forced_graph = json.loads((root / "graph.json").read_text(encoding="utf-8"))
+
+    assert first.returncode == 0, first.stderr
+    assert forced.returncode == 0, forced.stderr
+    assert first_commit != expected_commit
+    assert forced_graph["source_control"]["commit"] == expected_commit
+    assert (root / "graph.json").read_bytes() != first_bytes
+
+
+def test_analyze_clean_skip_runs_no_git_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    selected = _write(root, "selected.py", "value = 1\n")
+    output = tmp_path / "graph.json"
+    config = _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "../graph.json"\ntargets = ["selected.py"]\n',
+    )
+    assert _run(root, output, selected).returncode == 0
+
+    calls: list[object] = []
+
+    def fail_probe(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        raise AssertionError("clean analyze skip must not probe Git")
+
+    monkeypatch.setattr(cli.subprocess, "run", fail_probe)
+    status = cli.main(
+        [
+            "analyze",
+            "--config",
+            str(config),
+            "--root",
+            str(root),
+            "--output",
+            str(output),
+            str(selected),
+        ]
+    )
+
+    assert status == 0
+    assert calls == []
 
 
 def test_analyze_ignores_git_probe_failures(
@@ -1225,6 +1330,131 @@ def _run_in(cwd: Path, *argv: str) -> subprocess.CompletedProcess[str]:
 
 def _file_paths(graph: dict[str, object]) -> set[str]:
     return {node["path"] for node in graph["nodes"] if node["node_class"] == "file"}
+
+
+def _scope_project(tmp_path: Path, *, files: str = "src/auth/api.py") -> Path:
+    root = _config_repo(tmp_path, "scope-project")
+    _write(root, "src/auth/api.py", "from external import helper\nhelper()\n")
+    _write(root, "src/other.py", "def other():\n    return 1\n")
+    systems = root / "docs" / "systems" / "auth"
+    systems.mkdir(parents=True)
+    (systems / "system.toml").write_text(
+        'schema_version = 1\nname = "auth"\nfiles = ['
+        + ", ".join(f'"{entry}"' for entry in files.split(","))
+        + "]\n",
+        encoding="utf-8",
+    )
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG
+        + 'root = "."\ngraph = "graph.json"\ntargets = ["src"]\nsystems_dir = "docs/systems"\n',
+    )
+    assert _git(root, "add", ".").returncode == 0
+    assert _git(root, "commit", "-m", "scope fixtures").returncode == 0
+    return root
+
+
+def test_analyze_scope_writes_truthful_schema_graph_and_sidecar(tmp_path: Path) -> None:
+    root = _scope_project(tmp_path)
+    completed = _run_in(root, "analyze", "--scope", "auth")
+    output = root / "docs" / "systems" / "auth" / "graph.json"
+
+    assert completed.returncode == 0, completed.stderr
+    assert output.exists()
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert _file_paths(graph) == {"src/auth/api.py"}
+    unresolved = [node for node in graph["nodes"] if node["node_class"] == "unresolved-reference"]
+    assert unresolved
+    assert all(node["location"]["path"] == "src/auth/api.py" for node in unresolved)
+    assert graph["source_control"]["commit"] == _git(root, "rev-parse", "HEAD").stdout.strip()
+    assert (
+        stamp_path(output).read_text(encoding="ascii").strip()
+        == hashlib.sha256(output.read_bytes()).hexdigest()
+    )
+    loaded = load_graph_file(output)
+    assert loaded.document.to_dict() == graph
+
+
+def test_analyze_scope_has_whole_repo_skip_refresh_and_force_lifecycle(tmp_path: Path) -> None:
+    root = _scope_project(tmp_path)
+    output = root / "docs" / "systems" / "auth" / "graph.json"
+    assert _run_in(root, "analyze", "--scope", "auth").returncode == 0
+    original = output.read_bytes()
+    original_sidecar = stamp_path(output).read_bytes()
+    original_mtime = output.stat().st_mtime_ns
+
+    _write(root, "unselected.py", "value = 2\n")
+    assert _git(root, "add", "unselected.py").returncode == 0
+    assert _git(root, "commit", "-m", "unselected change").returncode == 0
+    skipped = _run_in(root, "analyze", "--scope", "auth")
+    assert skipped.returncode == 0, skipped.stderr
+    assert "graph is up to date, skipping analysis" in skipped.stderr
+    assert output.read_bytes() == original
+    assert stamp_path(output).read_bytes() == original_sidecar
+    assert output.stat().st_mtime_ns == original_mtime
+
+    _write(root, "src/auth/api.py", "from external import helper\nhelper()\nvalue = 3\n")
+    assert _git(root, "add", "src/auth/api.py").returncode == 0
+    assert _git(root, "commit", "-m", "selected change").returncode == 0
+    expected_commit = _git(root, "rev-parse", "HEAD").stdout.strip()
+    refreshed = _run_in(root, "analyze", "--scope", "auth")
+    assert refreshed.returncode == 0, refreshed.stderr
+    assert (
+        json.loads(output.read_text(encoding="utf-8"))["source_control"]["commit"]
+        == expected_commit
+    )
+
+    forced_commit = _git(root, "rev-parse", "HEAD").stdout.strip()
+    forced = _run_in(root, "analyze", "--scope", "auth", "--force")
+    assert forced.returncode == 0, forced.stderr
+    assert (
+        json.loads(output.read_text(encoding="utf-8"))["source_control"]["commit"] == forced_commit
+    )
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (("--scope", "aut"), "unknown system: aut"),
+        (("--scope", "auth", "extra.py"), "--scope cannot be combined with positional targets"),
+        (("--scope", "auth", "--output", "other.json"), "--scope cannot be combined with --output"),
+    ],
+)
+def test_analyze_scope_rejects_unknown_and_conflicting_invocations(
+    tmp_path: Path, args: tuple[str, ...], expected: str
+) -> None:
+    root = _scope_project(tmp_path)
+    completed = _run_in(root, "analyze", *args)
+    assert completed.returncode == 2
+    assert expected in completed.stderr
+
+
+def test_analyze_scope_rejects_duplicate_missing_and_unsupported_declarations(
+    tmp_path: Path,
+) -> None:
+    root = _scope_project(tmp_path, files="src/auth/missing.py")
+    missing = _run_in(root, "analyze", "--scope", "auth")
+    assert missing.returncode == 2
+    assert "target does not exist" in missing.stderr
+
+    second = root / "docs" / "systems" / "second"
+    second.mkdir()
+    (second / "system.toml").write_text(
+        'schema_version = 1\nname = "auth"\nfiles = ["src/other.py"]\n', encoding="utf-8"
+    )
+    duplicate = _run_in(root, "analyze", "--scope", "auth")
+    assert duplicate.returncode == 2
+    assert "duplicate system name: auth" in duplicate.stderr
+
+    (root / "docs" / "systems" / "second" / "system.toml").unlink()
+    (root / "docs" / "systems" / "second").rmdir()
+    (root / "docs" / "systems" / "auth" / "system.toml").write_text(
+        'schema_version = 1\nname = "auth"\nfiles = ["src/notes.txt"]\n', encoding="utf-8"
+    )
+    _write(root, "src/notes.txt", "not source\n")
+    unsupported = _run_in(root, "analyze", "--scope", "auth")
+    assert unsupported.returncode == 2
+    assert "unsupported source file" in unsupported.stderr
 
 
 def test_analyze_from_nested_directory_uses_discovered_config_only(
