@@ -12,8 +12,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from minotaur import git
 from minotaur.config import ConfigError, find_config, resolve_config
-from minotaur.git import read_head_blob, run_git, work_tree_root
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import (
     GraphLoadError,
@@ -412,14 +412,14 @@ def _warn_unresolved_imports(document: GraphDocument, root: Path) -> None:
 
 def _git_source_control(root: Path) -> SourceControl | None:
     """Return the Git snapshot metadata for ``root``, when it is available."""
-    work_tree = run_git(root, ("rev-parse", "--is-inside-work-tree"))
+    work_tree = git.run_git(root, ("rev-parse", "--is-inside-work-tree"))
     if work_tree is None:
         return None
     if work_tree.returncode != 0 or work_tree.stdout.strip() != "true":
         return None
 
-    commit_result = run_git(root, ("rev-parse", "HEAD"))
-    branch_result = run_git(root, ("branch", "--show-current"))
+    commit_result = git.run_git(root, ("rev-parse", "HEAD"))
+    branch_result = git.run_git(root, ("branch", "--show-current"))
     commit = (
         commit_result.stdout.strip()
         if commit_result is not None and commit_result.returncode == 0
@@ -674,7 +674,7 @@ def _committed_graph_path(resolved: Any, scope: System | None) -> Path:
 
 def _load_committed_old(graph_path: Path, *, root: Path, validate: bool) -> LoadedGraph:
     """Load the strict committed graph pair, or the read-only disk fallback."""
-    work_tree = work_tree_root(root)
+    work_tree = git.work_tree_root(root)
     if work_tree is None:
         # Outside Git (or with an unavailable probe), disk is the deliberate
         # fallback. load_graph_file itself only reads; this path never stamps.
@@ -683,11 +683,11 @@ def _load_committed_old(graph_path: Path, *, root: Path, validate: bool) -> Load
         relative = graph_path.resolve().relative_to(work_tree).as_posix()
     except ValueError as error:
         raise ValueError(f"committed graph is outside the Git work tree: {graph_path}") from error
-    content = read_head_blob(work_tree, relative)
+    content = git.read_head_blob(work_tree, relative)
     if content is None:
         raise ValueError(f"committed graph is absent at HEAD: {graph_path}")
     sidecar_relative = f"{relative}.sha256"
-    sidecar = read_head_blob(work_tree, sidecar_relative)
+    sidecar = git.read_head_blob(work_tree, sidecar_relative)
     if sidecar is None:
         raise ValueError(f"committed graph sidecar is absent at HEAD: {graph_path}.sha256")
     return load_graph_blob(content, sidecar, validate=validate)
