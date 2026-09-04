@@ -291,6 +291,7 @@ def test_committed_mismatched_head_sidecar_forces_full_validation(
     assert cli.main(["analyze"]) == 0
     sidecar = stamp_path(graph)
     sidecar.write_text("0" * 64 + "\n", encoding="ascii")
+    committed_bytes = (graph.read_bytes(), sidecar.read_bytes())
     _commit_all(root)
     calls: list[dict[str, object]] = []
     original = loading._validate_wire_shape
@@ -303,6 +304,7 @@ def test_committed_mismatched_head_sidecar_forces_full_validation(
     result = cli.main(["query", "diff"])
     assert result == 0
     assert calls, "mismatched HEAD sidecar must take the full validation path"
+    assert (graph.read_bytes(), sidecar.read_bytes()) == committed_bytes
     assert source.read_text(encoding="utf-8").startswith("def app")
 
 
