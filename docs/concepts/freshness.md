@@ -267,13 +267,16 @@ the graph and records the then-current commit and branch.
 
 ## Snapshot queries and concurrency
 
-`diff` compares two graph documents and does not inspect a source root.
-`context` reads current source and compares the requested file's recorded hash,
-but it does not refresh the graph. Its accepted `--no-refresh` spelling is a
-latent no-op and is pinned as current behavior. There is no concurrency lock
-between freshness detection and answer production or between two refreshers;
-atomic writes prevent torn individual files, but concurrent writers remain
-last-writer-wins.
+Explicit `diff OLD NEW` remains graph-only: it compares two supplied graph
+documents and does not inspect a source root or configuration. Committed-reference
+`diff` reads the committed graph and sidecar from `HEAD`, analyzes
+the current configured selection in memory, and compares the two structures;
+it does not write or stamp a graph or sidecar. `context` reads current source
+and compares the requested file's recorded hash, but it does not refresh the
+graph. Its accepted `--no-refresh` spelling is a latent no-op and is pinned as
+current behavior. There is no concurrency lock between freshness detection
+and answer production or between two refreshers; atomic writes prevent torn
+individual files, but concurrent writers remain last-writer-wins.
 
 ## For agents
 
