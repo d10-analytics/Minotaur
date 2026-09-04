@@ -169,12 +169,14 @@ def test_config_free_and_config_located_diff_help_expose_their_own_grammar(
     with pytest.raises(SystemExit) as free_help:
         cli.main(["query", "diff", "--help"])
     free_output = capsys.readouterr().out
+    free_help_text = " ".join(free_output.split())
     assert free_help.value.code == 0
     assert "OLD NEW" in free_output
     assert "--validate" in free_output
     assert "--scope NAME" not in free_output
     assert "--config CONFIG" not in free_output
-    assert "1 means structures differ" in free_output
+    assert "1 means structures differ" in free_help_text
+    assert "caller decides the consequence" in free_help_text
 
     configured = tmp_path / "configured"
     configured.mkdir()
@@ -183,13 +185,14 @@ def test_config_free_and_config_located_diff_help_expose_their_own_grammar(
     with pytest.raises(SystemExit) as located_help:
         cli.main(["query", "diff", "--help"])
     located_output = capsys.readouterr().out
+    located_help_text = " ".join(located_output.split())
     assert located_help.value.code == 0
     assert "[OLD] [NEW]" in located_output
     assert "--scope NAME" in located_output
     assert "--config CONFIG" in located_output
-    assert "0 means structures are identical" in located_output
-    assert "1 means structures" in located_output and "differ" in located_output
-    assert "caller decides" in located_output and "consequence" in located_output
+    assert "0 means structures are identical" in located_help_text
+    assert "1 means structures differ" in located_help_text
+    assert "caller decides the consequence" in located_help_text
 
 
 def test_config_free_bare_and_mixed_diff_grammar_is_refused_without_reading_graph(
