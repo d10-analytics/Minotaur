@@ -32,7 +32,6 @@ uses the standard-library ``tomllib`` and the conditional dependency installs
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -316,15 +315,4 @@ def _git_work_tree_root(start: Path) -> Path | None:
     is unavailable or failed"; discovery then continues to the filesystem
     root instead of stopping at an assumed boundary.
     """
-    completed = _run_git(start, ("rev-parse", "--show-toplevel"))
-    if completed is None or completed.returncode != 0:
-        return None
-    top_level = completed.stdout.strip()
-    if not top_level:
-        return None
-    return Path(top_level).resolve()
-
-
-def _run_git(root: Path, arguments: Sequence[str]) -> subprocess.CompletedProcess[str] | None:
-    """Compatibility seam delegating probes to the shared Git owner."""
-    return git.run_git(root, arguments)
+    return git.work_tree_root(start)

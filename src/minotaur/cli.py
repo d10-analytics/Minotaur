@@ -645,18 +645,6 @@ def _diff_output(
     return output, changed
 
 
-def _run_diff(query: argparse.Namespace) -> str:
-    """Run the explicit OLD NEW mode, retaining its load-and-stamp contract."""
-    validate: bool = query.validate
-    old_path, new_path = Path(query.old), Path(query.new)
-    old_loaded = load_graph_file(old_path, validate=validate)
-    _stamp_if_validated(old_path, old_loaded)
-    new_loaded = load_graph_file(new_path, validate=validate)
-    _stamp_if_validated(new_path, new_loaded)
-    output, _ = _diff_output(query, old_loaded.document, new_loaded.document)
-    return output
-
-
 def _run_explicit_diff(query: argparse.Namespace) -> int:
     """Print explicit-mode output and return the structure-based exit code."""
     old_path, new_path = Path(query.old), Path(query.new)
@@ -770,12 +758,11 @@ _GRAPH_QUERIES: Mapping[str, _GraphQuery] = {
     ),
 }
 
-# Snapshot queries intentionally do not call _load_and_refresh_graph: diff
-# compares two graphs as they were recorded, and context needs the current
-# excerpt while its per-file hash check makes a changed source explicit in the
-# result.  They also keep their own JSON envelopes, which are not record lists.
+# The context snapshot query intentionally does not call _load_and_refresh_graph:
+# it needs the current excerpt while its per-file hash check makes a changed
+# source explicit in the result. It keeps its own JSON envelope, which is not a
+# record list.
 _SNAPSHOT_QUERIES: Mapping[str, Callable[[argparse.Namespace], str]] = {
-    "diff": _run_diff,
     "context": _run_context,
 }
 
