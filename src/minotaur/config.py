@@ -37,6 +37,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from minotaur import git
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
@@ -324,14 +326,5 @@ def _git_work_tree_root(start: Path) -> Path | None:
 
 
 def _run_git(root: Path, arguments: Sequence[str]) -> subprocess.CompletedProcess[str] | None:
-    """Run one Git probe, treating unavailable or failed commands as unknown."""
-    try:
-        return subprocess.run(
-            ["git", *arguments],
-            cwd=root,
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    """Compatibility seam delegating probes to the shared Git owner."""
+    return git.run_git(root, arguments)

@@ -189,3 +189,26 @@ def load_graph_file(path: Path, *, validate: bool = False) -> LoadedGraph:
         skip_schema = stamp == digest
 
     return load_graph_bytes(data, _skip_schema=skip_schema, _digest=digest)
+
+
+def load_graph_blob(
+    content: bytes,
+    sidecar: bytes | None = None,
+    *,
+    validate: bool = False,
+) -> LoadedGraph:
+    """Load graph and optional sidecar bytes without touching the filesystem.
+
+    A sidecar is trusted only when its stripped UTF-8 text exactly equals the
+    SHA-256 digest of *content*. Missing, malformed, or mismatched sidecars
+    take the full validation path. This entry is intentionally read-only and
+    never stamps either input.
+    """
+    digest = graph_digest(content)
+    trusted = False
+    if not validate and sidecar is not None:
+        try:
+            trusted = sidecar.decode("utf-8").strip() == digest
+        except UnicodeDecodeError:
+            trusted = False
+    return load_graph_bytes(content, _skip_schema=trusted, _digest=digest)
