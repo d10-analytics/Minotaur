@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from minotaur import cli
@@ -588,11 +589,13 @@ def test_freshness_document_links_and_first_read_anchor_resolve() -> None:
 def test_freshness_documents_content_keyed_reuse_and_last_generation_provenance() -> None:
     """Pin the content-keyed freshness wording across freshness and language guides."""
     repository = Path(__file__).resolve().parents[2]
-    freshness = (repository / "docs/concepts/freshness.md").read_text(encoding="utf-8")
-    python_guide = (repository / "docs/guides/analyze-python.md").read_text(encoding="utf-8")
-    javascript_guide = (repository / "docs/guides/analyze-javascript.md").read_text(
-        encoding="utf-8"
-    )
+
+    def collapsed(path: Path) -> str:
+        return re.sub(r"\s+", " ", path.read_text(encoding="utf-8")).strip()
+
+    freshness = collapsed(repository / "docs/concepts/freshness.md")
+    python_guide = collapsed(repository / "docs/guides/analyze-python.md")
+    javascript_guide = collapsed(repository / "docs/guides/analyze-javascript.md")
 
     assert "source content is clean" in freshness
     assert "requested target selection equals the graph's recorded selection" in freshness
