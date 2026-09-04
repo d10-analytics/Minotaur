@@ -53,6 +53,12 @@ as provenance. For example,
 source evidence that later queries can navigate without importing or executing
 the project.
 
+For committed graphs, regenerate the whole-repository or selected system
+snapshot when analyzed content or selection changes, review the graph and its
+sidecar alongside the source change, and commit them together. When content is
+unchanged, analysis keeps the existing bytes and last-generation provenance;
+the recorded stamp may therefore lag the current `HEAD`.
+
 The query family turns that graph into practical navigation and review tools:
 `definitions` finds where a name is defined, `callers` traces who calls it,
 `impact` shows what depends on it if it changes, and `unreferenced` produces a
