@@ -25,6 +25,23 @@ def test_query_subcommand_help_exits_zero(capsys: pytest.CaptureFixture[str]) ->
     assert "usage: minotaur query callers" in out
 
 
+def test_systems_help_and_parser_route_have_no_positional_system_name(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["query", "systems", "--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "usage: minotaur query systems" in out
+    assert "SYSTEM_NAME" not in out
+
+    arguments = cli._parser().parse_args(
+        ["query", "systems", "--graph", "graph.json", "--root", "."]
+    )
+    assert arguments.name == "systems"
+    assert not hasattr(arguments, "system_name")
+
+
 def test_query_subcommand_usage_error_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
     """A genuine usage error (missing required arguments) still exits 2."""
     with pytest.raises(SystemExit) as excinfo:
