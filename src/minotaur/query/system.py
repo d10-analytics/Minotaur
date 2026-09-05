@@ -676,6 +676,16 @@ class ReportingSnapshot:
         self, query: Literal["system-deps"], system_name: str, details: bool = False
     ) -> SystemReport[SystemDepsRecord]: ...
 
+    @overload
+    def report(
+        self,
+        query: Literal["surface", "consumers", "system-deps"],
+        system_name: str,
+        details: bool = False,
+    ) -> (
+        SystemReport[SurfaceRecord] | SystemReport[ConsumersRecord] | SystemReport[SystemDepsRecord]
+    ): ...
+
     def report(self, query: str, system_name: str, details: bool = False) -> SystemReport[Any]:
         if query not in _QUERY_NAMES:
             raise ValueError(f"unknown system query: {query}")
