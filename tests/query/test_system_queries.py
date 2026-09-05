@@ -1053,7 +1053,7 @@ def test_reporting_snapshot_reuses_index_and_records_unavailable_selection() -> 
 
 
 def test_reporting_snapshot_direct_query_variants_and_invocation_errors() -> None:
-    """AC-01/D-08: direct consumers receive typed immutable reports.
+    """Direct consumers receive typed immutable reports.
 
     This intentionally bypasses CLI rendering so a renderer cannot mask a
     missing query variant, details shape, or invocation validation rule.
