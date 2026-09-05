@@ -47,14 +47,14 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar, overload
 
-from minotaur.graph_model.node import Node
 from minotaur.graph_model._parsing import _jcs_serialize
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import Location
+from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
-from minotaur.query.index import GraphIndex
 from minotaur.query.freshness import recorded_selection_view
-from minotaur.system import EndpointKind, System, classify_endpoint, system_for_file
+from minotaur.query.index import GraphIndex
+from minotaur.system import EndpointKind, System, classify_endpoint, resolve_system, system_for_file
 
 _CALLS = RelationshipKind.CALLS.value
 _REFERENCES = RelationshipKind.REFERENCES.value
@@ -426,9 +426,7 @@ class SystemCoverage:
             "selection": _thaw_json(self.selection),
             "graph_files": _thaw_json(self.graph_files),
             "declared_files": _thaw_json(self.declared_files),
-            "recorded_unresolved_references": _thaw_json(
-                self.recorded_unresolved_references
-            ),
+            "recorded_unresolved_references": _thaw_json(self.recorded_unresolved_references),
             "source_diagnostics": _thaw_json(self.source_diagnostics),
         }
 
@@ -659,9 +657,7 @@ class ReportingSnapshot:
         object.__setattr__(self, "index", GraphIndex.build(document))
 
     @classmethod
-    def prepare(
-        cls, document: GraphDocument, systems: Sequence[System]
-    ) -> "ReportingSnapshot":
+    def prepare(cls, document: GraphDocument, systems: Sequence[System]) -> ReportingSnapshot:
         return cls(document, systems)
 
     @overload
@@ -679,9 +675,7 @@ class ReportingSnapshot:
         self, query: Literal["system-deps"], system_name: str, details: bool = False
     ) -> SystemReport[SystemDepsRecord]: ...
 
-    def report(
-        self, query: str, system_name: str, details: bool = False
-    ) -> SystemReport[Any]:
+    def report(self, query: str, system_name: str, details: bool = False) -> SystemReport[Any]:
         if query not in _QUERY_NAMES:
             raise ValueError(f"unknown system query: {query}")
         target = resolve_system(self.systems, system_name)
@@ -692,9 +686,7 @@ class ReportingSnapshot:
         else:
             records = system_deps(self.systems, self.index, target)
         coverage = self._coverage(target)
-        relationship_details = (
-            self._relationships(query, target) if details else None
-        )
+        relationship_details = self._relationships(query, target) if details else None
         return SystemReport(
             query=query,
             system_name=target.name,
@@ -742,9 +734,7 @@ class ReportingSnapshot:
             source_diagnostics={"status": "unavailable"},
         )
 
-    def _relationships(
-        self, query: str, target: System
-    ) -> tuple[RelationshipDetail, ...]:
+    def _relationships(self, query: str, target: System) -> tuple[RelationshipDetail, ...]:
         selected: list[tuple[object, Node, Node]] = []
         kinds = _SURFACE_KINDS if query == "surface" else _BOUNDARY_KINDS
         for kind in kinds:
@@ -777,7 +767,9 @@ def _tag(value: object) -> dict[str, object]:
 
 
 def _optional_mapping(value: Mapping[str, object] | None) -> dict[str, object]:
-    return {"status": "recorded", "value": _thaw_json(_freeze_json(value or {}))} if value is not None else {"status": "unavailable"}
+    if value is None:
+        return {"status": "unavailable"}
+    return {"status": "recorded", "value": _thaw_json(_freeze_json(value))}
 
 
 def _location_dict(location: Location, encoding: str, *, status: bool) -> dict[str, object]:
@@ -882,13 +874,16 @@ def _evidence_detail(document: GraphDocument, evidence: Any) -> EvidenceDetail:
 def _evidence_sort_key(evidence: Any) -> bytes:
     raw = evidence.to_dict()
     if "locations" in raw:
-        raw["locations"] = sorted(raw["locations"], key=lambda item: (
-            item["path"],
-            item["range"]["start"]["line"],
-            item["range"]["start"]["character"],
-            item["range"]["end"]["line"],
-            item["range"]["end"]["character"],
-        ))
+        raw["locations"] = sorted(
+            raw["locations"],
+            key=lambda item: (
+                item["path"],
+                item["range"]["start"]["line"],
+                item["range"]["start"]["character"],
+                item["range"]["end"]["line"],
+                item["range"]["end"]["character"],
+            ),
+        )
     return _jcs_serialize(raw)
 
 
