@@ -840,13 +840,13 @@ def _run_graph_query(query: argparse.Namespace) -> int:
     if query.name == "systems":
         snapshot = system_query.ReportingSnapshot.prepare(graph.document, query.systems)
         _report_absent_files(snapshot.systems, snapshot.index)
-        report = snapshot.all_systems_report(details=query.details)
+        overview_report = snapshot.all_systems_report(details=query.details)
         invocation = system_query.QueryInvocation(
             refreshed=graph.refreshed,
             stale=graph.drift.paths,
             source_diagnostics=len(graph.diagnostics) if graph.refreshed else None,
         )
-        composed = system_query.compose_system_query(report, invocation)
+        composed = system_query.compose_system_query(overview_report, invocation)
         output = render_systems_json(composed) if query.json else render_systems_text(composed)
         print(output, end="")
         return 1 if graph.diagnostics else 0
