@@ -1558,3 +1558,6 @@ def test_reporting_snapshot_connections_preserve_sites_and_group_kinds() -> None
         "status": "recorded",
         "value": {"trace": {"source": "fixture"}},
     }
+    detached = report.to_dict()
+    detached["connections"][0]["relationships"][0]["evidence"][0]["sites"].clear()
+    assert len(report.connections[0].relationships[0].evidence[0].sites) == 2
