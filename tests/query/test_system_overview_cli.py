@@ -329,3 +329,36 @@ def test_systems_config_discovery_matches_explicit_graph_and_root(
     discovered_out, discovered_err = discovered.out, discovered.err
     assert discovered_out == explicit_out
     assert discovered_err == explicit_err
+
+
+def test_systems_details_json_routes_named_boundary_connections(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path)
+    _write(root, "orders/mod.py", "def order():\n    return 1\n")
+    _write(
+        root,
+        "use.py",
+        "from orders.mod import order\n\ndef caller():\n    return order()\n",
+    )
+    _declare(root, "orders", ["orders/mod.py"])
+    graph = root / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(graph), str(root)]) == 0
+
+    status, out, err = _systems(capsys, root, graph, "--details", "--json")
+
+    assert status == 0
+    assert err == ""
+    connections = json.loads(out)["connections"]
+    assert len(connections) == 1
+    assert connections[0]["source_category"] == "no_system"
+    assert connections[0]["target_category"] == "system: orders"
+    assert connections[0]["kinds"] == ["calls", "imports"]
+    assert len(connections[0]["relationships"]) == 2
+    assert {
+        "source",
+        "target",
+        "kind",
+        "relationship_extensions",
+        "evidence",
+    } == set(connections[0]["relationships"][0])
