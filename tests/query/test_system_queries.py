@@ -1042,9 +1042,99 @@ def test_reporting_snapshot_reuses_index_and_records_unavailable_selection() -> 
     snapshot = system_query.ReportingSnapshot.prepare(document, (System("s", ("target.py",)),))
     first = snapshot.report("consumers", "s")
     second = snapshot.report("system-deps", "s")
+    detailed_empty = snapshot.report("consumers", "s", details=True)
     assert first.coverage.selection == {"status": "unavailable"}
     assert first.relationships is None
+    assert detailed_empty.relationships == ()
     assert snapshot.index is snapshot.index
     assert second.coverage.source_diagnostics == {"status": "unavailable"}
     with pytest.raises(ValueError, match="unknown system query"):
         snapshot.report("other", "s")
+
+
+def test_reporting_snapshot_direct_query_variants_and_invocation_errors() -> None:
+    """AC-01/D-08: direct consumers receive typed immutable reports.
+
+    This intentionally bypasses CLI rendering so a renderer cannot mask a
+    missing query variant, details shape, or invocation validation rule.
+    """
+    target_node = _projection_symbol("target", "target.py", 0)
+    source_node = _projection_symbol("caller", "use.py", 0)
+    dependency_node = _projection_symbol("dependency", "other.py", 0)
+    target_file = _projection_file("target.py")
+    source_file = _projection_file("use.py")
+    dependency_file = _projection_file("other.py")
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(
+            target_node,
+            source_node,
+            dependency_node,
+            target_file,
+            source_file,
+            dependency_file,
+        ),
+        relationships=(
+            Relationship(
+                source=source_node.id,
+                target=target_node.id,
+                kind="calls",
+                evidence=(evidence,),
+            ),
+            Relationship(
+                source=target_node.id,
+                target=dependency_node.id,
+                kind="references",
+                evidence=(evidence,),
+            ),
+        ),
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(document, [System("s", ("target.py",))])
+
+    surface = snapshot.report("surface", "s")
+    consumers = snapshot.report("consumers", "s")
+    dependencies = snapshot.report("system-deps", "s")
+    assert isinstance(surface.results, tuple)
+    assert isinstance(surface.results[0], system_query.SurfaceRecord)
+    assert isinstance(consumers.results, tuple)
+    assert isinstance(consumers.results[0], system_query.ConsumersRecord)
+    assert isinstance(dependencies.results, tuple)
+    assert isinstance(dependencies.results[0], system_query.SystemDepsRecord)
+    assert surface.relationships is None
+    surface_details = snapshot.report("surface", "s", details=True)
+    assert isinstance(surface_details.relationships, tuple)
+    assert len(surface_details.relationships) == 1
+
+    with pytest.raises(ValueError, match="unknown system query"):
+        snapshot.report("unknown", "s")
+    with pytest.raises(ValueError, match="unknown system"):
+        snapshot.report("surface", "missing")
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        system_query.QueryInvocation(True, (), -1)
+    with pytest.raises(ValueError, match="non-negative integer"):
+        system_query.QueryInvocation(True, (), True)
+    with pytest.raises(ValueError, match="disagree"):
+        system_query.QueryInvocation(False, (), 0)
+    with pytest.raises(ValueError, match="disagree"):
+        system_query.QueryInvocation(True, (), None)
+
+    invocation = system_query.QueryInvocation(True, ("z.py", "a.py"), 0)
+    composed = system_query.compose_system_query(surface, invocation)
+    assert composed.report is surface
+    assert composed.invocation.stale == ("a.py", "z.py")
+    assert composed.to_dict()["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "count": 0,
+    }
+
+    observed = dataclasses.replace(
+        surface.coverage,
+        source_diagnostics={"status": "observed_on_refresh", "count": 1},
+    )
+    observed_report = dataclasses.replace(surface, coverage=observed)
+    with pytest.raises(ValueError, match="snapshot report source diagnostics"):
+        system_query.compose_system_query(
+            observed_report, system_query.QueryInvocation(False, (), None)
+        )
