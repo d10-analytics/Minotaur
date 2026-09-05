@@ -282,7 +282,6 @@ def test_systems_cli_distinguishes_empty_tree_zero_node_and_symbol_only_graphs(
             GraphDocument(
                 coordinate_encoding=CoordinateEncoding.UTF_8,
                 nodes=(symbol,),
-                extensions={"minotaur": {"selection": ["."]}},
             )
         )
     )
@@ -290,6 +289,7 @@ def test_systems_cli_distinguishes_empty_tree_zero_node_and_symbol_only_graphs(
     assert status == 0
     assert err == ""
     symbol_payload = json.loads(out)
+    assert symbol_payload["coverage"]["selection"] == {"status": "unavailable"}
     assert symbol_payload["results"][0]["declared_files"]["represented"] == 1
     assert symbol_payload["coverage"]["graph_files"]["count"] == 0
     assert symbol_payload["coverage"]["unassigned_files"] == {
