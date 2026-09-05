@@ -70,6 +70,7 @@ def test_systems_compact_json_has_exact_inventory_and_coverage_shape(
     assert status == 0
     assert err == "minotaur: warning: orders/missing.py (listed by system orders)\n"
     payload = json.loads(out)
+    assert out == json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
     assert set(payload) == {"query", "refreshed", "stale", "results", "coverage"}
     assert payload["query"] == "systems"
     assert payload["refreshed"] is False
@@ -205,6 +206,7 @@ def test_systems_refresh_and_no_refresh_report_distinct_diagnostics(
     assert "minotaur: stale: orders/mod.py" in err
     assert "refreshed graph" not in err
     assert json.loads(out)["coverage"]["source_diagnostics"] == {"status": "unavailable"}
+    assert graph.read_bytes() == original_graph
 
 
 def test_systems_cli_distinguishes_empty_tree_zero_node_and_symbol_only_graphs(
