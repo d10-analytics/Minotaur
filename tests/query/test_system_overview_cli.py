@@ -217,6 +217,52 @@ def test_systems_refresh_and_no_refresh_report_distinct_diagnostics(
     assert graph.read_bytes() == original_graph
 
 
+def test_systems_refresh_reports_source_diagnostics_in_overview_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, graph = _tree(tmp_path)
+    _write(root, "orders/mod.py", "def order(:\n    return 2\n")
+
+    status, out, err = _systems(capsys, root, graph, "--json")
+
+    assert status == 1
+    payload = json.loads(out)
+    assert payload["refreshed"] is True
+    assert payload["stale"] == ["orders/mod.py"]
+    assert payload["coverage"]["source_diagnostics"]["status"] == "observed_on_refresh"
+    assert payload["coverage"]["source_diagnostics"]["count"] > 0
+    assert "minotaur: refreshed graph" in err
+    assert "minotaur: stale: orders/mod.py" in err
+
+
+def test_systems_empty_tree_details_text_is_complete_and_canonical(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path, "empty-details")
+    _write(root, "loose.py", "value = 1\n")
+    (root / "docs" / "systems").mkdir(parents=True)
+    graph = root / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(graph), str(root)]) == 0
+    capsys.readouterr()
+
+    status, out, err = _systems(capsys, root, graph, "--details")
+
+    assert status == 0
+    assert err == ""
+    assert out == (
+        'coverage {"declared_files":{"absent":0,"represented":0,"scope":"all_declared_'
+        'system_files","total":0},"graph_files":{"count":1,"scope":"final_graph_file_nodes"},'
+        '"recorded_unresolved_references":{"count":0,"scope":"all_declared_system_files"},'
+        '"selection":{"status":"recorded","targets":["."]},'
+        '"source_diagnostics":{"status":"unavailable"},'
+        '"unassigned_files":{"count":1,"paths":["loose.py"],'
+        '"scope":"final_graph_file_node_derived_paths"}}\n'
+        "no declared systems\n"
+        "declared_files {}\n"
+        "connections []\n"
+    )
+
+
 def test_systems_cli_distinguishes_empty_tree_zero_node_and_symbol_only_graphs(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

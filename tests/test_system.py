@@ -11,6 +11,7 @@ behavior it pins is removed.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -412,6 +413,49 @@ def test_every_invalid_definition_raises_a_typed_error_naming_the_file(
     text = str(error.value)
     assert re.search(re.escape(message), text)
     assert str(definition) in text
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "line\nbreak",
+        "carriage\rreturn",
+        "tab\tseparated",
+        "terminal\x1b[31mcontrol",
+        "delete\x7fcontrol",
+    ],
+)
+def test_system_name_rejects_unicode_control_characters_at_loader_boundary(
+    tmp_path: Path, name: str
+) -> None:
+    """Every Cc character is rejected before a system can be produced."""
+    systems_dir = tmp_path / "systems"
+    definition = _write_definition(
+        systems_dir,
+        "broken",
+        f"schema_version = 1\nname = {json.dumps(name)}\nfiles = [\"src/a.py\"]\n",
+    )
+
+    with pytest.raises(InvalidSystemName) as error:
+        system.load_systems(systems_dir)
+
+    assert str(error.value) == (
+        "system name must not contain Unicode control characters (category Cc) "
+        f"(in {definition})"
+    )
+
+
+@pytest.mark.parametrize("name", ["customer support", "日本語のサービス"])
+def test_system_name_preserves_spaces_and_non_control_unicode(tmp_path: Path, name: str) -> None:
+    systems_dir = tmp_path / "systems"
+    _write_definition(
+        systems_dir,
+        "valid",
+        f"schema_version = 1\nname = {json.dumps(name, ensure_ascii=False)}\n"
+        'files = ["src/a.py"]\n',
+    )
+
+    assert system.load_systems(systems_dir)[0].name == name
 
 
 def test_one_invalid_definition_fails_the_whole_load_before_any_system(
