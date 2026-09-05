@@ -639,6 +639,28 @@ def test_listed_but_absent_files_warn_once_per_file_and_answer_fully(
     )
 
 
+def test_absent_warning_only_names_files_of_selected_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-03: diagnostics are scoped to the requested system, not the tree."""
+    root = _repo(tmp_path)
+    _write(root, "orders/__init__.py", "")
+    _write(root, "orders/mod.py", "def order():\n    pass\n")
+    _write(root, "billing/__init__.py", "")
+    _write(root, "billing/svc.py", "def charge():\n    pass\n")
+    _write(root, "use.py", "from orders.mod import order\n\ndef caller():\n    order()\n")
+    _declare(root, "orders", ["orders/mod.py", "orders/missing.py"])
+    _declare(root, "billing", ["billing/svc.py", "billing/missing.py"])
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    status, out, err = _query(capsys, graph, root, "consumers", "orders")
+    assert status == 0
+    assert out.startswith("coverage ")
+    assert err == "minotaur: warning: orders/missing.py (listed by system orders)\n"
+    assert "billing/missing.py" not in err
+
+
 # ---------------------------------------------------------------------------
 # AC-12: the strict system-tree load runs in _query's system path, before any
 # freshness refresh, on every freshness state; invalid declarations exit 2

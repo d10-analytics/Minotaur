@@ -838,7 +838,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
     # duplicated here previously accepted duplicate labels that the queries
     # then answered with an empty result.
     if query.name in _SYSTEM_QUERIES:
-        _report_absent_files(query.systems, index)
+        _report_absent_files((query.system,), index)
         snapshot = system_query.ReportingSnapshot.prepare(graph.document, query.systems)
         report = snapshot.report(query.name, query.system_name, details=query.details)
         invocation = system_query.QueryInvocation(

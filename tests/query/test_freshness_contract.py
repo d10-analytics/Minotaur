@@ -196,6 +196,66 @@ def test_query_refresh_returns_one_without_reprinting_parse_diagnostic(
     assert "parse-error" not in captured.err
 
 
+def test_system_no_refresh_after_source_deletion_uses_saved_graph_only(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """AC-03/AC-04: deleted stale sources cannot leak into a no-refresh report."""
+    root = tmp_path / "source"
+    source = _write(root, "pkg/mod.py", "def target():\n    return 1\n")
+    _write(root, "use.py", "from pkg.mod import target\n\ndef caller():\n    return target()\n")
+    systems = root / "docs" / "systems" / "orders"
+    systems.mkdir(parents=True)
+    (systems / "system.toml").write_text(
+        'schema_version = 1\nname = "orders"\nfiles = ["pkg/mod.py"]\n',
+        encoding="utf-8",
+    )
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    source.unlink()
+
+    def fail_refresh(*_args, **_kwargs):
+        raise AssertionError("--no-refresh must not analyze or replace the graph")
+
+    monkeypatch.setattr(cli, "_analyze_selection", fail_refresh)
+    real_read_bytes = Path.read_bytes
+    deleted = source.resolve()
+
+    def reject_deleted_source(path: Path) -> bytes:
+        if path.resolve() == deleted:
+            raise AssertionError("--no-refresh must not read the deleted source")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_deleted_source)
+    status = cli.main(
+        [
+            "query",
+            "consumers",
+            "orders",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+            "--no-refresh",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert "minotaur: stale: pkg/mod.py\n" in captured.err
+    assert "refreshed graph" not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["refreshed"] is False
+    assert payload["stale"] == ["pkg/mod.py"]
+    assert payload["coverage"]["declared_files"] == {
+        "scope": "selected_system_declared_files",
+        "total": 1,
+        "represented": 1,
+        "absent": 0,
+    }
+    assert payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
+
+
 def test_graph_without_recorded_selection_refuses_automatic_refresh(tmp_path: Path, capsys) -> None:
     """docs/concepts/freshness.md — Load a graph with no recorded selection and query after source drift."""  # noqa: E501
     root = tmp_path / "source"
