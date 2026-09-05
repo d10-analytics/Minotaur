@@ -692,6 +692,10 @@ class SystemsReport:
     coverage: SystemsCoverage
     connections: tuple[ConnectionRecord, ...] | None = None
 
+    @property
+    def query(self) -> str:
+        return "systems"
+
     def __post_init__(self) -> None:
         if not isinstance(self.results, (list, tuple)) or any(
             not isinstance(item, SystemInventoryRecord) for item in self.results
@@ -722,12 +726,12 @@ class SystemsReport:
 class SystemQueryResult(Generic[RecordT]):
     """The report plus invocation facts, retaining the report object."""
 
-    report: SystemReport[RecordT]
+    report: SystemReport[RecordT] | SystemsReport
     invocation: QueryInvocation
 
     def __post_init__(self) -> None:
-        if not isinstance(self.report, SystemReport):
-            raise ValueError("report must be SystemReport")
+        if not isinstance(self.report, (SystemReport, SystemsReport)):
+            raise ValueError("report must be a system report")
         if not isinstance(self.invocation, QueryInvocation):
             raise ValueError("invocation must be QueryInvocation")
 
@@ -741,17 +745,22 @@ class SystemQueryResult(Generic[RecordT]):
             "stale": list(self.invocation.stale),
             "coverage": coverage,
         }
-        if self.report.relationships is not None:
+        if isinstance(self.report, SystemsReport):
+            if self.report.connections is not None:
+                result["connections"] = [item.to_dict() for item in self.report.connections]
+        elif self.report.relationships is not None:
             result["relationships"] = [item.to_dict() for item in self.report.relationships]
         return result
 
 
 def compose_system_query(
-    report: SystemReport[RecordT], invocation: QueryInvocation
+    report: SystemReport[RecordT] | SystemsReport, invocation: QueryInvocation
 ) -> SystemQueryResult[RecordT]:
     """Compose typed snapshot and invocation facts without reparsing output."""
-    if not isinstance(report, SystemReport) or not isinstance(invocation, QueryInvocation):
-        raise ValueError("compose_system_query requires a SystemReport and QueryInvocation")
+    if not isinstance(report, (SystemReport, SystemsReport)) or not isinstance(
+        invocation, QueryInvocation
+    ):
+        raise ValueError("compose_system_query requires a system report and QueryInvocation")
     if report.coverage.source_diagnostics.get("status") != "unavailable":
         raise ValueError("snapshot report source diagnostics must be unavailable")
     return SystemQueryResult(report=report, invocation=invocation)
