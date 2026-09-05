@@ -710,7 +710,10 @@ class ReportingSnapshot:
         unresolved = sum(
             1
             for node in self.index.unresolved_nodes
-            if node.location is not None and node.location.path in declared
+            if (membership := classify_endpoint(self.systems, node)).kind is EndpointKind.SYSTEM
+            and membership.system is not None
+            and membership.system.name == target.name
+            and membership.file in declared
         )
         return SystemCoverage(
             selection=(
