@@ -1,8 +1,9 @@
 """Committed system definitions: model, strict loader, and membership.
 
 This module owns the committed-declaration contract (D-01, R-01): the
-declared system model — a unique ``name`` plus a deduplicated ``files`` list
-of root-relative individual repository file paths — and the loader that
+declared system model — a unique non-empty ``name`` with no Unicode ``Cc``
+control characters, plus a deduplicated ``files`` list of root-relative
+individual repository file paths — and the loader that
 discovers and strictly validates the committed ``system.toml`` files.
 
 Systems are flat peers under the resolved ``systems_dir`` (D-03).  Only an
@@ -35,6 +36,7 @@ silently dropped.
 from __future__ import annotations
 
 import difflib
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -90,7 +92,7 @@ class MissingField(SystemDefinitionError):
 
 
 class InvalidSystemName(SystemDefinitionError):
-    """``name`` is present but is not a non-empty string."""
+    """``name`` is empty, not a string, or contains a Unicode ``Cc`` character."""
 
 
 class InvalidFileList(SystemDefinitionError):
@@ -346,6 +348,10 @@ def _parse_definition(path: Path) -> System:
         raise MissingField(f"missing required field: name (in {path})")
     if not isinstance(name, str) or not name:
         raise InvalidSystemName(f"system name must be a non-empty string (in {path})")
+    if any(unicodedata.category(character) == "Cc" for character in name):
+        raise InvalidSystemName(
+            f"system name must not contain Unicode control characters (category Cc) (in {path})"
+        )
 
     files_value = raw.get("files")
     if files_value is None:
