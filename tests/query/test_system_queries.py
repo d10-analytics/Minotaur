@@ -1561,3 +1561,56 @@ def test_reporting_snapshot_connections_preserve_sites_and_group_kinds() -> None
     detached = report.to_dict()
     detached["connections"][0]["relationships"][0]["evidence"][0]["sites"].clear()
     assert len(report.connections[0].relationships[0].evidence[0].sites) == 2
+
+
+def test_reporting_snapshot_reassignment_updates_inventory_and_connections_together() -> None:
+    source = _projection_symbol("a.entry", "a.py", 0)
+    loose = _projection_symbol("loose.entry", "loose.py", 0)
+    loose_file = _projection_file("loose.py")
+    relationship = Relationship(
+        source=source.id,
+        target=loose.id,
+        kind="calls",
+        evidence=(Evidence(provenance=Provenance.STATIC_ANALYSIS),),
+    )
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(source, loose, loose_file),
+        relationships=(relationship,),
+    )
+
+    before = system_query.ReportingSnapshot.prepare(
+        document, (System("a", ("a.py",)),)
+    ).all_systems_report(details=True)
+    assert before.to_dict()["results"][0]["declared_files"] == {
+        "absent": 0,
+        "paths": ["a.py"],
+        "represented": 1,
+        "scope": "declared_system_files",
+        "total": 1,
+    }
+    assert before.to_dict()["coverage"]["unassigned_files"] == {
+        "count": 1,
+        "paths": ["loose.py"],
+        "scope": "final_graph_file_node_derived_paths",
+    }
+    assert [(row.source_category, row.target_category) for row in before.connections or ()] == [
+        ("system: a", "no_system")
+    ]
+
+    after = system_query.ReportingSnapshot.prepare(
+        document, (System("a", ("a.py", "loose.py")),)
+    ).all_systems_report(details=True)
+    assert after.to_dict()["results"][0]["declared_files"] == {
+        "absent": 0,
+        "paths": ["a.py", "loose.py"],
+        "represented": 2,
+        "scope": "declared_system_files",
+        "total": 2,
+    }
+    assert after.to_dict()["coverage"]["unassigned_files"] == {
+        "count": 0,
+        "paths": [],
+        "scope": "final_graph_file_node_derived_paths",
+    }
+    assert after.connections == ()
