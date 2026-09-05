@@ -212,14 +212,12 @@ def test_purpose_section_4_describes_a_definition_as_a_computed_scope_only() -> 
     assert "A scope is a lens, not a claim" in text
 
 
-def test_purpose_section_4_time_phases_expectations_and_curated_relationships() -> None:
+def test_purpose_section_4_does_not_promise_numbered_future_packages() -> None:
     text = _collapsed(PURPOSE)
-    assert "**Expectations (03)** — archived/deferred" in text
-    assert "No implementation is planned" in text
-    assert "Curated relationships (04)" in text
-    assert "static analysis cannot see" in text
-    assert "carrying a rule id" in text
-    assert "neither is shipped with v1" in text
+    assert "No separate declared-answer or curated-edge package is part of this contract" in text
+    assert "Expectations (03)" not in text
+    assert "Curated relationships (04)" not in text
+    assert "curated-rule edges carrying a rule id (04)" not in text
 
 
 def test_purpose_never_claims_shipped_v1_expectation_or_curated_behavior() -> None:
@@ -294,6 +292,17 @@ def test_query_reference_documents_system_query_shared_option_behavior() -> None
         "`--no-refresh` and `--json` behave exactly as they do for the other graph queries" in text
     )
     assert "records carry semantic labels and root-relative paths, never node IDs" in text
+    assert "the three system queries also accept `--details`" in text
+    assert "Text output starts with a compact, key-sorted `coverage ` JSON line" in text
+    assert "`relationships` present only for `--details`" in text
+
+
+def test_query_reference_documents_system_coverage_and_exit_semantics() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert "Coverage distinguishes the saved selection, final graph file count" in text
+    assert "an observed refresh with no diagnostics is recorded as count `0`" in text
+    assert "`relationships` text line containing the same deterministic evidence array" in text
+    assert "For system queries, `coverage` is the composed coverage of the final graph" in text
 
 
 def test_query_reference_keeps_the_system_query_model_claims() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +38,35 @@ class Drift:
         return tuple(sorted(set(self.changed) | set(self.missing) | set(self.added)))
 
 
+@dataclass(frozen=True, slots=True)
+class RecordedSelection:
+    """Presence-aware view of the saved source selection.
+
+    ``targets`` intentionally uses the exact filtering and sorting applied by
+    :func:`recorded_selection`.  ``recorded`` distinguishes an explicitly
+    recorded empty list from missing or malformed metadata, which is needed
+    by reporting without changing refresh's refusal policy.
+    """
+
+    recorded: bool
+    targets: tuple[str, ...]
+
+
+def recorded_selection_view(document: GraphDocument) -> RecordedSelection:
+    """Return normalized saved-selection targets together with presence."""
+    extensions = document.extensions or {}
+    minotaur = extensions.get("minotaur", {})
+    if not isinstance(minotaur, Mapping):
+        return RecordedSelection(recorded=False, targets=())
+    selection = minotaur.get("selection")
+    if not isinstance(selection, (list, tuple)):
+        return RecordedSelection(recorded=False, targets=())
+    return RecordedSelection(
+        recorded=True,
+        targets=tuple(sorted(item for item in selection if isinstance(item, str))),
+    )
+
+
 def recorded_selection(document: GraphDocument) -> tuple[str, ...]:
     """Return the root-relative targets recorded by ``analyze``.
 
@@ -44,12 +74,7 @@ def recorded_selection(document: GraphDocument) -> tuple[str, ...]:
     treated as having no recorded targets.  Query callers can then choose an
     explicit policy for such graphs instead of guessing a source tree.
     """
-    extensions = document.extensions or {}
-    minotaur = extensions.get("minotaur", {})
-    selection = minotaur.get("selection", ())
-    if not isinstance(selection, (list, tuple)):
-        return ()
-    return tuple(sorted(item for item in selection if isinstance(item, str)))
+    return recorded_selection_view(document).targets
 
 
 def drift(document: GraphDocument, root: Path) -> Drift:

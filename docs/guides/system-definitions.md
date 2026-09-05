@@ -34,7 +34,7 @@ minotaur query surface orders \
 ```
 
 The three system queries share the graph-query options `--graph`, `--root`,
-`--no-refresh`, and `--json`; run the
+`--no-refresh`, and `--json`, plus the opt-in `--details` evidence view; run the
 [system walkthrough](../../examples/system-walkthrough/) for executed output.
 
 ## Boundary membership
@@ -134,12 +134,24 @@ symbol, the consumer file, or the target category — and preserve call sites
 as payload only. Records are returned in stable sorted order, so
 the same graph and systems always produce the same bytes.
 
-Text is one deterministic line per record. With `--json`, each query returns
-the shared JSON envelope (`query`, `refreshed`, `results`, `stale`) whose
-records carry semantic endpoint labels, root-relative paths, explicit `kind`
-values, and the category spellings above — never node IDs. See
+Text begins with one deterministic `coverage ` line, then the existing summary
+record lines. With `--json`, each query returns the system envelope (`query`,
+`refreshed`, `results`, `stale`, `coverage`) in the shared JSON envelope, whose records carry semantic
+endpoint labels, root-relative paths, explicit `kind` values, and the category
+spellings above — never node IDs. `--details` adds a `relationships` line or
+JSON array with endpoint IDs, locations, provenance, producer/rule tags, and
+all recorded evidence sites; default summaries remain ID-free. See
 [Output and exit status](query-reference.md#output-and-exit-status) in the
 query reference.
+
+Coverage always describes the final graph and selected declaration: saved
+selection targets, all graph file nodes, declared files represented or absent,
+recorded unresolved references in the declared scope, and current refresh
+diagnostics. Clean and stale `--no-refresh` invocations report diagnostic
+history as unavailable; a refresh records zero or more observed diagnostics.
+Coverage limits are status-neutral. Ordinary valid answers, including empty
+ones, exit `0`; a completed refresh with diagnostics exits `1`; invalid input
+or definitions exit `2` before refresh or output.
 
 ## Strict loading and warnings
 

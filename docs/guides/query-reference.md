@@ -31,10 +31,11 @@ queries (`surface`, `consumers`, and `system-deps`) have their own
 ## Common freshness behavior
 
 `callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`,
-and `system-deps` accept the following common options:
+and `system-deps` accept the following common options (the three system
+queries also accept `--details`):
 
 ```text
---graph GRAPH --root ROOT [--no-refresh] [--json]
+--graph GRAPH --root ROOT [--no-refresh] [--json] [--details]
 ```
 
 `--no-refresh` answers from the existing graph and reports drift without
@@ -249,9 +250,12 @@ returned in stable sorted order, so the same graph and systems always produce
 the same bytes.
 
 The system queries run in the shared graph-query loop, so `--no-refresh` and
-`--json` behave exactly as they do for the other graph queries; the JSON
-envelope and records carry semantic labels and root-relative paths, never
-node IDs. Text output:
+`--json` behave exactly as they do for the other graph queries. Their JSON
+envelope is `query`, `refreshed`, `results`, `stale`, and `coverage`, with
+`relationships` present only for `--details`; records carry semantic labels
+and root-relative paths, never node IDs. Text output starts with a compact,
+key-sorted `coverage ` JSON line, followed by the unchanged summary. For
+example, the summary line has this form:
 
 ```text
 shop/checkout.py (no_system)  calls: shop.orders.create_order (shop/orders.py); imports: shop.orders.create_order (shop/orders.py)
@@ -264,6 +268,15 @@ committed definition anywhere fails with a file-attributed error at exit `2`
 before any freshness refresh can start, and a listed file absent from the
 analyzed graph is reported as a `minotaur: warning:` line (one per absent
 file of the queried system) without changing the answer or its exit status.
+
+Coverage distinguishes the saved selection, final graph file count, declared
+files represented or absent in that graph, recorded unresolved references
+within the selected system's declared files, and source diagnostics. Selection
+and diagnostic history use tagged `recorded`/`unavailable` values; an observed
+refresh with no diagnostics is recorded as count `0`. A clean or `--no-refresh`
+answer keeps diagnostic history unavailable. `--details` adds one
+`relationships` text line containing the same deterministic evidence array
+that appears in JSON.
 
 ### Compare snapshots
 
@@ -342,9 +355,11 @@ result with `path`, `lines`, `stale`, and `hash_available`; each line contains
 
 ## Output and exit status
 
-Every query supports `--json` where it is shown above. JSON is deterministic,
-uses the same records as text, and contains no node IDs, SHA-256 node digests,
-or evidence/provenance blocks. Empty result sets are represented by an empty
+Every query supports `--json` where it is shown above. JSON is deterministic.
+Default result records and non-details query payloads contain no node IDs,
+SHA-256 node digests, or evidence/provenance blocks. System-query `--details`
+is the explicit exception: its `relationships` array carries existing node IDs
+and provenance/evidence detail. Empty result sets are represented by an empty
 `results` array (or the corresponding empty diff arrays).
 
 `callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`,
@@ -354,6 +369,9 @@ agent reading only stdout learns what stderr would have told it:
 ```json
 {"query":"definitions","refreshed":true,"results":[],"stale":["src/example.py"]}
 ```
+
+For system queries, `coverage` is the composed coverage of the final graph
+and this invocation; it is not the snapshot's unavailable diagnostic history.
 
 `refreshed` is `true` when this invocation rewrote `GRAPH`, and `stale` lists
 the drifted root-relative paths that caused it — sorted, and reported whether

@@ -42,13 +42,20 @@ the shared envelope from :mod:`minotaur.query.render`.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Generic, Literal, TypeVar, overload
 
+from minotaur.graph_model._parsing import _jcs_serialize
+from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
+from minotaur.graph_model.relationship import Relationship
+from minotaur.query.freshness import recorded_selection_view
 from minotaur.query.index import GraphIndex
-from minotaur.system import EndpointKind, System, classify_endpoint, system_for_file
+from minotaur.system import EndpointKind, System, classify_endpoint, resolve_system, system_for_file
 
 _CALLS = RelationshipKind.CALLS.value
 _REFERENCES = RelationshipKind.REFERENCES.value
@@ -364,3 +371,547 @@ def _render_groups(targets: Iterable[TargetDetail]) -> str:
             entry = f"{entry} ({target.path})"
         groups[target.kind].append(entry)
     return "; ".join(f"{kind}: {', '.join(groups[kind])}" for kind in sorted(groups))
+
+
+# ---------------------------------------------------------------------------
+# Snapshot-bound reporting projection (D-08)
+# ---------------------------------------------------------------------------
+
+_QUERY_NAMES = ("surface", "consumers", "system-deps")
+RecordT = TypeVar("RecordT", SurfaceRecord, ConsumersRecord, SystemDepsRecord)
+
+
+def _freeze_json(value: object) -> object:
+    """Recursively freeze JSON containers held by reporting values."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: object) -> object:
+    """Return fresh mutable JSON containers for a public ``to_dict`` view."""
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class SystemCoverage:
+    """Immutable five-key coverage projection for one prepared system."""
+
+    selection: Mapping[str, object]
+    graph_files: Mapping[str, object]
+    declared_files: Mapping[str, object]
+    recorded_unresolved_references: Mapping[str, object]
+    source_diagnostics: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        for name in (
+            "selection",
+            "graph_files",
+            "declared_files",
+            "recorded_unresolved_references",
+            "source_diagnostics",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{name} must be a mapping")
+            object.__setattr__(self, name, _freeze_json(value))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "selection": _thaw_json(self.selection),
+            "graph_files": _thaw_json(self.graph_files),
+            "declared_files": _thaw_json(self.declared_files),
+            "recorded_unresolved_references": _thaw_json(self.recorded_unresolved_references),
+            "source_diagnostics": _thaw_json(self.source_diagnostics),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EndpointDetail:
+    """Exact semantic and graph identity projection of one endpoint."""
+
+    id: str
+    label: str
+    node_class: str
+    semantic_identity: Mapping[str, object]
+    path: Mapping[str, object]
+    location: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "semantic_identity", _freeze_json(self.semantic_identity))
+        object.__setattr__(self, "path", _freeze_json(self.path))
+        object.__setattr__(self, "location", _freeze_json(self.location))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "node_class": self.node_class,
+            "semantic_identity": _thaw_json(self.semantic_identity),
+            "path": _thaw_json(self.path),
+            "location": _thaw_json(self.location),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceDetail:
+    """One immutable attributed evidence record and all its sites."""
+
+    provenance: str
+    producer: Mapping[str, object]
+    rule: Mapping[str, object]
+    evidence_extensions: Mapping[str, object]
+    sites: tuple[Mapping[str, object], ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "producer", _freeze_json(self.producer))
+        object.__setattr__(self, "rule", _freeze_json(self.rule))
+        object.__setattr__(self, "evidence_extensions", _freeze_json(self.evidence_extensions))
+        object.__setattr__(
+            self,
+            "sites",
+            tuple(_freeze_json(site) for site in self.sites),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "provenance": self.provenance,
+            "producer": _thaw_json(self.producer),
+            "rule": _thaw_json(self.rule),
+            "evidence_extensions": _thaw_json(self.evidence_extensions),
+            "sites": [_thaw_json(site) for site in self.sites],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipDetail:
+    """One qualifying original edge with endpoint and evidence projections."""
+
+    source: EndpointDetail
+    target: EndpointDetail
+    kind: str
+    relationship_extensions: Mapping[str, object]
+    evidence: tuple[EvidenceDetail, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "relationship_extensions", _freeze_json(self.relationship_extensions)
+        )
+        object.__setattr__(self, "evidence", tuple(self.evidence))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source": self.source.to_dict(),
+            "target": self.target.to_dict(),
+            "kind": self.kind,
+            "relationship_extensions": _thaw_json(self.relationship_extensions),
+            "evidence": [item.to_dict() for item in self.evidence],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QueryInvocation:
+    """Immutable freshness facts from one graph query invocation."""
+
+    refreshed: bool
+    stale: tuple[str, ...] = field(default_factory=tuple)
+    source_diagnostics: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.refreshed, bool):
+            raise ValueError("refreshed must be a boolean")
+        if not isinstance(self.stale, (list, tuple)) or any(
+            not isinstance(path, str) for path in self.stale
+        ):
+            raise ValueError("stale must be a sequence of strings")
+        object.__setattr__(self, "stale", tuple(sorted(self.stale)))
+        if self.source_diagnostics is not None and (
+            not isinstance(self.source_diagnostics, int)
+            or isinstance(self.source_diagnostics, bool)
+            or self.source_diagnostics < 0
+        ):
+            raise ValueError("source_diagnostics must be a non-negative integer or None")
+        if self.refreshed != (self.source_diagnostics is not None):
+            raise ValueError("refreshed and source_diagnostics disagree")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "refreshed": self.refreshed,
+            "stale": list(self.stale),
+            "source_diagnostics": (
+                {"status": "observed_on_refresh", "count": self.source_diagnostics}
+                if self.source_diagnostics is not None
+                else {"status": "unavailable"}
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SystemReport(Generic[RecordT]):
+    """Pure report produced from one immutable prepared graph snapshot."""
+
+    query: str
+    system_name: str
+    results: tuple[RecordT, ...]
+    coverage: SystemCoverage
+    relationships: tuple[RelationshipDetail, ...] | None = None
+
+    def __post_init__(self) -> None:
+        expected: type[object]
+        if self.query == "surface":
+            expected = SurfaceRecord
+        elif self.query == "consumers":
+            expected = ConsumersRecord
+        elif self.query == "system-deps":
+            expected = SystemDepsRecord
+        else:
+            raise ValueError(f"unknown system query: {self.query}")
+        if not isinstance(self.results, (list, tuple)) or any(
+            not isinstance(item, expected) for item in self.results
+        ):
+            raise ValueError(f"query/result mismatch for {self.query}")
+        object.__setattr__(self, "results", tuple(self.results))
+        if not isinstance(self.coverage, SystemCoverage):
+            raise ValueError("coverage must be SystemCoverage")
+        if self.relationships is not None:
+            if not isinstance(self.relationships, (list, tuple)) or any(
+                not isinstance(item, RelationshipDetail) for item in self.relationships
+            ):
+                raise ValueError("relationships must be RelationshipDetail values")
+            object.__setattr__(self, "relationships", tuple(self.relationships))
+
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "query": self.query,
+            "system_name": self.system_name,
+            "results": [item.to_dict() for item in self.results],
+            "coverage": self.coverage.to_dict(),
+        }
+        if self.relationships is not None:
+            result["relationships"] = [item.to_dict() for item in self.relationships]
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class SystemQueryResult(Generic[RecordT]):
+    """The report plus invocation facts, retaining the report object."""
+
+    report: SystemReport[RecordT]
+    invocation: QueryInvocation
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.report, SystemReport):
+            raise ValueError("report must be SystemReport")
+        if not isinstance(self.invocation, QueryInvocation):
+            raise ValueError("invocation must be QueryInvocation")
+
+    def to_dict(self) -> dict[str, object]:
+        coverage = self.report.coverage.to_dict()
+        coverage["source_diagnostics"] = self.invocation.to_dict()["source_diagnostics"]
+        result: dict[str, object] = {
+            "query": self.report.query,
+            "refreshed": self.invocation.refreshed,
+            "results": [item.to_dict() for item in self.report.results],
+            "stale": list(self.invocation.stale),
+            "coverage": coverage,
+        }
+        if self.report.relationships is not None:
+            result["relationships"] = [item.to_dict() for item in self.report.relationships]
+        return result
+
+
+def compose_system_query(
+    report: SystemReport[RecordT], invocation: QueryInvocation
+) -> SystemQueryResult[RecordT]:
+    """Compose typed snapshot and invocation facts without reparsing output."""
+    if not isinstance(report, SystemReport) or not isinstance(invocation, QueryInvocation):
+        raise ValueError("compose_system_query requires a SystemReport and QueryInvocation")
+    if report.coverage.source_diagnostics.get("status") != "unavailable":
+        raise ValueError("snapshot report source diagnostics must be unavailable")
+    return SystemQueryResult(report=report, invocation=invocation)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ReportingSnapshot:
+    """Prepared immutable graph index and strict-loaded systems."""
+
+    document: GraphDocument
+    systems: tuple[System, ...]
+    index: GraphIndex
+
+    def __init__(self, document: GraphDocument, systems: Sequence[System]) -> None:
+        if not isinstance(document, GraphDocument):
+            raise ValueError("document must be GraphDocument")
+        if not isinstance(systems, (list, tuple)) or any(
+            not isinstance(system, System) for system in systems
+        ):
+            raise ValueError("systems must be a sequence of System values")
+        copied_systems = tuple(systems)
+        object.__setattr__(self, "document", document)
+        object.__setattr__(self, "systems", copied_systems)
+        object.__setattr__(self, "index", GraphIndex.build(document))
+
+    @classmethod
+    def prepare(cls, document: GraphDocument, systems: Sequence[System]) -> ReportingSnapshot:
+        return cls(document, systems)
+
+    @overload
+    def report(
+        self, query: Literal["surface"], system_name: str, details: bool = False
+    ) -> SystemReport[SurfaceRecord]: ...
+
+    @overload
+    def report(
+        self, query: Literal["consumers"], system_name: str, details: bool = False
+    ) -> SystemReport[ConsumersRecord]: ...
+
+    @overload
+    def report(
+        self, query: Literal["system-deps"], system_name: str, details: bool = False
+    ) -> SystemReport[SystemDepsRecord]: ...
+
+    @overload
+    def report(
+        self,
+        query: Literal["surface", "consumers", "system-deps"],
+        system_name: str,
+        details: bool = False,
+    ) -> (
+        SystemReport[SurfaceRecord] | SystemReport[ConsumersRecord] | SystemReport[SystemDepsRecord]
+    ): ...
+
+    def report(self, query: str, system_name: str, details: bool = False) -> SystemReport[Any]:
+        if query not in _QUERY_NAMES:
+            raise ValueError(f"unknown system query: {query}")
+        target = resolve_system(self.systems, system_name)
+        if query == "surface":
+            records: tuple[Any, ...] = surface(self.systems, self.index, target)
+        elif query == "consumers":
+            records = consumers(self.systems, self.index, target)
+        else:
+            records = system_deps(self.systems, self.index, target)
+        coverage = self._coverage(target)
+        relationship_details = self._relationships(query, target) if details else None
+        return SystemReport(
+            query=query,
+            system_name=target.name,
+            results=records,
+            coverage=coverage,
+            relationships=relationship_details,
+        )
+
+    def _coverage(self, target: System) -> SystemCoverage:
+        selection = recorded_selection_view(self.document)
+        declared = set(target.files)
+        represented = {
+            membership.file
+            for node in self.document.nodes
+            if (membership := classify_endpoint(self.systems, node)).kind is EndpointKind.SYSTEM
+            and membership.system is not None
+            and membership.system.name == target.name
+            and membership.file is not None
+        }
+        unresolved = sum(
+            1
+            for node in self.index.unresolved_nodes
+            if (membership := classify_endpoint(self.systems, node)).kind is EndpointKind.SYSTEM
+            and membership.system is not None
+            and membership.system.name == target.name
+            and membership.file in declared
+        )
+        return SystemCoverage(
+            selection=(
+                {"status": "recorded", "targets": selection.targets}
+                if selection.recorded
+                else {"status": "unavailable"}
+            ),
+            graph_files={
+                "scope": "final_graph_file_nodes",
+                "count": sum(node.node_class.value == "file" for node in self.document.nodes),
+            },
+            declared_files={
+                "scope": "selected_system_declared_files",
+                "total": len(target.files),
+                "represented": len(declared & represented),
+                "absent": len(declared - represented),
+            },
+            recorded_unresolved_references={
+                "scope": "selected_system_declared_files",
+                "count": unresolved,
+            },
+            source_diagnostics={"status": "unavailable"},
+        )
+
+    def _relationships(self, query: str, target: System) -> tuple[RelationshipDetail, ...]:
+        selected: list[tuple[Relationship, Node, Node]] = []
+        kinds = _SURFACE_KINDS if query == "surface" else _BOUNDARY_KINDS
+        for kind in kinds:
+            for relationship in self.index.relationships(kind):
+                source = self.index.nodes.get(relationship.source)
+                destination = self.index.nodes.get(relationship.target)
+                if source is None or destination is None:
+                    continue
+                source_in = _in_scope(self.systems, target, source)
+                destination_in = _in_scope(self.systems, target, destination)
+                if query == "surface":
+                    qualifies = destination_in and not source_in
+                elif query == "consumers":
+                    qualifies = destination_in and not source_in
+                    if qualifies and classify_endpoint(self.systems, source).file is None:
+                        qualifies = False
+                else:
+                    qualifies = source_in and not destination_in
+                if qualifies:
+                    selected.append((relationship, source, destination))
+        selected.sort(key=lambda item: item[0].tuple_key)
+        return tuple(
+            _relationship_detail(self.document, relationship, source, destination)
+            for relationship, source, destination in selected
+        )
+
+
+def _tag(value: object) -> dict[str, object]:
+    return {"status": "recorded", "value": value}
+
+
+def _optional_mapping(value: Mapping[str, object] | None) -> dict[str, object]:
+    if value is None:
+        return {"status": "unavailable"}
+    return {"status": "recorded", "value": _thaw_json(_freeze_json(value))}
+
+
+def _location_dict(location: Location, encoding: str, *, status: bool) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "path": location.path,
+        "coordinate_encoding": encoding,
+        "range": {
+            "start": {
+                "line": location.range.start.line + 1,
+                "column": location.range.start.character + 1,
+            },
+            "end": {
+                "line": location.range.end.line + 1,
+                "column": location.range.end.character + 1,
+            },
+            "end_exclusive": True,
+        },
+    }
+    return {"status": "recorded", **payload} if status else payload
+
+
+def _endpoint_detail(document: GraphDocument, node: Node) -> EndpointDetail:
+    identity: dict[str, object] = {
+        "basis": node.identity.basis.value,
+        "namespace": node.identity.namespace,
+        "upstream_identifier": (
+            _tag(node.identity.upstream_identifier)
+            if node.identity.upstream_identifier is not None
+            else {"status": "unavailable"}
+        ),
+        "resource_key": (
+            _tag(node.identity.resource_key)
+            if node.identity.resource_key is not None
+            else {"status": "unavailable"}
+        ),
+        "reference_text": (
+            _tag(node.reference_text)
+            if node.reference_text is not None
+            else {"status": "unavailable"}
+        ),
+    }
+    location = (
+        _location_dict(node.location, document.coordinate_encoding.value, status=True)
+        if node.location is not None
+        else {"status": "unavailable"}
+    )
+    path = (
+        _tag(node.location.path)
+        if node.location is not None
+        else (_tag(node.path) if node.path is not None else {"status": "unavailable"})
+    )
+    return EndpointDetail(
+        id=node.id,
+        label=node.label,
+        node_class=node.node_class.value,
+        semantic_identity=identity,
+        path=path,
+        location=location,
+    )
+
+
+def _evidence_detail(document: GraphDocument, evidence: Any) -> EvidenceDetail:
+    locations = tuple(sorted(evidence.locations, key=lambda location: location.sort_key))
+    producer = (
+        {
+            "status": "recorded",
+            "name": evidence.producer.name,
+            "version": (
+                _tag(evidence.producer.version)
+                if evidence.producer.version is not None
+                else {"status": "unavailable"}
+            ),
+        }
+        if evidence.producer is not None
+        else {"status": "unavailable"}
+    )
+    rule = (
+        {
+            "status": "recorded",
+            "id": evidence.rule.id,
+            "version": (
+                _tag(evidence.rule.version)
+                if evidence.rule.version is not None
+                else {"status": "unavailable"}
+            ),
+        }
+        if evidence.rule is not None
+        else {"status": "unavailable"}
+    )
+    return EvidenceDetail(
+        provenance=evidence.provenance.value,
+        producer=producer,
+        rule=rule,
+        evidence_extensions=_optional_mapping(evidence.extensions),
+        sites=tuple(
+            _location_dict(location, document.coordinate_encoding.value, status=False)
+            for location in locations
+        ),
+    )
+
+
+def _evidence_sort_key(evidence: Any) -> bytes:
+    raw = evidence.to_dict()
+    if "locations" in raw:
+        raw["locations"] = sorted(
+            raw["locations"],
+            key=lambda item: (
+                item["path"],
+                item["range"]["start"]["line"],
+                item["range"]["start"]["character"],
+                item["range"]["end"]["line"],
+                item["range"]["end"]["character"],
+            ),
+        )
+    return _jcs_serialize(raw)
+
+
+def _relationship_detail(
+    document: GraphDocument, relationship: Relationship, source: Node, target: Node
+) -> RelationshipDetail:
+    evidence = tuple(
+        _evidence_detail(document, item)
+        for item in sorted(relationship.evidence, key=_evidence_sort_key)
+    )
+    return RelationshipDetail(
+        source=_endpoint_detail(document, source),
+        target=_endpoint_detail(document, target),
+        kind=relationship.kind,
+        relationship_extensions=_optional_mapping(relationship.extensions),
+        evidence=evidence,
+    )

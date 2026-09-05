@@ -98,6 +98,7 @@ file that only imports `shop.orders` would expose nothing.
 $ minotaur query surface orders \
     --graph examples/system-walkthrough/minotaur-graph.json \
     --root examples/system-walkthrough --no-refresh
+coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 shop/orders.py  shop.orders.create_order  calls
 ```
 
@@ -109,7 +110,19 @@ internal. The same records as JSON:
 $ minotaur query surface orders \
     --graph examples/system-walkthrough/minotaur-graph.json \
     --root examples/system-walkthrough --no-refresh --json
-{"query":"surface","refreshed":false,"results":[{"category":"system: orders","kinds":["calls"],"path":"shop/orders.py","symbol":"shop.orders.create_order"}],"stale":[]}
+{"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"surface","refreshed":false,"results":[{"category":"system: orders","kinds":["calls"],"path":"shop/orders.py","symbol":"shop.orders.create_order"}],"stale":[]}
+```
+
+Opt in to relationship evidence when an exact graph join and source location
+are needed:
+
+```console
+$ minotaur query surface orders \
+    --graph examples/system-walkthrough/minotaur-graph.json \
+    --root examples/system-walkthrough --no-refresh --details
+coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
+shop/orders.py  shop.orders.create_order  calls
+relationships [{"evidence":[{"evidence_extensions":{"status":"unavailable"},"producer":{"name":"minotaur-python","status":"recorded","version":{"status":"unavailable"}},"provenance":"static-analysis","rule":{"status":"unavailable"},"sites":[{"coordinate_encoding":"utf-8","path":"shop/checkout.py","range":{"end":{"column":25,"line":8},"end_exclusive":true,"start":{"column":13,"line":8}}}]}],"kind":"calls","relationship_extensions":{"status":"unavailable"},"source":{"id":"node:sha256:99b2170760c1979d5601f6da9483153ac2da5ebfc7b071c4ecc53016c2e714b7","label":"shop.checkout.checkout","location":{"coordinate_encoding":"utf-8","path":"shop/checkout.py","range":{"end":{"column":25,"line":9},"end_exclusive":true,"start":{"column":1,"line":7}},"status":"recorded"},"node_class":"symbol","path":{"status":"recorded","value":"shop/checkout.py"},"semantic_identity":{"basis":"source-location","namespace":"minotaur-python","reference_text":{"status":"unavailable"},"resource_key":{"status":"unavailable"},"upstream_identifier":{"status":"unavailable"}}},"target":{"id":"node:sha256:5822107e1c8348278f492acfc50cb897197cd9ea9c52d307cf347ff0b2b0cc69","label":"shop.orders.create_order","location":{"coordinate_encoding":"utf-8","path":"shop/orders.py","range":{"end":{"column":17,"line":10},"end_exclusive":true,"start":{"column":1,"line":7}},"status":"recorded"},"node_class":"symbol","path":{"status":"recorded","value":"shop/orders.py"},"semantic_identity":{"basis":"source-location","namespace":"minotaur-python","reference_text":{"status":"unavailable"},"resource_key":{"status":"unavailable"},"upstream_identifier":{"status":"unavailable"}}}}]
 ```
 
 ## consumers: which outside files use the system
@@ -123,6 +136,7 @@ in-scope targets it reaches:
 $ minotaur query consumers orders \
     --graph examples/system-walkthrough/minotaur-graph.json \
     --root examples/system-walkthrough --no-refresh
+coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 shop/checkout.py (no_system)  calls: shop.orders.create_order (shop/orders.py); imports: shop.orders.create_order (shop/orders.py)
 ```
 
@@ -135,7 +149,7 @@ because linking against the system's module is itself a consumer fact.
 $ minotaur query consumers orders \
     --graph examples/system-walkthrough/minotaur-graph.json \
     --root examples/system-walkthrough --no-refresh --json
-{"query":"consumers","refreshed":false,"results":[{"category":"no_system","file":"shop/checkout.py","kinds":["calls","imports"],"targets":[{"kind":"calls","label":"shop.orders.create_order","path":"shop/orders.py"},{"kind":"imports","label":"shop.orders.create_order","path":"shop/orders.py"}]}],"stale":[]}
+{"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"consumers","refreshed":false,"results":[{"category":"no_system","file":"shop/checkout.py","kinds":["calls","imports"],"targets":[{"kind":"calls","label":"shop.orders.create_order","path":"shop/orders.py"},{"kind":"imports","label":"shop.orders.create_order","path":"shop/orders.py"}]}],"stale":[]}
 ```
 
 Consumers of the billing system show both categories of consumer file: the
@@ -146,6 +160,7 @@ system*:
 $ minotaur query consumers billing \
     --graph examples/system-walkthrough/minotaur-graph.json \
     --root examples/system-walkthrough --no-refresh
+coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 shop/checkout.py (no_system)  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
 shop/orders.py (system: orders)  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
 ```
@@ -162,6 +177,7 @@ subsystem charges orders through billing and appends to the shared ledger:
 $ minotaur query system-deps orders \
     --graph examples/system-walkthrough/minotaur-graph.json \
     --root examples/system-walkthrough --no-refresh
+coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 no_system  calls: shop.ledger.record (shop/ledger.py); imports: shop.ledger.record (shop/ledger.py)
 system: billing  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
 ```
@@ -170,7 +186,7 @@ system: billing  calls: shop.billing.charge (shop/billing.py); imports: shop.bil
 $ minotaur query system-deps orders \
     --graph examples/system-walkthrough/minotaur-graph.json \
     --root examples/system-walkthrough --no-refresh --json
-{"query":"system-deps","refreshed":false,"results":[{"category":"no_system","targets":[{"kind":"calls","label":"shop.ledger.record","path":"shop/ledger.py"},{"kind":"imports","label":"shop.ledger.record","path":"shop/ledger.py"}]},{"category":"system: billing","targets":[{"kind":"calls","label":"shop.billing.charge","path":"shop/billing.py"},{"kind":"imports","label":"shop.billing.charge","path":"shop/billing.py"}]}],"stale":[]}
+{"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"system-deps","refreshed":false,"results":[{"category":"no_system","targets":[{"kind":"calls","label":"shop.ledger.record","path":"shop/ledger.py"},{"kind":"imports","label":"shop.ledger.record","path":"shop/ledger.py"}]},{"category":"system: billing","targets":[{"kind":"calls","label":"shop.billing.charge","path":"shop/billing.py"},{"kind":"imports","label":"shop.billing.charge","path":"shop/billing.py"}]}],"stale":[]}
 ```
 
 No target is silently attributed to a system: an unlisted path-carrying target
@@ -182,6 +198,7 @@ has a single `no_system` row:
 $ minotaur query system-deps billing \
     --graph examples/system-walkthrough/minotaur-graph.json \
     --root examples/system-walkthrough --no-refresh
+coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 no_system  calls: shop.ledger.record (shop/ledger.py); imports: shop.ledger.record (shop/ledger.py)
 ```
 
@@ -189,6 +206,7 @@ no_system  calls: shop.ledger.record (shop/ledger.py); imports: shop.ledger.reco
 $ minotaur query surface billing \
     --graph examples/system-walkthrough/minotaur-graph.json \
     --root examples/system-walkthrough --no-refresh
+coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 shop/billing.py  shop.billing.charge  calls
 ```
 

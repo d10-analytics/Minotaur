@@ -7,8 +7,10 @@ import re
 from pathlib import Path
 
 from minotaur import cli
+from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.loading import graph_digest, load_graph_file, stamp_path
-from minotaur.query.freshness import drift
+from minotaur.graph_model.provenance import CoordinateEncoding
+from minotaur.query.freshness import drift, recorded_selection, recorded_selection_view
 
 
 def _write(root: Path, relative: str, content: str) -> Path:
@@ -34,6 +36,25 @@ def _analyze(root: Path, output: Path, *targets: Path) -> int:
 
 def _document(output: Path):
     return load_graph_file(output).document
+
+
+def test_recorded_selection_view_preserves_refresh_normalization_and_presence() -> None:
+    cases = (
+        ({"minotaur": {"selection": ["z", 2, "a"]}}, True, ("a", "z")),
+        ({"minotaur": {"selection": ("z", "a")}}, True, ("a", "z")),
+        ({}, False, ()),
+        ({"minotaur": {"selection": "a.py"}}, False, ()),
+        ({"minotaur": {"selection": []}}, True, ()),
+        ({"minotaur": {"selection": [1, None]}}, True, ()),
+    )
+    for extensions, present, targets in cases:
+        document = GraphDocument(
+            coordinate_encoding=CoordinateEncoding.UTF_8,
+            extensions=extensions,
+        )
+        observed = recorded_selection_view(document)
+        assert (observed.recorded, observed.targets) == (present, targets)
+        assert recorded_selection(document) == targets
 
 
 def test_new_python_outside_recorded_target_is_not_detected(tmp_path: Path) -> None:
@@ -173,6 +194,66 @@ def test_query_refresh_returns_one_without_reprinting_parse_diagnostic(
         "minotaur: refreshed graph (1 drifted paths)\nminotaur: stale: broken.py\n"
     )
     assert "parse-error" not in captured.err
+
+
+def test_system_no_refresh_after_source_deletion_uses_saved_graph_only(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """AC-03/AC-04: deleted stale sources cannot leak into a no-refresh report."""
+    root = tmp_path / "source"
+    source = _write(root, "pkg/mod.py", "def target():\n    return 1\n")
+    _write(root, "use.py", "from pkg.mod import target\n\ndef caller():\n    return target()\n")
+    systems = root / "docs" / "systems" / "orders"
+    systems.mkdir(parents=True)
+    (systems / "system.toml").write_text(
+        'schema_version = 1\nname = "orders"\nfiles = ["pkg/mod.py"]\n',
+        encoding="utf-8",
+    )
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    source.unlink()
+
+    def fail_refresh(*_args, **_kwargs):
+        raise AssertionError("--no-refresh must not analyze or replace the graph")
+
+    monkeypatch.setattr(cli, "_analyze_selection", fail_refresh)
+    real_read_bytes = Path.read_bytes
+    deleted = source.resolve()
+
+    def reject_deleted_source(path: Path) -> bytes:
+        if path.resolve() == deleted:
+            raise AssertionError("--no-refresh must not read the deleted source")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_deleted_source)
+    status = cli.main(
+        [
+            "query",
+            "consumers",
+            "orders",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+            "--no-refresh",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert "minotaur: stale: pkg/mod.py\n" in captured.err
+    assert "refreshed graph" not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["refreshed"] is False
+    assert payload["stale"] == ["pkg/mod.py"]
+    assert payload["coverage"]["declared_files"] == {
+        "scope": "selected_system_declared_files",
+        "total": 1,
+        "represented": 1,
+        "absent": 0,
+    }
+    assert payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
 
 
 def test_graph_without_recorded_selection_refuses_automatic_refresh(tmp_path: Path, capsys) -> None:

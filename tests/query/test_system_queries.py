@@ -19,16 +19,48 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.evidence import Evidence, Producer
 from minotaur.graph_model.identity import IdentityBasis, NodeIdentity, compute_node_id
+from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node, NodeClass
-from minotaur.graph_model.provenance import Provenance
+from minotaur.graph_model.provenance import CoordinateEncoding, Provenance
 from minotaur.graph_model.relationship import Relationship
 from minotaur.query import system as system_query
 from minotaur.query.index import GraphIndex
-from minotaur.system import load_systems, resolve_system
+from minotaur.system import System, load_systems, resolve_system
 
 _DOCS = "docs/systems"
+
+
+def _projection_symbol(label: str, path: str, line: int) -> Node:
+    location = Location(path, Range(Position(line, 0), Position(line, 1)))
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, "test")
+    node_id = compute_node_id(
+        identity,
+        node_class=NodeClass.SYMBOL.value,
+        symbol_kind="function",
+        location=location,
+    )
+    return Node(
+        id=node_id,
+        identity=identity,
+        node_class=NodeClass.SYMBOL,
+        label=label,
+        symbol_kind="function",
+        location=location,
+    )
+
+
+def _projection_file(path: str) -> Node:
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, "test")
+    return Node(
+        id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=path),
+        identity=identity,
+        node_class=NodeClass.FILE,
+        label=path,
+        path=path,
+    )
 
 
 def _write(root: Path, relative: str, content: str) -> None:
@@ -93,6 +125,16 @@ def _query(
     return status, captured.out, captured.err
 
 
+def _assert_system_text(out: str, summary: str) -> dict[str, object]:
+    """Assert the coverage prefix while keeping legacy summary bytes pinned."""
+    coverage_line, separator, remainder = out.partition("\n")
+    assert separator == "\n"
+    assert coverage_line.startswith("coverage ")
+    coverage = json.loads(coverage_line.removeprefix("coverage "))
+    assert remainder == summary
+    return coverage
+
+
 # ---------------------------------------------------------------------------
 # AC-05: surface -- one record per exposed in-scope symbol, never internal,
 # same-file, or module-import exposure.
@@ -129,7 +171,8 @@ def test_surface_reports_only_symbols_outside_files_reach(
     status, out, err = _query(capsys, graph, root, "surface", "orders")
     assert status == 0
     assert err == ""
-    assert out == "orders/mod.py  orders.mod.order  calls\n"
+    coverage = _assert_system_text(out, "orders/mod.py  orders.mod.order  calls\n")
+    assert coverage["declared_files"]["total"] == 2
     # The internal cross-file call from audit.py and the module-layer imports
     # from importer_only.py expose nothing (AC-05).
     assert "audit" not in out
@@ -138,19 +181,18 @@ def test_surface_reports_only_symbols_outside_files_reach(
     status, out, _ = _query(capsys, graph, root, "surface", "orders", "--json")
     assert status == 0
     payload = json.loads(out)
-    assert payload == {
-        "query": "surface",
-        "refreshed": False,
-        "results": [
-            {
-                "category": "system: orders",
-                "kinds": ["calls"],
-                "path": "orders/mod.py",
-                "symbol": "orders.mod.order",
-            }
-        ],
-        "stale": [],
-    }
+    assert payload["query"] == "surface"
+    assert payload["refreshed"] is False
+    assert payload["stale"] == []
+    assert payload["results"] == [
+        {
+            "category": "system: orders",
+            "kinds": ["calls"],
+            "path": "orders/mod.py",
+            "symbol": "orders.mod.order",
+        }
+    ]
+    assert payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
 
 
 def test_surface_import_only_consumer_exposes_nothing(
@@ -167,7 +209,7 @@ def test_surface_import_only_consumer_exposes_nothing(
 
     status, out, _ = _query(capsys, graph, root, "surface", "orders")
     assert status == 0
-    assert out == "no exposed symbols\n"
+    _assert_system_text(out, "no exposed symbols\n")
 
     status, out, _ = _query(capsys, graph, root, "surface", "orders", "--json")
     assert status == 0
@@ -207,20 +249,8 @@ def test_surface_one_row_per_symbol_aggregates_reaching_kinds(
             "symbol": "orders.mod.order",
         }
     ]
-    assert (
-        out
-        == json.dumps(
-            {
-                "query": "surface",
-                "refreshed": False,
-                "results": payload["results"],
-                "stale": [],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
+    assert set(payload) == {"query", "refreshed", "results", "stale", "coverage"}
+    assert payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
 
 
 # ---------------------------------------------------------------------------
@@ -259,11 +289,12 @@ def test_consumers_one_row_per_outside_file_with_distinct_kinds(
     status, out, err = _query(capsys, graph, root, "consumers", "orders")
     assert status == 0
     assert err == ""
-    assert out == (
+    _assert_system_text(
+        out,
         "billing/svc.py (system: billing)  calls: orders.mod.order (orders/mod.py); "
         "imports: orders.mod.order (orders/mod.py)\n"
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n"
+        "imports: orders.mod.order (orders/mod.py)\n",
     )
 
     status, out, _ = _query(capsys, graph, root, "consumers", "orders", "--json")
@@ -353,10 +384,11 @@ def test_system_deps_rows_per_category_with_sorted_nested_targets(
     status, out, err = _query(capsys, graph, root, "system-deps", "orders")
     assert status == 0
     assert err == ""
-    assert out == (
+    _assert_system_text(
+        out,
         "no_system  imports: lib.util (lib/util.py); references: lib.util (lib/util.py)\n"
         "system: billing  calls: billing.svc.ship (billing/svc.py); "
-        "imports: billing.svc.ship (billing/svc.py)\n"
+        "imports: billing.svc.ship (billing/svc.py)\n",
     )
 
     status, out, _ = _query(capsys, graph, root, "system-deps", "orders", "--json")
@@ -471,7 +503,7 @@ def test_system_queries_json_is_deterministic_and_hides_graph_internals(
         assert first[1] == second[1]
         assert "node:sha256:" not in first[1]
         payload = json.loads(first[1])
-        assert set(payload) == {"query", "refreshed", "results", "stale"}
+        assert set(payload) == {"query", "refreshed", "results", "stale", "coverage"}
         for record in payload["results"]:
             if name == "surface":
                 assert set(record) == {"category", "kinds", "path", "symbol"}
@@ -558,7 +590,7 @@ def test_defined_system_with_no_consumers_is_a_successful_empty_answer(
     status, out, err = _query(capsys, graph, root, "consumers", "solo")
     assert status == 0
     assert err == ""
-    assert out == "no consumers\n"
+    _assert_system_text(out, "no consumers\n")
 
     status, out, _ = _query(capsys, graph, root, "consumers", "solo", "--json")
     assert status == 0
@@ -587,9 +619,10 @@ def test_listed_but_absent_files_warn_once_per_file_and_answer_fully(
 
     status, out, err = _query(capsys, graph, root, "consumers", "orders")
     assert status == 0
-    assert out == (
+    _assert_system_text(
+        out,
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n"
+        "imports: orders.mod.order (orders/mod.py)\n",
     )
     assert err == (
         "minotaur: warning: orders/missing.py (listed by system orders)\n"
@@ -604,6 +637,28 @@ def test_listed_but_absent_files_warn_once_per_file_and_answer_fully(
         "minotaur: warning: orders/missing.py (listed by system orders)\n"
         "minotaur: warning: orders/notes.md (listed by system orders)\n"
     )
+
+
+def test_absent_warning_only_names_files_of_selected_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-03: diagnostics are scoped to the requested system, not the tree."""
+    root = _repo(tmp_path)
+    _write(root, "orders/__init__.py", "")
+    _write(root, "orders/mod.py", "def order():\n    pass\n")
+    _write(root, "billing/__init__.py", "")
+    _write(root, "billing/svc.py", "def charge():\n    pass\n")
+    _write(root, "use.py", "from orders.mod import order\n\ndef caller():\n    order()\n")
+    _declare(root, "orders", ["orders/mod.py", "orders/missing.py"])
+    _declare(root, "billing", ["billing/svc.py", "billing/missing.py"])
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    status, out, err = _query(capsys, graph, root, "consumers", "orders")
+    assert status == 0
+    assert out.startswith("coverage ")
+    assert err == "minotaur: warning: orders/missing.py (listed by system orders)\n"
+    assert "billing/missing.py" not in err
 
 
 # ---------------------------------------------------------------------------
@@ -790,9 +845,10 @@ def test_config_tree_system_query_answers_from_nested_cwd_with_no_flags(
     captured = capsys.readouterr()
     assert status == 0
     assert captured.err == ""
-    assert captured.out == (
+    _assert_system_text(
+        captured.out,
         "mix.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n"
+        "imports: orders.mod.order (orders/mod.py)\n",
     )
     assert (root / "g.json").exists()
 
@@ -817,9 +873,10 @@ def test_config_less_explicit_graph_root_answers_from_default_docs_systems(
     status, out, err = _query(capsys, graph, root, "consumers", "orders")
     assert status == 0
     assert err == ""
-    assert out == (
+    _assert_system_text(
+        out,
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n"
+        "imports: orders.mod.order (orders/mod.py)\n",
     )
 
 
@@ -887,7 +944,7 @@ def test_system_deps_internal_edges_are_never_a_dependency_and_empty_form(
     status, out, err = _query(capsys, graph, root, "system-deps", "solo")
     assert status == 0
     assert err == ""
-    assert out == "no dependencies\n"
+    _assert_system_text(out, "no dependencies\n")
 
     status, out, _ = _query(capsys, graph, root, "system-deps", "solo", "--json")
     assert status == 0
@@ -921,3 +978,276 @@ def test_absent_warning_is_computed_against_the_final_index_after_refresh(
     assert "refreshed graph" in err
     assert "warning:" not in err
     assert "use.py (no_system)" in out
+
+
+def test_system_cli_composes_coverage_and_details_for_each_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-03: all system siblings expose one composed report contract."""
+    root = _repo(tmp_path)
+    _orders_with_consumer(root)
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    for name in ("surface", "consumers", "system-deps"):
+        status, default_out, err = _query(capsys, graph, root, name, "orders", "--json")
+        assert status == 0
+        assert err == ""
+        default_payload = json.loads(default_out)
+        assert set(default_payload) == {"query", "refreshed", "results", "stale", "coverage"}
+        assert "relationships" not in default_payload
+        assert default_payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
+
+        status, details_out, err = _query(
+            capsys, graph, root, name, "orders", "--json", "--details"
+        )
+        assert status == 0
+        assert err == ""
+        details_payload = json.loads(details_out)
+        assert details_payload["coverage"] == default_payload["coverage"]
+        assert isinstance(details_payload["relationships"], list)
+
+        status, details_text, err = _query(capsys, graph, root, name, "orders", "--details")
+        assert status == 0
+        assert err == ""
+        lines = details_text.splitlines()
+        assert json.loads(lines[0].removeprefix("coverage ")) == details_payload["coverage"]
+        relationship_line = next(line for line in lines if line.startswith("relationships "))
+        assert (
+            json.loads(relationship_line.removeprefix("relationships "))
+            == details_payload["relationships"]
+        )
+
+
+def test_system_cli_refresh_composes_zero_and_positive_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-04: refresh diagnostics are taken from the final invocation."""
+    root = _repo(tmp_path)
+    _orders_with_consumer(root)
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    _write(root, "orders/mod.py", "def order():\n    return 2\n")
+    status, out, err = _query(capsys, graph, root, "surface", "orders", "--json")
+    assert status == 0
+    assert "refreshed graph" in err
+    payload = json.loads(out)
+    assert payload["refreshed"] is True
+    assert payload["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "count": 0,
+    }
+
+    _write(root, "broken.py", "def broken(\n")
+    status, out, err = _query(capsys, graph, root, "consumers", "orders", "--json")
+    assert status == 1
+    assert "refreshed graph" in err
+    payload = json.loads(out)
+    assert payload["refreshed"] is True
+    assert payload["coverage"]["source_diagnostics"]["status"] == "observed_on_refresh"
+    assert payload["coverage"]["source_diagnostics"]["count"] > 0
+
+
+def test_system_cli_no_refresh_keeps_saved_coverage_and_unavailable_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-03/AC-04: stale answers remain graph-only when refresh is disabled."""
+    root = _repo(tmp_path)
+    _orders_with_consumer(root)
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+    _write(root, "orders/mod.py", "def order():\n    return 8\n")
+
+    status, out, err = _query(capsys, graph, root, "consumers", "orders", "--json", "--no-refresh")
+    assert status == 0
+    assert "minotaur: stale: orders/mod.py" in err
+    payload = json.loads(out)
+    assert payload["refreshed"] is False
+    assert payload["stale"] == ["orders/mod.py"]
+    assert payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
+
+
+def test_reporting_snapshot_projects_coverage_and_details_from_canonical_owner() -> None:
+    target_node = _projection_symbol("orders.mod.order", "orders/mod.py", 0)
+    source_node = _projection_symbol("use.call", "use.py", 2)
+    target_file = _projection_file("orders/mod.py")
+    source_file = _projection_file("use.py")
+    evidence = Evidence(
+        provenance=Provenance.STATIC_ANALYSIS,
+        producer=Producer("test", "1"),
+        locations=(
+            Location("use.py", Range(Position(4, 2), Position(4, 7))),
+            Location("use.py", Range(Position(1, 0), Position(1, 2))),
+        ),
+        extensions={},
+    )
+    relationship = Relationship(
+        source=source_node.id,
+        target=target_node.id,
+        kind="calls",
+        evidence=(evidence,),
+        extensions={},
+    )
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(target_node, source_node, target_file, source_file),
+        relationships=(relationship,),
+        extensions={"minotaur": {"selection": [".", "orders/mod.py"]}},
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(
+        document, (System("orders", ("orders/mod.py",)),)
+    )
+
+    report = snapshot.report("surface", "orders", details=True)
+    assert isinstance(report, system_query.SystemReport)
+    assert isinstance(report.results[0], system_query.SurfaceRecord)
+    assert report.coverage.to_dict() == {
+        "selection": {"status": "recorded", "targets": [".", "orders/mod.py"]},
+        "graph_files": {"scope": "final_graph_file_nodes", "count": 2},
+        "declared_files": {
+            "scope": "selected_system_declared_files",
+            "total": 1,
+            "represented": 1,
+            "absent": 0,
+        },
+        "recorded_unresolved_references": {
+            "scope": "selected_system_declared_files",
+            "count": 0,
+        },
+        "source_diagnostics": {"status": "unavailable"},
+    }
+    assert report.relationships is not None
+    detail = report.relationships[0].to_dict()
+    assert detail["source"]["id"] == source_node.id
+    assert detail["source"]["node_class"] == "symbol"
+    assert detail["source"]["path"] == {"status": "recorded", "value": "use.py"}
+    assert detail["source"]["location"]["range"] == {
+        "start": {"line": 3, "column": 1},
+        "end": {"line": 3, "column": 2},
+        "end_exclusive": True,
+    }
+    assert detail["relationship_extensions"] == {"status": "recorded", "value": {}}
+    assert detail["evidence"][0]["producer"] == {
+        "status": "recorded",
+        "name": "test",
+        "version": {"status": "recorded", "value": "1"},
+    }
+    assert [site["range"]["start"]["line"] for site in detail["evidence"][0]["sites"]] == [2, 5]
+
+    composed = system_query.compose_system_query(
+        report, system_query.QueryInvocation(False, (), None)
+    )
+    assert composed.report is report
+    payload = composed.to_dict()
+    assert set(payload) == {"query", "refreshed", "results", "stale", "coverage", "relationships"}
+    payload["coverage"]["declared_files"]["total"] = 99
+    assert report.coverage.to_dict()["declared_files"]["total"] == 1
+
+
+def test_reporting_snapshot_reuses_index_and_records_unavailable_selection() -> None:
+    target = _projection_symbol("target", "target.py", 0)
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_16,
+        nodes=(target,),
+        extensions={"minotaur": {"selection": "target.py"}},
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(document, (System("s", ("target.py",)),))
+    first = snapshot.report("consumers", "s")
+    second = snapshot.report("system-deps", "s")
+    detailed_empty = snapshot.report("consumers", "s", details=True)
+    assert first.coverage.selection == {"status": "unavailable"}
+    assert first.relationships is None
+    assert detailed_empty.relationships == ()
+    assert snapshot.index is snapshot.index
+    assert second.coverage.source_diagnostics == {"status": "unavailable"}
+    with pytest.raises(ValueError, match="unknown system query"):
+        snapshot.report("other", "s")
+
+
+def test_reporting_snapshot_direct_query_variants_and_invocation_errors() -> None:
+    """Direct consumers receive typed immutable reports.
+
+    This intentionally bypasses CLI rendering so a renderer cannot mask a
+    missing query variant, details shape, or invocation validation rule.
+    """
+    target_node = _projection_symbol("target", "target.py", 0)
+    source_node = _projection_symbol("caller", "use.py", 0)
+    dependency_node = _projection_symbol("dependency", "other.py", 0)
+    target_file = _projection_file("target.py")
+    source_file = _projection_file("use.py")
+    dependency_file = _projection_file("other.py")
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(
+            target_node,
+            source_node,
+            dependency_node,
+            target_file,
+            source_file,
+            dependency_file,
+        ),
+        relationships=(
+            Relationship(
+                source=source_node.id,
+                target=target_node.id,
+                kind="calls",
+                evidence=(evidence,),
+            ),
+            Relationship(
+                source=target_node.id,
+                target=dependency_node.id,
+                kind="references",
+                evidence=(evidence,),
+            ),
+        ),
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(document, [System("s", ("target.py",))])
+
+    surface = snapshot.report("surface", "s")
+    consumers = snapshot.report("consumers", "s")
+    dependencies = snapshot.report("system-deps", "s")
+    assert isinstance(surface.results, tuple)
+    assert isinstance(surface.results[0], system_query.SurfaceRecord)
+    assert isinstance(consumers.results, tuple)
+    assert isinstance(consumers.results[0], system_query.ConsumersRecord)
+    assert isinstance(dependencies.results, tuple)
+    assert isinstance(dependencies.results[0], system_query.SystemDepsRecord)
+    assert surface.relationships is None
+    surface_details = snapshot.report("surface", "s", details=True)
+    assert isinstance(surface_details.relationships, tuple)
+    assert len(surface_details.relationships) == 1
+
+    with pytest.raises(ValueError, match="unknown system query"):
+        snapshot.report("unknown", "s")
+    with pytest.raises(ValueError, match="unknown system"):
+        snapshot.report("surface", "missing")
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        system_query.QueryInvocation(True, (), -1)
+    with pytest.raises(ValueError, match="non-negative integer"):
+        system_query.QueryInvocation(True, (), True)
+    with pytest.raises(ValueError, match="disagree"):
+        system_query.QueryInvocation(False, (), 0)
+    with pytest.raises(ValueError, match="disagree"):
+        system_query.QueryInvocation(True, (), None)
+
+    invocation = system_query.QueryInvocation(True, ("z.py", "a.py"), 0)
+    composed = system_query.compose_system_query(surface, invocation)
+    assert composed.report is surface
+    assert composed.invocation.stale == ("a.py", "z.py")
+    assert composed.to_dict()["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "count": 0,
+    }
+
+    observed = dataclasses.replace(
+        surface.coverage,
+        source_diagnostics={"status": "observed_on_refresh", "count": 1},
+    )
+    observed_report = dataclasses.replace(surface, coverage=observed)
+    with pytest.raises(ValueError, match="snapshot report source diagnostics"):
+        system_query.compose_system_query(
+            observed_report, system_query.QueryInvocation(False, (), None)
+        )

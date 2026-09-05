@@ -67,13 +67,14 @@ TRANSCRIPTS = _transcripts()
 def test_walkthrough_has_all_expected_console_commands() -> None:
     """Guard the parser itself: a silently empty scan would pass every case."""
     commands = [command for command, _ in TRANSCRIPTS]
-    assert len(commands) == 11
+    assert len(commands) == 12
     assert sum(command.startswith("minotaur analyze ") for command in commands) == 1
     assert sum(command.startswith("minotaur query diff ") for command in commands) == 1
-    assert sum(command.startswith("minotaur query surface ") for command in commands) == 3
+    assert sum(command.startswith("minotaur query surface ") for command in commands) == 4
     assert sum(command.startswith("minotaur query consumers ") for command in commands) == 3
     assert sum(command.startswith("minotaur query system-deps ") for command in commands) == 3
     assert sum(" --json" in command for command in commands) == 3
+    assert sum(" --details" in command for command in commands) == 1
 
 
 @pytest.mark.parametrize(
