@@ -1355,6 +1355,13 @@ def test_reporting_snapshot_all_systems_preserves_file_universes_and_detaches_js
         "loose.py",
         "shared.py",
     ]
+    composed = system_query.compose_system_query(report, system_query.QueryInvocation(True, (), 0))
+    assert composed.to_dict()["query"] == "systems"
+    assert composed.to_dict()["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "count": 0,
+    }
+    assert "connections" in composed.to_dict()
 
     reassigned = system_query.ReportingSnapshot.prepare(
         document,
