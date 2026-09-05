@@ -190,6 +190,39 @@ def test_systems_strict_load_rejects_malformed_declaration_before_refresh(
     assert graph.read_bytes() == original_graph
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "line\nbreak",
+        "carriage\rreturn",
+        "tab\tseparated",
+        "terminal\x1b[31mcontrol",
+        "delete\x7fcontrol",
+    ],
+)
+def test_systems_rejects_control_character_names_before_refresh(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    root, graph = _tree(tmp_path)
+    original_graph = graph.read_bytes()
+    definition = root / "docs" / "systems" / "orders" / "system.toml"
+    definition.write_text(
+        "schema_version = 1\n"
+        f"name = {json.dumps(name)}\n"
+        'files = ["orders/mod.py"]\n',
+        encoding="utf-8",
+    )
+
+    status, out, err = _systems(capsys, root, graph)
+
+    assert status == 2
+    assert out == ""
+    assert "system name must not contain Unicode control characters" in err
+    assert "refreshed graph" not in err
+    assert "minotaur: stale:" not in err
+    assert graph.read_bytes() == original_graph
+
+
 def test_systems_refresh_and_no_refresh_report_distinct_diagnostics(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
