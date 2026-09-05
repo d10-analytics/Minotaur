@@ -181,6 +181,14 @@ def test_systems_strict_load_rejects_malformed_declaration_before_refresh(
     assert "minotaur: stale:" not in err
     assert graph.read_bytes() == original_graph
 
+    status, out, err = _systems(capsys, root, graph, "--no-refresh")
+    assert status == 2
+    assert out == ""
+    assert "unknown system field: unknown" in err
+    assert "refreshed graph" not in err
+    assert "minotaur: stale:" not in err
+    assert graph.read_bytes() == original_graph
+
 
 def test_systems_refresh_and_no_refresh_report_distinct_diagnostics(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
