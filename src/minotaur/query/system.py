@@ -52,6 +52,7 @@ from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
+from minotaur.graph_model.relationship import Relationship
 from minotaur.query.freshness import recorded_selection_view
 from minotaur.query.index import GraphIndex
 from minotaur.system import EndpointKind, System, classify_endpoint, resolve_system, system_for_file
@@ -735,7 +736,7 @@ class ReportingSnapshot:
         )
 
     def _relationships(self, query: str, target: System) -> tuple[RelationshipDetail, ...]:
-        selected: list[tuple[object, Node, Node]] = []
+        selected: list[tuple[Relationship, Node, Node]] = []
         kinds = _SURFACE_KINDS if query == "surface" else _BOUNDARY_KINDS
         for kind in kinds:
             for relationship in self.index.relationships(kind):
@@ -888,7 +889,7 @@ def _evidence_sort_key(evidence: Any) -> bytes:
 
 
 def _relationship_detail(
-    document: GraphDocument, relationship: Any, source: Node, target: Node
+    document: GraphDocument, relationship: Relationship, source: Node, target: Node
 ) -> RelationshipDetail:
     evidence = tuple(
         _evidence_detail(document, item)
