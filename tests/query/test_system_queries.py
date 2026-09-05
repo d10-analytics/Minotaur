@@ -1439,3 +1439,122 @@ def test_reporting_snapshot_all_systems_connections_group_named_boundaries() -> 
         ("system: a", "external"),
         ("system: a", "system: b"),
     ]
+
+
+def test_reporting_snapshot_all_systems_keeps_zero_inventory_and_empty_connections() -> None:
+    document = GraphDocument(coordinate_encoding=CoordinateEncoding.UTF_8)
+    report = system_query.ReportingSnapshot.prepare(
+        document, (System("empty", ("empty.py",)),)
+    ).all_systems_report(details=True)
+
+    assert report.to_dict() == {
+        "query": "systems",
+        "results": [
+            {
+                "name": "empty",
+                "declared_files": {
+                    "absent": 1,
+                    "paths": ["empty.py"],
+                    "represented": 0,
+                    "scope": "declared_system_files",
+                    "total": 1,
+                },
+            }
+        ],
+        "coverage": {
+            "declared_files": {
+                "absent": 1,
+                "represented": 0,
+                "scope": "all_declared_system_files",
+                "total": 1,
+            },
+            "graph_files": {"count": 0, "scope": "final_graph_file_nodes"},
+            "recorded_unresolved_references": {
+                "count": 0,
+                "scope": "all_declared_system_files",
+            },
+            "selection": {"status": "unavailable"},
+            "source_diagnostics": {"status": "unavailable"},
+            "unassigned_files": {
+                "count": 0,
+                "paths": [],
+                "scope": "final_graph_file_node_derived_paths",
+            },
+        },
+        "connections": [],
+    }
+
+
+def test_reporting_snapshot_connections_preserve_sites_and_group_kinds() -> None:
+    source = _projection_symbol("a.entry", "a.py", 0)
+    target = _projection_symbol("loose.entry", "loose.py", 0)
+    first_site = Location("calls.py", Range(Position(1, 2), Position(1, 5)))
+    second_site = Location("calls.py", Range(Position(0, 4), Position(0, 7)))
+    evidence = Evidence(
+        provenance=Provenance.STATIC_ANALYSIS,
+        producer=Producer("analyzer", "1"),
+        locations=(first_site, second_site),
+        extensions={"trace": {"source": "fixture"}},
+    )
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(source, target),
+        relationships=(
+            Relationship(
+                source=source.id,
+                target=target.id,
+                kind="references",
+                evidence=(evidence,),
+                extensions={"edge": {"confidence": 1}},
+            ),
+            Relationship(
+                source=source.id,
+                target=target.id,
+                kind="calls",
+                evidence=(evidence,),
+            ),
+        ),
+    )
+
+    report = system_query.ReportingSnapshot.prepare(
+        document, (System("a", ("a.py",)),)
+    ).all_systems_report(details=True)
+    assert report.connections is not None
+    assert len(report.connections) == 1
+    connection = report.connections[0]
+    assert (connection.source_category, connection.target_category) == (
+        "system: a",
+        "no_system",
+    )
+    assert connection.kinds == ("calls", "references")
+    assert [item.kind for item in connection.relationships] == ["calls", "references"]
+
+    calls, references = connection.relationships
+    assert calls.evidence[0].to_dict()["sites"] == [
+        {
+            "coordinate_encoding": "utf-8",
+            "path": "calls.py",
+            "range": {
+                "end": {"column": 8, "line": 1},
+                "start": {"column": 5, "line": 1},
+                "end_exclusive": True,
+            },
+        },
+        {
+            "coordinate_encoding": "utf-8",
+            "path": "calls.py",
+            "range": {
+                "end": {"column": 6, "line": 2},
+                "start": {"column": 3, "line": 2},
+                "end_exclusive": True,
+            },
+        },
+    ]
+    assert references.relationship_extensions == {
+        "status": "recorded",
+        "value": {"edge": {"confidence": 1}},
+    }
+    assert calls.evidence[0].evidence_extensions == {
+        "status": "recorded",
+        "value": {"trace": {"source": "fixture"}},
+    }
