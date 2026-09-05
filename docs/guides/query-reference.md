@@ -254,7 +254,8 @@ The system queries run in the shared graph-query loop, so `--no-refresh` and
 envelope is `query`, `refreshed`, `results`, `stale`, and `coverage`, with
 `relationships` present only for `--details`; records carry semantic labels
 and root-relative paths, never node IDs. Text output starts with a compact,
-key-sorted `coverage ` JSON line, followed by the unchanged summary:
+key-sorted `coverage ` JSON line, followed by the unchanged summary. For
+example, the summary line has this form:
 
 ```text
 shop/checkout.py (no_system)  calls: shop.orders.create_order (shop/orders.py); imports: shop.orders.create_order (shop/orders.py)
@@ -354,9 +355,11 @@ result with `path`, `lines`, `stale`, and `hash_available`; each line contains
 
 ## Output and exit status
 
-Every query supports `--json` where it is shown above. JSON is deterministic,
-uses the same records as text, and contains no node IDs, SHA-256 node digests,
-or evidence/provenance blocks. Empty result sets are represented by an empty
+Every query supports `--json` where it is shown above. JSON is deterministic.
+Default result records and non-details query payloads contain no node IDs,
+SHA-256 node digests, or evidence/provenance blocks. System-query `--details`
+is the explicit exception: its `relationships` array carries existing node IDs
+and provenance/evidence detail. Empty result sets are represented by an empty
 `results` array (or the corresponding empty diff arrays).
 
 `callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`,
