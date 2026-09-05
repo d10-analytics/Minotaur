@@ -433,15 +433,14 @@ def test_system_name_rejects_unicode_control_characters_at_loader_boundary(
     definition = _write_definition(
         systems_dir,
         "broken",
-        f"schema_version = 1\nname = {json.dumps(name)}\nfiles = [\"src/a.py\"]\n",
+        f'schema_version = 1\nname = {json.dumps(name)}\nfiles = ["src/a.py"]\n',
     )
 
     with pytest.raises(InvalidSystemName) as error:
         system.load_systems(systems_dir)
 
     assert str(error.value) == (
-        "system name must not contain Unicode control characters (category Cc) "
-        f"(in {definition})"
+        f"system name must not contain Unicode control characters (category Cc) (in {definition})"
     )
 
 

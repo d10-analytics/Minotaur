@@ -207,9 +207,7 @@ def test_systems_rejects_control_character_names_before_refresh(
     original_graph = graph.read_bytes()
     definition = root / "docs" / "systems" / "orders" / "system.toml"
     definition.write_text(
-        "schema_version = 1\n"
-        f"name = {json.dumps(name)}\n"
-        'files = ["orders/mod.py"]\n',
+        f'schema_version = 1\nname = {json.dumps(name)}\nfiles = ["orders/mod.py"]\n',
         encoding="utf-8",
     )
 
