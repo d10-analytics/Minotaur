@@ -19,7 +19,8 @@ by the optional `systems_dir` field of a
 [project configuration](../guides/project-configuration.md) and defaults to
 `docs/systems` inside the declared project root. When no configuration
 governs a query, `systems_dir` defaults to `docs/systems` under the explicit
-`--root`, so the three system queries work with just `--graph` and `--root`.
+`--root`, so the repository overview and three named-boundary queries work with
+just `--graph` and `--root`.
 
 Systems are flat peers:
 
@@ -46,7 +47,9 @@ files = ["shop/orders.py"]
 
 * `schema_version` — **required**; the integer `1`. The loader supports only
   this value.
-* `name` — **required**; a non-empty string unique across all definitions.
+* `name` — **required**; a non-empty string unique across all definitions that
+  contains no Unicode General Category `Cc` control character. This rejects
+  line breaks, tabs, Escape, Delete, and the other characters in that category.
 * `files` — **required**; a non-empty list of root-relative *individual
   repository file paths*, each listing one file in exactly one system.
 
@@ -88,7 +91,8 @@ The loader rejects:
 * any unknown field — including hand-recorded, expectation-shaped, and
   curated-rule-shaped relationship keys such as `depends_on`,
   `expectations`, or edge lists, which are not part of this contract;
-* a missing, mistyped, or empty `name`;
+* a missing, mistyped, or empty `name`, or a name containing any Unicode
+  General Category `Cc` control character;
 * a missing, non-list, or empty `files` list;
 * a `files` entry that is not a root-relative individual file path — a
   non-string, an empty string, an absolute path, a `..` escape, a glob or

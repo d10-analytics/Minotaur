@@ -24,15 +24,16 @@ imports would resolve under a different root; see the
 [Python analysis guide](analyze-python.md) for details.
 
 For a step-by-step tour of these commands with real output, see the
-[query walkthrough](../../examples/query-walkthrough/). The declared-system
-queries (`surface`, `consumers`, and `system-deps`) have their own
+[query walkthrough](../../examples/query-walkthrough/). The repository-level
+`systems` inventory is documented below; the named-boundary queries (`surface`,
+`consumers`, and `system-deps`) have their own
 [system walkthrough](../../examples/system-walkthrough/).
 
 ## Common freshness behavior
 
-`callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`,
-and `system-deps` accept the following common options (the three system
-queries also accept `--details`):
+`callers`, `definitions`, `impact`, `unreferenced`, `systems`, `surface`,
+`consumers`, and `system-deps` accept the following common options (the four
+system queries also accept `--details`):
 
 ```text
 --graph GRAPH --root ROOT [--no-refresh] [--json] [--details]
@@ -212,7 +213,10 @@ minotaur query systems [--details] [--json] \
 ```
 
 It strictly loads all declarations, sorts system names lexically, and reports
-the compact inventory before any optional detail. Default text starts with one
+the compact inventory before any optional detail. A system name must be a
+non-empty string with no Unicode General Category `Cc` control characters;
+line breaks, tabs, Escape, and Delete are therefore rejected before refresh or
+output. Default text starts with one
 canonical `coverage ` JSON line, followed by lines of the exact form
 `NAME  declared TOTAL  represented REPRESENTED  absent ABSENT`. Default JSON
 has exactly `query`, `refreshed`, `stale`, `results`, and `coverage`; each
@@ -302,8 +306,9 @@ consumer file, or the target category — never on the call site, and they are
 returned in stable sorted order, so the same graph and systems always produce
 the same bytes.
 
-The system queries run in the shared graph-query loop, so `--no-refresh` and
-`--json` behave exactly as they do for the other graph queries. Their JSON
+The three named-boundary queries run in the shared graph-query loop, so
+`--no-refresh` and `--json` behave exactly as they do for the other graph
+queries. Their JSON
 envelope is `query`, `refreshed`, `results`, `stale`, and `coverage`, with
 `relationships` present only for `--details`; records carry semantic labels
 and root-relative paths, never node IDs. Text output starts with a compact,
@@ -415,9 +420,10 @@ is the explicit exception: its `relationships` array carries existing node IDs
 and provenance/evidence detail. Empty result sets are represented by an empty
 `results` array (or the corresponding empty diff arrays).
 
-`callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`,
-and `system-deps` also report the freshness of the answer alongside it, so an
-agent reading only stdout learns what stderr would have told it:
+`callers`, `definitions`, `impact`, `unreferenced`, `systems`, `surface`,
+`consumers`, and `system-deps` also report the freshness of the answer
+alongside it, so an agent reading only stdout learns what stderr would have
+told it:
 
 ```json
 {"query":"definitions","refreshed":true,"results":[],"stale":["src/example.py"]}

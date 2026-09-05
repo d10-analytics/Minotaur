@@ -31,13 +31,13 @@ Minotaur is in early development. Its current implementation includes:
 - bounded native Python and JavaScript analyzers behind the selected-path CLI
   (each invocation selects one language: `.py` or `.js`);
 - fixed agent-facing graph queries for callers, definitions, impact,
-  unreferenced symbols, snapshot diffs, and source context;
+  unreferenced symbols, system inventory, snapshot diffs, and source context;
 - committed graph artifacts with per-file content digests and last-generation
   Git provenance, so reviewed graphs remain reproducible while unchanged
   content stays byte-stable across commit and branch changes;
-- committed system definitions that name subsystem boundaries, with the
-  `surface`, `consumers`, and `system-deps` queries reporting who reaches
-  across a declared boundary;
+- committed system definitions that name subsystem boundaries, with `systems`
+  reporting inventory and graph coverage and the `surface`, `consumers`, and
+  `system-deps` queries reporting who reaches across a declared boundary;
 - a self-contained HTML explorer with filters, themes, source excerpts, and
   call-site inspection.
 
@@ -69,10 +69,12 @@ mode (`minotaur query diff` or `minotaur query diff --scope NAME`, which
 requires the located project configuration) and explicit two-snapshot mode
 (`minotaur query diff OLD NEW`, which is configuration-free).
 
-Declared system boundaries add three graph queries of their own: `surface`
-lists the in-scope symbols that files outside a system reach, `consumers`
-lists the outside files that use it, and `system-deps` lists the other
-systems and unlisted targets it depends on. See the
+Declared system boundaries add a repository overview and three named-boundary
+queries. `systems` lists every declaration with represented and absent file
+coverage and can show observed boundary connections. `surface` lists the
+in-scope symbols that files outside a system reach, `consumers` lists the
+outside files that use it, and `system-deps` lists the other systems and
+unlisted targets it depends on. See the
 [system definitions guide](docs/guides/system-definitions.md) for the
 membership model, the [system walkthrough](examples/system-walkthrough/) for
 executed output, and the [system definition format](docs/formats/system-definition-v1.md)
