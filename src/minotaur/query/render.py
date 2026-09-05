@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
-from typing import Any, Protocol
+from collections.abc import Mapping, Sequence
+from typing import Any, Protocol, cast
 
 from minotaur.query.system import SystemQueryResult
 
@@ -65,4 +65,36 @@ def render_system_text(result: SystemQueryResult[Any], summary: str) -> str:
     if relationships is not None:
         encoded = json.dumps(relationships, sort_keys=True, separators=(",", ":"))
         output += f"relationships {encoded}\n"
+    return output
+
+
+def render_systems_json(result: SystemQueryResult[Any]) -> str:
+    """Render the all-systems overview through the canonical JSON dumper."""
+    return dump_json(result.to_dict())
+
+
+def render_systems_text(result: SystemQueryResult[Any]) -> str:
+    """Render the compact or detailed all-systems overview as stable text."""
+    payload = result.to_dict()
+    coverage = cast(Mapping[str, object], payload["coverage"])
+    output = f"coverage {dump_json(coverage)}"
+    records = cast(Sequence[Mapping[str, object]], payload["results"])
+    if records:
+        for record in records:
+            declared = cast(Mapping[str, object], record["declared_files"])
+            output += (
+                f"{record['name']}  declared {declared['total']}  "
+                f"represented {declared['represented']}  absent {declared['absent']}\n"
+            )
+    else:
+        output += "no declared systems\n"
+    if "connections" in payload:
+        declared_files = {
+            str(record["name"]): cast(
+                list[str], cast(Mapping[str, object], record["declared_files"])["paths"]
+            )
+            for record in records
+        }
+        output += f"declared_files {dump_json(declared_files)}"
+        output += f"connections {dump_json(payload['connections'])}"
     return output
