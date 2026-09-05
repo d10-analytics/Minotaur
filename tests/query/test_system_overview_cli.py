@@ -9,11 +9,17 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.identity import IdentityBasis, NodeIdentity, compute_node_id
+from minotaur.graph_model.location import Location, Position, Range
+from minotaur.graph_model.node import Node, NodeClass
+from minotaur.graph_model.provenance import CoordinateEncoding
+from minotaur.graph_model.serialization import serialize
 from minotaur.query.index import GraphIndex
 
 
-def _repo(tmp_path: Path) -> Path:
-    root = tmp_path / "repo"
+def _repo(tmp_path: Path, name: str = "repo") -> Path:
+    root = tmp_path / name
     root.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     return root
@@ -199,3 +205,125 @@ def test_systems_refresh_and_no_refresh_report_distinct_diagnostics(
     assert "minotaur: stale: orders/mod.py" in err
     assert "refreshed graph" not in err
     assert json.loads(out)["coverage"]["source_diagnostics"] == {"status": "unavailable"}
+
+
+def test_systems_cli_distinguishes_empty_tree_zero_node_and_symbol_only_graphs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    empty_root = _repo(tmp_path, "empty")
+    _write(empty_root, "loose.py", "value = 1\n")
+    empty_graph = empty_root / "graph.json"
+    assert (
+        cli.main(
+            ["analyze", "--root", str(empty_root), "--output", str(empty_graph), str(empty_root)]
+        )
+        == 0
+    )
+    status, out, err = _systems(capsys, empty_root, empty_graph, "--details", "--json")
+    assert status == 0
+    assert err == ""
+    empty_payload = json.loads(out)
+    assert empty_payload["results"] == []
+    assert empty_payload["coverage"]["graph_files"] == {
+        "scope": "final_graph_file_nodes",
+        "count": 1,
+    }
+    assert empty_payload["coverage"]["unassigned_files"] == {
+        "scope": "final_graph_file_node_derived_paths",
+        "count": 1,
+        "paths": ["loose.py"],
+    }
+    assert empty_payload["connections"] == []
+
+    zero_root = _repo(tmp_path, "zero")
+    _declare(zero_root, "empty", ["empty.py"])
+    zero_graph = zero_root / "graph.json"
+    assert (
+        cli.main(["analyze", "--root", str(zero_root), "--output", str(zero_graph), str(zero_root)])
+        == 0
+    )
+    status, out, err = _systems(capsys, zero_root, zero_graph, "--details", "--json")
+    assert status == 0
+    assert err == "minotaur: warning: empty.py (listed by system empty)\n"
+    zero_payload = json.loads(out)
+    assert zero_payload["results"][0]["declared_files"] == {
+        "scope": "declared_system_files",
+        "total": 1,
+        "represented": 0,
+        "absent": 1,
+        "paths": ["empty.py"],
+    }
+    assert zero_payload["coverage"]["graph_files"] == {
+        "scope": "final_graph_file_nodes",
+        "count": 0,
+    }
+    assert zero_payload["connections"] == []
+
+    symbol_root = _repo(tmp_path, "symbol")
+    _declare(symbol_root, "orders", ["orders/mod.py"])
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, "fixture")
+    location = Location("orders/mod.py", Range(Position(0, 0), Position(0, 1)))
+    symbol = Node(
+        id=compute_node_id(
+            identity,
+            node_class=NodeClass.SYMBOL.value,
+            symbol_kind="function",
+            location=location,
+        ),
+        identity=identity,
+        node_class=NodeClass.SYMBOL,
+        label="orders.mod.order",
+        symbol_kind="function",
+        location=location,
+    )
+    symbol_graph = symbol_root / "graph.json"
+    symbol_graph.write_bytes(
+        serialize(
+            GraphDocument(
+                coordinate_encoding=CoordinateEncoding.UTF_8,
+                nodes=(symbol,),
+                extensions={"minotaur": {"selection": ["."]}},
+            )
+        )
+    )
+    status, out, err = _systems(capsys, symbol_root, symbol_graph, "--details", "--json")
+    assert status == 0
+    assert err == ""
+    symbol_payload = json.loads(out)
+    assert symbol_payload["results"][0]["declared_files"]["represented"] == 1
+    assert symbol_payload["coverage"]["graph_files"]["count"] == 0
+    assert symbol_payload["coverage"]["unassigned_files"] == {
+        "scope": "final_graph_file_node_derived_paths",
+        "count": 0,
+        "paths": [],
+    }
+
+
+def test_systems_config_discovery_matches_explicit_graph_and_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _repo(tmp_path)
+    _write(root, "orders/mod.py", "def order():\n    return 1\n")
+    _declare(root, "orders", ["orders/mod.py"])
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["."]\n',
+        encoding="utf-8",
+    )
+    graph = root / "graph.json"
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    capsys.readouterr()
+    nested = root / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+
+    status = cli.main(["query", "systems", "--details", "--json"])
+    discovered = capsys.readouterr()
+    assert status == 0
+    status, explicit_out, explicit_err = _systems(capsys, root, graph, "--details", "--json")
+    assert status == 0
+    discovered_out, discovered_err = discovered.out, discovered.err
+    assert discovered_out == explicit_out
+    assert discovered_err == explicit_err
