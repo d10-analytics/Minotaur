@@ -116,7 +116,12 @@ def test_query_guide_documents_strict_loading_and_absent_file_warnings() -> None
     assert "strict-loads the whole committed systems tree" in text
     assert "exits `2`" in text
     assert "five nearest declared systems" in text
+    assert (
+        "A valid system name is a non-empty string with no Unicode General Category `Cc` control "
+        "characters" in text
+    )
     assert "listed by system" in text
+    assert "the repository overview reports them across all declared systems" in text
     assert "never changes the answer or its exit status" in text
 
 
@@ -183,6 +188,7 @@ def test_format_reference_documents_each_rejection_class() -> None:
     assert "any unknown field" in text
     assert "`depends_on`" in text
     assert "a missing, mistyped, or empty `name`" in text
+    assert "a name containing any Unicode General Category `Cc` control character" in text
     assert "two definitions declaring the same system `name`" in text
 
 
