@@ -45,6 +45,11 @@ def test_query_guide_file_exists() -> None:
 
 def test_query_guide_documents_exact_file_membership_and_categories() -> None:
     text = _collapsed(QUERY_GUIDE)
+    assert (
+        "With committed definitions, `systems` inventories every declared boundary and its "
+        "graph coverage, while `surface`, `consumers`, and `system-deps` answer who reaches "
+        "across a named boundary" in text
+    )
     assert 'exact-file test "is this file listed — Y/N"' in text
     assert "membership" in text
     assert "`no_system`" in text
@@ -129,6 +134,10 @@ def test_format_reference_documents_location_and_the_flat_tree() -> None:
     assert "one directory per system" in text
     assert "`systems_dir`" in text
     assert "defaults to `docs/systems` inside the declared project root" in text
+    assert (
+        "the repository overview and three named-boundary queries work with just `--graph` "
+        "and `--root`" in text
+    )
     assert "**immediate child directory** of `systems_dir` that contains a `system.toml`" in text
     assert "never nested" in text
     assert "no directory is contained in another system" in text
@@ -137,7 +146,10 @@ def test_format_reference_documents_location_and_the_flat_tree() -> None:
 def test_format_reference_documents_the_definition_fields() -> None:
     text = _collapsed(FORMAT_REFERENCE)
     assert "`schema_version` — **required**; the integer `1`" in text
-    assert "`name` — **required**; a non-empty string unique across all definitions" in text
+    assert (
+        "`name` — **required**; a non-empty string unique across all definitions that contains "
+        "no Unicode General Category `Cc` control character" in text
+    )
     assert "`files` — **required**; a non-empty list" in text
     assert "root-relative *individual repository file paths*" in text
 
@@ -199,7 +211,11 @@ def test_purpose_section_2_marks_scopes_shipped_and_expectations_archived() -> N
     assert "declared-answer concept is archived/deferred" in text
     assert "planned expectations package" not in text
     assert "*planned* — system definitions" not in text
-    assert "`surface`, `consumers`, `system-deps`, `context`" in text
+    assert (
+        "Fixed queries that answer one structural question each from a graph: `callers`, "
+        "`definitions`, `impact`, `unreferenced`, `systems`, `surface`, `consumers`, "
+        "`system-deps`, `context`." in text
+    )
 
 
 def test_purpose_section_4_describes_a_definition_as_a_computed_scope_only() -> None:
@@ -273,11 +289,13 @@ def test_query_reference_file_exists() -> None:
 def test_query_reference_enumerates_the_system_queries_with_shared_options() -> None:
     text = _collapsed(QUERY_REFERENCE)
     assert (
-        "`callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`, "
+        "`callers`, `definitions`, `impact`, `unreferenced`, `systems`, `surface`, "
+        "`consumers`, "
         "and `system-deps` accept the following common options" in text
     )
     assert (
-        "`callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`, "
+        "`callers`, `definitions`, `impact`, `unreferenced`, `systems`, `surface`, "
+        "`consumers`, "
         "and `system-deps` also report the freshness of the answer alongside it" in text
     )
     assert "minotaur query surface orders --graph GRAPH.json --root ROOT" in text
@@ -292,7 +310,7 @@ def test_query_reference_documents_system_query_shared_option_behavior() -> None
         "`--no-refresh` and `--json` behave exactly as they do for the other graph queries" in text
     )
     assert "records carry semantic labels and root-relative paths, never node IDs" in text
-    assert "the three system queries also accept `--details`" in text
+    assert "the four system queries also accept `--details`" in text
     assert "Text output starts with a compact, key-sorted `coverage ` JSON line" in text
     assert "`relationships` present only for `--details`" in text
 
@@ -346,11 +364,15 @@ def test_readme_documents_committed_graph_provenance_and_both_diff_modes() -> No
     )
 
 
-def test_readme_names_the_three_system_queries_in_prose() -> None:
+def test_readme_names_the_system_queries_in_prose() -> None:
     text = _collapsed(README)
     assert "committed system definitions that name subsystem boundaries" in text
+    assert "with `systems` reporting inventory and graph coverage" in text
     assert "the `surface`, `consumers`, and `system-deps` queries" in text
-    assert "Declared system boundaries add three graph queries of their own" in text
+    assert (
+        "Declared system boundaries add a repository overview and three named-boundary queries"
+        in text
+    )
     assert "`surface` lists the in-scope symbols that files outside a system reach" in text
     assert "`consumers` lists the outside files that use it" in text
     assert "`system-deps` lists the other systems and unlisted targets it depends on" in text
