@@ -125,6 +125,16 @@ def _query(
     return status, captured.out, captured.err
 
 
+def _assert_system_text(out: str, summary: str) -> dict[str, object]:
+    """Assert the coverage prefix while keeping legacy summary bytes pinned."""
+    coverage_line, separator, remainder = out.partition("\n")
+    assert separator == "\n"
+    assert coverage_line.startswith("coverage ")
+    coverage = json.loads(coverage_line.removeprefix("coverage "))
+    assert remainder == summary
+    return coverage
+
+
 # ---------------------------------------------------------------------------
 # AC-05: surface -- one record per exposed in-scope symbol, never internal,
 # same-file, or module-import exposure.
@@ -161,7 +171,8 @@ def test_surface_reports_only_symbols_outside_files_reach(
     status, out, err = _query(capsys, graph, root, "surface", "orders")
     assert status == 0
     assert err == ""
-    assert out == "orders/mod.py  orders.mod.order  calls\n"
+    coverage = _assert_system_text(out, "orders/mod.py  orders.mod.order  calls\n")
+    assert coverage["declared_files"]["total"] == 2
     # The internal cross-file call from audit.py and the module-layer imports
     # from importer_only.py expose nothing (AC-05).
     assert "audit" not in out
@@ -170,19 +181,18 @@ def test_surface_reports_only_symbols_outside_files_reach(
     status, out, _ = _query(capsys, graph, root, "surface", "orders", "--json")
     assert status == 0
     payload = json.loads(out)
-    assert payload == {
-        "query": "surface",
-        "refreshed": False,
-        "results": [
-            {
-                "category": "system: orders",
-                "kinds": ["calls"],
-                "path": "orders/mod.py",
-                "symbol": "orders.mod.order",
-            }
-        ],
-        "stale": [],
-    }
+    assert payload["query"] == "surface"
+    assert payload["refreshed"] is False
+    assert payload["stale"] == []
+    assert payload["results"] == [
+        {
+            "category": "system: orders",
+            "kinds": ["calls"],
+            "path": "orders/mod.py",
+            "symbol": "orders.mod.order",
+        }
+    ]
+    assert payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
 
 
 def test_surface_import_only_consumer_exposes_nothing(
@@ -199,7 +209,7 @@ def test_surface_import_only_consumer_exposes_nothing(
 
     status, out, _ = _query(capsys, graph, root, "surface", "orders")
     assert status == 0
-    assert out == "no exposed symbols\n"
+    _assert_system_text(out, "no exposed symbols\n")
 
     status, out, _ = _query(capsys, graph, root, "surface", "orders", "--json")
     assert status == 0
@@ -239,20 +249,8 @@ def test_surface_one_row_per_symbol_aggregates_reaching_kinds(
             "symbol": "orders.mod.order",
         }
     ]
-    assert (
-        out
-        == json.dumps(
-            {
-                "query": "surface",
-                "refreshed": False,
-                "results": payload["results"],
-                "stale": [],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
+    assert set(payload) == {"query", "refreshed", "results", "stale", "coverage"}
+    assert payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
 
 
 # ---------------------------------------------------------------------------
@@ -291,11 +289,12 @@ def test_consumers_one_row_per_outside_file_with_distinct_kinds(
     status, out, err = _query(capsys, graph, root, "consumers", "orders")
     assert status == 0
     assert err == ""
-    assert out == (
+    _assert_system_text(
+        out,
         "billing/svc.py (system: billing)  calls: orders.mod.order (orders/mod.py); "
         "imports: orders.mod.order (orders/mod.py)\n"
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n"
+        "imports: orders.mod.order (orders/mod.py)\n",
     )
 
     status, out, _ = _query(capsys, graph, root, "consumers", "orders", "--json")
@@ -385,10 +384,11 @@ def test_system_deps_rows_per_category_with_sorted_nested_targets(
     status, out, err = _query(capsys, graph, root, "system-deps", "orders")
     assert status == 0
     assert err == ""
-    assert out == (
+    _assert_system_text(
+        out,
         "no_system  imports: lib.util (lib/util.py); references: lib.util (lib/util.py)\n"
         "system: billing  calls: billing.svc.ship (billing/svc.py); "
-        "imports: billing.svc.ship (billing/svc.py)\n"
+        "imports: billing.svc.ship (billing/svc.py)\n",
     )
 
     status, out, _ = _query(capsys, graph, root, "system-deps", "orders", "--json")
@@ -503,7 +503,7 @@ def test_system_queries_json_is_deterministic_and_hides_graph_internals(
         assert first[1] == second[1]
         assert "node:sha256:" not in first[1]
         payload = json.loads(first[1])
-        assert set(payload) == {"query", "refreshed", "results", "stale"}
+        assert set(payload) == {"query", "refreshed", "results", "stale", "coverage"}
         for record in payload["results"]:
             if name == "surface":
                 assert set(record) == {"category", "kinds", "path", "symbol"}
@@ -590,7 +590,7 @@ def test_defined_system_with_no_consumers_is_a_successful_empty_answer(
     status, out, err = _query(capsys, graph, root, "consumers", "solo")
     assert status == 0
     assert err == ""
-    assert out == "no consumers\n"
+    _assert_system_text(out, "no consumers\n")
 
     status, out, _ = _query(capsys, graph, root, "consumers", "solo", "--json")
     assert status == 0
@@ -619,9 +619,10 @@ def test_listed_but_absent_files_warn_once_per_file_and_answer_fully(
 
     status, out, err = _query(capsys, graph, root, "consumers", "orders")
     assert status == 0
-    assert out == (
+    _assert_system_text(
+        out,
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n"
+        "imports: orders.mod.order (orders/mod.py)\n",
     )
     assert err == (
         "minotaur: warning: orders/missing.py (listed by system orders)\n"
@@ -822,9 +823,10 @@ def test_config_tree_system_query_answers_from_nested_cwd_with_no_flags(
     captured = capsys.readouterr()
     assert status == 0
     assert captured.err == ""
-    assert captured.out == (
+    _assert_system_text(
+        captured.out,
         "mix.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n"
+        "imports: orders.mod.order (orders/mod.py)\n",
     )
     assert (root / "g.json").exists()
 
@@ -849,9 +851,10 @@ def test_config_less_explicit_graph_root_answers_from_default_docs_systems(
     status, out, err = _query(capsys, graph, root, "consumers", "orders")
     assert status == 0
     assert err == ""
-    assert out == (
+    _assert_system_text(
+        out,
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n"
+        "imports: orders.mod.order (orders/mod.py)\n",
     )
 
 
@@ -919,7 +922,7 @@ def test_system_deps_internal_edges_are_never_a_dependency_and_empty_form(
     status, out, err = _query(capsys, graph, root, "system-deps", "solo")
     assert status == 0
     assert err == ""
-    assert out == "no dependencies\n"
+    _assert_system_text(out, "no dependencies\n")
 
     status, out, _ = _query(capsys, graph, root, "system-deps", "solo", "--json")
     assert status == 0
@@ -953,6 +956,94 @@ def test_absent_warning_is_computed_against_the_final_index_after_refresh(
     assert "refreshed graph" in err
     assert "warning:" not in err
     assert "use.py (no_system)" in out
+
+
+def test_system_cli_composes_coverage_and_details_for_each_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-03: all system siblings expose one composed report contract."""
+    root = _repo(tmp_path)
+    _orders_with_consumer(root)
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    for name in ("surface", "consumers", "system-deps"):
+        status, default_out, err = _query(capsys, graph, root, name, "orders", "--json")
+        assert status == 0
+        assert err == ""
+        default_payload = json.loads(default_out)
+        assert set(default_payload) == {"query", "refreshed", "results", "stale", "coverage"}
+        assert "relationships" not in default_payload
+        assert default_payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
+
+        status, details_out, err = _query(
+            capsys, graph, root, name, "orders", "--json", "--details"
+        )
+        assert status == 0
+        assert err == ""
+        details_payload = json.loads(details_out)
+        assert details_payload["coverage"] == default_payload["coverage"]
+        assert isinstance(details_payload["relationships"], list)
+
+        status, details_text, err = _query(capsys, graph, root, name, "orders", "--details")
+        assert status == 0
+        assert err == ""
+        lines = details_text.splitlines()
+        assert json.loads(lines[0].removeprefix("coverage ")) == details_payload["coverage"]
+        relationship_line = next(line for line in lines if line.startswith("relationships "))
+        assert (
+            json.loads(relationship_line.removeprefix("relationships "))
+            == details_payload["relationships"]
+        )
+
+
+def test_system_cli_refresh_composes_zero_and_positive_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-04: refresh diagnostics are taken from the final invocation."""
+    root = _repo(tmp_path)
+    _orders_with_consumer(root)
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    _write(root, "orders/mod.py", "def order():\n    return 2\n")
+    status, out, err = _query(capsys, graph, root, "surface", "orders", "--json")
+    assert status == 0
+    assert "refreshed graph" in err
+    payload = json.loads(out)
+    assert payload["refreshed"] is True
+    assert payload["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "count": 0,
+    }
+
+    _write(root, "broken.py", "def broken(\n")
+    status, out, err = _query(capsys, graph, root, "consumers", "orders", "--json")
+    assert status == 1
+    assert "refreshed graph" in err
+    payload = json.loads(out)
+    assert payload["refreshed"] is True
+    assert payload["coverage"]["source_diagnostics"]["status"] == "observed_on_refresh"
+    assert payload["coverage"]["source_diagnostics"]["count"] > 0
+
+
+def test_system_cli_no_refresh_keeps_saved_coverage_and_unavailable_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-03/AC-04: stale answers remain graph-only when refresh is disabled."""
+    root = _repo(tmp_path)
+    _orders_with_consumer(root)
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+    _write(root, "orders/mod.py", "def order():\n    return 8\n")
+
+    status, out, err = _query(capsys, graph, root, "consumers", "orders", "--json", "--no-refresh")
+    assert status == 0
+    assert "minotaur: stale: orders/mod.py" in err
+    payload = json.loads(out)
+    assert payload["refreshed"] is False
+    assert payload["stale"] == ["orders/mod.py"]
+    assert payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
 
 
 def test_reporting_snapshot_projects_coverage_and_details_from_canonical_owner() -> None:

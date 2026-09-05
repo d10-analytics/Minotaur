@@ -77,8 +77,9 @@ guarantees that every answer is about the tree you think it is about.
 6. **Nothing repository-specific.** Minotaur knows languages, not products.
    Framework conventions and product knowledge enter only through declared,
    inspectable inputs that live in the repository they describe: exclusion
-   patterns and scopes today, with curated-rule edges carrying a rule id (04)
-   as a declared input of that later package.
+   patterns and scopes. System relationships remain facts computed from the
+   analyzed graph; this page does not promise a separate declared-answer or
+   curated-edge package.
 
 ## 4. System definitions under this framing
 
@@ -93,19 +94,10 @@ relationship data. It lists root-relative file paths only: it names a unique
 system and its files, references no qualified names, and never node ids. A
 scope is a lens, not a claim.
 
-Two later packages extend what a definition may carry, and neither is
-shipped with v1:
-
-* **Expectations (03)** — archived/deferred: a question plus the answer its
-  author believes is true. No implementation is planned, and nothing compares
-  a declared answer against the analyzed graph today.
-* **Curated relationships (04)** — declared edges static analysis cannot see
-  (registry dispatch, framework callbacks), each carrying a rule id, that
-  boundary queries may include alongside the graph's own edges.
-
-Until those packages ship, a system definition is exactly the committed
-scope above: relationships come from the analyzed graph only, and nothing in
-the shipped package is checked against a declared expectation.
+No separate declared-answer or curated-edge package is part of this contract.
+A system definition is exactly the committed scope above: relationships come
+from the analyzed graph only, and nothing in the shipped package is checked
+against an authored expectation or augmented with hand-recorded edges.
 
 ## 5. Does a proposed feature belong in Minotaur?
 

@@ -46,7 +46,7 @@ from minotaur.query import system as system_query
 from minotaur.query import unreferenced as unreferenced_query
 from minotaur.query.freshness import Drift, drift, recorded_selection
 from minotaur.query.index import GraphIndex
-from minotaur.query.render import QueryRecord, render_json
+from minotaur.query.render import QueryRecord, render_json, render_system_json, render_system_text
 from minotaur.system import System, absent_files, load_systems, resolve_system
 
 _CONFIG_CONSUMING_COMMANDS = frozenset({"analyze", "visualize"})
@@ -837,17 +837,32 @@ def _run_graph_query(query: argparse.Namespace) -> int:
     # reaches _query's handler as an exit-2 error message.  A membership test
     # duplicated here previously accepted duplicate labels that the queries
     # then answered with an empty result.
-    records = handler.run(query, index, graph.drift)
-    output = (
-        render_json(
-            query.name,
-            records,
+    if query.name in _SYSTEM_QUERIES:
+        _report_absent_files(query.systems, index)
+        snapshot = system_query.ReportingSnapshot.prepare(graph.document, query.systems)
+        report = snapshot.report(query.name, query.system_name, details=query.details)
+        invocation = system_query.QueryInvocation(
             refreshed=graph.refreshed,
             stale=graph.drift.paths,
+            source_diagnostics=len(graph.diagnostics) if graph.refreshed else None,
         )
-        if query.json
-        else handler.render_text(records)
-    )
+        composed = system_query.compose_system_query(report, invocation)
+        summary = handler.render_text(report.results)
+        output = (
+            render_system_json(composed) if query.json else render_system_text(composed, summary)
+        )
+    else:
+        records = handler.run(query, index, graph.drift)
+        output = (
+            render_json(
+                query.name,
+                records,
+                refreshed=graph.refreshed,
+                stale=graph.drift.paths,
+            )
+            if query.json
+            else handler.render_text(records)
+        )
     print(output, end="")
     return 1 if graph.diagnostics else 0
 
@@ -895,14 +910,23 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
         "surface", help="show a declared system's symbols reached from outside"
     )
     surface_parser.add_argument("system_name", metavar="SYSTEM_NAME")
+    surface_parser.add_argument(
+        "--details", action="store_true", help="include relationship evidence details"
+    )
     consumers_parser = commands.add_parser(
         "consumers", help="list files outside a declared system that use it"
     )
     consumers_parser.add_argument("system_name", metavar="SYSTEM_NAME")
+    consumers_parser.add_argument(
+        "--details", action="store_true", help="include relationship evidence details"
+    )
     system_deps_parser = commands.add_parser(
         "system-deps", help="list the targets a declared system depends on"
     )
     system_deps_parser.add_argument("system_name", metavar="SYSTEM_NAME")
+    system_deps_parser.add_argument(
+        "--details", action="store_true", help="include relationship evidence details"
+    )
     if config_located:
         diff_description = (
             "Compare the current working tree with the committed graph at HEAD "

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Any, Protocol
+
+from minotaur.query.system import SystemQueryResult
 
 
 class QueryRecord(Protocol):
@@ -47,3 +49,20 @@ def render_json(
             "stale": sorted(stale),
         }
     )
+
+
+def render_system_json(result: SystemQueryResult[Any]) -> str:
+    """Render one composed system-query result through the canonical wire view."""
+    return dump_json(result.to_dict())
+
+
+def render_system_text(result: SystemQueryResult[Any], summary: str) -> str:
+    """Prefix the unchanged summary with composed coverage and optional details."""
+    payload = result.to_dict()
+    coverage = json.dumps(payload["coverage"], sort_keys=True, separators=(",", ":"))
+    output = f"coverage {coverage}\n{summary}"
+    relationships = payload.get("relationships")
+    if relationships is not None:
+        encoded = json.dumps(relationships, sort_keys=True, separators=(",", ":"))
+        output += f"relationships {encoded}\n"
+    return output
