@@ -19,16 +19,48 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.evidence import Evidence, Producer
 from minotaur.graph_model.identity import IdentityBasis, NodeIdentity, compute_node_id
+from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node, NodeClass
-from minotaur.graph_model.provenance import Provenance
+from minotaur.graph_model.provenance import CoordinateEncoding, Provenance
 from minotaur.graph_model.relationship import Relationship
 from minotaur.query import system as system_query
 from minotaur.query.index import GraphIndex
-from minotaur.system import load_systems, resolve_system
+from minotaur.system import System, load_systems, resolve_system
 
 _DOCS = "docs/systems"
+
+
+def _projection_symbol(label: str, path: str, line: int) -> Node:
+    location = Location(path, Range(Position(line, 0), Position(line, 1)))
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, "test")
+    node_id = compute_node_id(
+        identity,
+        node_class=NodeClass.SYMBOL.value,
+        symbol_kind="function",
+        location=location,
+    )
+    return Node(
+        id=node_id,
+        identity=identity,
+        node_class=NodeClass.SYMBOL,
+        label=label,
+        symbol_kind="function",
+        location=location,
+    )
+
+
+def _projection_file(path: str) -> Node:
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, "test")
+    return Node(
+        id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=path),
+        identity=identity,
+        node_class=NodeClass.FILE,
+        label=path,
+        path=path,
+    )
 
 
 def _write(root: Path, relative: str, content: str) -> None:
@@ -921,3 +953,98 @@ def test_absent_warning_is_computed_against_the_final_index_after_refresh(
     assert "refreshed graph" in err
     assert "warning:" not in err
     assert "use.py (no_system)" in out
+
+
+def test_reporting_snapshot_projects_coverage_and_details_from_canonical_owner() -> None:
+    target_node = _projection_symbol("orders.mod.order", "orders/mod.py", 0)
+    source_node = _projection_symbol("use.call", "use.py", 2)
+    target_file = _projection_file("orders/mod.py")
+    source_file = _projection_file("use.py")
+    evidence = Evidence(
+        provenance=Provenance.STATIC_ANALYSIS,
+        producer=Producer("test", "1"),
+        locations=(
+            Location("use.py", Range(Position(4, 2), Position(4, 7))),
+            Location("use.py", Range(Position(1, 0), Position(1, 2))),
+        ),
+        extensions={},
+    )
+    relationship = Relationship(
+        source=source_node.id,
+        target=target_node.id,
+        kind="calls",
+        evidence=(evidence,),
+        extensions={},
+    )
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(target_node, source_node, target_file, source_file),
+        relationships=(relationship,),
+        extensions={"minotaur": {"selection": [".", "orders/mod.py"]}},
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(
+        document, (System("orders", ("orders/mod.py",)),)
+    )
+
+    report = snapshot.report("surface", "orders", details=True)
+    assert isinstance(report, system_query.SystemReport)
+    assert isinstance(report.results[0], system_query.SurfaceRecord)
+    assert report.coverage.to_dict() == {
+        "selection": {"status": "recorded", "targets": [".", "orders/mod.py"]},
+        "graph_files": {"scope": "final_graph_file_nodes", "count": 2},
+        "declared_files": {
+            "scope": "selected_system_declared_files",
+            "total": 1,
+            "represented": 1,
+            "absent": 0,
+        },
+        "recorded_unresolved_references": {
+            "scope": "selected_system_declared_files",
+            "count": 0,
+        },
+        "source_diagnostics": {"status": "unavailable"},
+    }
+    assert report.relationships is not None
+    detail = report.relationships[0].to_dict()
+    assert detail["source"]["id"] == source_node.id
+    assert detail["source"]["node_class"] == "symbol"
+    assert detail["source"]["path"] == {"status": "recorded", "value": "use.py"}
+    assert detail["source"]["location"]["range"] == {
+        "start": {"line": 3, "column": 1},
+        "end": {"line": 3, "column": 2},
+        "end_exclusive": True,
+    }
+    assert detail["relationship_extensions"] == {"status": "recorded", "value": {}}
+    assert detail["evidence"][0]["producer"] == {
+        "status": "recorded",
+        "name": "test",
+        "version": {"status": "recorded", "value": "1"},
+    }
+    assert [site["range"]["start"]["line"] for site in detail["evidence"][0]["sites"]] == [2, 5]
+
+    composed = system_query.compose_system_query(
+        report, system_query.QueryInvocation(False, (), None)
+    )
+    assert composed.report is report
+    payload = composed.to_dict()
+    assert set(payload) == {"query", "refreshed", "results", "stale", "coverage", "relationships"}
+    payload["coverage"]["declared_files"]["total"] = 99
+    assert report.coverage.to_dict()["declared_files"]["total"] == 1
+
+
+def test_reporting_snapshot_reuses_index_and_records_unavailable_selection() -> None:
+    target = _projection_symbol("target", "target.py", 0)
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_16,
+        nodes=(target,),
+        extensions={"minotaur": {"selection": "target.py"}},
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(document, (System("s", ("target.py",)),))
+    first = snapshot.report("consumers", "s")
+    second = snapshot.report("system-deps", "s")
+    assert first.coverage.selection == {"status": "unavailable"}
+    assert first.relationships is None
+    assert snapshot.index is snapshot.index
+    assert second.coverage.source_diagnostics == {"status": "unavailable"}
+    with pytest.raises(ValueError, match="unknown system query"):
+        snapshot.report("other", "s")

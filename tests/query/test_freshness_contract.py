@@ -7,8 +7,10 @@ import re
 from pathlib import Path
 
 from minotaur import cli
+from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.loading import graph_digest, load_graph_file, stamp_path
-from minotaur.query.freshness import drift
+from minotaur.graph_model.provenance import CoordinateEncoding
+from minotaur.query.freshness import drift, recorded_selection, recorded_selection_view
 
 
 def _write(root: Path, relative: str, content: str) -> Path:
@@ -34,6 +36,25 @@ def _analyze(root: Path, output: Path, *targets: Path) -> int:
 
 def _document(output: Path):
     return load_graph_file(output).document
+
+
+def test_recorded_selection_view_preserves_refresh_normalization_and_presence() -> None:
+    cases = (
+        ({"minotaur": {"selection": ["z", 2, "a"]}}, True, ("a", "z")),
+        ({"minotaur": {"selection": ("z", "a")}}, True, ("a", "z")),
+        ({}, False, ()),
+        ({"minotaur": {"selection": "a.py"}}, False, ()),
+        ({"minotaur": {"selection": []}}, True, ()),
+        ({"minotaur": {"selection": [1, None]}}, True, ()),
+    )
+    for extensions, present, targets in cases:
+        document = GraphDocument(
+            coordinate_encoding=CoordinateEncoding.UTF_8,
+            extensions=extensions,
+        )
+        observed = recorded_selection_view(document)
+        assert (observed.recorded, observed.targets) == (present, targets)
+        assert recorded_selection(document) == targets
 
 
 def test_new_python_outside_recorded_target_is_not_detected(tmp_path: Path) -> None:
