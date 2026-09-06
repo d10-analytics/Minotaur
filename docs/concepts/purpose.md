@@ -32,7 +32,7 @@ That is the whole product. Everything in the repository serves it.
 | Primitive | What it is | Where it lives today |
 | --- | --- | --- |
 | **Facts** | A canonical, validated graph of what the source establishes: definitions, containment, imports, calls, references, each with provenance and location evidence. Unresolved references are explicit nodes, never inferred edges. | `graph_model/`, `language_interpreter/` |
-| **Questions** | Fixed queries that answer one structural question each from a graph: `callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`, `system-deps`, `context`. | `query/` |
+| **Questions** | Fixed queries that answer one structural question each from a graph: `callers`, `definitions`, `impact`, `unreferenced`, `systems`, `surface`, `consumers`, `system-deps`, `context`. | `query/` |
 | **Scopes** | A named boundary that makes a question answerable about *part* of a codebase — "when I say `orders`, I mean these files." A scope is a lens, not a claim: it says what you are asking about, not what is true. Shipped as committed `system.toml` definitions (one directory per system under `docs/systems`, format v1). | shipped — committed system definitions |
 
 Two operations compare answers:
@@ -86,13 +86,14 @@ guarantees that every answer is about the tree you think it is about.
 A **system definition** is a scope, shipped in this version: a committed
 file naming a boundary by listing individual repository files, one directory
 per system under `docs/systems`. Its only job is to let questions be asked
-about a named part of the codebase: `surface` (what the system exposes),
-`consumers` (who outside uses it), `system-deps` (what it actually depends
-on). Relationships are computed from the analyzed graph only — a definition
-declares no dependencies and no expectations, and no hand-recorded
-relationship data. It lists root-relative file paths only: it names a unique
-system and its files, references no qualified names, and never node ids. A
-scope is a lens, not a claim.
+about declared parts of the codebase: `systems` inventories every scope and its
+representation in the graph, while `surface` reports what one system exposes,
+`consumers` reports who outside uses it, and `system-deps` reports what it
+actually depends on. Relationships are computed from the analyzed graph only —
+a definition declares no dependencies and no expectations, and no
+hand-recorded relationship data. It lists root-relative file paths only: it
+names a unique system and its files, references no qualified names, and never
+node ids. A scope is a lens, not a claim.
 
 No separate declared-answer or curated-edge package is part of this contract.
 A system definition is exactly the committed scope above: relationships come

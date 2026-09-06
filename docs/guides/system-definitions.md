@@ -1,11 +1,12 @@
 # System definitions
 
 System definitions give the fixed graph queries something they otherwise
-cannot ask: *part* of a codebase. With one or more committed definitions,
-`surface`, `consumers`, and `system-deps` answer who reaches across a declared
-system boundary. This guide documents the model the three queries share: how
-boundary membership works, the two consumption layers they report, and the
-deterministic record semantics of each query.
+cannot ask: *part* of a codebase. With committed definitions, `systems`
+inventories every declared boundary and its graph coverage, while `surface`,
+`consumers`, and `system-deps` answer who reaches across a named boundary. This
+guide documents the repository overview and the model the three named-boundary
+queries share: how membership works, the two consumption layers they report,
+and the deterministic record semantics of each query.
 
 The committed file format itself — where definitions live and what makes one
 invalid — is the [system definition format v1](../formats/system-definition-v1.md)
@@ -33,9 +34,73 @@ minotaur query surface orders \
   --root examples/system-walkthrough --no-refresh
 ```
 
-The three system queries share the graph-query options `--graph`, `--root`,
-`--no-refresh`, and `--json`, plus the opt-in `--details` evidence view; run the
+The repository overview and the three named-boundary queries share the
+graph-query options `--graph`, `--root`, `--no-refresh`, and `--json`, plus the
+opt-in `--details` evidence view; run the
 [system walkthrough](../../examples/system-walkthrough/) for executed output.
+
+## Repository overview
+
+Use `query systems` when the question is "what declared systems are present, and
+what did this graph actually represent?" It has no positional system name and
+reports every strictly loaded declaration in lexical name order:
+
+```bash
+minotaur query systems [--details] [--json] \
+  --graph GRAPH.json --root ROOT --no-refresh
+```
+
+The shared graph-query options may also discover the graph, root, systems
+directory, and refresh policy from project configuration. The compact text
+answer starts with one canonical `coverage ` JSON line and then one inventory
+line per system. A valid system name is a non-empty string with no Unicode
+General Category `Cc` control characters, including line breaks, tabs, Escape,
+or Delete; strict loading rejects such a name before refresh or output:
+
+```text
+coverage {"declared_files":{"absent":1,"represented":2,"scope":"all_declared_system_files","total":3},"graph_files":{"count":3,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":1,"scope":"all_declared_system_files"},"selection":{"status":"recorded","targets":["."]},"source_diagnostics":{"status":"unavailable"},"unassigned_files":{"count":1,"scope":"final_graph_file_node_derived_paths"}}
+billing  declared 1  represented 1  absent 0
+orders  declared 2  represented 1  absent 1
+```
+
+The same compact facts in JSON have exactly the top-level keys `query`,
+`refreshed`, `stale`, `results`, and `coverage`. Each result has `name` and a
+`declared_files` object with `scope`, `total`, `represented`, and `absent`.
+The JSON representation is canonical: object keys are sorted, arrays use the
+documented lexical order, separators are compact, and one newline terminates
+the answer.
+
+`coverage` keeps three file universes separate. `graph_files` counts raw final
+graph `FILE` nodes. `declared_files` sums each named system's declared paths,
+including paths absent from the graph; `represented` is based on any final
+graph node classified to that path, so a symbol-only graph can represent a
+declared path. `unassigned_files` counts sorted distinct paths derived only
+from final-graph `FILE` nodes classified as `no_system`. These counts are not a
+partition equation: duplicate file nodes and symbol-only representation are
+valid. `recorded_unresolved_references` counts unresolved-reference nodes
+classified to named systems, excluding `no_system` and `external`; it is not a
+graph-wide unresolved count. `selection` records the saved analysis targets
+in the existing canonical lexical order and does not promise that every target
+was successfully analyzed. `source_diagnostics` is unavailable for a clean or
+`--no-refresh` answer, and is `observed_on_refresh` with a count after refresh,
+including zero.
+
+`--details` puts each system's sorted declared paths beside its
+`declared_files` object, puts sorted unassigned paths beside
+`coverage.unassigned_files`, and adds top-level `connections`. The compact
+answer omits these keys entirely. A connection is retained only when at least
+one endpoint is a named system and the two endpoints are not the same named
+system. Thus named-to-named (different names), named-to-`no_system`,
+`no_system`-to-named, named-to-`external`, and `external`-to-named edges are
+included; all same-named, unassigned-to-unassigned, and external-only pairs
+are excluded. Each row sorts by source/target category, has sorted distinct
+`kinds`, and carries the existing full relationship detail (endpoint IDs,
+unavailable fields, extensions, evidence, and sorted sites). A details text
+answer appends canonical `declared_files {}` and `connections []` lines when
+there are no systems; otherwise it appends the corresponding path mapping and
+connection array. An empty systems tree is a successful answer, and a partial
+graph is only a report of analyzed facts — this command never claims repository
+completeness.
 
 ## Boundary membership
 
@@ -155,14 +220,17 @@ or definitions exit `2` before refresh or output.
 
 ## Strict loading and warnings
 
-Before any answer, a system query strict-loads the whole committed systems
-tree from the resolved `systems_dir` and resolves the requested name; an
-invalid definition anywhere fails the invocation with a file-attributed
-`minotaur: error:` and exit `2` before any freshness refresh can start. An
-unknown system name also exits `2`, listing up to five nearest declared
-systems.
+Before any answer, every system query strict-loads the whole committed systems
+tree from the resolved `systems_dir`. A name containing a Unicode General
+Category `Cc` control character makes the definition invalid. Any invalid
+definition fails the invocation with a file-attributed `minotaur: error:` and
+exit `2` before any freshness refresh can start. The three named-boundary
+queries then resolve the requested name; an unknown system name also exits `2`,
+listing up to five nearest declared systems.
 
 After the graph is loaded or refreshed, a declared file with no analyzed node
 is reported as one `minotaur: warning: {path} (listed by system {name})` line
-on standard error for the queried system — a diagnosis, never a silent drop —
-and never changes the answer or its exit status.
+on standard error. A named-boundary query reports absent files for its selected
+system; the repository overview reports them across all declared systems. Each
+warning is a diagnosis, never a silent drop, and never changes the answer or
+its exit status.

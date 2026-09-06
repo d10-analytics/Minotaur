@@ -46,7 +46,14 @@ from minotaur.query import system as system_query
 from minotaur.query import unreferenced as unreferenced_query
 from minotaur.query.freshness import Drift, drift, recorded_selection
 from minotaur.query.index import GraphIndex
-from minotaur.query.render import QueryRecord, render_json, render_system_json, render_system_text
+from minotaur.query.render import (
+    QueryRecord,
+    render_json,
+    render_system_json,
+    render_system_text,
+    render_systems_json,
+    render_systems_text,
+)
 from minotaur.system import System, absent_files, load_systems, resolve_system
 
 _CONFIG_CONSUMING_COMMANDS = frozenset({"analyze", "visualize"})
@@ -59,6 +66,7 @@ _CONFIG_CONSUMING_QUERIES = frozenset(
         "impact",
         "surface",
         "system-deps",
+        "systems",
         "unreferenced",
     }
 )
@@ -66,7 +74,7 @@ _CONFIG_CONSUMING_QUERIES = frozenset(
 #: the committed systems tree from the resolved ``systems_dir`` before any
 #: graph freshness decision (AC-12), so an invalid declaration exits 2 with
 #: no answer and no refresh or rewrite on every freshness state.
-_SYSTEM_QUERIES = frozenset({"surface", "consumers", "system-deps"})
+_SYSTEM_QUERIES = frozenset({"surface", "consumers", "system-deps", "systems"})
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -813,7 +821,8 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
                 # resolved name are stashed on the namespace for the run
                 # handler, which consumes them after the graph is final.
                 arguments.systems = load_systems(resolved.systems_dir)
-                arguments.system = resolve_system(arguments.systems, arguments.system_name)
+                if arguments.name != "systems":
+                    arguments.system = resolve_system(arguments.systems, arguments.system_name)
         if snapshot is not None:
             print(snapshot(arguments), end="")
             return 0
@@ -825,12 +834,25 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
 
 def _run_graph_query(query: argparse.Namespace) -> int:
     """Answer one index-backed query, refreshing the graph when it has drifted."""
-    handler = _GRAPH_QUERIES.get(query.name)
-    if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
-        raise ValueError(f"unsupported query: {query.name}")
     graph = _load_and_refresh_graph(
         Path(query.graph), Path(query.root).resolve(), query.no_refresh, validate=query.validate
     )
+    if query.name == "systems":
+        snapshot = system_query.ReportingSnapshot.prepare(graph.document, query.systems)
+        _report_absent_files(snapshot.systems, snapshot.index)
+        overview_report = snapshot.all_systems_report(details=query.details)
+        invocation = system_query.QueryInvocation(
+            refreshed=graph.refreshed,
+            stale=graph.drift.paths,
+            source_diagnostics=len(graph.diagnostics) if graph.refreshed else None,
+        )
+        composed = system_query.compose_system_query(overview_report, invocation)
+        output = render_systems_json(composed) if query.json else render_systems_text(composed)
+        print(output, end="")
+        return 1 if graph.diagnostics else 0
+    handler = _GRAPH_QUERIES.get(query.name)
+    if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
+        raise ValueError(f"unsupported query: {query.name}")
     index = GraphIndex.build(graph.document)
     # No symbol guard here: each query resolves its own name through
     # GraphIndex.resolve, whose SymbolResolutionError is a ValueError and so
@@ -927,6 +949,12 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
     system_deps_parser.add_argument(
         "--details", action="store_true", help="include relationship evidence details"
     )
+    systems_parser = commands.add_parser(
+        "systems", help="show the inventory and coverage of all declared systems"
+    )
+    systems_parser.add_argument(
+        "--details", action="store_true", help="include declared paths and connections"
+    )
     if config_located:
         diff_description = (
             "Compare the current working tree with the committed graph at HEAD "
@@ -970,6 +998,7 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
         surface_parser,
         consumers_parser,
         system_deps_parser,
+        systems_parser,
         context_parser,
     ):
         command.add_argument(

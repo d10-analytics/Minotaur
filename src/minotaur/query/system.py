@@ -599,15 +599,139 @@ class SystemReport(Generic[RecordT]):
 
 
 @dataclass(frozen=True, slots=True)
+class SystemInventoryRecord:
+    """One declared system's all-systems inventory projection."""
+
+    name: str
+    declared_files: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("system inventory name must be a non-empty string")
+        if not isinstance(self.declared_files, Mapping):
+            raise ValueError("declared_files must be a mapping")
+        object.__setattr__(self, "declared_files", _freeze_json(self.declared_files))
+
+    def to_dict(self) -> dict[str, object]:
+        return {"name": self.name, "declared_files": _thaw_json(self.declared_files)}
+
+
+@dataclass(frozen=True, slots=True)
+class SystemsCoverage:
+    """Immutable all-systems coverage universes."""
+
+    selection: Mapping[str, object]
+    graph_files: Mapping[str, object]
+    declared_files: Mapping[str, object]
+    unassigned_files: Mapping[str, object]
+    recorded_unresolved_references: Mapping[str, object]
+    source_diagnostics: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        for name in (
+            "selection",
+            "graph_files",
+            "declared_files",
+            "unassigned_files",
+            "recorded_unresolved_references",
+            "source_diagnostics",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{name} must be a mapping")
+            object.__setattr__(self, name, _freeze_json(value))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "selection": _thaw_json(self.selection),
+            "graph_files": _thaw_json(self.graph_files),
+            "declared_files": _thaw_json(self.declared_files),
+            "unassigned_files": _thaw_json(self.unassigned_files),
+            "recorded_unresolved_references": _thaw_json(self.recorded_unresolved_references),
+            "source_diagnostics": _thaw_json(self.source_diagnostics),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionRecord:
+    """One ordered named-boundary category pair and its original edges."""
+
+    source_category: str
+    target_category: str
+    kinds: tuple[str, ...]
+    relationships: tuple[RelationshipDetail, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_category, str) or not isinstance(self.target_category, str):
+            raise ValueError("connection categories must be strings")
+        if not isinstance(self.kinds, (list, tuple)) or any(
+            not isinstance(kind, str) for kind in self.kinds
+        ):
+            raise ValueError("connection kinds must be a sequence of strings")
+        if not isinstance(self.relationships, (list, tuple)) or any(
+            not isinstance(item, RelationshipDetail) for item in self.relationships
+        ):
+            raise ValueError("connections require RelationshipDetail values")
+        object.__setattr__(self, "kinds", tuple(sorted(set(self.kinds))))
+        object.__setattr__(self, "relationships", tuple(self.relationships))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source_category": self.source_category,
+            "target_category": self.target_category,
+            "kinds": list(self.kinds),
+            "relationships": [item.to_dict() for item in self.relationships],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SystemsReport:
+    """Immutable all-systems inventory, coverage, and optional connections."""
+
+    results: tuple[SystemInventoryRecord, ...]
+    coverage: SystemsCoverage
+    connections: tuple[ConnectionRecord, ...] | None = None
+
+    @property
+    def query(self) -> str:
+        return "systems"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.results, (list, tuple)) or any(
+            not isinstance(item, SystemInventoryRecord) for item in self.results
+        ):
+            raise ValueError("results must be SystemInventoryRecord values")
+        if not isinstance(self.coverage, SystemsCoverage):
+            raise ValueError("coverage must be SystemsCoverage")
+        if self.connections is not None:
+            if not isinstance(self.connections, (list, tuple)) or any(
+                not isinstance(item, ConnectionRecord) for item in self.connections
+            ):
+                raise ValueError("connections must be ConnectionRecord values")
+            object.__setattr__(self, "connections", tuple(self.connections))
+        object.__setattr__(self, "results", tuple(self.results))
+
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "query": "systems",
+            "results": [item.to_dict() for item in self.results],
+            "coverage": self.coverage.to_dict(),
+        }
+        if self.connections is not None:
+            result["connections"] = [item.to_dict() for item in self.connections]
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class SystemQueryResult(Generic[RecordT]):
     """The report plus invocation facts, retaining the report object."""
 
-    report: SystemReport[RecordT]
+    report: SystemReport[RecordT] | SystemsReport
     invocation: QueryInvocation
 
     def __post_init__(self) -> None:
-        if not isinstance(self.report, SystemReport):
-            raise ValueError("report must be SystemReport")
+        if not isinstance(self.report, (SystemReport, SystemsReport)):
+            raise ValueError("report must be a system report")
         if not isinstance(self.invocation, QueryInvocation):
             raise ValueError("invocation must be QueryInvocation")
 
@@ -621,17 +745,22 @@ class SystemQueryResult(Generic[RecordT]):
             "stale": list(self.invocation.stale),
             "coverage": coverage,
         }
-        if self.report.relationships is not None:
+        if isinstance(self.report, SystemsReport):
+            if self.report.connections is not None:
+                result["connections"] = [item.to_dict() for item in self.report.connections]
+        elif self.report.relationships is not None:
             result["relationships"] = [item.to_dict() for item in self.report.relationships]
         return result
 
 
 def compose_system_query(
-    report: SystemReport[RecordT], invocation: QueryInvocation
+    report: SystemReport[RecordT] | SystemsReport, invocation: QueryInvocation
 ) -> SystemQueryResult[RecordT]:
     """Compose typed snapshot and invocation facts without reparsing output."""
-    if not isinstance(report, SystemReport) or not isinstance(invocation, QueryInvocation):
-        raise ValueError("compose_system_query requires a SystemReport and QueryInvocation")
+    if not isinstance(report, (SystemReport, SystemsReport)) or not isinstance(
+        invocation, QueryInvocation
+    ):
+        raise ValueError("compose_system_query requires a system report and QueryInvocation")
     if report.coverage.source_diagnostics.get("status") != "unavailable":
         raise ValueError("snapshot report source diagnostics must be unavailable")
     return SystemQueryResult(report=report, invocation=invocation)
@@ -686,9 +815,17 @@ class ReportingSnapshot:
         SystemReport[SurfaceRecord] | SystemReport[ConsumersRecord] | SystemReport[SystemDepsRecord]
     ): ...
 
-    def report(self, query: str, system_name: str, details: bool = False) -> SystemReport[Any]:
+    def report(
+        self, query: str, system_name: str | None = None, details: bool = False
+    ) -> SystemReport[Any] | SystemsReport:
+        if query == "systems":
+            if system_name is not None:
+                raise ValueError("systems query does not accept a system name")
+            return self.all_systems_report(details=details)
         if query not in _QUERY_NAMES:
             raise ValueError(f"unknown system query: {query}")
+        if system_name is None:
+            raise ValueError(f"{query} query requires a system name")
         target = resolve_system(self.systems, system_name)
         if query == "surface":
             records: tuple[Any, ...] = surface(self.systems, self.index, target)
@@ -705,6 +842,145 @@ class ReportingSnapshot:
             coverage=coverage,
             relationships=relationship_details,
         )
+
+    def all_systems_report(self, *, details: bool = False) -> SystemsReport:
+        """Return one immutable inventory projection for every loaded system."""
+        records: list[SystemInventoryRecord] = []
+        represented_by_system = self._represented_files_by_system()
+        for system in sorted(self.systems, key=lambda item: item.name):
+            represented = represented_by_system.get(system.name, set())
+            declared = set(system.files)
+            declared_files: dict[str, object] = {
+                "scope": "declared_system_files",
+                "total": len(system.files),
+                "represented": len(declared & represented),
+                "absent": len(declared - represented),
+            }
+            if details:
+                declared_files["paths"] = sorted(system.files)
+            records.append(SystemInventoryRecord(name=system.name, declared_files=declared_files))
+        coverage = self._systems_coverage()
+        connections = self._connections() if details else None
+        if details:
+            coverage = self._systems_coverage(include_paths=True)
+        return SystemsReport(results=tuple(records), coverage=coverage, connections=connections)
+
+    def systems_report(self, *, details: bool = False) -> SystemsReport:
+        """Compatibility spelling for the all-systems report routine."""
+        return self.all_systems_report(details=details)
+
+    def _represented_files_by_system(self) -> dict[str, set[str]]:
+        represented: dict[str, set[str]] = defaultdict(set)
+        for node in self.document.nodes:
+            membership = classify_endpoint(self.systems, node)
+            if (
+                membership.kind is EndpointKind.SYSTEM
+                and membership.system is not None
+                and membership.file is not None
+            ):
+                represented[membership.system.name].add(membership.file)
+        return represented
+
+    def _systems_coverage(self, *, include_paths: bool = False) -> SystemsCoverage:
+        selection = recorded_selection_view(self.document)
+        represented_by_system = self._represented_files_by_system()
+        declared_total = sum(len(system.files) for system in self.systems)
+        declared_represented = sum(
+            len(set(system.files) & represented_by_system.get(system.name, set()))
+            for system in self.systems
+        )
+        unassigned = {
+            membership.file
+            for node in self.document.nodes
+            if node.node_class.value == "file"
+            and (membership := classify_endpoint(self.systems, node)).kind is EndpointKind.NO_SYSTEM
+            and membership.file is not None
+        }
+        unresolved = sum(
+            1
+            for node in self.index.unresolved_nodes
+            if classify_endpoint(self.systems, node).kind is EndpointKind.SYSTEM
+        )
+        unassigned_files: dict[str, object] = {
+            "scope": "final_graph_file_node_derived_paths",
+            "count": len(unassigned),
+        }
+        if include_paths:
+            unassigned_files["paths"] = sorted(unassigned)
+        return SystemsCoverage(
+            selection=(
+                {"status": "recorded", "targets": selection.targets}
+                if selection.recorded
+                else {"status": "unavailable"}
+            ),
+            graph_files={
+                "scope": "final_graph_file_nodes",
+                "count": sum(node.node_class.value == "file" for node in self.document.nodes),
+            },
+            declared_files={
+                "scope": "all_declared_system_files",
+                "total": declared_total,
+                "represented": declared_represented,
+                "absent": declared_total - declared_represented,
+            },
+            unassigned_files=unassigned_files,
+            recorded_unresolved_references={
+                "scope": "all_declared_system_files",
+                "count": unresolved,
+            },
+            source_diagnostics={"status": "unavailable"},
+        )
+
+    def _connections(self) -> tuple[ConnectionRecord, ...]:
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for relationship in self.document.relationships:
+            if relationship.kind not in _BOUNDARY_KINDS:
+                continue
+            source = self.index.nodes.get(relationship.source)
+            target = self.index.nodes.get(relationship.target)
+            if source is None or target is None:
+                continue
+            source_membership = classify_endpoint(self.systems, source)
+            target_membership = classify_endpoint(self.systems, target)
+            if not (
+                source_membership.kind is EndpointKind.SYSTEM
+                or target_membership.kind is EndpointKind.SYSTEM
+            ):
+                continue
+            if (
+                source_membership.kind is EndpointKind.SYSTEM
+                and target_membership.kind is EndpointKind.SYSTEM
+                and source_membership.system is not None
+                and target_membership.system is not None
+                and source_membership.system.name == target_membership.system.name
+            ):
+                continue
+            source_category = _membership_category(source_membership)
+            target_category = _membership_category(target_membership)
+            key = (source_category, target_category)
+            entry = grouped.setdefault(key, {"kinds": set(), "relationships": []})
+            entry["kinds"].add(relationship.kind)
+            entry["relationships"].append(
+                _relationship_detail(self.document, relationship, source, target)
+            )
+        records: list[ConnectionRecord] = []
+        for source_category, target_category in sorted(grouped):
+            entry = grouped[(source_category, target_category)]
+            relationships = tuple(
+                sorted(
+                    entry["relationships"],
+                    key=lambda item: (item.source.id, item.target.id, item.kind),
+                )
+            )
+            records.append(
+                ConnectionRecord(
+                    source_category=source_category,
+                    target_category=target_category,
+                    kinds=tuple(sorted(entry["kinds"])),
+                    relationships=relationships,
+                )
+            )
+        return tuple(records)
 
     def _coverage(self, target: System) -> SystemCoverage:
         selection = recorded_selection_view(self.document)
@@ -774,6 +1050,15 @@ class ReportingSnapshot:
             _relationship_detail(self.document, relationship, source, destination)
             for relationship, source, destination in selected
         )
+
+
+def _membership_category(membership: Any) -> str:
+    """Spell one classified endpoint category for all-systems connections."""
+    if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
+        return f"system: {membership.system.name}"
+    if membership.kind is EndpointKind.NO_SYSTEM:
+        return "no_system"
+    return "external"
 
 
 def _tag(value: object) -> dict[str, object]:

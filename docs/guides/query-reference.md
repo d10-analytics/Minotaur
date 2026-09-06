@@ -24,15 +24,16 @@ imports would resolve under a different root; see the
 [Python analysis guide](analyze-python.md) for details.
 
 For a step-by-step tour of these commands with real output, see the
-[query walkthrough](../../examples/query-walkthrough/). The declared-system
-queries (`surface`, `consumers`, and `system-deps`) have their own
+[query walkthrough](../../examples/query-walkthrough/). The repository-level
+`systems` inventory is documented below; the named-boundary queries (`surface`,
+`consumers`, and `system-deps`) have their own
 [system walkthrough](../../examples/system-walkthrough/).
 
 ## Common freshness behavior
 
-`callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`,
-and `system-deps` accept the following common options (the three system
-queries also accept `--details`):
+`callers`, `definitions`, `impact`, `unreferenced`, `systems`, `surface`,
+`consumers`, and `system-deps` accept the following common options (the four
+system queries also accept `--details`):
 
 ```text
 --graph GRAPH --root ROOT [--no-refresh] [--json] [--details]
@@ -202,6 +203,62 @@ since that mode intentionally answers from graph relationships only; see the
 ["stale graph + `--text-fallback` + `--no-refresh`" row](../concepts/freshness.md)
 in the freshness contract.
 
+### Inventory every declared system
+
+The repository overview has no positional system name:
+
+```bash
+minotaur query systems [--details] [--json] \
+  --graph GRAPH.json --root ROOT --no-refresh
+```
+
+It strictly loads all declarations, sorts system names lexically, and reports
+the compact inventory before any optional detail. A system name must be a
+non-empty string with no Unicode General Category `Cc` control characters;
+line breaks, tabs, Escape, and Delete are therefore rejected before refresh or
+output. Default text starts with one
+canonical `coverage ` JSON line, followed by lines of the exact form
+`NAME  declared TOTAL  represented REPRESENTED  absent ABSENT`. Default JSON
+has exactly `query`, `refreshed`, `stale`, `results`, and `coverage`; each
+result's `declared_files` has `scope`, `total`, `represented`, and `absent`.
+For example, the synthetic fixture used by the public walkthrough produces:
+
+```text
+coverage {"declared_files":{"absent":1,"represented":2,"scope":"all_declared_system_files","total":3},"graph_files":{"count":3,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":1,"scope":"all_declared_system_files"},"selection":{"status":"recorded","targets":["."]},"source_diagnostics":{"status":"unavailable"},"unassigned_files":{"count":1,"scope":"final_graph_file_node_derived_paths"}}
+billing  declared 1  represented 1  absent 0
+orders  declared 2  represented 1  absent 1
+```
+
+The coverage objects name their universes: `graph_files` is the raw final
+graph `FILE`-node count; `declared_files` is all paths declared by named
+systems, with representation derived from any final-graph node; and
+`unassigned_files` is the sorted distinct path set derived from final-graph
+`FILE` nodes classified `no_system`. Do not add these counts together: a
+symbol-only node can represent a declared path without being a `FILE` node, and
+distinct `FILE` nodes can carry one path. `recorded_unresolved_references`
+counts only unresolved-reference nodes classified to named systems, excluding
+`no_system` and `external`. `selection` is the saved analysis target list in
+the shared canonical lexical order, not a guarantee that analysis succeeded
+for every target. Diagnostics are tagged unavailable until a refresh observes
+them, including an observed count of zero.
+
+`--details` adds `results[].declared_files.paths` and
+`coverage.unassigned_files.paths`, both sorted, plus top-level `connections`.
+It does not add a parallel path list or nested details wrapper. Connections
+are observed boundaries only: a row is eligible when at least one endpoint is
+named and the endpoints are not in the same named system. Rows therefore cover
+different named systems, either direction between a named system and
+`no_system`, and either direction between a named system and `external`;
+same-system, `no_system`-to-`no_system`, and external-only pairs are omitted.
+Rows sort by category pair, `kinds` are sorted and deduplicated, and each
+`relationships` entry is the existing complete evidence projection with
+original endpoint IDs, unavailable fields, extensions, evidence, and sorted
+sites. Text details append canonical `declared_files` and `connections` JSON
+lines; for an empty tree these are exactly `declared_files {}` and
+`connections []`. Canonical JSON uses sorted object keys, compact separators,
+and one trailing newline. Partial or empty graphs are valid limited answers,
+not claims about all repository files.
+
 ### Answer system boundary questions
 
 `surface`, `consumers`, and `system-deps` answer questions about a *declared
@@ -249,8 +306,9 @@ consumer file, or the target category — never on the call site, and they are
 returned in stable sorted order, so the same graph and systems always produce
 the same bytes.
 
-The system queries run in the shared graph-query loop, so `--no-refresh` and
-`--json` behave exactly as they do for the other graph queries. Their JSON
+The three named-boundary queries run in the shared graph-query loop, so
+`--no-refresh` and `--json` behave exactly as they do for the other graph
+queries. Their JSON
 envelope is `query`, `refreshed`, `results`, `stale`, and `coverage`, with
 `relationships` present only for `--details`; records carry semantic labels
 and root-relative paths, never node IDs. Text output starts with a compact,
@@ -362,9 +420,10 @@ is the explicit exception: its `relationships` array carries existing node IDs
 and provenance/evidence detail. Empty result sets are represented by an empty
 `results` array (or the corresponding empty diff arrays).
 
-`callers`, `definitions`, `impact`, `unreferenced`, `surface`, `consumers`,
-and `system-deps` also report the freshness of the answer alongside it, so an
-agent reading only stdout learns what stderr would have told it:
+`callers`, `definitions`, `impact`, `unreferenced`, `systems`, `surface`,
+`consumers`, and `system-deps` also report the freshness of the answer
+alongside it, so an agent reading only stdout learns what stderr would have
+told it:
 
 ```json
 {"query":"definitions","refreshed":true,"results":[],"stale":["src/example.py"]}

@@ -1251,3 +1251,366 @@ def test_reporting_snapshot_direct_query_variants_and_invocation_errors() -> Non
         system_query.compose_system_query(
             observed_report, system_query.QueryInvocation(False, (), None)
         )
+
+
+def _projection_file_with_namespace(path: str, namespace: str) -> Node:
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, namespace)
+    return Node(
+        id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=path),
+        identity=identity,
+        node_class=NodeClass.FILE,
+        label=path,
+        path=path,
+    )
+
+
+def _projection_upstream(label: str) -> Node:
+    identity = NodeIdentity(
+        IdentityBasis.UPSTREAM_IDENTIFIER, "external", upstream_identifier=label
+    )
+    return Node(
+        id=compute_node_id(identity, node_class=NodeClass.SYMBOL.value, symbol_kind="function"),
+        identity=identity,
+        node_class=NodeClass.SYMBOL,
+        label=label,
+        symbol_kind="function",
+    )
+
+
+def test_reporting_snapshot_all_systems_preserves_file_universes_and_detaches_json() -> None:
+    named_a = _projection_symbol("a.entry", "a.py", 0)
+    named_b = _projection_symbol("b.entry", "b.py", 0)
+    unassigned_symbol = _projection_symbol("loose.entry", "loose.py", 0)
+    unassigned_file = _projection_file("loose.py")
+    duplicate_one = _projection_file_with_namespace("shared.py", "one")
+    duplicate_two = _projection_file_with_namespace("shared.py", "two")
+    location = Location("located.py", Range(Position(0, 0), Position(0, 1)))
+    located_identity = NodeIdentity(IdentityBasis.FILE_PATH, "located")
+    located_file = Node(
+        id=compute_node_id(
+            located_identity,
+            node_class=NodeClass.FILE.value,
+            path="wrong.py",
+        ),
+        identity=located_identity,
+        node_class=NodeClass.FILE,
+        label="wrong.py",
+        path="wrong.py",
+        location=location,
+    )
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(
+            named_a,
+            named_b,
+            unassigned_symbol,
+            unassigned_file,
+            duplicate_one,
+            duplicate_two,
+            located_file,
+        ),
+        extensions={"minotaur": {"selection": ["."]}},
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(
+        document,
+        (System("b", ("b.py",)), System("a", ("a.py", "absent.py"))),
+    )
+
+    report = snapshot.all_systems_report(details=True)
+    assert isinstance(report, system_query.SystemsReport)
+    payload = report.to_dict()
+    assert [item["name"] for item in payload["results"]] == ["a", "b"]
+    assert payload["results"][0]["declared_files"] == {
+        "absent": 1,
+        "paths": ["a.py", "absent.py"],
+        "represented": 1,
+        "scope": "declared_system_files",
+        "total": 2,
+    }
+    assert payload["coverage"] == {
+        "declared_files": {
+            "absent": 1,
+            "represented": 2,
+            "scope": "all_declared_system_files",
+            "total": 3,
+        },
+        "graph_files": {"count": 4, "scope": "final_graph_file_nodes"},
+        "recorded_unresolved_references": {
+            "count": 0,
+            "scope": "all_declared_system_files",
+        },
+        "selection": {"status": "recorded", "targets": ["."]},
+        "source_diagnostics": {"status": "unavailable"},
+        "unassigned_files": {
+            "count": 3,
+            "paths": ["located.py", "loose.py", "shared.py"],
+            "scope": "final_graph_file_node_derived_paths",
+        },
+    }
+    payload["results"][0]["declared_files"]["total"] = 999
+    payload["coverage"]["unassigned_files"]["paths"].append("mutated.py")
+    assert report.to_dict()["results"][0]["declared_files"]["total"] == 2
+    assert report.to_dict()["coverage"]["unassigned_files"]["paths"] == [
+        "located.py",
+        "loose.py",
+        "shared.py",
+    ]
+    composed = system_query.compose_system_query(report, system_query.QueryInvocation(True, (), 0))
+    assert composed.to_dict()["query"] == "systems"
+    assert composed.to_dict()["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "count": 0,
+    }
+    assert "connections" in composed.to_dict()
+
+    reassigned = system_query.ReportingSnapshot.prepare(
+        document,
+        (System("b", ("b.py",)), System("a", ("a.py", "absent.py", "loose.py"))),
+    )
+    reassigned_payload = reassigned.all_systems_report().to_dict()
+    assert reassigned_payload["results"][0]["declared_files"] == {
+        "absent": 1,
+        "represented": 2,
+        "scope": "declared_system_files",
+        "total": 3,
+    }
+    assert reassigned_payload["coverage"]["unassigned_files"] == {
+        "count": 2,
+        "scope": "final_graph_file_node_derived_paths",
+    }
+
+
+def test_reporting_snapshot_all_systems_connections_group_named_boundaries() -> None:
+    a = _projection_symbol("a.entry", "a.py", 0)
+    b = _projection_symbol("b.entry", "b.py", 0)
+    no_system = _projection_symbol("loose.entry", "loose.py", 0)
+    external = _projection_upstream("external.entry")
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+
+    def edge(source: Node, target: Node, kind: str) -> Relationship:
+        return Relationship(source=source.id, target=target.id, kind=kind, evidence=(evidence,))
+
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(a, b, no_system, external),
+        relationships=(
+            edge(a, b, "calls"),
+            edge(a, no_system, "references"),
+            edge(no_system, a, "imports"),
+            edge(a, external, "calls"),
+            edge(external, a, "references"),
+            edge(a, a, "calls"),
+            edge(no_system, no_system, "calls"),
+            edge(no_system, external, "calls"),
+            edge(external, no_system, "calls"),
+            edge(external, external, "calls"),
+        ),
+    )
+    systems = (System("a", ("a.py",)), System("b", ("b.py",)))
+    report = system_query.ReportingSnapshot.prepare(document, systems).all_systems_report(
+        details=True
+    )
+    assert report.connections is not None
+    assert [
+        (row.source_category, row.target_category, row.kinds, len(row.relationships))
+        for row in report.connections
+    ] == [
+        ("external", "system: a", ("references",), 1),
+        ("no_system", "system: a", ("imports",), 1),
+        ("system: a", "external", ("calls",), 1),
+        ("system: a", "no_system", ("references",), 1),
+        ("system: a", "system: b", ("calls",), 1),
+    ]
+    assert all(
+        not (row.source_category == "system: a" and row.target_category == "system: a")
+        for row in report.connections
+    )
+    detail = report.connections[0].relationships[0].to_dict()
+    assert detail["source"]["id"] == external.id
+    assert detail["source"]["path"] == {"status": "unavailable"}
+    assert detail["evidence"][0]["sites"] == []
+
+    reassigned = system_query.ReportingSnapshot.prepare(
+        document, (System("a", ("a.py", "loose.py")), System("b", ("b.py",)))
+    ).all_systems_report(details=True)
+    assert reassigned.connections is not None
+    assert [(row.source_category, row.target_category) for row in reassigned.connections] == [
+        ("external", "system: a"),
+        ("system: a", "external"),
+        ("system: a", "system: b"),
+    ]
+
+
+def test_reporting_snapshot_all_systems_keeps_zero_inventory_and_empty_connections() -> None:
+    document = GraphDocument(coordinate_encoding=CoordinateEncoding.UTF_8)
+    report = system_query.ReportingSnapshot.prepare(
+        document, (System("empty", ("empty.py",)),)
+    ).all_systems_report(details=True)
+
+    assert report.to_dict() == {
+        "query": "systems",
+        "results": [
+            {
+                "name": "empty",
+                "declared_files": {
+                    "absent": 1,
+                    "paths": ["empty.py"],
+                    "represented": 0,
+                    "scope": "declared_system_files",
+                    "total": 1,
+                },
+            }
+        ],
+        "coverage": {
+            "declared_files": {
+                "absent": 1,
+                "represented": 0,
+                "scope": "all_declared_system_files",
+                "total": 1,
+            },
+            "graph_files": {"count": 0, "scope": "final_graph_file_nodes"},
+            "recorded_unresolved_references": {
+                "count": 0,
+                "scope": "all_declared_system_files",
+            },
+            "selection": {"status": "unavailable"},
+            "source_diagnostics": {"status": "unavailable"},
+            "unassigned_files": {
+                "count": 0,
+                "paths": [],
+                "scope": "final_graph_file_node_derived_paths",
+            },
+        },
+        "connections": [],
+    }
+
+
+def test_reporting_snapshot_connections_preserve_sites_and_group_kinds() -> None:
+    source = _projection_symbol("a.entry", "a.py", 0)
+    target = _projection_symbol("loose.entry", "loose.py", 0)
+    first_site = Location("calls.py", Range(Position(1, 2), Position(1, 5)))
+    second_site = Location("calls.py", Range(Position(0, 4), Position(0, 7)))
+    evidence = Evidence(
+        provenance=Provenance.STATIC_ANALYSIS,
+        producer=Producer("analyzer", "1"),
+        locations=(first_site, second_site),
+        extensions={"trace": {"source": "fixture"}},
+    )
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(source, target),
+        relationships=(
+            Relationship(
+                source=source.id,
+                target=target.id,
+                kind="references",
+                evidence=(evidence,),
+                extensions={"edge": {"confidence": 1}},
+            ),
+            Relationship(
+                source=source.id,
+                target=target.id,
+                kind="calls",
+                evidence=(evidence,),
+            ),
+        ),
+    )
+
+    report = system_query.ReportingSnapshot.prepare(
+        document, (System("a", ("a.py",)),)
+    ).all_systems_report(details=True)
+    assert report.connections is not None
+    assert len(report.connections) == 1
+    connection = report.connections[0]
+    assert (connection.source_category, connection.target_category) == (
+        "system: a",
+        "no_system",
+    )
+    assert connection.kinds == ("calls", "references")
+    assert [item.kind for item in connection.relationships] == ["calls", "references"]
+
+    calls, references = connection.relationships
+    assert calls.evidence[0].to_dict()["sites"] == [
+        {
+            "coordinate_encoding": "utf-8",
+            "path": "calls.py",
+            "range": {
+                "end": {"column": 8, "line": 1},
+                "start": {"column": 5, "line": 1},
+                "end_exclusive": True,
+            },
+        },
+        {
+            "coordinate_encoding": "utf-8",
+            "path": "calls.py",
+            "range": {
+                "end": {"column": 6, "line": 2},
+                "start": {"column": 3, "line": 2},
+                "end_exclusive": True,
+            },
+        },
+    ]
+    assert references.relationship_extensions == {
+        "status": "recorded",
+        "value": {"edge": {"confidence": 1}},
+    }
+    assert calls.evidence[0].evidence_extensions == {
+        "status": "recorded",
+        "value": {"trace": {"source": "fixture"}},
+    }
+    detached = report.to_dict()
+    detached["connections"][0]["relationships"][0]["evidence"][0]["sites"].clear()
+    assert len(report.connections[0].relationships[0].evidence[0].sites) == 2
+
+
+def test_reporting_snapshot_reassignment_updates_inventory_and_connections_together() -> None:
+    source = _projection_symbol("a.entry", "a.py", 0)
+    loose = _projection_symbol("loose.entry", "loose.py", 0)
+    loose_file = _projection_file("loose.py")
+    relationship = Relationship(
+        source=source.id,
+        target=loose.id,
+        kind="calls",
+        evidence=(Evidence(provenance=Provenance.STATIC_ANALYSIS),),
+    )
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(source, loose, loose_file),
+        relationships=(relationship,),
+    )
+
+    before = system_query.ReportingSnapshot.prepare(
+        document, (System("a", ("a.py",)),)
+    ).all_systems_report(details=True)
+    assert before.to_dict()["results"][0]["declared_files"] == {
+        "absent": 0,
+        "paths": ["a.py"],
+        "represented": 1,
+        "scope": "declared_system_files",
+        "total": 1,
+    }
+    assert before.to_dict()["coverage"]["unassigned_files"] == {
+        "count": 1,
+        "paths": ["loose.py"],
+        "scope": "final_graph_file_node_derived_paths",
+    }
+    assert [(row.source_category, row.target_category) for row in before.connections or ()] == [
+        ("system: a", "no_system")
+    ]
+
+    after = system_query.ReportingSnapshot.prepare(
+        document, (System("a", ("a.py", "loose.py")),)
+    ).all_systems_report(details=True)
+    assert after.to_dict()["results"][0]["declared_files"] == {
+        "absent": 0,
+        "paths": ["a.py", "loose.py"],
+        "represented": 2,
+        "scope": "declared_system_files",
+        "total": 2,
+    }
+    assert after.to_dict()["coverage"]["unassigned_files"] == {
+        "count": 0,
+        "paths": [],
+        "scope": "final_graph_file_node_derived_paths",
+    }
+    assert after.connections == ()
