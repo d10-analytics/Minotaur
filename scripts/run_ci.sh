@@ -141,6 +141,7 @@ final_changed=false
 active_pid=""
 active_grace=30
 interrupted_signal=""
+active_group_drained=false
 
 signal_active_group() {
     interrupted_signal="$1"
@@ -148,6 +149,7 @@ signal_active_group() {
         kill -TERM -- "-$active_pid" 2>/dev/null || true
         if declare -F terminate_group >/dev/null 2>&1; then
             terminate_group "$active_pid" "$active_grace"
+            active_group_drained=true
         fi
     fi
 }
@@ -234,6 +236,18 @@ finally:
 PY
 }
 
+mark_interrupted() {
+    if [[ -n "$interrupted_signal" ]]; then
+        for lane in "${selected_lanes[@]}"; do
+            if [[ "${lane_status[$lane]}" == pending ]]; then
+                lane_status[$lane]=not_run
+                lane_exit[$lane]=null
+            fi
+        done
+        overall_status=interrupted
+    fi
+}
+
 finalize_manifest() {
     cd "$checkout_root"
     final_commit="$(git rev-parse HEAD)"
@@ -246,7 +260,12 @@ finalize_manifest() {
         final_changed=true
         diagnostic_only=true
     fi
+    mark_interrupted
     write_manifest true
+    if [[ -n "$interrupted_signal" ]]; then
+        mark_interrupted
+        write_manifest true
+    fi
 }
 
 write_manifest false
@@ -360,7 +379,7 @@ if [[ -z "$setsid_path" ]]; then
         printf 'setsid is required but unavailable\n' > "$run_root/${lane_log[$lane]}"
     done
     overall_status=failed
-    write_manifest true
+    finalize_manifest
     exit 1
 fi
 
@@ -384,6 +403,7 @@ run_lane() {
     marker="$temporary_root/$lane.timeout"
     environment_dir="${lane_environment[$lane]}"
     export environment_dir
+    active_group_drained=false
     rm -f "$marker"
     : > "$run_root/${lane_log[$lane]}"
     set +e
@@ -406,8 +426,11 @@ run_lane() {
     set -e
     ended="$(date +%s.%N)"
     lane_duration[$lane]="$(awk -v start="$started" -v end="$ended" 'BEGIN { d=end-start; if (d<0) d=0; printf "%.6f", d }')"
-    terminate_group "$active_pid" "$grace"
+    if [[ "$active_group_drained" != true ]]; then
+        terminate_group "$active_pid" "$grace"
+    fi
     active_pid=""
+    active_group_drained=false
     rm -rf "${lane_environment[$lane]}"
 
     if [[ -n "$interrupted_signal" ]]; then
@@ -456,8 +479,15 @@ for lane in "${selected_lanes[@]}"; do
 done
 
 if [[ "$overall_status" == running ]]; then
-    overall_status=passed
+    if [[ -n "$interrupted_signal" ]]; then
+        mark_interrupted
+    else
+        overall_status=passed
+    fi
     for lane in "${selected_lanes[@]}"; do
+        if [[ "$overall_status" == interrupted ]]; then
+            break
+        fi
         if [[ "${lane_status[$lane]}" != passed ]]; then
             overall_status=failed
             break
@@ -467,6 +497,10 @@ fi
 
 finalize_manifest
 
+if [[ -n "$interrupted_signal" ]]; then
+    mark_interrupted
+    finalize_manifest
+fi
 if [[ "$overall_status" == passed ]]; then
     exit 0
 fi
