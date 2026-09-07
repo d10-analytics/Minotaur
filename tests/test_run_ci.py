@@ -62,6 +62,7 @@ if [[ "${1-}" == -m ]]; then
                 git -C "$FAKE_MUTATE_CHECKOUT" add provenance.txt
                 git -C "$FAKE_MUTATE_CHECKOUT" -c user.email=ci@example.test \
                     -c user.name=CI commit -qm 'mutate during lane'
+                : > "${FAKE_MUTATION_DONE:-/dev/null}"
             fi
             [[ -n "${FAKE_PYTEST_SLEEP:-}" ]] && sleep "$FAKE_PYTEST_SLEEP"
             exit "${FAKE_PYTEST_STATUS:-0}"
@@ -382,6 +383,7 @@ def test_sigterm_records_final_provenance_after_lane_changes_checkout(
             "XDG_STATE_HOME": str(state),
             "FAKE_LOG": str(state / "calls.log"),
             "FAKE_MUTATE_CHECKOUT": str(checkout),
+            "FAKE_MUTATION_DONE": str(state / "mutation.done"),
             "FAKE_PYTEST_SLEEP": "20",
             "MINOTAUR_CI_TIMEOUT_SECONDS": "10",
             "MINOTAUR_CI_TERM_GRACE_SECONDS": "1",
@@ -389,8 +391,7 @@ def test_sigterm_records_final_provenance_after_lane_changes_checkout(
     )
     process = subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "all"], cwd=checkout, env=env)
     for _ in range(200):
-        calls = state / "calls.log"
-        if calls.is_file() and "pytest" in calls.read_text(encoding="utf-8"):
+        if (state / "mutation.done").exists():
             break
         time.sleep(0.02)
     process.send_signal(signal.SIGTERM)
