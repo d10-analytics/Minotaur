@@ -206,6 +206,27 @@ def test_omitted_selector_retains_all_default(fixture: tuple[Path, Path, Path]) 
     assert [row["name"] for row in manifest(state)["lanes"]] == LANES
 
 
+def test_all_manifest_records_default_limits_relative_logs_and_safe_metadata(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    result = run_ci(checkout, fake_python, state)
+    assert result.returncode == 0
+    evidence = manifest(state)
+    expected_limits = {
+        "test": {"timeout_seconds": 600, "term_grace_seconds": 30},
+        "lint": {"timeout_seconds": 300, "term_grace_seconds": 30},
+        "typecheck": {"timeout_seconds": 300, "term_grace_seconds": 30},
+        "package": {"timeout_seconds": 300, "term_grace_seconds": 30},
+        "browser": {"timeout_seconds": 600, "term_grace_seconds": 30},
+        "build": {"timeout_seconds": 300, "term_grace_seconds": 30},
+    }
+    assert {row["name"]: row["limits"] for row in evidence["lanes"]} == expected_limits
+    assert all(row["duration_seconds"] >= 0 for row in evidence["lanes"])
+    assert all(row["log"].startswith("logs/") for row in evidence["lanes"])
+    assert not {"environment", "command", "pid", "host"}.intersection(evidence)
+
+
 def test_all_runs_six_lanes_and_keeps_later_lanes_after_failure(
     fixture: tuple[Path, Path, Path],
 ) -> None:
@@ -336,6 +357,20 @@ def test_source_copy_keeps_dirty_visible_entries_and_excludes_ignored(
     assert "untracked.sh=file:untracked:mode=755" in lines
     assert "link.txt=symlink:tracked.txt" in lines
     assert "ignored.txt=absent" in lines
+
+
+def test_dirty_input_is_recorded_diagnostic_only(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    (checkout / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    result = run_ci(checkout, fake_python, state, "test")
+    assert result.returncode == 0
+    evidence = manifest(state)
+    assert evidence["initial"]["clean"] is False
+    assert evidence["final"]["clean"] is False
+    assert evidence["final"]["changed"] is False
+    assert evidence["diagnostic_only"] is True
 
 
 def test_browser_install_and_test_share_owned_browser_root(
@@ -701,6 +736,29 @@ def test_sigterm_records_final_provenance_after_lane_changes_checkout(
     assert all(row["status"] == "not_run" for row in evidence["lanes"][1:])
     assert evidence["final"]["commit"] != evidence["initial"]["commit"]
     assert evidence["final"]["clean"] is True
+    assert evidence["final"]["changed"] is True
+    assert evidence["diagnostic_only"] is True
+
+
+def test_normal_completion_records_commit_mutation_as_diagnostic(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    mutation_done = state / "mutation.done"
+    result = run_ci(
+        checkout,
+        fake_python,
+        state,
+        "test",
+        FAKE_MUTATE_CHECKOUT=str(checkout),
+        FAKE_MUTATION_DONE=str(mutation_done),
+    )
+    assert result.returncode == 0
+    assert mutation_done.exists()
+    evidence = manifest(state)
+    assert evidence["initial"]["clean"] is True
+    assert evidence["final"]["clean"] is True
+    assert evidence["final"]["commit"] != evidence["initial"]["commit"]
     assert evidence["final"]["changed"] is True
     assert evidence["diagnostic_only"] is True
 
