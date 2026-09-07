@@ -17,6 +17,7 @@ from minotaur.graph_model.provenance import (
     Provenance,
 )
 from minotaur.graph_model.relationship import Relationship
+from minotaur.graph_model.validation import IssueCode, validate_document
 
 
 def _location(path: str, line: int) -> Location:
@@ -100,6 +101,47 @@ def _unresolved(origin: Node, text: str, line: int) -> Node:
         label=text,
         reference_text=text,
         location=location,
+    )
+
+
+def _file(path: str) -> Node:
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, "files")
+    node_id = compute_node_id(identity, node_class=NodeClass.FILE.value, path=path)
+    return Node(
+        id=node_id,
+        identity=identity,
+        node_class=NodeClass.FILE,
+        label=path,
+        path=path,
+    )
+
+
+def _upstream_resource(identifier: str) -> Node:
+    identity = NodeIdentity(
+        IdentityBasis.UPSTREAM_IDENTIFIER,
+        "resources",
+        upstream_identifier=identifier,
+    )
+    node_id = compute_node_id(
+        identity,
+        node_class=NodeClass.RESOURCE.value,
+    )
+    return Node(
+        id=node_id,
+        identity=identity,
+        node_class=NodeClass.RESOURCE,
+        label=identifier,
+    )
+
+
+def _resource_key(key: str) -> Node:
+    identity = NodeIdentity(IdentityBasis.RESOURCE_KEY, "resources", resource_key=key)
+    node_id = compute_node_id(identity, node_class=NodeClass.RESOURCE.value)
+    return Node(
+        id=node_id,
+        identity=identity,
+        node_class=NodeClass.RESOURCE,
+        label=key,
     )
 
 
@@ -272,3 +314,126 @@ def test_exposed_lookup_state_is_deeply_immutable() -> None:
         prepared.origin_dependencies[key] = key  # type: ignore[index]
     assert prepared.nodes_by_key[key] == (source,)
     assert prepared.relationship_groups[relation_key][0].relationship.source == source.id
+
+
+@pytest.mark.parametrize(
+    ("node_factory", "expected_basis"),
+    [
+        (lambda: _symbol("s", 0), "source-location"),
+        (lambda: _file("pkg/mod.py"), "file-path"),
+        (lambda: _upstream_symbol("function"), "upstream-identifier"),
+        (lambda: _upstream_resource("resource-1"), "upstream-identifier"),
+        (lambda: _resource_key("resource-1"), "resource-key"),
+    ],
+)
+def test_each_ordinary_identity_basis_has_a_complete_structured_key(
+    node_factory: object,
+    expected_basis: str,
+) -> None:
+    node = node_factory()  # type: ignore[operator]
+    key = correspondence.node_key(node)
+    assert key[0] == expected_basis
+    assert key[1] == node.node_class.value
+    assert key[2] == node.identity.namespace
+
+
+def test_key_uses_location_path_over_shadowed_node_path() -> None:
+    node = _symbol("s", 0)
+    shadowed = replace(node, path="other.py")
+    assert correspondence.node_key(node) == correspondence.node_key(shadowed)
+    moved = replace(node, location=_location("moved.py", 0))
+    assert correspondence.node_key(node) != correspondence.node_key(moved)
+
+
+def test_labels_and_separators_remain_structured_and_orderable() -> None:
+    first = _symbol("a|b", 0, path="pkg/a|b.py")
+    second = _symbol("a", 0, path="pkg/a.py")
+    assert correspondence.node_key(first) != correspondence.node_key(second)
+    prepared = correspondence.prepare(_document(first, second))
+    assert tuple(prepared.nodes_by_key) == tuple(
+        sorted(prepared.nodes_by_key, key=correspondence._key_sort)
+    )
+
+
+def test_range_only_movement_changes_verified_id_but_preserves_source_key() -> None:
+    first = _symbol("s", 0)
+    moved_location = _location("src/a.py", 1)
+    identity = first.identity
+    moved = replace(
+        first,
+        id=compute_node_id(
+            identity,
+            node_class=NodeClass.SYMBOL.value,
+            symbol_kind=first.symbol_kind,
+            location=moved_location,
+        ),
+        location=moved_location,
+    )
+    assert validate_document(_document(moved)).is_valid
+    assert correspondence.node_key(first) == correspondence.node_key(moved)
+
+
+def test_complete_validator_report_is_preserved_before_indexing() -> None:
+    first = _symbol("first", 0)
+    second = _symbol("second", 1)
+    duplicate = replace(second, id=first.id)
+    missing = _relationship(first, second)
+    missing = replace(missing, source="node:sha256:" + "0" * 64, target="node:sha256:" + "1" * 64)
+    document = _document(first, duplicate, relationships=(missing,))
+    real = validate_document(document)
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
+        correspondence.prepare(document)
+    assert raised.value.report.issues == real.issues
+    assert [issue.code for issue in real] == [
+        IssueCode.NODE_ID_MISMATCH,
+        IssueCode.NODE_ID_DUPLICATE,
+        IssueCode.RELATIONSHIP_ENDPOINT_MISSING,
+        IssueCode.RELATIONSHIP_ENDPOINT_MISSING,
+    ]
+
+
+@pytest.mark.parametrize("kind", ["calls", "imports"])
+def test_calls_and_imports_to_unresolved_target_are_admission_errors(kind: str) -> None:
+    source = _symbol("s", 0)
+    unresolved = _unresolved(source, "missing", 1)
+    document = _document(
+        source,
+        unresolved,
+        relationships=(_relationship(source, unresolved, kind),),
+    )
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
+        correspondence.prepare(document)
+    assert [issue.code for issue in raised.value.report] == [
+        IssueCode.RELATIONSHIP_UNRESOLVED_TARGET_KIND
+    ]
+
+
+def test_orphan_unresolved_node_is_retained_without_eligibility_error() -> None:
+    source = _symbol("s", 0)
+    orphan = _unresolved(source, "unused", 1)
+    prepared = correspondence.prepare(_document(source, orphan))
+    assert prepared.nodes_by_id[orphan.id] is orphan
+    orphan_key = correspondence.node_key(orphan, origin=correspondence.node_key(source))
+    assert orphan_key not in prepared.nodes_by_key
+
+
+def test_requested_duplicate_target_reports_target_candidates() -> None:
+    source = _symbol("source", 0)
+    first = _symbol("target", 1)
+    second = _symbol("target", 2)
+    edge = _relationship(source, first)
+    prepared = correspondence.prepare(_document(source, first, second, relationships=(edge,)))
+    with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
+        prepared.require({next(iter(prepared.relationship_groups))}, side="old")
+    assert raised.value.endpoint == "target"
+    assert raised.value.candidate_ids == tuple(node.id for node in (first, second))
+
+
+def test_prepare_is_fresh_when_a_reused_id_gets_a_new_label() -> None:
+    first = _symbol("first", 0)
+    changed = replace(first, label="second")
+    before = correspondence.prepare(_document(first))
+    after = correspondence.prepare(_document(changed))
+    assert correspondence.node_key(first) in before.nodes_by_key
+    assert correspondence.node_key(changed) in after.nodes_by_key
+    assert before.nodes_by_key != after.nodes_by_key
