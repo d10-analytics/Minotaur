@@ -621,3 +621,77 @@ def test_unreferenced_exclude_pattern_matches_qualified_labels(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert status == 2
     assert "invalid --exclude-pattern '(unclosed'" in captured.err
+
+
+def _edge_kinds(document: dict[str, object], source_label: str, target_label: str) -> list[str]:
+    nodes = document["nodes"]
+    relationships = document["relationships"]
+    assert isinstance(nodes, list)
+    assert isinstance(relationships, list)
+    ids = {node["label"]: node["id"] for node in nodes if isinstance(node, dict)}
+    return [
+        relationship["kind"]
+        for relationship in relationships
+        if isinstance(relationship, dict)
+        and relationship["source"] == ids[source_label]
+        and relationship["target"] == ids[target_label]
+    ]
+
+
+def test_dotted_import_relations_independently_count_as_uses(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    call_root = tmp_path / "call-only"
+    _write(call_root, "pkg/__init__.py", "")
+    _write(call_root, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        call_root,
+        "caller.py",
+        "import pkg.sub\n\ndef owner():\n    pkg.sub.go()\n",
+    )
+    call_graph = call_root / "call-only.json"
+    assert _analyze(call_root, call_graph) == 0
+    call_document = json.loads(call_graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(call_document, "caller.owner", "pkg.sub.go") == ["calls"]
+
+    call_status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--graph",
+            str(call_graph),
+            "--root",
+            str(call_root),
+        ]
+    )
+    call_output = capsys.readouterr()
+
+    load_root = tmp_path / "load-only"
+    _write(load_root, "pkg/__init__.py", "")
+    _write(load_root, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        load_root,
+        "loader.py",
+        "import pkg.sub\n\ndef owner():\n    loaded = pkg.sub.go\n    return loaded\n",
+    )
+    load_graph = load_root / "load-only.json"
+    assert _analyze(load_root, load_graph) == 0
+    load_document = json.loads(load_graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(load_document, "loader.owner", "pkg.sub.go") == ["references"]
+
+    load_status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--graph",
+            str(load_graph),
+            "--root",
+            str(load_root),
+        ]
+    )
+    load_output = capsys.readouterr()
+
+    assert call_status == 0
+    assert "pkg.sub.go" not in call_output.out
+    assert load_status == 0
+    assert "pkg.sub.go" not in load_output.out

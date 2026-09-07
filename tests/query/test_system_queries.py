@@ -386,7 +386,7 @@ def test_system_deps_rows_per_category_with_sorted_nested_targets(
     assert err == ""
     _assert_system_text(
         out,
-        "no_system  imports: lib.util (lib/util.py); references: lib.util (lib/util.py)\n"
+        "no_system  calls: lib.util.helper (lib/util.py); imports: lib.util (lib/util.py)\n"
         "system: billing  calls: billing.svc.ship (billing/svc.py); "
         "imports: billing.svc.ship (billing/svc.py)\n",
     )
@@ -398,8 +398,8 @@ def test_system_deps_rows_per_category_with_sorted_nested_targets(
         {
             "category": "no_system",
             "targets": [
+                {"kind": "calls", "label": "lib.util.helper", "path": "lib/util.py"},
                 {"kind": "imports", "label": "lib.util", "path": "lib/util.py"},
-                {"kind": "references", "label": "lib.util", "path": "lib/util.py"},
             ],
         },
         {
