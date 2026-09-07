@@ -12,13 +12,12 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "run_ci.sh"
 LANES = ["test", "lint", "typecheck", "package", "browser", "build"]
 
 
-FAKE_PYTHON = r'''#!/usr/bin/env bash
+FAKE_PYTHON = r"""#!/usr/bin/env bash
 set -euo pipefail
 name="$(basename "$0")"
 log_call() { printf '%s\t%s\t%s\n' "$name" "$PWD" "$*" >> "$FAKE_LOG"; }
@@ -34,13 +33,16 @@ if [[ "$name" == ruff ]]; then exit "${FAKE_RUFF_STATUS:-0}"; fi
 if [[ "$name" == mypy ]]; then exit "${FAKE_MYPY_STATUS:-0}"; fi
 if [[ "${1-}" == -m ]]; then
     case "$2" in
-        pytest) [[ -n "${FAKE_PYTEST_SLEEP:-}" ]] && sleep "$FAKE_PYTEST_SLEEP"; exit "${FAKE_PYTEST_STATUS:-0}";;
+        pytest)
+            [[ -n "${FAKE_PYTEST_SLEEP:-}" ]] && sleep "$FAKE_PYTEST_SLEEP"
+            exit "${FAKE_PYTEST_STATUS:-0}"
+            ;;
         playwright) exit "${FAKE_PLAYWRIGHT_STATUS:-0}";;
         build) exit "${FAKE_BUILD_STATUS:-0}";;
     esac
 fi
 exit 0
-'''
+"""
 
 
 @pytest.fixture
@@ -191,7 +193,6 @@ def test_sigint_marks_active_and_pending_lanes(fixture: tuple[Path, Path, Path])
         }
     )
     process = subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "all"], cwd=checkout, env=env)
-    result_path = state / "minotaur-ci/runs"
     for _ in range(200):
         calls = state / "calls.log"
         if calls.is_file() and "-m venv" in calls.read_text(encoding="utf-8"):
