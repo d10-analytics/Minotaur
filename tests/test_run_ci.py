@@ -236,6 +236,7 @@ def test_all_runs_six_lanes_and_keeps_later_lanes_after_failure(
     evidence = manifest(state)
     assert [row["name"] for row in evidence["lanes"]] == LANES
     assert evidence["lanes"][1]["status"] == "failed"
+    assert evidence["lanes"][1]["exit_code"] == 7
     assert all(row["status"] != "pending" for row in evidence["lanes"])
     assert evidence["lanes"][2]["status"] == "passed"
     calls = (state / "calls.log").read_text(encoding="utf-8")
@@ -429,6 +430,8 @@ def test_browser_failure_and_timeout_are_nonpass_and_remove_owned_root(
     assert result.returncode != 0
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == status
+    if extra.get("FAKE_PYTEST_STATUS") == "5":
+        assert evidence["lanes"][0]["exit_code"] == 5
     roots = [line.split("\t", 1)[1] for line in (state / "browser.log").read_text().splitlines()]
     assert roots and all(root != str(ambient) for root in roots)
     assert not Path(roots[0]).exists()
@@ -541,6 +544,7 @@ def test_timeout_kills_owned_group_and_removes_disposable_root(
     assert result.returncode != 0
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == "timeout"
+    assert evidence["lanes"][0]["exit_code"] == 124
     assert evidence["lanes"][0]["limits"] == {"timeout_seconds": 1, "term_grace_seconds": 1}
     assert not list((state / "tmp").glob("minotaur-ci.*/source"))
 
@@ -574,7 +578,9 @@ def test_timeout_drains_term_ignoring_descendant_before_result_cleanup(
         FAKE_DESCENDANT_OBSERVED=str(observed),
     )
     assert result.returncode != 0
-    assert manifest(state)["lanes"][0]["status"] == "timeout"
+    evidence = manifest(state)
+    assert evidence["lanes"][0]["status"] == "timeout"
+    assert evidence["lanes"][0]["exit_code"] == 124
     _assert_dead(descendant)
     assert observed.read_text(encoding="utf-8") == "present\n"
 
@@ -598,6 +604,7 @@ def test_ordinary_failure_drains_descendant_before_next_lane(
     assert result.returncode != 0
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == "failed"
+    assert evidence["lanes"][0]["exit_code"] == 7
     assert evidence["lanes"][1]["status"] == "passed"
     assert next_lane.read_text(encoding="utf-8") == "gone\n"
 
