@@ -605,6 +605,30 @@ def test_preparation_does_not_open_files_or_mutate_the_document(
     assert document.to_dict() == before
 
 
+def test_same_key_unresolved_edges_keep_two_exact_pairs_without_cartesian_product() -> None:
+    source_origin = _symbol("source-origin", 0)
+    target_origin = _symbol("target-origin", 1)
+    source_one = _unresolved(source_origin, "missing-source", 2)
+    source_two = _unresolved(source_origin, "missing-source", 3)
+    target_one = _unresolved(target_origin, "missing-target", 4)
+    target_two = _unresolved(target_origin, "missing-target", 5)
+    first = _relationship(source_one, target_one, "references")
+    second = _relationship(source_two, target_two, "references")
+    nodes = (source_origin, target_origin, source_one, source_two, target_one, target_two)
+    document = _document(*nodes, relationships=(first, second))
+    reordered = _document(*reversed(nodes), relationships=(second, first))
+    prepared = correspondence.prepare(document)
+    permuted = correspondence.prepare(reordered)
+    groups = list(prepared.relationship_groups.values())
+    assert len(groups) == 1
+    pairs = {(item.relationship.source, item.relationship.target) for item in groups[0]}
+    assert pairs == {(source_one.id, target_one.id), (source_two.id, target_two.id)}
+    assert tuple(
+        (item.relationship.source, item.relationship.target)
+        for item in next(iter(permuted.relationship_groups.values()))
+    ) == tuple((item.relationship.source, item.relationship.target) for item in groups[0])
+
+
 def test_input_serialization_survives_admission_and_eligibility_errors() -> None:
     ordinary = _symbol("ordinary", 0)
     unresolved_origin = _unresolved(ordinary, "outer", 1)
