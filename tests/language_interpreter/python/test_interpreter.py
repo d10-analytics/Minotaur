@@ -4428,7 +4428,7 @@ def test_nested_plain_dotted_import_does_not_block_same_module_declaration(
         RelationshipKind.CALLS.value,
         path="app.py",
         start=(4, 0),
-        end=(4, 5),
+        end=(4, 3),
     )
     _assert_relation_location(
         result,
