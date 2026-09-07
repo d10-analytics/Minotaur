@@ -45,6 +45,14 @@ Two operations compare answers:
 The declared-answer concept is archived/deferred. No authored expected sets,
 expectation files, or `expect`-style evaluation command ship in this package.
 
+The shared graph vocabulary and the current Python import boundaries are
+defined in the [structural analysis contract](structural-analysis-contract.md).
+It explains how source evidence, resolved calls, non-call references, imports,
+and unresolved expressions relate to one another. The contract keeps those
+graph meanings shared while leaving Python binding rules and JavaScript ESM
+rules language-specific; this page does not claim that their syntax or
+semantics are equivalent.
+
 Freshness (content hashes, drift detection, the trusted-load sidecar)
 guarantees that every answer is about the tree you think it is about.
 

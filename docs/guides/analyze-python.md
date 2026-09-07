@@ -5,6 +5,12 @@ language-neutral CLI selects files by registered extension. This page covers
 the Python registration for `.py` files; the separate JavaScript guide covers
 the pure `.js` selection boundary.
 
+The graph meanings and supported Python binding boundaries are collected in
+the [structural analysis contract](../concepts/structural-analysis-contract.md).
+Use that contract when interpreting an import, call, reference, or unresolved
+relationship; this guide focuses on running the analysis and the Python
+module-scope behavior.
+
 Analysis records source bytes and the selected targets for later freshness
 checks. See [Graph freshness and snapshot order](../concepts/freshness.md) for
 the exact refresh, no-refresh, clean-skip, and graph-integrity contract.
@@ -169,6 +175,40 @@ unresolved rather than dropped, while the bare parameter itself (`self`,
 
 Import, call, and reference relationships include source-location evidence so
 a consumer can identify the site that established the relationship.
+
+### Module-scope dotted imports
+
+At module scope, a plain import such as `import pkg.sub` can admit
+component-bounded descendants. A later `pkg.sub.child.go()` use appends the
+remaining components once and asks the existing qualified-declaration lookup
+for the exact target ID; a separate `import pkg.sub.child` is not required.
+`pkg.other` and `pkg.submarine` are outside the `pkg.sub` component boundary,
+and an overlapping eligible prefix uses the longest component match. The
+import statement still emits its own `IMPORTS` fact: it never implies a
+`CALLS` or `REFERENCES` edge to every member.
+
+The module resolver aggregates direct bindings before resolving expressions.
+Competing module binders conservatively invalidate every use of an affected
+plain prefix. A later true alias can retain its real route, while a later
+plain dotted import cannot preserve an earlier corrupted alias route. Plain
+dotted imports inside functions, classes, or control-flow containers remain
+syntactic evidence in this slice; they do not create a new module prefix for
+the enclosing analysis.
+
+The lookup preserves distinct node IDs for same-labelled declarations. For
+the natural collision cases, a lowercase `child` selects the function at
+`pkg/sub/child.py`, graph `Range(0, 0)-(0, 14)`, while uppercase `Child`
+selects the package method at `pkg/sub/__init__.py`, graph
+`Range(1, 4)-(1, 22)`; a class-only package method has that latter location.
+Those are current qualified-lookup outcomes, not owner or declaration-kind
+precedence rules. Graph ranges are zero-based. Query output uses one-based
+line and column values, such as `caller.py:4:5` for the caller proof.
+
+These claims are proved by the named natural tests in the [structural
+analysis contract](../concepts/structural-analysis-contract.md#supported-behavior-and-proof).
+The slice does not provide per-expression source-order precision, control-flow
+joins, general local-prefix production, interprocedural runtime side effects,
+or runtime dispatch; unresolved cases remain explicit.
 
 The output uses the canonical Minotaur wire contract described in the
 [Minotaur graph format reference](../formats/minotaur-graph-v1.md).
