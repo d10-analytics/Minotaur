@@ -354,7 +354,9 @@ def test_sigint_handles_parent_inherited_ignored_disposition(
     )
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        process = subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "all"], cwd=checkout, env=env)
+        process = subprocess.Popen(
+            [str(checkout / "scripts/run_ci.sh"), "all"], cwd=checkout, env=env
+        )
     finally:
         signal.signal(signal.SIGINT, previous)
     for _ in range(200):
