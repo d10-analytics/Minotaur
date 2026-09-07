@@ -4108,6 +4108,63 @@ def _relationship_map(result: AnalysisResult) -> dict[tuple[str, str, str], obje
     }
 
 
+def _node_at_path(result: AnalysisResult, label: str, path: str):
+    return next(
+        node
+        for node in result.document.nodes
+        if node.label == label and node.location is not None and node.location.path == path
+    )
+
+
+def _assert_relation_location(
+    result: AnalysisResult,
+    source_label: str,
+    target_id: str,
+    kind: str,
+    *,
+    path: str,
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> None:
+    source_id = _node_id(result, source_label)
+    relation = next(
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == source_id
+        and relationship.target == target_id
+        and relationship.kind == kind
+    )
+    assert any(
+        location.path == path
+        and (location.range.start.line, location.range.start.character) == start
+        and (location.range.end.line, location.range.end.character) == end
+        for evidence in relation.evidence
+        for location in evidence.locations
+    )
+
+
+def _assert_unresolved_locations(
+    result: AnalysisResult,
+    source_label: str,
+    text: str,
+    starts: set[tuple[int, int]],
+) -> None:
+    source_id = _node_id(result, source_label)
+    unresolved = next(
+        node
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == text
+    )
+    locations = {
+        (location.range.start.line, location.range.start.column)
+        for relationship in result.document.relationships
+        if relationship.source == source_id and relationship.target == unresolved.id
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert locations == starts
+
+
 def test_plain_dotted_imports_resolve_exact_call_and_load_without_decoys(tmp_path: Path) -> None:
     _write(tmp_path, "pkg/__init__.py", "")
     _write(tmp_path, "pkg/sub/__init__.py", "")
@@ -4213,6 +4270,18 @@ def test_dotted_import_final_binding_orders_preserve_real_routes(tmp_path: Path)
         "match 1:\n    case pkg:\n        pass",
         "if True:\n    pkg = 1\nelse:\n    pkg = 2",
         "try:\n    pkg = 1\nexcept Exception:\n    pass\nelse:\n    pkg = 2\nfinally:\n    pkg = 3",
+        "[value for value in items if (pkg := factory())]",
+        "[(pkg := factory()) for value in items]",
+        "for pkg, other in ():\n    pass",
+        "with open('unused') as (pkg, other):\n    pass",
+        "try:\n    pass\nexcept* Exception as pkg:\n    pass",
+        "match {'key': 1}:\n    case {'key': pkg}:\n        pass",
+        "type pkg = int",
+        "for value in ():\n    pass\nelse:\n    pkg = 1",
+        "while False:\n    pass\nelse:\n    pkg = 1",
+        "try:\n    pass\nexcept Exception:\n    pass\nelse:\n    pkg = 1\nfinally:\n    pkg = 2",
+        "with open('unused') as value:\n    pkg = 1",
+        "match 1:\n    case _:\n        pkg = 1",
     ],
 )
 def test_dotted_import_module_binders_invalidate_every_prefix_use(
@@ -4221,6 +4290,29 @@ def test_dotted_import_module_binders_invalidate_every_prefix_use(
     _write(tmp_path, "pkg/__init__.py", "")
     _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
     _write(tmp_path, "app.py", f"import pkg.sub\n{binder}\npkg.sub.go()\n")
+
+    result = analyze_python_workspace(tmp_path)
+    assert "pkg.sub.go" in _unresolved_by_source(result).get("app", set())
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "def declared(value=(pkg := factory())): pass",
+        "async def declared(value=(pkg := factory())): pass",
+        "def declared(value: (pkg := annotation)) -> (pkg := result): pass",
+        "@(pkg := decorator)\ndef declared(): pass",
+        "@(pkg := decorator)\nclass Declared: pass",
+        "class Declared((pkg := base)): pass",
+        "class Declared(metaclass=(pkg := metaclass)): pass",
+    ],
+)
+def test_dotted_import_module_binders_include_legal_definition_headers(
+    tmp_path: Path, header: str
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(tmp_path, "app.py", f"import pkg.sub\n{header}\npkg.sub.go()\n")
 
     result = analyze_python_workspace(tmp_path)
     assert "pkg.sub.go" in _unresolved_by_source(result).get("app", set())
@@ -4292,3 +4384,690 @@ def test_nested_plain_dotted_imports_remain_syntactic_only(tmp_path: Path) -> No
     assert len(imports) == 1
     assert len(imports[0].evidence[0].locations) == 2
     assert validate_document(result.document).is_valid
+
+
+@pytest.mark.parametrize(
+    ("member", "child_path", "expected_path", "expected_method_label"),
+    [
+        ("child", "pkg/sub/child.py", "pkg/sub/child.py", "pkg.sub.child.go"),
+        ("Child", "pkg/sub/Child.py", "pkg/sub/__init__.py", "pkg.sub.Child.go"),
+    ],
+)
+def test_plain_dotted_imports_preserve_lowercase_and_uppercase_collision_identity(
+    tmp_path: Path,
+    member: str,
+    child_path: str,
+    expected_path: str,
+    expected_method_label: str,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(
+        tmp_path,
+        "pkg/sub/__init__.py",
+        f"class {member}:\n    def go(self): pass\n",
+    )
+    _write(tmp_path, child_path, "def go(): pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        f"import pkg.sub\npkg.sub.{member}.go()\ncallback = pkg.sub.{member}.go\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    declarations = _nodes(result, expected_method_label)
+    assert len(declarations) == 2
+    target = _node_at_path(result, expected_method_label, expected_path)
+    assert target.location is not None
+    if expected_path.endswith("__init__.py"):
+        assert (target.location.range.start.line, target.location.range.start.character) == (1, 4)
+        assert (target.location.range.end.line, target.location.range.end.character) == (1, 22)
+    else:
+        assert (target.location.range.start.line, target.location.range.start.character) == (0, 0)
+        assert (target.location.range.end.line, target.location.range.end.character) == (0, 14)
+
+    _assert_relation_location(
+        result,
+        "app",
+        target.id,
+        RelationshipKind.CALLS.value,
+        path="app.py",
+        start=(1, 0),
+        end=(1, 16),
+    )
+    _assert_relation_location(
+        result,
+        "app",
+        target.id,
+        RelationshipKind.REFERENCES.value,
+        path="app.py",
+        start=(2, 11),
+        end=(2, 27),
+    )
+    assert _unresolved_by_source(result).get("app", set()) == set()
+
+
+def test_plain_dotted_import_class_only_fallback_preserves_method_identity(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub/__init__.py", "class child:\n    def go(self): pass\n")
+    _write(tmp_path, "app.py", "import pkg.sub\npkg.sub.child.go()\ncallback = pkg.sub.child.go\n")
+
+    result = analyze_python_workspace(tmp_path)
+    target = _node_at_path(result, "pkg.sub.child.go", "pkg/sub/__init__.py")
+    _assert_relation_location(
+        result,
+        "app",
+        target.id,
+        RelationshipKind.CALLS.value,
+        path="app.py",
+        start=(1, 0),
+        end=(1, 16),
+    )
+    _assert_relation_location(
+        result,
+        "app",
+        target.id,
+        RelationshipKind.REFERENCES.value,
+        path="app.py",
+        start=(2, 11),
+        end=(2, 27),
+    )
+
+
+def test_plain_parent_and_parent_plus_child_imports_keep_one_target_identity(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub/__init__.py", "")
+    _write(tmp_path, "pkg/sub/child.py", "def go():\n    return 1\n")
+    _write(tmp_path, "parent.py", "import pkg.sub\npkg.sub.child.go()\nvalue = pkg.sub.child.go\n")
+    _write(
+        tmp_path,
+        "parent_plus_child.py",
+        "import pkg.sub\nimport pkg.sub.child\npkg.sub.child.go()\nvalue = pkg.sub.child.go\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    target = _node_at_path(result, "pkg.sub.child.go", "pkg/sub/child.py")
+    for owner, call_line, reference_line in (
+        ("parent", 1, 2),
+        ("parent_plus_child", 2, 3),
+    ):
+        _assert_relation_location(
+            result,
+            owner,
+            target.id,
+            RelationshipKind.CALLS.value,
+            path=f"{owner}.py",
+            start=(call_line, 0),
+            end=(call_line, 16),
+        )
+        _assert_relation_location(
+            result,
+            owner,
+            target.id,
+            RelationshipKind.REFERENCES.value,
+            path=f"{owner}.py",
+            start=(reference_line, 8),
+            end=(reference_line, 24),
+        )
+        assert _unresolved_by_source(result).get(owner, set()) == set()
+
+
+def test_plain_dotted_import_rejects_out_of_prefix_textual_and_same_module_decoys(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(tmp_path, "pkg/other.py", "def go():\n    return 2\n")
+    _write(tmp_path, "pkg/submarine.py", "def go():\n    return 3\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.sub\npkg.sub.go()\npkg.other.go()\npkg.submarine.go()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    assert ("app", "pkg.sub.go", RelationshipKind.CALLS.value) in edges
+    assert ("app", "pkg.other.go", RelationshipKind.CALLS.value) not in edges
+    assert ("app", "pkg.submarine.go", RelationshipKind.CALLS.value) not in edges
+    assert _unresolved_by_source(result)["app"] >= {"pkg.other.go", "pkg.submarine.go"}
+
+
+def test_plain_dotted_missing_module_and_missing_member_keep_import_evidence_without_fallback(
+    tmp_path: Path,
+) -> None:
+    missing_root = tmp_path / "missing"
+    _write(missing_root, "pkg/__init__.py", "class sub:\n    pass\n")
+    _write(missing_root, "app.py", "import pkg.sub\npkg.sub()\nvalue = pkg.sub\n")
+    missing_result = analyze_python_workspace(missing_root)
+    assert "pkg.sub" in _unresolved_by_source(missing_result)["app"]
+    assert not any(
+        relationship.source == _node_id(missing_result, "app")
+        and relationship.target == _node_id(missing_result, "pkg.sub")
+        and relationship.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+        for relationship in missing_result.document.relationships
+    )
+
+    member_root = tmp_path / "member"
+    _write(member_root, "pkg/__init__.py", "")
+    _write(member_root, "pkg/sub.py", "value = 1\n")
+    _write(member_root, "app.py", "import pkg.sub\npkg.sub.go()\nvalue = pkg.sub.go\n")
+    result = analyze_python_workspace(member_root)
+    assert "pkg.sub.go" in _unresolved_by_source(result)["app"]
+    imports = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app")
+        and relationship.kind == RelationshipKind.IMPORTS.value
+    ]
+    assert any(_node_id(result, "pkg.sub") == relationship.target for relationship in imports)
+
+
+def test_plain_dotted_root_load_and_unimported_sibling_remain_unresolved(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "value = 1\n")
+    _write(tmp_path, "pkg/other.py", "value = 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.sub\ncallback = pkg\nother = pkg.other\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert _unresolved_by_source(result)["app"] >= {"pkg", "pkg.other"}
+    app = _node_id(result, "app")
+    assert not any(
+        relationship.source == app
+        and relationship.kind == RelationshipKind.REFERENCES.value
+        and relationship.target in {_node_id(result, "pkg"), _node_id(result, "pkg.sub")}
+        for relationship in result.document.relationships
+    )
+
+
+def test_plain_dotted_overlapping_prefixes_keep_component_boundary_identity(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub/__init__.py", "")
+    _write(tmp_path, "pkg/sub/deep.py", "def go(): pass\n")
+    _write(tmp_path, "app.py", "import pkg.sub\nimport pkg.sub.deep\npkg.sub.deep.go()\n")
+
+    result = analyze_python_workspace(tmp_path)
+    target = _node_at_path(result, "pkg.sub.deep.go", "pkg/sub/deep.py")
+    _assert_relation_location(
+        result,
+        "app",
+        target.id,
+        RelationshipKind.CALLS.value,
+        path="app.py",
+        start=(2, 0),
+        end=(2, 15),
+    )
+    assert _unresolved_by_source(result).get("app", set()) == set()
+
+
+def test_comprehension_iteration_target_does_not_invalidate_module_plain_prefix(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(tmp_path, "app.py", "import pkg.sub\n[pkg for pkg in ()]\npkg.sub.go()\n")
+
+    result = analyze_python_workspace(tmp_path)
+    assert ("app", "pkg.sub.go", RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert "pkg.sub.go" not in _unresolved_by_source(result).get("app", set())
+
+
+def test_invalidated_plain_route_blocks_secondary_root_decoys_for_call_and_load(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(tmp_path, "alternate.py", "def go(): pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import alternate as pkg\nimport pkg.sub\npkg.go()\ncallback = pkg.go\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert _unresolved_by_source(result)["app"] >= {"pkg.go"}
+    alternate = _node_id(result, "alternate.go")
+    app = _node_id(result, "app")
+    assert not any(
+        relationship.source == app
+        and relationship.target == alternate
+        and relationship.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+        for relationship in result.document.relationships
+    )
+
+
+@pytest.mark.parametrize(
+    ("block", "owner"),
+    [
+        ("def run():\n    import pkg.sub\n    pkg.sub.go()\n    value = pkg.sub.go", "app.run"),
+        (
+            "class Runner:\n    import pkg.sub\n    value = pkg.sub.go()\n    other = pkg.sub.go",
+            "app.Runner",
+        ),
+        ("if True:\n    import pkg.sub\n    pkg.sub.go()\n    value = pkg.sub.go", "app"),
+        (
+            "if False:\n    pass\nelse:\n    import pkg.sub\n"
+            "    pkg.sub.go()\n    value = pkg.sub.go",
+            "app",
+        ),
+        ("for _ in ():\n    import pkg.sub\n    pkg.sub.go()\n    value = pkg.sub.go", "app"),
+        (
+            "try:\n    pass\nexcept Exception:\n    import pkg.sub\n"
+            "    pkg.sub.go()\n    value = pkg.sub.go",
+            "app",
+        ),
+        (
+            "with open('unused'):\n    import pkg.sub\n    pkg.sub.go()\n    value = pkg.sub.go",
+            "app",
+        ),
+        (
+            "match 1:\n    case 1:\n        import pkg.sub\n"
+            "        pkg.sub.go()\n        value = pkg.sub.go",
+            "app",
+        ),
+    ],
+)
+def test_nested_plain_dotted_imports_are_syntactic_only_in_each_container(
+    tmp_path: Path, block: str, owner: str
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(tmp_path, "app.py", f"{block}\n")
+
+    result = analyze_python_workspace(tmp_path)
+    assert "pkg.sub.go" in _unresolved_by_source(result).get(owner, set())
+    assert not any(
+        relationship.source == _node_id(result, owner)
+        and relationship.target == _node_id(result, "pkg.sub.go")
+        and relationship.kind
+        in {
+            RelationshipKind.CALLS.value,
+            RelationshipKind.REFERENCES.value,
+        }
+        for relationship in result.document.relationships
+    )
+    imports = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.kind == RelationshipKind.IMPORTS.value
+    ]
+    assert len(imports) == 1
+
+
+@pytest.mark.parametrize(
+    "route_kind",
+    [
+        "undotted",
+        "aliased_undotted",
+        "aliased_dotted",
+        "from_named",
+        "from_aliased_named",
+        "relative_named",
+        "relative_aliased_named",
+    ],
+)
+def test_plain_dotted_import_final_route_orders_cover_all_legacy_families(
+    tmp_path: Path, route_kind: str
+) -> None:
+    relative = route_kind.startswith("relative")
+    owner = "consumer.app" if relative else "app"
+    source_path = "consumer/app.py" if relative else "app.py"
+
+    if route_kind == "undotted":
+        route = "import pkg"
+        target_label = "pkg.go"
+        target_path = "pkg/__init__.py"
+        _write(tmp_path, "pkg/__init__.py", "def go(): pass\n")
+    elif route_kind == "aliased_undotted":
+        route = "import alternate as pkg"
+        target_label = "alternate.go"
+        target_path = "alternate.py"
+        _write(tmp_path, "alternate.py", "def go(): pass\n")
+    elif route_kind == "aliased_dotted":
+        route = "import alternate.mod as pkg"
+        target_label = "alternate.mod.go"
+        target_path = "alternate/mod.py"
+        _write(tmp_path, "alternate/__init__.py", "")
+        _write(tmp_path, "alternate/mod.py", "def go(): pass\n")
+    elif route_kind == "from_named":
+        route = "from alternate import pkg"
+        target_label = "alternate.pkg.go"
+        target_path = "alternate/pkg.py"
+        _write(tmp_path, "alternate/__init__.py", "")
+        _write(tmp_path, "alternate/pkg.py", "def go(): pass\n")
+    elif route_kind == "from_aliased_named":
+        route = "from alternate import backend as pkg"
+        target_label = "alternate.backend.go"
+        target_path = "alternate/backend.py"
+        _write(tmp_path, "alternate/__init__.py", "")
+        _write(tmp_path, "alternate/backend.py", "def go(): pass\n")
+    elif route_kind == "relative_named":
+        route = "from .alternate import pkg"
+        target_label = "consumer.alternate.pkg.go"
+        target_path = "consumer/alternate/pkg.py"
+        _write(tmp_path, "consumer/__init__.py", "")
+        _write(tmp_path, "consumer/alternate/__init__.py", "")
+        _write(tmp_path, "consumer/alternate/pkg.py", "def go(): pass\n")
+    else:
+        route = "from .alternate import backend as pkg"
+        target_label = "consumer.alternate.backend.go"
+        target_path = "consumer/alternate/backend.py"
+        _write(tmp_path, "consumer/__init__.py", "")
+        _write(tmp_path, "consumer/alternate/__init__.py", "")
+        _write(tmp_path, "consumer/alternate/backend.py", "def go(): pass\n")
+
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(tmp_path, source_path, f"import pkg.sub\n{route}\npkg.go()\ncallback = pkg.go\n")
+    _write(
+        tmp_path,
+        source_path.replace("app.py", "reverse.py"),
+        f"{route}\nimport pkg.sub\npkg.go()\ncallback = pkg.go\n",
+    )
+    if relative:
+        reverse_path = "consumer/reverse.py"
+        _write(
+            tmp_path,
+            reverse_path,
+            f"{route}\nimport pkg.sub\npkg.go()\ncallback = pkg.go\n",
+        )
+    else:
+        reverse_path = "reverse.py"
+
+    result = analyze_python_workspace(tmp_path)
+    target = _node_id(result, target_label)
+    target_node = next(node for node in result.document.nodes if node.id == target)
+    assert target_node.location is not None
+    assert target_node.location.path == target_path
+    _assert_relation_location(
+        result,
+        owner,
+        target,
+        RelationshipKind.CALLS.value,
+        path=source_path,
+        start=(2, 0),
+        end=(2, 6),
+    )
+    _assert_relation_location(
+        result,
+        owner,
+        target,
+        RelationshipKind.REFERENCES.value,
+        path=source_path,
+        start=(3, 11),
+        end=(3, 17),
+    )
+    assert _unresolved_by_source(result).get(owner, set()) == set()
+
+    reverse_owner = "consumer.reverse" if relative else "reverse"
+    assert "pkg.go" in _unresolved_by_source(result).get(reverse_owner, set())
+    assert not any(
+        relationship.source == _node_id(result, reverse_owner)
+        and relationship.target == target
+        and relationship.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+        for relationship in result.document.relationships
+    )
+    assert not any(
+        relationship.source == _node_id(result, "app" if not relative else "consumer.app")
+        and relationship.target == _node_id(result, "pkg.sub.go")
+        and relationship.kind == RelationshipKind.CALLS.value
+        for relationship in result.document.relationships
+    )
+
+
+@pytest.mark.parametrize(
+    "route_kind",
+    ["undotted", "aliased_undotted", "aliased_dotted", "from_named", "from_aliased_named"],
+)
+def test_plain_route_history_keeps_final_real_route_and_disables_stale_prefix(
+    tmp_path: Path, route_kind: str
+) -> None:
+    if route_kind == "undotted" or route_kind == "aliased_undotted":
+        route_a, route_b = "import alternate_a as pkg", "import alternate_b as pkg"
+        target_a, target_b = "alternate_a.go", "alternate_b.go"
+        _write(tmp_path, "alternate_a.py", "def go(): pass\n")
+        _write(tmp_path, "alternate_b.py", "def go(): pass\n")
+    elif route_kind == "aliased_dotted":
+        route_a, route_b = "import alternate_a.mod as pkg", "import alternate_b.mod as pkg"
+        target_a, target_b = "alternate_a.mod.go", "alternate_b.mod.go"
+        for name in ("alternate_a", "alternate_b"):
+            _write(tmp_path, f"{name}/__init__.py", "")
+            _write(tmp_path, f"{name}/mod.py", "def go(): pass\n")
+    elif route_kind == "from_named":
+        route_a, route_b = "from alternate_a import pkg", "from alternate_b import pkg"
+        target_a, target_b = "alternate_a.pkg.go", "alternate_b.pkg.go"
+        for name in ("alternate_a", "alternate_b"):
+            _write(tmp_path, f"{name}/__init__.py", "")
+            _write(tmp_path, f"{name}/pkg.py", "def go(): pass\n")
+    else:
+        route_a = "from alternate_a import backend as pkg"
+        route_b = "from alternate_b import backend as pkg"
+        target_a, target_b = "alternate_a.backend.go", "alternate_b.backend.go"
+        for name in ("alternate_a", "alternate_b"):
+            _write(tmp_path, f"{name}/__init__.py", "")
+            _write(tmp_path, f"{name}/backend.py", "def go(): pass\n")
+
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        f"{route_a}\nbefore = pkg.go()\nbefore_ref = pkg.go\nimport pkg.sub\n"
+        f"between = pkg.go()\nbetween_ref = pkg.go\n{route_b}\n"
+        "after = pkg.go()\nafter_ref = pkg.go\n",
+    )
+    result = analyze_python_workspace(tmp_path)
+    app = _node_id(result, "app")
+    relationships = _relationship_map(result)
+    target_b_id = _node_id(result, target_b)
+    target_a_id = _node_id(result, target_a)
+    assert (app, target_b_id, RelationshipKind.CALLS.value) in relationships
+    assert (app, target_b_id, RelationshipKind.REFERENCES.value) in relationships
+    assert (app, target_a_id, RelationshipKind.CALLS.value) not in relationships
+    assert (app, target_a_id, RelationshipKind.REFERENCES.value) not in relationships
+    assert "pkg.go" not in _unresolved_by_source(result).get("app", set())
+
+
+@pytest.mark.parametrize("plain_first", [True, False])
+def test_plain_and_undotted_pkg_route_preserve_or_reject_qualified_members(
+    tmp_path: Path, plain_first: bool
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "def go(): pass\n")
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(tmp_path, "pkg/other.py", "def go(): pass\n")
+    if plain_first:
+        source = "import pkg.sub\nimport pkg\npkg.sub.go()\npkg.other.go()\n"
+    else:
+        source = "import pkg\nimport pkg.sub\npkg.sub.go()\npkg.other.go()\nbare = pkg\n"
+    _write(tmp_path, "app.py", source)
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    if plain_first:
+        assert ("app", "pkg.sub.go", RelationshipKind.CALLS.value) in edges
+        assert ("app", "pkg.other.go", RelationshipKind.CALLS.value) in edges
+        assert not _unresolved_by_source(result).get("app")
+    else:
+        assert _unresolved_by_source(result)["app"] >= {"pkg.sub.go", "pkg.other.go", "pkg"}
+        declaration_ids = {
+            node.id
+            for label in ("pkg.sub.go", "pkg.other.go", "pkg")
+            for node in _nodes(result, label)
+            if node.node_class != NodeClass.UNRESOLVED_REFERENCE
+        }
+        assert not any(
+            relationship.source == _node_id(result, "app")
+            and relationship.kind
+            in {
+                RelationshipKind.CALLS.value,
+                RelationshipKind.REFERENCES.value,
+            }
+            and relationship.target in declaration_ids
+            for relationship in result.document.relationships
+        )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_plain_same_root_siblings_and_unrelated_multi_name_imports_coexist(
+    tmp_path: Path, reverse: bool
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(tmp_path, "pkg/other.py", "def go(): pass\n")
+    _write(tmp_path, "other/__init__.py", "")
+    _write(tmp_path, "other/mod.py", "def go(): pass\n")
+    imports = (
+        "import pkg.other\nimport pkg.sub, other.mod\n"
+        if not reverse
+        else "import pkg.sub, other.mod\nimport pkg.other\n"
+    )
+    _write(tmp_path, "app.py", imports + "pkg.sub.go()\npkg.other.go()\n")
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    assert ("app", "pkg.sub.go", RelationshipKind.CALLS.value) in edges
+    assert ("app", "pkg.other.go", RelationshipKind.CALLS.value) in edges
+    assert not _unresolved_by_source(result).get("app")
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        ("import alternate as pkg", "import other as pkg", "alternate.go", "alternate.py"),
+        (
+            "from alternate import pkg",
+            "from other import pkg",
+            "alternate.pkg.go",
+            "alternate/pkg.py",
+        ),
+        (
+            "from alternate import backend as pkg",
+            "from other import backend as pkg",
+            "alternate.backend.go",
+            "alternate/backend.py",
+        ),
+        (
+            "import alternate.mod as pkg",
+            "import other.mod as pkg",
+            "alternate.mod.go",
+            "alternate/mod.py",
+        ),
+    ],
+)
+def test_lexical_same_target_routes_survive_and_different_near_routes_refuse_outer(
+    tmp_path: Path, route: tuple[str, str, str, str]
+) -> None:
+    module_route, other_route, target_label, target_path = route
+    if "/" in target_path:
+        for package in ("alternate", "other"):
+            _write(tmp_path, f"{package}/__init__.py", "")
+            if target_path.endswith("pkg.py"):
+                _write(tmp_path, f"{package}/pkg.py", "def go(): pass\n")
+            elif target_path.endswith("backend.py"):
+                _write(tmp_path, f"{package}/backend.py", "def go(): pass\n")
+            else:
+                _write(tmp_path, f"{package}/mod.py", "def go(): pass\n")
+    else:
+        _write(tmp_path, "alternate.py", "def go(): pass\n")
+        _write(tmp_path, "other.py", "def go(): pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        f"{module_route}\n"
+        f"def same():\n    {module_route}\n    return pkg.go()\n\n"
+        f"def different():\n    {other_route}\n    return pkg.go()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert ("app.same", target_label, RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert "pkg.go" in _unresolved_by_source(result).get("app.different", set())
+    assert ("app.different", target_label, RelationshipKind.CALLS.value) not in _edge_labels(result)
+
+
+def test_lexical_class_route_installation_deletion_and_method_restoration(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.sub\n"
+        "class Outer:\n"
+        "    import pkg.sub\n"
+        "    local = pkg.sub.go()\n"
+        "    del pkg\n"
+        "    restored = pkg.sub.go()\n"
+        "    class Inner(pkg.sub.go()):\n"
+        "        pass\n"
+        "    def run(self):\n"
+        "        return pkg.sub.go()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    assert ("app.Outer", "pkg.sub.go", RelationshipKind.CALLS.value) in edges
+    assert ("app.Outer.run", "pkg.sub.go", RelationshipKind.CALLS.value) in edges
+    assert "pkg.sub.go" in _unresolved_by_source(result).get("app.Outer", set())
+    assert validate_document(result.document).is_valid
+
+
+def test_plain_prefix_does_not_bypass_parameter_or_dynamic_assignment_locals(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.sub\n"
+        "def parameter(pkg):\n    return pkg.sub.go()\n\n"
+        "def assigned():\n    pkg = build()\n    return pkg.sub.go()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    unresolved = _unresolved_by_source(result)
+    assert "pkg.sub.go" not in unresolved.get("app.parameter", set())
+    assert "pkg.sub.go" not in unresolved.get("app.assigned", set())
+    assert "build" in unresolved.get("app.assigned", set())
+    assert ("app.parameter", "pkg.sub.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
+    assert ("app.assigned", "pkg.sub.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
+
+
+def test_final_real_route_keeps_secondary_root_reference_for_missing_member(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go(): pass\n")
+    _write(tmp_path, "alternate.py", "def go(): pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.sub\nimport alternate as pkg\npkg.missing()\nvalue = pkg.missing\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    app = _node_id(result, "app")
+    alternate = _node_id(result, "alternate")
+    missing = _unresolved_by_source(result)["app"]
+    assert {"pkg.missing"} <= missing
+    references = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == app
+        and relationship.target == alternate
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    ]
+    assert len(references) == 1
+    lines = {
+        location.range.start.line
+        for evidence in references[0].evidence
+        for location in evidence.locations
+    }
+    assert lines == {
+        2,
+        3,
+    }
