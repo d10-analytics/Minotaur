@@ -4826,7 +4826,12 @@ def test_plain_dotted_import_final_route_orders_cover_all_legacy_families(
 def test_plain_route_history_keeps_final_real_route_and_disables_stale_prefix(
     tmp_path: Path, route_kind: str
 ) -> None:
-    if route_kind == "undotted" or route_kind == "aliased_undotted":
+    if route_kind == "undotted":
+        route_a, route_b = "import pkg", "import alternate as pkg"
+        target_a, target_b = "pkg.go", "alternate.go"
+        _write(tmp_path, "pkg/__init__.py", "def go(): pass\n")
+        _write(tmp_path, "alternate.py", "def go(): pass\n")
+    elif route_kind == "aliased_undotted":
         route_a, route_b = "import alternate_a as pkg", "import alternate_b as pkg"
         target_a, target_b = "alternate_a.go", "alternate_b.go"
         _write(tmp_path, "alternate_a.py", "def go(): pass\n")
