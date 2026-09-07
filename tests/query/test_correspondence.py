@@ -1028,6 +1028,31 @@ def test_unsupported_only_unresolved_source_is_retained() -> None:
     assert not prepared.relationship_groups
 
 
+@pytest.mark.parametrize("kind", ["contains", "inherits", "implements", "python:decorates"])
+def test_full_loader_valid_unsupported_unresolved_origin_chain_is_retained_without_group(
+    kind: str,
+) -> None:
+    ordinary = _symbol("ordinary", 0)
+    first_unresolved = _unresolved(ordinary, "outer", 1)
+    chained_unresolved = _unresolved(first_unresolved, "inner", 2)
+    relationship = _relationship(chained_unresolved, ordinary, kind)
+    loaded = _full_load(
+        _document(
+            ordinary,
+            first_unresolved,
+            chained_unresolved,
+            relationships=(relationship,),
+        )
+    )
+
+    prepared = correspondence.prepare_correspondence(loaded.document)
+
+    loaded_chain_end = loaded.document.nodes[2]
+    assert prepared.nodes_by_id[loaded_chain_end.id] is loaded_chain_end
+    assert prepared.nodes_by_id[loaded_chain_end.id].to_dict() == chained_unresolved.to_dict()
+    assert not prepared.relationship_groups
+
+
 def test_unresolved_target_chain_is_rejected_only_for_supported_references() -> None:
     ordinary = _symbol("ordinary", 0)
     origin = _unresolved(ordinary, "outer", 1)
@@ -1038,6 +1063,38 @@ def test_unresolved_target_chain_is_rejected_only_for_supported_references() -> 
         _prepare_after_full_load(document, side="old")
     assert raised.value.endpoint == "target"
     assert raised.value.side == "old"
+
+
+@pytest.mark.parametrize("side", ["old", "new"])
+def test_validator_admission_precedes_eligibility_for_a_participating_unresolved_chain(
+    side: str,
+) -> None:
+    ordinary = _symbol("ordinary", 0)
+    first_unresolved = _unresolved(ordinary, "outer", 1)
+    chained_unresolved = _unresolved(first_unresolved, "inner", 2)
+    participating_chain = _relationship(ordinary, chained_unresolved, "references")
+    independent_defect = replace(
+        _relationship(ordinary, ordinary, "references"),
+        source="node:sha256:" + "a" * 64,
+        target="node:sha256:" + "b" * 64,
+    )
+    document = _document(
+        ordinary,
+        first_unresolved,
+        chained_unresolved,
+        relationships=(participating_chain, independent_defect),
+    )
+    report = validate_document(document)
+    assert [(issue.code, issue.json_pointer) for issue in report] == [
+        (IssueCode.RELATIONSHIP_ENDPOINT_MISSING, "/relationships/1/source"),
+        (IssueCode.RELATIONSHIP_ENDPOINT_MISSING, "/relationships/1/target"),
+    ]
+
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
+        correspondence.prepare_correspondence(document, side=side)
+
+    assert raised.value.report.issues == report.issues
+    assert raised.value.side == side
 
 
 @pytest.mark.parametrize("kind", ["contains", "inherits", "implements", "python:decorates"])
