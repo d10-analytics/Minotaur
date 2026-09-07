@@ -825,3 +825,272 @@ def test_resource_kind_is_excluded_for_every_resource_basis() -> None:
     assert correspondence.node_key(source) == correspondence.node_key(source_kind)
     assert correspondence.node_key(upstream) == correspondence.node_key(upstream_kind)
     assert correspondence.node_key(keyed) == correspondence.node_key(keyed_kind)
+
+
+def test_source_symbol_kind_and_supported_relationship_kind_are_key_bearing() -> None:
+    function = _symbol("same", 0, kind="function")
+    method = _symbol("same", 0, kind="method")
+    extension = _symbol("same", 0, kind="python:callable")
+    assert correspondence.node_key(function) != correspondence.node_key(method)
+    assert correspondence.node_key(method) != correspondence.node_key(extension)
+
+    target = _symbol("target", 1)
+    relationships = tuple(
+        _relationship(function, target, kind) for kind in ("calls", "references", "imports")
+    )
+    prepared = correspondence.prepare_correspondence(
+        _document(function, target, relationships=relationships)
+    )
+    assert {key[2] for key in prepared.relationship_groups} == {
+        "calls",
+        "references",
+        "imports",
+    }
+
+
+def test_source_location_resource_candidates_remain_ambiguous_when_kind_changes() -> None:
+    first = _resource("database", 0, kind="db:table")
+    second = _resource("database", 1, kind="db:view")
+    first = replace(
+        first,
+        id=compute_node_id(
+            first.identity,
+            node_class=NodeClass.RESOURCE.value,
+            symbol_kind=first.symbol_kind,
+            location=first.location,
+        ),
+    )
+    second = replace(
+        second,
+        id=compute_node_id(
+            second.identity,
+            node_class=NodeClass.RESOURCE.value,
+            symbol_kind=second.symbol_kind,
+            location=second.location,
+        ),
+    )
+    target = _symbol("target", 2)
+    document = _document(first, second, target, relationships=(_relationship(first, target),))
+    loaded = load_graph_bytes(orjson.dumps(document.to_dict()))
+    prepared = correspondence.prepare_correspondence(loaded.document)
+    key = correspondence.node_key(first)
+    assert first.id != second.id
+    assert prepared.nodes_by_key[key] == (first, second)
+    relationship_key = next(iter(prepared.relationship_groups))
+    with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
+        prepared.validate_required_keys({relationship_key})
+    assert raised.value.endpoint == "source"
+    assert raised.value.candidate_ids == (first.id, second.id)
+
+
+def test_unresolved_derived_file_uses_location_path_then_node_path_then_absence() -> None:
+    origin = _symbol("origin", 0)
+    located = _unresolved(origin, "missing", 1)
+    shadowed = replace(located, path="shadowed.py")
+    fallback_identity = NodeIdentity(
+        IdentityBasis.UNRESOLVED_REFERENCE,
+        "python",
+        originating_node=origin.id,
+    )
+    fallback_id = compute_node_id(
+        fallback_identity,
+        node_class=NodeClass.UNRESOLVED_REFERENCE.value,
+        reference_text="missing",
+        location=None,
+    )
+    fallback = replace(located, id=fallback_id, location=None, path="fallback.py")
+    absent = replace(fallback, id=fallback_id, path=None)
+    origin_key = correspondence.node_key(origin)
+    assert correspondence.node_key(located, origin=origin_key)[4:] == ("missing", "src/a.py")
+    assert correspondence.node_key(shadowed, origin=origin_key)[4:] == ("missing", "src/a.py")
+    assert correspondence.node_key(fallback, origin=origin_key)[4:] == ("missing", "fallback.py")
+    assert correspondence.node_key(absent, origin=origin_key)[4:] == ("missing", None)
+    for node in (located, fallback, absent):
+        edge = _relationship(origin, node, "references")
+        loaded = load_graph_bytes(
+            orjson.dumps(_document(origin, node, relationships=(edge,)).to_dict())
+        )
+        assert correspondence.prepare_correspondence(loaded.document).relationship_groups
+
+
+def test_range_only_movement_updates_ids_and_unresolved_descendants_transitively() -> None:
+    origin = _symbol("origin", 0)
+    unresolved = _unresolved(origin, "missing", 1)
+    first_edge = _relationship(origin, unresolved, "references")
+    first_document = _document(origin, unresolved, relationships=(first_edge,))
+
+    moved_origin = _symbol("origin", 2)
+    moved_unresolved = _unresolved(moved_origin, "missing", 3)
+    moved_edge = _relationship(moved_origin, moved_unresolved, "references")
+    moved_document = _document(moved_origin, moved_unresolved, relationships=(moved_edge,))
+    first_loaded = load_graph_bytes(orjson.dumps(first_document.to_dict()))
+    moved_loaded = load_graph_bytes(orjson.dumps(moved_document.to_dict()))
+    first = correspondence.prepare_correspondence(first_loaded.document)
+    moved = correspondence.prepare_correspondence(moved_loaded.document)
+    assert origin.id != moved_origin.id
+    assert unresolved.id != moved_unresolved.id
+    assert tuple(first.relationship_groups) == tuple(moved.relationship_groups)
+    assert tuple(first.nodes_by_key) == tuple(moved.nodes_by_key)
+
+
+def test_neutral_observations_and_nested_extensions_are_preserved_without_key_changes() -> None:
+    source = _symbol("source", 0)
+    target = _symbol("target", 1)
+    evidence = Evidence(
+        provenance=Provenance.STATIC_ANALYSIS,
+        locations=(_location("src/a.py", 4),),
+        extensions={"tool": {"nested": {"value": "kept"}}},
+    )
+    relationship = Relationship(
+        source.id,
+        target.id,
+        "references",
+        (evidence,),
+        extensions={"edge": {"nested": {"value": "kept"}}},
+    )
+    observed = replace(
+        source,
+        language="python",
+        expected_symbol_kind="function",
+        extensions={"node": {"nested": {"value": "kept"}}},
+    )
+    observed_relationship = replace(relationship, source=observed.id)
+    document = _document(observed, target, relationships=(observed_relationship,))
+    prepared = correspondence.prepare_correspondence(document)
+    assert correspondence.node_key(source) == correspondence.node_key(observed)
+    assert prepared.document.to_dict() == document.to_dict()
+    occurrence = next(iter(next(iter(prepared.relationship_groups.values()))))
+    assert occurrence.relationship.to_dict() == observed_relationship.to_dict()
+    with pytest.raises(TypeError):
+        occurrence.relationship.extensions["edge"]["nested"]["value"] = "changed"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        occurrence.source.extensions["node"]["nested"]["value"] = "changed"  # type: ignore[index]
+
+
+def test_ambiguity_failure_preserves_input_and_candidate_sites() -> None:
+    first = _symbol("same", 0)
+    second = _symbol("same", 1)
+    target = _symbol("target", 2)
+    edge = _relationship(first, target)
+    document = _document(first, second, target, relationships=(edge,))
+    before = document.to_dict()
+    prepared = correspondence.prepare_correspondence(document)
+    key = next(iter(prepared.relationship_groups))
+    with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
+        prepared.validate_required_keys({key}, side="old")
+    assert raised.value.side == "old"
+    assert raised.value.candidate_ids == (first.id, second.id)
+    assert document.to_dict() == before
+
+
+def test_distinct_evidence_and_paired_occurrences_are_retained() -> None:
+    source_origin = _symbol("source", 0)
+    target_origin = _symbol("target", 1)
+    source_occurrence = _unresolved(source_origin, "missing-source", 2)
+    target_occurrence = _unresolved(target_origin, "missing-target", 3)
+    first_evidence = Evidence(
+        provenance=Provenance.STATIC_ANALYSIS,
+        locations=(_location("src/a.py", 5), _location("src/a.py", 6)),
+    )
+    second_evidence = Evidence(
+        provenance=Provenance.IMPORTED_GRAPH,
+        locations=(_location("src/a.py", 5),),
+    )
+    relationship = Relationship(
+        source_occurrence.id,
+        target_occurrence.id,
+        "references",
+        (first_evidence, second_evidence),
+        extensions={"edge": {"source": "paired"}},
+    )
+    document = _document(
+        source_origin,
+        target_origin,
+        source_occurrence,
+        target_occurrence,
+        relationships=(relationship,),
+    )
+    loaded = load_graph_bytes(orjson.dumps(document.to_dict()))
+    prepared = correspondence.prepare_correspondence(loaded.document)
+    occurrence = next(iter(next(iter(prepared.relationship_groups.values()))))
+    assert occurrence.relationship.source == source_occurrence.id
+    assert occurrence.relationship.target == target_occurrence.id
+    assert occurrence.relationship.evidence == relationship.evidence
+    assert occurrence.relationship.extensions == relationship.extensions
+
+
+def test_valid_duplicate_id_and_reversed_node_range_are_admission_findings() -> None:
+    source = _symbol("source", 0)
+    duplicate = _document(source, source)
+    duplicate_report = validate_document(duplicate)
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as duplicate_error:
+        correspondence.prepare_correspondence(duplicate)
+    assert duplicate_error.value.report.issues == duplicate_report.issues
+    assert duplicate_report.issues[0].code == IssueCode.NODE_ID_DUPLICATE
+    assert duplicate_report.issues[0].path == ("nodes", 1, "id")
+
+    reversed_location = Location("src/a.py", Range(Position(2, 0), Position(1, 0)))
+    reversed_node = replace(
+        source,
+        id=compute_node_id(
+            source.identity,
+            node_class=NodeClass.SYMBOL.value,
+            symbol_kind=source.symbol_kind,
+            location=reversed_location,
+        ),
+        location=reversed_location,
+    )
+    reversed_document = _document(reversed_node)
+    reversed_report = validate_document(reversed_document)
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as reversed_error:
+        correspondence.prepare_correspondence(reversed_document)
+    assert reversed_error.value.report.issues == reversed_report.issues
+    assert reversed_report.issues[0].code == IssueCode.RANGE_END_BEFORE_START
+    assert reversed_report.issues[0].path == ("nodes", 0, "location", "range")
+
+
+def test_absent_unresolved_request_does_not_activate_duplicate_origin_candidates() -> None:
+    first = _symbol("origin", 0)
+    second = _symbol("origin", 1)
+    target = _symbol("target", 2)
+    unresolved = _unresolved(first, "missing", 3)
+    prepared = correspondence.prepare_correspondence(_document(first, second, target, unresolved))
+    unresolved_key = correspondence.node_key(unresolved, origin=correspondence.node_key(first))
+    absent = (unresolved_key, correspondence.node_key(target), "references")
+    assert prepared.validate_required_keys({absent}, side="right") is prepared
+
+
+def test_invalid_input_report_is_exact_and_permutation_specific() -> None:
+    source = _symbol("source", 0)
+    target = _symbol("target", 1)
+    first = replace(_relationship(source, target), source="node:sha256:" + "a" * 64)
+    second = replace(_relationship(source, target), target="node:sha256:" + "b" * 64)
+    document = _document(source, target, relationships=(first, second))
+    report = validate_document(document)
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
+        correspondence.prepare_correspondence(document)
+    assert raised.value.report.issues == report.issues
+    assert raised.value.report.issues == validate_document(document).issues
+
+    permuted = _document(source, target, relationships=(second, first))
+    permuted_report = validate_document(permuted)
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as permuted_error:
+        correspondence.prepare_correspondence(permuted)
+    assert permuted_error.value.report.issues == permuted_report.issues
+    assert permuted_error.value.report.issues != report.issues
+
+
+def test_same_evidence_site_is_retained_across_distinct_valid_relationships() -> None:
+    source = _symbol("source", 0)
+    first_target = _symbol("first", 1)
+    second_target = _symbol("second", 2)
+    site = _location("src/a.py", 4)
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS, locations=(site,))
+    first = Relationship(source.id, first_target.id, "references", (evidence,))
+    second = Relationship(source.id, second_target.id, "references", (evidence,))
+    prepared = correspondence.prepare_correspondence(
+        _document(source, first_target, second_target, relationships=(first, second))
+    )
+    occurrences = [item for group in prepared.relationship_groups.values() for item in group]
+    assert len(occurrences) == 2
+    assert all(item.relationship.evidence[0].locations == (site,) for item in occurrences)
