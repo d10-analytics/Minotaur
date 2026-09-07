@@ -1040,14 +1040,12 @@ def _module_resolution(module: _Module, modules: Mapping[str, _Module]) -> _Modu
 
     collector = _BindingCollector(module.name, module.is_package)
     nested_import_names: set[str] = set()
-    nested_plain_names: set[str] = set()
     for statement in module.tree.body:
         collector.visit(statement)
         if not isinstance(statement, (ast.Import, ast.ImportFrom)):
             nested_collector = _BindingCollector(module.name, module.is_package)
             nested_collector.visit(statement)
             nested_import_names.update(nested_collector.import_targets)
-            nested_plain_names.update(nested_collector.plain_import_names)
     # A Store binding in the same module remains a conservative invalidator,
     # even when it shares a name with a direct import.
     competing_names = (collector.names | set(collector.import_targets)) - direct_names
@@ -1063,7 +1061,7 @@ def _module_resolution(module: _Module, modules: Mapping[str, _Module]) -> _Modu
                 prefixes[target] = target
     plain_roots = frozenset(
         name for name, descriptor in bindings.items() if descriptor.category == "plain"
-    ) | frozenset(nested_plain_names - set(bindings))
+    )
     return _ModuleResolution(bindings, prefixes, plain_roots)
 
 
