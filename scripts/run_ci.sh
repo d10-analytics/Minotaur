@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 # Run the repository's GitHub Actions checks in fresh temporary environments.
 
+if [[ -z "${MINOTAUR_CI_SIGNAL_RESET-}" ]]; then
+    export MINOTAUR_CI_SIGNAL_RESET=1
+    exec python3 - "$0" "$@" <<'PY'
+import os
+import signal
+import sys
+
+script = os.path.abspath(sys.argv[1])
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+shell = os.environ.get("BASH", "/bin/bash")
+os.execv(shell, [shell, script, *sys.argv[2:]])
+PY
+fi
+
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -113,13 +128,14 @@ else
     initial_clean=true
 fi
 
-declare -A lane_status lane_exit lane_duration lane_log lane_timeout
+declare -A lane_status lane_exit lane_duration lane_log lane_timeout lane_environment
 for lane in "${selected_lanes[@]}"; do
     lane_status[$lane]=pending
     lane_exit[$lane]=null
     lane_duration[$lane]=0
     lane_log[$lane]="logs/$lane.log"
     lane_timeout[$lane]="$(timeout_for "$lane")"
+    lane_environment[$lane]="$temporary_root/env-$lane"
     : > "$run_root/${lane_log[$lane]}"
 done
 
@@ -244,13 +260,28 @@ copy_source() {
     done < <(git ls-files --cached --others --exclude-standard -z)
 }
 
-copy_source
+if ! copy_source; then
+    for lane in "${selected_lanes[@]}"; do
+        lane_status[$lane]=setup_failed
+        lane_exit[$lane]=127
+        printf 'source copy setup failed\n' > "$run_root/${lane_log[$lane]}"
+    done
+    overall_status=failed
+    cd "$checkout_root"
+    final_commit="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+        final_clean=false
+    else
+        final_clean=true
+    fi
+    write_manifest true
+    exit 1
+fi
 cd "$source_copy"
 
 run_in_environment() (
     set -e
-    environment_dir="$(mktemp -d "$temporary_root/env.XXXXXX")"
-    trap 'rm -rf "$environment_dir"' EXIT
+    mkdir -p "$environment_dir"
     ci_python="$environment_dir/bin/python"
     ci_pip="$environment_dir/bin/pip"
     export environment_dir ci_python ci_pip
@@ -352,6 +383,8 @@ run_lane() {
     active_grace="$grace"
     timeout="${lane_timeout[$lane]}"
     marker="$temporary_root/$lane.timeout"
+    environment_dir="${lane_environment[$lane]}"
+    export environment_dir
     rm -f "$marker"
     : > "$run_root/${lane_log[$lane]}"
     set +e
@@ -376,6 +409,7 @@ run_lane() {
     lane_duration[$lane]="$(awk -v start="$started" -v end="$ended" 'BEGIN { d=end-start; if (d<0) d=0; printf "%.6f", d }')"
     terminate_group "$active_pid" "$grace"
     active_pid=""
+    rm -rf "${lane_environment[$lane]}"
 
     if [[ -n "$interrupted_signal" ]]; then
         lane_status[$lane]=interrupted
