@@ -36,7 +36,8 @@ if [[ "${1-}" == -m && "${2-}" == venv ]]; then
                 printf '%s=symlink:%s\n' "$path" "$target" >> "$FAKE_OBSERVED"
             elif [[ -e "$path" ]]; then
                 content="$(cat "$path")"
-                printf '%s=file:%s\n' "$path" "$content" >> "$FAKE_OBSERVED"
+                mode="$(stat -c '%a' "$path")"
+                printf '%s=file:%s:mode=%s\n' "$path" "$content" "$mode" >> "$FAKE_OBSERVED"
             else
                 printf '%s=absent\n' "$path" >> "$FAKE_OBSERVED"
             fi
@@ -46,6 +47,18 @@ if [[ "${1-}" == -m && "${2-}" == venv ]]; then
     for tool in python pip ruff mypy; do cp "$0" "$3/bin/$tool"; chmod +x "$3/bin/$tool"; done
     exit 0
 fi
+if [[ "$name" == ruff && -n "${FAKE_NEXT_LANE_CHECK:-}" ]]; then
+    descendant_pid="$(cat "$FAKE_DESCENDANT_PID")"
+    if [[ -n "${FAKE_DESCENDANT_PID:-}" ]] && kill -0 "$descendant_pid" 2>/dev/null; then
+        printf 'alive\n' > "$FAKE_NEXT_LANE_CHECK"
+    else
+        printf 'gone\n' > "$FAKE_NEXT_LANE_CHECK"
+    fi
+fi
+if [[ "$name" == ruff && "${1-}" == check && -n "${FAKE_HOLD_FILE:-}" ]]; then
+    : > "${FAKE_HOLD_READY:?}"
+    while [[ -e "$FAKE_HOLD_FILE" ]]; do sleep 0.05; done
+fi
 log_call "$@"
 if [[ "$name" == pip ]]; then exit "${FAKE_PIP_STATUS:-0}"; fi
 if [[ "$name" == ruff ]]; then exit "${FAKE_RUFF_STATUS:-0}"; fi
@@ -54,7 +67,19 @@ if [[ "${1-}" == -m ]]; then
     case "$2" in
         pytest)
             if [[ -n "${FAKE_DESCENDANT_PID:-}" ]]; then
-                (trap '' TERM; while :; do sleep 1; done) &
+                if [[ -n "${FAKE_DESCENDANT_OBSERVED:-}" ]]; then
+                    (
+                        trap 'if [[ -d "$environment_dir" ]]; then
+                            printf "present\\n" > "$FAKE_DESCENDANT_OBSERVED"
+                        else
+                            printf "missing\\n" > "$FAKE_DESCENDANT_OBSERVED"
+                        fi
+                        trap "" TERM' TERM
+                        while :; do sleep 1; done
+                    ) &
+                else
+                    (trap '' TERM; while :; do sleep 1; done) &
+                fi
                 printf '%s\n' "$!" > "$FAKE_DESCENDANT_PID"
             fi
             if [[ -n "${FAKE_MUTATE_CHECKOUT:-}" ]]; then
@@ -140,10 +165,16 @@ def test_help_and_unknown_selector_are_nonexecuting(fixture: tuple[Path, Path, P
     assert help_result.returncode == 0
     assert "MINOTAUR_CI_TIMEOUT_SECONDS" in help_result.stdout
     assert not (state / "calls.log").exists()
-
     unknown = run_ci(checkout, fake_python, state, "unknown")
     assert unknown.returncode == 2
     assert not (state / "calls.log").exists()
+
+
+def test_omitted_selector_retains_all_default(fixture: tuple[Path, Path, Path]) -> None:
+    checkout, fake_python, state = fixture
+    result = run_ci(checkout, fake_python, state)
+    assert result.returncode == 0
+    assert [row["name"] for row in manifest(state)["lanes"]] == LANES
 
 
 def test_all_runs_six_lanes_and_keeps_later_lanes_after_failure(
@@ -159,6 +190,38 @@ def test_all_runs_six_lanes_and_keeps_later_lanes_after_failure(
     assert evidence["lanes"][2]["status"] == "passed"
     calls = (state / "calls.log").read_text(encoding="utf-8")
     assert "-m build" in calls
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected"),
+    [
+        ("test", ["install --upgrade pip", "install -e .[dev]", "-m pytest tests/ -v"]),
+        ("lint", ["install ruff==0.16.3", "check .", "format --check ."]),
+        ("typecheck", ["install --upgrade pip", "install -e .[dev]", "mypy"]),
+        ("package", ["install --upgrade pip", "install .", "schema"]),
+        (
+            "browser",
+            [
+                "install --upgrade pip",
+                "install -e .[dev,visualizer]",
+                "-m playwright install chromium",
+                "-m pytest tests/test_visualizer_browser.py -v",
+            ],
+        ),
+        ("build", ["install build", "-m build --outdir"]),
+    ],
+)
+def test_each_selector_records_the_parity_payload_in_an_isolated_venv(
+    fixture: tuple[Path, Path, Path], selector: str, expected: list[str]
+) -> None:
+    checkout, fake_python, state = fixture
+    result = run_ci(checkout, fake_python, state, selector)
+    assert result.returncode == 0
+    calls = (state / "calls.log").read_text(encoding="utf-8")
+    assert all(fragment in calls for fragment in expected)
+    venv_calls = [line for line in calls.splitlines() if "-m venv" in line]
+    assert len(venv_calls) == 1
+    assert str(checkout) not in calls
 
 
 def test_exit_five_is_diagnostic_no_tests_and_manifest_is_reader_safe(
@@ -181,6 +244,7 @@ def test_source_copy_keeps_dirty_visible_entries_and_excludes_ignored(
 ) -> None:
     checkout, fake_python, state = fixture
     (checkout / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    (checkout / "tracked.txt").chmod(0o644)
     untracked = checkout / "untracked.sh"
     untracked.write_text("untracked\n", encoding="utf-8")
     untracked.chmod(0o755)
@@ -191,8 +255,8 @@ def test_source_copy_keeps_dirty_visible_entries_and_excludes_ignored(
     assert result.returncode == 0
     lines = observed.read_text(encoding="utf-8").splitlines()
     assert any(line.startswith("cwd=") and str(checkout) not in line for line in lines)
-    assert "tracked.txt=file:dirty" in lines
-    assert "untracked.sh=file:untracked" in lines
+    assert "tracked.txt=file:dirty:mode=644" in lines
+    assert "untracked.sh=file:untracked:mode=755" in lines
     assert "link.txt=symlink:tracked.txt" in lines
     assert "ignored.txt=absent" in lines
 
@@ -220,6 +284,45 @@ def test_browser_install_and_test_share_owned_browser_root(
     assert (ambient / "sentinel").read_text(encoding="utf-8") == "keep\n"
 
 
+@pytest.mark.parametrize(
+    ("extra", "status"),
+    [
+        ({"FAKE_PLAYWRIGHT_STATUS": "7"}, "failed"),
+        ({"FAKE_PYTEST_STATUS": "5"}, "failed"),
+        (
+            {
+                "FAKE_PYTEST_SLEEP": "5",
+                "MINOTAUR_CI_TIMEOUT_SECONDS": "1",
+                "MINOTAUR_CI_TERM_GRACE_SECONDS": "1",
+            },
+            "timeout",
+        ),
+    ],
+)
+def test_browser_failure_and_timeout_are_nonpass_and_remove_owned_root(
+    fixture: tuple[Path, Path, Path], extra: dict[str, str], status: str
+) -> None:
+    checkout, fake_python, state = fixture
+    ambient = state / "ambient"
+    ambient.mkdir(parents=True)
+    (ambient / "sentinel").write_text("keep\n", encoding="utf-8")
+    result = run_ci(
+        checkout,
+        fake_python,
+        state,
+        "browser",
+        **extra,
+        PLAYWRIGHT_BROWSERS_PATH=str(ambient),
+    )
+    assert result.returncode != 0
+    evidence = manifest(state)
+    assert evidence["lanes"][0]["status"] == status
+    roots = [line.split("\t", 1)[1] for line in (state / "browser.log").read_text().splitlines()]
+    assert roots and all(root != str(ambient) for root in roots)
+    assert not Path(roots[0]).exists()
+    assert (ambient / "sentinel").read_text(encoding="utf-8") == "keep\n"
+
+
 def test_invalid_limits_fail_before_any_payload(fixture: tuple[Path, Path, Path]) -> None:
     checkout, fake_python, state = fixture
     for variable, value in (
@@ -232,6 +335,85 @@ def test_invalid_limits_fail_before_any_payload(fixture: tuple[Path, Path, Path]
         result = run_ci(checkout, fake_python, state, "test", **{variable: value})
         assert result.returncode == 2
         assert not (state / "calls.log").exists()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"MINOTAUR_CI_TIMEOUT_SECONDS": "2"},
+        {"MINOTAUR_CI_TERM_GRACE_SECONDS": "2"},
+        {"MINOTAUR_CI_TIMEOUT_SECONDS": "2", "MINOTAUR_CI_TERM_GRACE_SECONDS": "2"},
+    ],
+)
+def test_valid_limit_overrides_are_recorded_diagnostic_only(
+    fixture: tuple[Path, Path, Path], overrides: dict[str, str]
+) -> None:
+    checkout, fake_python, state = fixture
+    result = run_ci(checkout, fake_python, state, "test", **overrides)
+    assert result.returncode == 0
+    evidence = manifest(state)
+    assert evidence["diagnostic_only"] is True
+    limits = evidence["lanes"][0]["limits"]
+    assert limits["timeout_seconds"] == int(overrides.get("MINOTAUR_CI_TIMEOUT_SECONDS", 600))
+    assert limits["term_grace_seconds"] == int(overrides.get("MINOTAUR_CI_TERM_GRACE_SECONDS", 30))
+
+
+def test_concurrent_invocations_keep_distinct_complete_result_roots(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    processes: list[subprocess.Popen[bytes]] = []
+    states = [state / "one", state / "two"]
+    for run_state in states:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHON_BIN": str(fake_python),
+                "XDG_STATE_HOME": str(run_state),
+                "FAKE_LOG": str(run_state / "calls.log"),
+                "FAKE_BROWSER_LOG": str(run_state / "browser.log"),
+                "FAKE_PYTEST_SLEEP": "1",
+            }
+        )
+        processes.append(
+            subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "test"], cwd=checkout, env=env)
+        )
+    assert all(process.wait(timeout=30) == 0 for process in processes)
+    roots = [next((run_state / "minotaur-ci/runs").glob("*/result.json")) for run_state in states]
+    assert len({path.parent for path in roots}) == 2
+    assert all(json.loads(path.read_text())["complete"] for path in roots)
+
+
+def test_manifest_is_reader_safe_while_a_later_lane_is_held(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    hold = state / "hold"
+    ready = state / "ready"
+    state.mkdir(parents=True)
+    hold.touch()
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "XDG_STATE_HOME": str(state),
+            "FAKE_LOG": str(state / "calls.log"),
+            "FAKE_BROWSER_LOG": str(state / "browser.log"),
+            "FAKE_HOLD_FILE": str(hold),
+            "FAKE_HOLD_READY": str(ready),
+        }
+    )
+    process = subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "all"], cwd=checkout, env=env)
+    for _ in range(300):
+        if ready.exists():
+            break
+        time.sleep(0.02)
+    result_path = next((state / "minotaur-ci/runs").glob("*/result.json"))
+    evidence = json.loads(result_path.read_text(encoding="utf-8"))
+    assert evidence["lanes"][0]["status"] == "passed"
+    assert all(row["status"] == "pending" for row in evidence["lanes"][1:])
+    hold.unlink()
+    assert process.wait(timeout=30) == 0
 
 
 def test_timeout_kills_owned_group_and_removes_disposable_root(
@@ -272,6 +454,7 @@ def test_timeout_drains_term_ignoring_descendant_before_result_cleanup(
 ) -> None:
     checkout, fake_python, state = fixture
     descendant = state / "descendant.pid"
+    observed = state / "descendant.observed"
     result = run_ci(
         checkout,
         fake_python,
@@ -281,10 +464,35 @@ def test_timeout_drains_term_ignoring_descendant_before_result_cleanup(
         MINOTAUR_CI_TERM_GRACE_SECONDS="1",
         FAKE_PYTEST_SLEEP="20",
         FAKE_DESCENDANT_PID=str(descendant),
+        FAKE_DESCENDANT_OBSERVED=str(observed),
     )
     assert result.returncode != 0
     assert manifest(state)["lanes"][0]["status"] == "timeout"
     _assert_dead(descendant)
+    assert observed.read_text(encoding="utf-8") == "present\n"
+
+
+def test_ordinary_failure_drains_descendant_before_next_lane(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    descendant = state / "descendant.pid"
+    next_lane = state / "next-lane.observed"
+    result = run_ci(
+        checkout,
+        fake_python,
+        state,
+        "all",
+        FAKE_PYTEST_STATUS="7",
+        FAKE_DESCENDANT_PID=str(descendant),
+        FAKE_NEXT_LANE_CHECK=str(next_lane),
+        MINOTAUR_CI_TERM_GRACE_SECONDS="1",
+    )
+    assert result.returncode != 0
+    evidence = manifest(state)
+    assert evidence["lanes"][0]["status"] == "failed"
+    assert evidence["lanes"][1]["status"] == "passed"
+    assert next_lane.read_text(encoding="utf-8") == "gone\n"
 
 
 def test_missing_setsid_marks_all_lanes_setup_failed_without_payload(
@@ -398,6 +606,7 @@ def test_sigterm_records_final_provenance_after_lane_changes_checkout(
     assert process.wait(timeout=30) != 0
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == "interrupted"
+    assert all(row["status"] == "not_run" for row in evidence["lanes"][1:])
     assert evidence["final"]["commit"] != evidence["initial"]["commit"]
     assert evidence["final"]["clean"] is True
     assert evidence["final"]["changed"] is True
