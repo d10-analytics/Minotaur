@@ -337,6 +337,38 @@ def test_sigint_marks_active_and_pending_lanes(fixture: tuple[Path, Path, Path])
     assert all(row["status"] == "not_run" for row in evidence["lanes"][1:])
 
 
+def test_sigint_handles_parent_inherited_ignored_disposition(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "XDG_STATE_HOME": str(state),
+            "FAKE_LOG": str(state / "calls.log"),
+            "FAKE_PYTEST_SLEEP": "5",
+            "MINOTAUR_CI_TIMEOUT_SECONDS": "1",
+            "MINOTAUR_CI_TERM_GRACE_SECONDS": "1",
+        }
+    )
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        process = subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "all"], cwd=checkout, env=env)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    for _ in range(200):
+        calls = state / "calls.log"
+        if calls.is_file() and "-m venv" in calls.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.02)
+    process.send_signal(signal.SIGINT)
+    assert process.wait(timeout=30) != 0
+    evidence = manifest(state)
+    assert evidence["lanes"][0]["status"] == "interrupted"
+    assert all(row["status"] == "not_run" for row in evidence["lanes"][1:])
+
+
 def test_sigterm_records_final_provenance_after_lane_changes_checkout(
     fixture: tuple[Path, Path, Path],
 ) -> None:
