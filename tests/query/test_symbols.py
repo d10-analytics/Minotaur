@@ -329,3 +329,51 @@ def test_duplicate_label_is_ambiguous_for_callers_and_impact(
         assert captured.err == (
             "minotaur: error: ambiguous symbol: mod.dup; candidates: mod.py:1, mod.py:5\n"
         )
+
+
+def _edge_kinds(document: dict[str, object], source_label: str, target_label: str) -> list[str]:
+    nodes = document["nodes"]
+    relationships = document["relationships"]
+    assert isinstance(nodes, list)
+    assert isinstance(relationships, list)
+    ids = {node["label"]: node["id"] for node in nodes if isinstance(node, dict)}
+    return [
+        relationship["kind"]
+        for relationship in relationships
+        if isinstance(relationship, dict)
+        and relationship["source"] == ids[source_label]
+        and relationship["target"] == ids[target_label]
+    ]
+
+
+def test_dotted_import_call_graph_drives_exact_callers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "caller.py",
+        "import pkg.sub\n\ndef owner():\n    pkg.sub.go()\n",
+    )
+    graph = tmp_path / "call-only.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "caller.owner", "pkg.sub.go") == ["calls"]
+
+    status = cli.main(
+        [
+            "query",
+            "callers",
+            "pkg.sub.go",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "caller.py:4:5  caller.owner\n"
