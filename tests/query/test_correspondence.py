@@ -868,20 +868,32 @@ def test_invalid_full_and_trusted_loaders_match_direct_preparation(
     _assert_invalid_loader_parity(document, expected_codes)
 
 
+@pytest.mark.parametrize("side", ["old", "new"])
+@pytest.mark.parametrize("error_type", [ValueError, TypeError])
 def test_unverifiable_digest_issue_from_real_validator_is_preserved(
     monkeypatch: pytest.MonkeyPatch,
+    side: str,
+    error_type: type[Exception],
 ) -> None:
     source = _symbol("source", 0)
     document = _document(source)
+    _full_load(document)
     import minotaur.graph_model.validation as validation
 
     def fail(*args: object, **kwargs: object) -> bool:
-        raise ValueError("test digest dependency failure")
+        raise error_type("test digest dependency failure")
 
     monkeypatch.setattr(validation, "verify_node_id", fail)
+    expected = validation.validate_document(document, verify_node_ids=True)
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare_correspondence(document)
-    assert [issue.code for issue in raised.value.report] == [IssueCode.NODE_ID_UNVERIFIABLE]
+        correspondence.prepare_correspondence(document, side=side)
+    assert raised.value.report.issues == expected.issues
+    assert tuple(issue.code for issue in expected) == (IssueCode.NODE_ID_UNVERIFIABLE,)
+    assert expected.issues[0].path == ("nodes", 0, "id")
+    assert expected.issues[0].message == (
+        "node id could not be reconstructed from its identity: test digest dependency failure"
+    )
+    assert raised.value.side == side
 
 
 @pytest.mark.parametrize("endpoint", ["source", "target"])
