@@ -60,6 +60,26 @@ def _resource(label: str, line: int, *, kind: str | None = None) -> Node:
     )
 
 
+def _upstream_symbol(kind: str) -> Node:
+    identity = NodeIdentity(
+        IdentityBasis.UPSTREAM_IDENTIFIER,
+        "python",
+        upstream_identifier="upstream-1",
+    )
+    node_id = compute_node_id(
+        identity,
+        node_class=NodeClass.SYMBOL.value,
+        symbol_kind=kind,
+    )
+    return Node(
+        id=node_id,
+        identity=identity,
+        node_class=NodeClass.SYMBOL,
+        label="external",
+        symbol_kind=kind,
+    )
+
+
 def _unresolved(origin: Node, text: str, line: int) -> Node:
     location = _location("src/a.py", line)
     identity = NodeIdentity(
@@ -135,10 +155,11 @@ def test_admission_rejects_digest_mismatch_before_index_publication() -> None:
     document = _document(invalid)
 
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare(document)
+        correspondence.prepare(document, side="new")
 
     assert [issue.code.value for issue in raised.value.report] == ["node-id-mismatch"]
     assert raised.value.report.issues[0].path == ("nodes", 0, "id")
+    assert raised.value.side == "new"
 
 
 def test_resource_kind_is_observation_and_does_not_change_key() -> None:
@@ -147,6 +168,13 @@ def test_resource_kind_is_observation_and_does_not_change_key() -> None:
     assert correspondence.node_key(absent) == correspondence.node_key(present)
     assert absent.symbol_kind is None
     assert present.symbol_kind == "db:table"
+
+
+def test_upstream_symbol_kind_is_required_in_correspondence_key() -> None:
+    function = _upstream_symbol("function")
+    method = _upstream_symbol("method")
+    assert function.id == method.id
+    assert correspondence.node_key(function) != correspondence.node_key(method)
 
 
 def test_unresolved_occurrences_use_nested_origin_and_remain_paired() -> None:
@@ -222,6 +250,7 @@ def test_participating_unresolved_origin_chain_is_eligibility_error() -> None:
         correspondence.prepare(document)
 
     assert raised.value.endpoint == "target"
+    assert raised.value.side == "local"
     assert raised.value.node is chained
     assert raised.value.origin is unresolved_origin
 
