@@ -86,12 +86,15 @@ def node_key(node: Node, *, origin: NodeKey | None = None) -> NodeKey:
     if basis == IdentityBasis.FILE_PATH:
         return (basis.value, node.node_class.value, identity.namespace, node.path)
     if basis == IdentityBasis.UPSTREAM_IDENTIFIER:
-        return (
+        fields = (
             basis.value,
             node.node_class.value,
             identity.namespace,
             identity.upstream_identifier,
         )
+        if node.node_class == NodeClass.SYMBOL:
+            fields += (node.symbol_kind,)
+        return fields
     if basis == IdentityBasis.RESOURCE_KEY:
         return (basis.value, node.node_class.value, identity.namespace, identity.resource_key)
     if basis == IdentityBasis.UNRESOLVED_REFERENCE:
@@ -130,9 +133,16 @@ class CorrespondenceError(ValueError):
 class CorrespondenceAdmissionError(CorrespondenceError):
     """The canonical graph validator found one or more admission issues."""
 
-    def __init__(self, report: ValidationReport, document: GraphDocument) -> None:
+    def __init__(
+        self,
+        report: ValidationReport,
+        document: GraphDocument,
+        *,
+        side: str = "local",
+    ) -> None:
         self.report = report
         self.document = document
+        self.side = side
         self.issues = report.issues
         details = "; ".join(f"{issue.code.value} at {issue.json_pointer}" for issue in report)
         super().__init__(f"graph correspondence admission failed: {details}")
@@ -141,11 +151,20 @@ class CorrespondenceAdmissionError(CorrespondenceError):
 class CorrespondenceEligibilityError(CorrespondenceError):
     """A supported relationship has an unresolved endpoint without an ordinary origin."""
 
-    def __init__(self, relationship: Relationship, endpoint: str, node: Node, origin: Node) -> None:
+    def __init__(
+        self,
+        relationship: Relationship,
+        endpoint: str,
+        node: Node,
+        origin: Node,
+        *,
+        side: str = "local",
+    ) -> None:
         self.relationship = relationship
         self.endpoint = endpoint
         self.node = node
         self.origin = origin
+        self.side = side
         super().__init__(
             f"{relationship.kind} {endpoint} {node.id!r} has unresolved direct origin "
             f"{origin.id!r}; comparison requires an ordinary origin"
@@ -262,16 +281,53 @@ class CorrespondenceIndex:
     validate = validate_required_keys
 
 
-def prepare_correspondence(document: GraphDocument) -> CorrespondenceIndex:
+def _check_side(side: str) -> None:
+    if side not in {"local", "old", "new", "left", "right"}:
+        raise ValueError("side must be local, old, new, left, or right")
+
+
+def _relationship_sort_key(occurrence: RelationshipOccurrence) -> tuple[object, ...]:
+    relationship = occurrence.relationship
+    evidence = tuple(
+        (
+            repr(item.attribution_key),
+            tuple(
+                (
+                    location.path,
+                    location.range.start.line,
+                    location.range.start.character,
+                    location.range.end.line,
+                    location.range.end.character,
+                )
+                for location in item.locations
+            ),
+        )
+        for item in relationship.evidence
+    )
+    return (
+        relationship.source,
+        relationship.target,
+        relationship.kind,
+        repr(evidence),
+        repr(relationship.extensions),
+    )
+
+
+def prepare_correspondence(
+    document: GraphDocument,
+    *,
+    side: str = "local",
+) -> CorrespondenceIndex:
     """Validate and prepare one graph document for semantic correspondence.
 
     Admission always calls ``validate_document(document,
     verify_node_ids=True)`` without source text.  Thus the returned index is
     usable only after the complete ordered validator report is valid.
     """
+    _check_side(side)
     report = validate_document(document, verify_node_ids=True)
     if not report.is_valid:
-        raise CorrespondenceAdmissionError(report, document)
+        raise CorrespondenceAdmissionError(report, document, side=side)
 
     by_id = {node.id: node for node in document.nodes}
     ordinary_keys: dict[str, NodeKey] = {}
@@ -298,7 +354,13 @@ def prepare_correspondence(document: GraphDocument) -> CorrespondenceIndex:
             assert origin_id is not None  # structural model + admission guarantee this
             origin = by_id[origin_id]
             if origin.node_class == NodeClass.UNRESOLVED_REFERENCE:
-                raise CorrespondenceEligibilityError(relationship, endpoint_name, endpoint, origin)
+                raise CorrespondenceEligibilityError(
+                    relationship,
+                    endpoint_name,
+                    endpoint,
+                    origin,
+                    side=side,
+                )
             origin_key = ordinary_keys[origin.id]
             key = node_key(endpoint, origin=origin_key)
             unresolved_keys[endpoint.id] = key
@@ -328,7 +390,7 @@ def prepare_correspondence(document: GraphDocument) -> CorrespondenceIndex:
         relationship_groups[occurrence.key].append(occurrence)
     immutable_relationships = MappingProxyType(
         {
-            key: tuple(items)
+            key: tuple(sorted(items, key=_relationship_sort_key))
             for key, items in sorted(
                 relationship_groups.items(), key=lambda item: _key_sort(item[0])
             )
