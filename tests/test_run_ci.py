@@ -20,17 +20,31 @@ LANES = ["test", "lint", "typecheck", "package", "browser", "build"]
 FAKE_PYTHON = r"""#!/usr/bin/env bash
 set -euo pipefail
 name="$(basename "$0")"
-log_call() { printf '%s\t%s\t%s\n' "$name" "$PWD" "$*" >> "$FAKE_LOG"; }
-if [[ "$name" == python && -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]] \
-    && [[ "${1-}" == -m ]] \
-    && [[ "${2-}" == playwright || "${2-}" == pytest ]]; then
+log_call() {
+    printf '%s\t%s\t%s\n' "$name" "$PWD" "$*" >> "$FAKE_LOG"
+    if [[ -n "${FAKE_ARGS:-}" ]]; then
+        printf '%s\0%s\0' "$name" "$PWD" >> "$FAKE_ARGS"
+        if (( $# )); then
+            printf '%s\0' "$@" >> "$FAKE_ARGS"
+        fi
+        printf '\036' >> "$FAKE_ARGS"
+    fi
+}
+browser_command=false
+if [[ "${2-}" == playwright ]] \
+    || [[ "${2-}" == pytest && "$*" == *test_visualizer_browser.py* ]]; then
+    browser_command=true
+fi
+if [[ "$name" == python && -n "${PLAYWRIGHT_BROWSERS_PATH:-}" && "$browser_command" == true ]]; then
     printf '%s\t%s\n' "$name" "$PLAYWRIGHT_BROWSERS_PATH" >> "$FAKE_BROWSER_LOG"
+    mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+    printf '%s\n' "$name" > "$PLAYWRIGHT_BROWSERS_PATH/$name.marker"
 fi
 if [[ "${1-}" == -m && "${2-}" == venv ]]; then
     log_call "$@"
     if [[ -n "${FAKE_OBSERVED:-}" ]]; then
         printf 'cwd=%s\n' "$PWD" >> "$FAKE_OBSERVED"
-        for path in tracked.txt untracked.sh link.txt ignored.txt; do
+        for path in tracked.txt staged.txt deleted.txt untracked.sh link.txt ignored.txt; do
             if [[ -L "$path" ]]; then
                 target="$(readlink "$path")"
                 printf '%s=symlink:%s\n' "$path" "$target" >> "$FAKE_OBSERVED"
@@ -111,6 +125,8 @@ def fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     (checkout / "pyproject.toml").write_text("[build-system]\nrequires=[]\n", encoding="utf-8")
     (checkout / "tests/sample.py").write_text("def test_sample(): pass\n", encoding="utf-8")
     (checkout / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    (checkout / "staged.txt").write_text("baseline staged\n", encoding="utf-8")
+    (checkout / "deleted.txt").write_text("baseline deleted\n", encoding="utf-8")
     (checkout / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
     subprocess.run(["git", "config", "user.email", "ci@example.test"], cwd=checkout, check=True)
@@ -157,6 +173,19 @@ def manifest(state: Path) -> dict[str, object]:
     paths = list((state / "minotaur-ci/runs").glob("*/result.json"))
     assert len(paths) == 1
     return json.loads(paths[0].read_text(encoding="utf-8"))
+
+
+def argument_records(path: Path) -> list[tuple[str, str, list[str]]]:
+    records = []
+    for raw in path.read_bytes().split(b"\036"):
+        fields = raw.split(b"\0")
+        if fields and fields[-1] == b"":
+            fields.pop()
+        if fields:
+            records.append(
+                (fields[0].decode(), fields[1].decode(), [item.decode() for item in fields[2:]])
+            )
+    return records
 
 
 def test_help_and_unknown_selector_are_nonexecuting(fixture: tuple[Path, Path, Path]) -> None:
@@ -215,13 +244,56 @@ def test_each_selector_records_the_parity_payload_in_an_isolated_venv(
     fixture: tuple[Path, Path, Path], selector: str, expected: list[str]
 ) -> None:
     checkout, fake_python, state = fixture
-    result = run_ci(checkout, fake_python, state, selector)
+    args_file = state / "args.bin"
+    result = run_ci(checkout, fake_python, state, selector, FAKE_ARGS=str(args_file))
     assert result.returncode == 0
     calls = (state / "calls.log").read_text(encoding="utf-8")
     assert all(fragment in calls for fragment in expected)
     venv_calls = [line for line in calls.splitlines() if "-m venv" in line]
     assert len(venv_calls) == 1
     assert str(checkout) not in calls
+    records = argument_records(args_file)
+    assert records
+    assert all(cwd != str(checkout) for _, cwd, _ in records)
+    venv = next(args for name, _, args in records if args[:2] == ["-m", "venv"])
+    assert len(venv) == 3
+    assert all(args[0] == "install" for _, _, args in records if args and args[0] == "install")
+    if selector == "test":
+        assert [args for _, _, args in records if args[:2] == ["-m", "pytest"]] == [
+            ["-m", "pytest", "tests/", "-v"]
+        ]
+    elif selector == "lint":
+        assert [args for _, _, args in records if args[:1] == ["check"]] == [["check", "."]]
+        assert [args for _, _, args in records if args[:1] == ["format"]] == [
+            ["format", "--check", "."]
+        ]
+    elif selector == "typecheck":
+        assert [(name, args) for name, _, args in records if name == "mypy"] == [("mypy", [])]
+    elif selector == "package":
+        assert [args for _, _, args in records if args[:2] == ["install", "."]] == [
+            ["install", "."]
+        ]
+        assert [args for _, _, args in records if args[:1] == ["-c"]] == [
+            [
+                "-c",
+                (
+                    "from minotaur.graph_model.loading import schema; "
+                    'assert schema()["$id"] == "urn:minotaur:schemas:minotaur-graph:0.1.0"'
+                ),
+            ]
+        ]
+    elif selector == "browser":
+        assert [args for _, _, args in records if args[:2] == ["-m", "playwright"]] == [
+            ["-m", "playwright", "install", "chromium"]
+        ]
+        assert [args for _, _, args in records if args[:2] == ["-m", "pytest"]] == [
+            ["-m", "pytest", "tests/test_visualizer_browser.py", "-v"]
+        ]
+    else:
+        build = [args for _, _, args in records if args[:2] == ["-m", "build"]]
+        assert len(build) == 1
+        assert build[0][:3] == ["-m", "build", "--outdir"]
+        assert build[0][3].endswith("/build")
 
 
 def test_exit_five_is_diagnostic_no_tests_and_manifest_is_reader_safe(
@@ -244,7 +316,10 @@ def test_source_copy_keeps_dirty_visible_entries_and_excludes_ignored(
 ) -> None:
     checkout, fake_python, state = fixture
     (checkout / "tracked.txt").write_text("dirty\n", encoding="utf-8")
-    (checkout / "tracked.txt").chmod(0o644)
+    (checkout / "tracked.txt").chmod(0o755)
+    (checkout / "staged.txt").write_text("staged dirty\n", encoding="utf-8")
+    subprocess.run(["git", "add", "staged.txt"], cwd=checkout, check=True)
+    (checkout / "deleted.txt").unlink()
     untracked = checkout / "untracked.sh"
     untracked.write_text("untracked\n", encoding="utf-8")
     untracked.chmod(0o755)
@@ -255,7 +330,9 @@ def test_source_copy_keeps_dirty_visible_entries_and_excludes_ignored(
     assert result.returncode == 0
     lines = observed.read_text(encoding="utf-8").splitlines()
     assert any(line.startswith("cwd=") and str(checkout) not in line for line in lines)
-    assert "tracked.txt=file:dirty:mode=644" in lines
+    assert "tracked.txt=file:dirty:mode=755" in lines
+    assert "staged.txt=file:staged dirty:mode=664" in lines
+    assert "deleted.txt=absent" in lines
     assert "untracked.sh=file:untracked:mode=755" in lines
     assert "link.txt=symlink:tracked.txt" in lines
     assert "ignored.txt=absent" in lines
@@ -325,16 +402,11 @@ def test_browser_failure_and_timeout_are_nonpass_and_remove_owned_root(
 
 def test_invalid_limits_fail_before_any_payload(fixture: tuple[Path, Path, Path]) -> None:
     checkout, fake_python, state = fixture
-    for variable, value in (
-        ("MINOTAUR_CI_TIMEOUT_SECONDS", ""),
-        ("MINOTAUR_CI_TIMEOUT_SECONDS", "0"),
-        ("MINOTAUR_CI_TIMEOUT_SECONDS", "-1"),
-        ("MINOTAUR_CI_TIMEOUT_SECONDS", "1.5"),
-        ("MINOTAUR_CI_TERM_GRACE_SECONDS", "nope"),
-    ):
-        result = run_ci(checkout, fake_python, state, "test", **{variable: value})
-        assert result.returncode == 2
-        assert not (state / "calls.log").exists()
+    for variable in ("MINOTAUR_CI_TIMEOUT_SECONDS", "MINOTAUR_CI_TERM_GRACE_SECONDS"):
+        for value in ("", "0", "-1", "1.5", "nope"):
+            result = run_ci(checkout, fake_python, state, "test", **{variable: value})
+            assert result.returncode == 2
+            assert not (state / "calls.log").exists()
 
 
 @pytest.mark.parametrize(
@@ -363,15 +435,15 @@ def test_concurrent_invocations_keep_distinct_complete_result_roots(
 ) -> None:
     checkout, fake_python, state = fixture
     processes: list[subprocess.Popen[bytes]] = []
-    states = [state / "one", state / "two"]
-    for run_state in states:
+    state.mkdir(parents=True)
+    for index in range(2):
         env = os.environ.copy()
         env.update(
             {
                 "PYTHON_BIN": str(fake_python),
-                "XDG_STATE_HOME": str(run_state),
-                "FAKE_LOG": str(run_state / "calls.log"),
-                "FAKE_BROWSER_LOG": str(run_state / "browser.log"),
+                "XDG_STATE_HOME": str(state),
+                "FAKE_LOG": str(state / f"calls-{index}.log"),
+                "FAKE_BROWSER_LOG": str(state / f"browser-{index}.log"),
                 "FAKE_PYTEST_SLEEP": "1",
             }
         )
@@ -379,7 +451,7 @@ def test_concurrent_invocations_keep_distinct_complete_result_roots(
             subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "test"], cwd=checkout, env=env)
         )
     assert all(process.wait(timeout=30) == 0 for process in processes)
-    roots = [next((run_state / "minotaur-ci/runs").glob("*/result.json")) for run_state in states]
+    roots = list((state / "minotaur-ci/runs").glob("*/result.json"))
     assert len({path.parent for path in roots}) == 2
     assert all(json.loads(path.read_text())["complete"] for path in roots)
 
@@ -492,6 +564,26 @@ def test_ordinary_failure_drains_descendant_before_next_lane(
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == "failed"
     assert evidence["lanes"][1]["status"] == "passed"
+    assert next_lane.read_text(encoding="utf-8") == "gone\n"
+
+
+def test_success_drains_descendant_before_next_lane(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    descendant = state / "descendant.pid"
+    next_lane = state / "next-lane.observed"
+    result = run_ci(
+        checkout,
+        fake_python,
+        state,
+        "all",
+        FAKE_DESCENDANT_PID=str(descendant),
+        FAKE_NEXT_LANE_CHECK=str(next_lane),
+        MINOTAUR_CI_TERM_GRACE_SECONDS="1",
+    )
+    assert result.returncode == 0
+    assert manifest(state)["outcome"] == "passed"
     assert next_lane.read_text(encoding="utf-8") == "gone\n"
 
 
@@ -611,3 +703,44 @@ def test_sigterm_records_final_provenance_after_lane_changes_checkout(
     assert evidence["final"]["clean"] is True
     assert evidence["final"]["changed"] is True
     assert evidence["diagnostic_only"] is True
+
+
+@pytest.mark.parametrize("interrupt", [signal.SIGINT, signal.SIGTERM])
+def test_browser_interrupt_removes_owned_root_and_stops_pending_lanes(
+    fixture: tuple[Path, Path, Path], interrupt: signal.Signals
+) -> None:
+    checkout, fake_python, state = fixture
+    ambient = state / "ambient"
+    ambient.mkdir(parents=True)
+    (ambient / "sentinel").write_text("keep\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "XDG_STATE_HOME": str(state),
+            "FAKE_LOG": str(state / "calls.log"),
+            "FAKE_BROWSER_LOG": str(state / "browser.log"),
+            "PLAYWRIGHT_BROWSERS_PATH": str(ambient),
+            "FAKE_PYTEST_SLEEP": "20",
+            "MINOTAUR_CI_TIMEOUT_SECONDS": "10",
+            "MINOTAUR_CI_TERM_GRACE_SECONDS": "1",
+        }
+    )
+    process = subprocess.Popen(
+        [str(checkout / "scripts/run_ci.sh"), "browser"], cwd=checkout, env=env
+    )
+    for _ in range(500):
+        browser_log = state / "browser.log"
+        if browser_log.is_file() and len(browser_log.read_text().splitlines()) >= 2:
+            time.sleep(0.2)
+            break
+        time.sleep(0.02)
+    process.send_signal(interrupt)
+    assert process.wait(timeout=30) != 0
+    evidence = manifest(state)
+    browser_row = next(row for row in evidence["lanes"] if row["name"] == "browser")
+    assert browser_row["status"] == "interrupted"
+    assert len(evidence["lanes"]) == 1
+    roots = [line.split("\t", 1)[1] for line in (state / "browser.log").read_text().splitlines()]
+    assert roots and not Path(roots[0]).exists()
+    assert (ambient / "sentinel").read_text(encoding="utf-8") == "keep\n"
