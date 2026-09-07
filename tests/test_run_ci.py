@@ -578,6 +578,26 @@ def test_timeout_kills_owned_group_and_removes_disposable_root(
     assert not list((state / "tmp").glob("minotaur-ci.*/source"))
 
 
+def test_all_timeout_removes_every_lane_source_copy(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    tmp_root = state / "tmp"
+    tmp_root.mkdir(parents=True)
+    result = run_ci(
+        checkout,
+        fake_python,
+        state,
+        "all",
+        MINOTAUR_CI_TIMEOUT_SECONDS="1",
+        MINOTAUR_CI_TERM_GRACE_SECONDS="1",
+        FAKE_PYTEST_SLEEP="5",
+        TMPDIR=str(tmp_root),
+    )
+    assert result.returncode != 0
+    assert not list(tmp_root.glob("minotaur-ci.*"))
+
+
 def test_timeout_preserves_unrelated_process(
     fixture: tuple[Path, Path, Path],
 ) -> None:
