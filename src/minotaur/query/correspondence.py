@@ -276,10 +276,6 @@ class CorrespondenceIndex:
                         )
         return self
 
-    # Short operation names make the typed handoff convenient for callers.
-    require = validate_required_keys
-    validate = validate_required_keys
-
 
 def _check_side(side: str) -> None:
     if side not in {"local", "old", "new", "left", "right"}:
@@ -340,6 +336,18 @@ def prepare_correspondence(
 
     origin_dependencies: dict[NodeKey, NodeKey] = {}
     unresolved_keys: dict[str, NodeKey] = {}
+    eligibility_errors: list[tuple[Relationship, str, Node, Node]] = []
+    candidate_ids: dict[NodeKey, set[str]] = defaultdict(set)
+
+    def add_candidate(key: NodeKey, node: Node) -> None:
+        if node.id not in candidate_ids[key]:
+            candidate_ids[key].add(node.id)
+            groups[key].append(node)
+
+    for key, nodes in tuple(groups.items()):
+        for node in nodes:
+            candidate_ids[key].add(node.id)
+
     for relationship in document.relationships:
         if relationship.kind not in _SUPPORTED_RELATIONSHIPS:
             continue
@@ -354,18 +362,33 @@ def prepare_correspondence(
             assert origin_id is not None  # structural model + admission guarantee this
             origin = by_id[origin_id]
             if origin.node_class == NodeClass.UNRESOLVED_REFERENCE:
-                raise CorrespondenceEligibilityError(
-                    relationship,
-                    endpoint_name,
-                    endpoint,
-                    origin,
-                    side=side,
-                )
+                eligibility_errors.append((relationship, endpoint_name, endpoint, origin))
+                continue
             origin_key = ordinary_keys[origin.id]
             key = node_key(endpoint, origin=origin_key)
             unresolved_keys[endpoint.id] = key
             origin_dependencies[key] = origin_key
-            groups[key].append(endpoint)
+            add_candidate(key, endpoint)
+
+    if eligibility_errors:
+        eligibility_errors.sort(
+            key=lambda item: (
+                item[0].source,
+                item[0].target,
+                item[0].kind,
+                0 if item[1] == "source" else 1,
+                item[2].id,
+                item[3].id,
+            )
+        )
+        relationship, endpoint_name, endpoint, origin = eligibility_errors[0]
+        raise CorrespondenceEligibilityError(
+            relationship,
+            endpoint_name,
+            endpoint,
+            origin,
+            side=side,
+        )
 
     immutable_groups = MappingProxyType(
         {
@@ -373,10 +396,12 @@ def prepare_correspondence(
             for key, nodes in sorted(groups.items(), key=lambda item: _key_sort(item[0]))
         }
     )
-    immutable_ids = MappingProxyType(dict(by_id))
+    immutable_ids = MappingProxyType({node_id: by_id[node_id] for node_id in sorted(by_id)})
 
     relationship_groups: dict[RelationshipKey, list[RelationshipOccurrence]] = defaultdict(list)
     for relationship in document.relationships:
+        if relationship.kind not in _SUPPORTED_RELATIONSHIPS:
+            continue
         source = by_id[relationship.source]
         target = by_id[relationship.target]
         source_key = ordinary_keys.get(source.id) or unresolved_keys.get(source.id)
@@ -401,7 +426,9 @@ def prepare_correspondence(
         nodes_by_id=immutable_ids,
         nodes_by_key=immutable_groups,
         relationships_by_key=immutable_relationships,
-        origin_dependencies=MappingProxyType(dict(origin_dependencies)),
+        origin_dependencies=MappingProxyType(
+            {key: origin_dependencies[key] for key in sorted(origin_dependencies, key=_key_sort)}
+        ),
     )
 
 
@@ -415,11 +442,6 @@ def validate_required_keys(
     return index.validate_required_keys(requested_keys, side=side)
 
 
-# The short name is useful to consumers while the descriptive name remains
-# the canonical documentation entry point.
-prepare = prepare_correspondence
-
-
 __all__ = [
     "CorrespondenceAdmissionError",
     "CorrespondenceAmbiguityError",
@@ -430,7 +452,6 @@ __all__ = [
     "RelationshipKey",
     "RelationshipOccurrence",
     "node_key",
-    "prepare",
     "prepare_correspondence",
     "validate_required_keys",
 ]
