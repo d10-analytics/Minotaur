@@ -3,18 +3,9 @@
 
 if [[ -z "${MINOTAUR_CI_SIGNAL_RESET-}" ]]; then
     export MINOTAUR_CI_SIGNAL_RESET=1
-    exec python3 - "$0" "$@" <<'PY'
-import os
-import signal
-import sys
-
-script = os.path.abspath(sys.argv[1])
-signal.signal(signal.SIGINT, signal.SIG_DFL)
-signal.signal(signal.SIGTERM, signal.SIG_DFL)
-shell = os.environ.get("BASH", "/bin/bash")
-os.execv(shell, [shell, script, *sys.argv[2:]])
-PY
+    exec python3 -c 'import os, signal, sys; script = os.path.abspath(sys.argv[1]); signal.signal(signal.SIGINT, signal.SIG_DFL); signal.signal(signal.SIGTERM, signal.SIG_DFL); shell = os.environ.get("BASH", "/bin/bash"); os.execv(shell, [shell, script, *sys.argv[2:]])' "$0" "$@"
 fi
+unset MINOTAUR_CI_SIGNAL_RESET
 
 set -euo pipefail
 
@@ -229,6 +220,7 @@ payload = {
     "outcome": os.environ["MANIFEST_STATUS"],
     "complete": boolean("MANIFEST_FINISHED"),
 }
+
 path = pathlib.Path(os.environ["MANIFEST_PATH"])
 fd, temporary = tempfile.mkstemp(prefix=".result.", dir=path.parent)
 try:
@@ -242,6 +234,21 @@ finally:
 PY
 }
 
+finalize_manifest() {
+    cd "$checkout_root"
+    final_commit="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+        final_clean=false
+    else
+        final_clean=true
+    fi
+    if [[ "$final_commit" != "$initial_commit" || "$final_clean" != "$initial_clean" ]]; then
+        final_changed=true
+        diagnostic_only=true
+    fi
+    write_manifest true
+}
+
 write_manifest false
 
 # Materialize the present Git-visible checkout, including dirty tracked files,
@@ -249,15 +256,17 @@ write_manifest false
 # an independent clone so repository-aware tests can create disposable trees.
 copy_source() {
     local relative destination
-    git clone --no-local "$checkout_root" "$source_copy" >/dev/null 2>&1
+    local inventory="$temporary_root/git-visible-entries"
+    git clone --no-local "$checkout_root" "$source_copy" >/dev/null 2>&1 || return 1
     git -C "$source_copy" remote remove origin >/dev/null 2>&1 || true
-    find "$source_copy" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
+    find "$source_copy" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} + || return 1
+    git ls-files --cached --others --exclude-standard -z > "$inventory" || return 1
     while IFS= read -r -d '' relative; do
         [[ -e "$relative" || -L "$relative" ]] || continue
         destination="$source_copy/$relative"
-        mkdir -p "$(dirname -- "$destination")"
-        cp -a -- "$relative" "$destination"
-    done < <(git ls-files --cached --others --exclude-standard -z)
+        mkdir -p "$(dirname -- "$destination")" || return 1
+        cp -a -- "$relative" "$destination" || return 1
+    done < "$inventory"
 }
 
 if ! copy_source; then
@@ -267,14 +276,7 @@ if ! copy_source; then
         printf 'source copy setup failed\n' > "$run_root/${lane_log[$lane]}"
     done
     overall_status=failed
-    cd "$checkout_root"
-    final_commit="$(git rev-parse HEAD)"
-    if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
-        final_clean=false
-    else
-        final_clean=true
-    fi
-    write_manifest true
+    finalize_manifest
     exit 1
 fi
 cd "$source_copy"
@@ -368,10 +370,7 @@ if [[ -n "$interrupted_signal" ]]; then
         lane_exit[$lane]=null
     done
     overall_status=interrupted
-    cd "$checkout_root"
-    final_commit="$(git rev-parse HEAD)"
-    final_clean="$initial_clean"
-    write_manifest true
+    finalize_manifest
     exit 130
 fi
 
@@ -466,18 +465,7 @@ if [[ "$overall_status" == running ]]; then
     done
 fi
 
-cd "$checkout_root"
-final_commit="$(git rev-parse HEAD)"
-if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
-    final_clean=false
-else
-    final_clean=true
-fi
-if [[ "$final_commit" != "$initial_commit" || "$final_clean" != "$initial_clean" ]]; then
-    final_changed=true
-    diagnostic_only=true
-fi
-write_manifest true
+finalize_manifest
 
 if [[ "$overall_status" == passed ]]; then
     exit 0
