@@ -472,6 +472,51 @@ def test_full_loader_valid_supported_unresolved_fixture_prepares_and_groups() ->
     )
 
 
+def test_distinct_same_key_unresolved_sources_validate_as_occurrences() -> None:
+    origin = _symbol("origin", 0)
+    target = _symbol("target", 1)
+    first = _unresolved(origin, "missing", 2)
+    second = _unresolved(origin, "missing", 3)
+    edges = (_relationship(first, target), _relationship(second, target))
+    document = _document(origin, target, first, second, relationships=edges)
+    loaded = load_graph_bytes(orjson.dumps(document.to_dict()))
+    prepared = correspondence.prepare_correspondence(loaded.document)
+    relationship_key = next(iter(prepared.relationship_groups))
+    assert len(prepared.nodes_by_key[relationship_key[0]]) == 2
+    assert len(prepared.relationship_groups[relationship_key]) == 2
+    assert prepared.validate_required_keys({relationship_key}) is prepared
+
+
+def test_distinct_same_key_unresolved_targets_validate_as_occurrences() -> None:
+    source = _symbol("source", 0)
+    origin = _symbol("origin", 1)
+    first = _unresolved(origin, "missing", 2)
+    second = _unresolved(origin, "missing", 3)
+    edges = (_relationship(source, first), _relationship(source, second))
+    document = _document(source, origin, first, second, relationships=edges)
+    loaded = load_graph_bytes(orjson.dumps(document.to_dict()))
+    prepared = correspondence.prepare_correspondence(loaded.document)
+    relationship_key = next(iter(prepared.relationship_groups))
+    assert len(prepared.nodes_by_key[relationship_key[1]]) == 2
+    assert len(prepared.relationship_groups[relationship_key]) == 2
+    assert prepared.validate_required_keys({relationship_key}) is prepared
+
+
+def test_distinct_unresolved_occurrences_still_fail_for_duplicate_origins() -> None:
+    first_origin = _symbol("origin", 0)
+    second_origin = _symbol("origin", 1)
+    target = _symbol("target", 2)
+    occurrence = _unresolved(first_origin, "missing", 3)
+    edge = _relationship(occurrence, target)
+    document = _document(first_origin, second_origin, target, occurrence, relationships=(edge,))
+    loaded = load_graph_bytes(orjson.dumps(document.to_dict()))
+    prepared = correspondence.prepare_correspondence(loaded.document)
+    relationship_key = next(iter(prepared.relationship_groups))
+    with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
+        prepared.validate_required_keys({relationship_key})
+    assert raised.value.origin is True
+
+
 def test_trusted_loader_does_not_bypass_comparison_id_verification() -> None:
     source = _symbol("source", 0)
     altered = replace(source, symbol_kind="method")
@@ -751,6 +796,7 @@ def test_same_key_unresolved_edges_keep_two_exact_pairs_without_cartesian_produc
     assert len(groups) == 1
     pairs = {(item.relationship.source, item.relationship.target) for item in groups[0]}
     assert pairs == {(source_one.id, target_one.id), (source_two.id, target_two.id)}
+    assert prepared.validate_required_keys({next(iter(prepared.relationship_groups))}) is prepared
     assert tuple(
         (item.relationship.source, item.relationship.target)
         for item in next(iter(permuted.relationship_groups.values()))
