@@ -605,6 +605,64 @@ def test_preparation_does_not_open_files_or_mutate_the_document(
     assert document.to_dict() == before
 
 
+def test_missing_unresolved_origin_is_admission_error_with_exact_pointer() -> None:
+    fake_origin = "node:sha256:" + "a" * 64
+    location = _location("src/a.py", 0)
+    identity = NodeIdentity(
+        IdentityBasis.UNRESOLVED_REFERENCE,
+        "python",
+        originating_node=fake_origin,
+    )
+    node_id = compute_node_id(
+        identity,
+        node_class=NodeClass.UNRESOLVED_REFERENCE.value,
+        reference_text="missing",
+        location=location,
+    )
+    unresolved = Node(
+        id=node_id,
+        identity=identity,
+        node_class=NodeClass.UNRESOLVED_REFERENCE,
+        label="missing",
+        reference_text="missing",
+        location=location,
+    )
+    document = _document(unresolved)
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
+        correspondence.prepare(document)
+    assert raised.value.report.issues[0].code == IssueCode.IDENTITY_ORIGIN_MISSING
+    assert raised.value.report.issues[0].path == ("nodes", 0, "identity", "originating_node")
+
+
+def test_duplicate_relationship_tuple_is_rejected_after_valid_evidence() -> None:
+    source = _symbol("source", 0)
+    target = _symbol("target", 1)
+    first = _relationship(source, target, "references")
+    second = _relationship(source, target, "references")
+    document = _document(source, target, relationships=(first, second))
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
+        correspondence.prepare(document)
+    assert raised.value.report.issues[0].code == IssueCode.RELATIONSHIP_DUPLICATE
+    assert raised.value.report.issues[0].path == ("relationships", 1)
+
+
+def test_extreme_location_without_source_text_is_still_admitted() -> None:
+    source = _symbol("source", 900)
+    document = _document(source)
+    prepared = correspondence.prepare(document)
+    assert prepared.nodes_by_key[correspondence.node_key(source)] == (source,)
+
+
+def test_empty_requested_set_still_checks_graph_admission_and_chain_eligibility() -> None:
+    ordinary = _symbol("ordinary", 0)
+    origin = _unresolved(ordinary, "outer", 1)
+    chained = _unresolved(origin, "inner", 2)
+    edge = _relationship(ordinary, chained, "references")
+    document = _document(ordinary, origin, chained, relationships=(edge,))
+    with pytest.raises(correspondence.CorrespondenceEligibilityError):
+        correspondence.prepare(document).validate_required_keys(set())
+
+
 def test_same_key_unresolved_edges_keep_two_exact_pairs_without_cartesian_product() -> None:
     source_origin = _symbol("source-origin", 0)
     target_origin = _symbol("target-origin", 1)
