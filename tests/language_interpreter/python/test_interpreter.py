@@ -4394,12 +4394,7 @@ def test_nested_plain_dotted_import_does_not_block_same_module_declaration(
     _write(
         tmp_path,
         "app.py",
-        "def pkg():\n"
-        "    pass\n"
-        "if True:\n"
-        "    import pkg.sub\n"
-        "pkg()\n"
-        "value = pkg\n",
+        "def pkg():\n    pass\nif True:\n    import pkg.sub\npkg()\nvalue = pkg\n",
     )
 
     result = analyze_python_workspace(tmp_path)
@@ -4414,7 +4409,8 @@ def test_nested_plain_dotted_import_does_not_block_same_module_declaration(
     assert not any(
         relationship.source == app
         and relationship.target == imported_sub
-        and relationship.kind in {
+        and relationship.kind
+        in {
             RelationshipKind.CALLS.value,
             RelationshipKind.REFERENCES.value,
         }
@@ -4447,11 +4443,7 @@ def test_nested_dotted_import_invalidates_existing_direct_prefix(tmp_path: Path)
     _write(
         tmp_path,
         "app.py",
-        "import pkg.sub\n"
-        "if True:\n"
-        "    import pkg.sub\n"
-        "pkg.sub.go()\n"
-        "value = pkg.sub.go\n",
+        "import pkg.sub\nif True:\n    import pkg.sub\npkg.sub.go()\nvalue = pkg.sub.go\n",
     )
 
     result = analyze_python_workspace(tmp_path)
