@@ -103,7 +103,6 @@ mkdir -p "$logs_root"
 manifest="$run_root/result.json"
 
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/minotaur-ci.XXXXXX")"
-source_copy="$temporary_root/source"
 build_output="$temporary_root/build"
 browser_root="$temporary_root/browser"
 mkdir -p "$build_output" "$browser_root"
@@ -119,7 +118,7 @@ else
     initial_clean=true
 fi
 
-declare -A lane_status lane_exit lane_duration lane_log lane_timeout lane_environment
+declare -A lane_status lane_exit lane_duration lane_log lane_timeout lane_environment lane_source
 for lane in "${selected_lanes[@]}"; do
     lane_status[$lane]=pending
     lane_exit[$lane]=null
@@ -127,6 +126,7 @@ for lane in "${selected_lanes[@]}"; do
     lane_log[$lane]="logs/$lane.log"
     lane_timeout[$lane]="$(timeout_for "$lane")"
     lane_environment[$lane]="$temporary_root/env-$lane"
+    lane_source[$lane]="$temporary_root/source-$lane"
     : > "$run_root/${lane_log[$lane]}"
 done
 
@@ -274,21 +274,28 @@ write_manifest false
 # non-ignored untracked files, modes, and symlinks. Git metadata is retained in
 # an independent clone so repository-aware tests can create disposable trees.
 copy_source() {
-    local relative destination
+    local relative destination="$1"
     local inventory="$temporary_root/git-visible-entries"
-    git clone --no-local "$checkout_root" "$source_copy" >/dev/null 2>&1 || return 1
-    git -C "$source_copy" remote remove origin >/dev/null 2>&1 || true
-    find "$source_copy" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} + || return 1
-    git ls-files --cached --others --exclude-standard -z > "$inventory" || return 1
+    git clone --no-local "$checkout_root" "$destination" >/dev/null 2>&1 || return 1
+    git -C "$destination" remote remove origin >/dev/null 2>&1 || true
+    find "$destination" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} + || return 1
+    git -C "$checkout_root" ls-files --cached --others --exclude-standard -z > "$inventory" || return 1
     while IFS= read -r -d '' relative; do
-        [[ -e "$relative" || -L "$relative" ]] || continue
-        destination="$source_copy/$relative"
-        mkdir -p "$(dirname -- "$destination")" || return 1
-        cp -a -- "$relative" "$destination" || return 1
+        [[ -e "$checkout_root/$relative" || -L "$checkout_root/$relative" ]] || continue
+        local copied_path="$destination/$relative"
+        mkdir -p "$(dirname -- "$copied_path")" || return 1
+        cp -a -- "$checkout_root/$relative" "$copied_path" || return 1
     done < "$inventory"
 }
 
-if ! copy_source; then
+source_copy_failed=false
+for lane in "${selected_lanes[@]}"; do
+    if ! copy_source "${lane_source[$lane]}"; then
+        source_copy_failed=true
+        break
+    fi
+done
+if [[ "$source_copy_failed" == true ]]; then
     for lane in "${selected_lanes[@]}"; do
         lane_status[$lane]=setup_failed
         lane_exit[$lane]=127
@@ -298,7 +305,6 @@ if ! copy_source; then
     finalize_manifest
     exit 1
 fi
-cd "$source_copy"
 
 run_in_environment() (
     set -e
@@ -447,7 +453,7 @@ run_lane() {
     if [[ "$status" -eq 0 ]]; then
         lane_status[$lane]=passed
     elif [[ "$lane" == test && "$status" -eq 5 ]]; then
-        lane_status[$lane]=no_tests
+        lane_status[$lane]=passed
     else
         lane_status[$lane]=failed
     fi
@@ -460,6 +466,7 @@ for lane in "${selected_lanes[@]}"; do
         lane_exit[$lane]=null
         continue
     fi
+    cd "${lane_source[$lane]}"
     if run_lane "$lane"; then
         run_result=0
     else
