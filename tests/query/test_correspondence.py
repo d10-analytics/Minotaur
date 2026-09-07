@@ -199,7 +199,7 @@ def test_admission_rejects_digest_mismatch_before_index_publication() -> None:
     document = _document(invalid)
 
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare(document, side="new")
+        correspondence.prepare_correspondence(document, side="new")
 
     assert [issue.code.value for issue in raised.value.report] == ["node-id-mismatch"]
     assert raised.value.report.issues[0].path == ("nodes", 0, "id")
@@ -228,7 +228,7 @@ def test_unresolved_occurrences_use_nested_origin_and_remain_paired() -> None:
     unresolved_target = _unresolved(target, "Other", 3)
     first = _relationship(unresolved_source, target)
     second = _relationship(source, unresolved_target)
-    prepared = correspondence.prepare(
+    prepared = correspondence.prepare_correspondence(
         _document(
             source,
             target,
@@ -257,7 +257,9 @@ def test_requested_present_duplicate_reports_all_candidates_including_edgeless()
     second = _symbol("same", 1)
     target = _symbol("target", 2)
     edge = _relationship(first, target)
-    prepared = correspondence.prepare(_document(first, second, target, relationships=(edge,)))
+    prepared = correspondence.prepare_correspondence(
+        _document(first, second, target, relationships=(edge,))
+    )
     requested = next(iter(prepared.relationship_groups))
 
     with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
@@ -272,7 +274,7 @@ def test_absent_requested_relationship_does_not_activate_ambiguity() -> None:
     first = _symbol("same", 0)
     second = _symbol("same", 1)
     target = _symbol("target", 2)
-    prepared = correspondence.prepare(_document(first, second, target))
+    prepared = correspondence.prepare_correspondence(_document(first, second, target))
     absent = (
         correspondence.node_key(first),
         correspondence.node_key(target),
@@ -291,7 +293,7 @@ def test_participating_unresolved_origin_chain_is_eligibility_error() -> None:
     document = _document(ordinary, unresolved_origin, chained, relationships=(edge,))
 
     with pytest.raises(correspondence.CorrespondenceEligibilityError) as raised:
-        correspondence.prepare(document)
+        correspondence.prepare_correspondence(document)
 
     assert raised.value.endpoint == "target"
     assert raised.value.side == "local"
@@ -302,7 +304,7 @@ def test_participating_unresolved_origin_chain_is_eligibility_error() -> None:
 def test_exposed_lookup_state_is_deeply_immutable() -> None:
     source = _symbol("caller", 0)
     target = _symbol("callee", 1)
-    prepared = correspondence.prepare(
+    prepared = correspondence.prepare_correspondence(
         _document(source, target, relationships=(_relationship(source, target),))
     )
     key = correspondence.node_key(source)
@@ -351,7 +353,7 @@ def test_labels_and_separators_remain_structured_and_orderable() -> None:
     first = _symbol("a|b", 0, path="pkg/a|b.py")
     second = _symbol("a", 0, path="pkg/a.py")
     assert correspondence.node_key(first) != correspondence.node_key(second)
-    prepared = correspondence.prepare(_document(first, second))
+    prepared = correspondence.prepare_correspondence(_document(first, second))
     assert tuple(prepared.nodes_by_key) == tuple(
         sorted(prepared.nodes_by_key, key=correspondence._key_sort)
     )
@@ -384,7 +386,7 @@ def test_complete_validator_report_is_preserved_before_indexing() -> None:
     document = _document(first, duplicate, relationships=(missing,))
     real = validate_document(document)
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare(document)
+        correspondence.prepare_correspondence(document)
     assert raised.value.report.issues == real.issues
     assert [issue.code for issue in real] == [
         IssueCode.NODE_ID_MISMATCH,
@@ -404,7 +406,7 @@ def test_calls_and_imports_to_unresolved_target_are_admission_errors(kind: str) 
         relationships=(_relationship(source, unresolved, kind),),
     )
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare(document)
+        correspondence.prepare_correspondence(document)
     assert [issue.code for issue in raised.value.report] == [
         IssueCode.RELATIONSHIP_UNRESOLVED_TARGET_KIND
     ]
@@ -413,7 +415,7 @@ def test_calls_and_imports_to_unresolved_target_are_admission_errors(kind: str) 
 def test_orphan_unresolved_node_is_retained_without_eligibility_error() -> None:
     source = _symbol("s", 0)
     orphan = _unresolved(source, "unused", 1)
-    prepared = correspondence.prepare(_document(source, orphan))
+    prepared = correspondence.prepare_correspondence(_document(source, orphan))
     assert prepared.nodes_by_id[orphan.id] is orphan
     orphan_key = correspondence.node_key(orphan, origin=correspondence.node_key(source))
     assert orphan_key not in prepared.nodes_by_key
@@ -424,9 +426,11 @@ def test_requested_duplicate_target_reports_target_candidates() -> None:
     first = _symbol("target", 1)
     second = _symbol("target", 2)
     edge = _relationship(source, first)
-    prepared = correspondence.prepare(_document(source, first, second, relationships=(edge,)))
+    prepared = correspondence.prepare_correspondence(
+        _document(source, first, second, relationships=(edge,))
+    )
     with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
-        prepared.require({next(iter(prepared.relationship_groups))}, side="old")
+        prepared.validate_required_keys({next(iter(prepared.relationship_groups))}, side="old")
     assert raised.value.endpoint == "target"
     assert raised.value.candidate_ids == tuple(node.id for node in (first, second))
 
@@ -434,8 +438,8 @@ def test_requested_duplicate_target_reports_target_candidates() -> None:
 def test_prepare_is_fresh_when_a_reused_id_gets_a_new_label() -> None:
     first = _symbol("first", 0)
     changed = replace(first, label="second")
-    before = correspondence.prepare(_document(first))
-    after = correspondence.prepare(_document(changed))
+    before = correspondence.prepare_correspondence(_document(first))
+    after = correspondence.prepare_correspondence(_document(changed))
     assert correspondence.node_key(first) in before.nodes_by_key
     assert correspondence.node_key(changed) in after.nodes_by_key
     assert before.nodes_by_key != after.nodes_by_key
@@ -449,8 +453,22 @@ def test_direct_and_full_trusted_blob_loaders_feed_the_same_preparation() -> Non
     full = load_graph_bytes(payload)
     trusted = load_graph_bytes(payload, _skip_schema=True, _digest="trusted")
     assert (
-        correspondence.prepare(full.document).relationships_by_key
-        == correspondence.prepare(trusted.document).relationships_by_key
+        correspondence.prepare_correspondence(full.document).relationships_by_key
+        == correspondence.prepare_correspondence(trusted.document).relationships_by_key
+    )
+
+
+def test_full_loader_valid_supported_unresolved_fixture_prepares_and_groups() -> None:
+    source = _symbol("source", 0)
+    unresolved = _unresolved(source, "missing", 1)
+    relationship = _relationship(source, unresolved, "references")
+    document = _document(source, unresolved, relationships=(relationship,))
+    loaded = load_graph_bytes(orjson.dumps(document.to_dict()))
+    prepared = correspondence.prepare_correspondence(loaded.document)
+    assert len(prepared.relationship_groups) == 1
+    assert (
+        next(iter(prepared.relationship_groups.values()))[0].relationship
+        is loaded.document.relationships[0]
     )
 
 
@@ -461,7 +479,7 @@ def test_trusted_loader_does_not_bypass_comparison_id_verification() -> None:
     payload = orjson.dumps(document.to_dict())
     loaded = load_graph_bytes(payload, _skip_schema=True, _digest="trusted")
     with pytest.raises(correspondence.CorrespondenceAdmissionError):
-        correspondence.prepare(loaded.document)
+        correspondence.prepare_correspondence(loaded.document)
 
 
 def test_unverifiable_digest_issue_from_real_validator_is_preserved(
@@ -476,7 +494,7 @@ def test_unverifiable_digest_issue_from_real_validator_is_preserved(
 
     monkeypatch.setattr(validation, "verify_node_id", fail)
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare(document)
+        correspondence.prepare_correspondence(document)
     assert [issue.code for issue in raised.value.report] == [IssueCode.NODE_ID_UNVERIFIABLE]
 
 
@@ -488,7 +506,7 @@ def test_missing_source_and_target_endpoints_keep_exact_validator_pointer(endpoi
     edge = replace(edge, **{endpoint: "node:sha256:" + "f" * 64})
     report = validate_document(_document(source, target, relationships=(edge,)))
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare(_document(source, target, relationships=(edge,)))
+        correspondence.prepare_correspondence(_document(source, target, relationships=(edge,)))
     assert raised.value.report.issues == report.issues
     assert report.issues[0].path == ("relationships", 0, endpoint)
 
@@ -511,7 +529,7 @@ def test_reversed_evidence_range_and_duplicate_evidence_reports_are_admission_er
         IssueCode.RANGE_END_BEFORE_START,
     ]
     with pytest.raises(correspondence.CorrespondenceAdmissionError):
-        correspondence.prepare(_document(source, target, relationships=(duplicate,)))
+        correspondence.prepare_correspondence(_document(source, target, relationships=(duplicate,)))
 
 
 def test_duplicate_evidence_location_is_rejected() -> None:
@@ -532,14 +550,64 @@ def test_unresolved_source_participation_requires_direct_ordinary_origin(kind: s
     relationship = _relationship(unresolved, ordinary, kind)
     document = _document(ordinary, origin, unresolved, relationships=(relationship,))
     with pytest.raises(correspondence.CorrespondenceEligibilityError):
-        correspondence.prepare(document)
+        correspondence.prepare_correspondence(document)
+
+
+def test_same_unresolved_endpoint_in_multiple_supported_relationships_is_one_candidate() -> None:
+    source = _symbol("source", 0)
+    first_target = _symbol("first", 1)
+    second_target = _symbol("second", 2)
+    unresolved = _unresolved(source, "missing", 3)
+    first = _relationship(unresolved, first_target, "references")
+    second = _relationship(unresolved, second_target, "calls")
+    prepared = correspondence.prepare_correspondence(
+        _document(source, first_target, second_target, unresolved, relationships=(first, second))
+    )
+    unresolved_key = correspondence.node_key(unresolved, origin=correspondence.node_key(source))
+    assert prepared.nodes_by_key[unresolved_key] == (unresolved,)
+    for relationship_key in prepared.relationship_groups:
+        assert prepared.validate_required_keys({relationship_key}) is prepared
+
+
+def test_unsupported_relationships_never_enter_groups_when_endpoints_are_indexed() -> None:
+    source = _symbol("source", 0)
+    target = _symbol("target", 1)
+    supported = _relationship(source, target, "calls")
+    unsupported = _relationship(source, target, "contains")
+    prepared = correspondence.prepare_correspondence(
+        _document(source, target, relationships=(supported, unsupported))
+    )
+    assert len(prepared.relationship_groups) == 1
+    assert next(iter(prepared.relationship_groups.values()))[0].relationship is supported
+
+
+def test_multiple_eligibility_errors_are_canonical_across_relationship_permutations() -> None:
+    ordinary = _symbol("ordinary", 0)
+    first_origin = _unresolved(ordinary, "first-origin", 1)
+    second_origin = _unresolved(ordinary, "second-origin", 2)
+    first_chain = _unresolved(first_origin, "first-chain", 3)
+    second_chain = _unresolved(second_origin, "second-chain", 4)
+    first_edge = _relationship(first_chain, ordinary, "references")
+    second_edge = _relationship(second_chain, ordinary, "calls")
+    nodes = (ordinary, first_origin, second_origin, first_chain, second_chain)
+    first_document = _document(*nodes, relationships=(first_edge, second_edge))
+    second_document = _document(*reversed(nodes), relationships=(second_edge, first_edge))
+    with pytest.raises(correspondence.CorrespondenceEligibilityError) as first_error:
+        correspondence.prepare_correspondence(first_document, side="new")
+    with pytest.raises(correspondence.CorrespondenceEligibilityError) as second_error:
+        correspondence.prepare_correspondence(second_document, side="new")
+    assert (first_error.value.endpoint, first_error.value.node.id, first_error.value.side) == (
+        second_error.value.endpoint,
+        second_error.value.node.id,
+        "new",
+    )
 
 
 def test_unsupported_only_unresolved_source_is_retained() -> None:
     ordinary = _symbol("ordinary", 0)
     unresolved = _unresolved(ordinary, "missing", 1)
     relationship = _relationship(unresolved, ordinary, "contains")
-    prepared = correspondence.prepare(
+    prepared = correspondence.prepare_correspondence(
         _document(ordinary, unresolved, relationships=(relationship,))
     )
     assert prepared.nodes_by_id[unresolved.id] is unresolved
@@ -553,7 +621,7 @@ def test_unresolved_target_chain_is_rejected_only_for_supported_references() -> 
     edge = _relationship(ordinary, chained, "references")
     document = _document(ordinary, origin, chained, relationships=(edge,))
     with pytest.raises(correspondence.CorrespondenceEligibilityError) as raised:
-        correspondence.prepare(document, side="old")
+        correspondence.prepare_correspondence(document, side="old")
     assert raised.value.endpoint == "target"
     assert raised.value.side == "old"
 
@@ -564,7 +632,9 @@ def test_unsupported_unresolved_target_keeps_validator_rule(kind: str) -> None:
     unresolved = _unresolved(ordinary, "missing", 1)
     edge = _relationship(ordinary, unresolved, kind)
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare(_document(ordinary, unresolved, relationships=(edge,)))
+        correspondence.prepare_correspondence(
+            _document(ordinary, unresolved, relationships=(edge,))
+        )
     assert raised.value.report.issues[0].code == IssueCode.RELATIONSHIP_UNRESOLVED_TARGET_KIND
 
 
@@ -572,7 +642,7 @@ def test_duplicate_origin_candidates_activate_only_when_local_relationship_is_pr
     first = _symbol("origin", 0)
     second = _symbol("origin", 1)
     unresolved = _unresolved(first, "missing", 2)
-    absent = correspondence.prepare(_document(first, second, unresolved))
+    absent = correspondence.prepare_correspondence(_document(first, second, unresolved))
     assert (
         absent.validate_required_keys(
             {(correspondence.node_key(first), correspondence.node_key(second), "references")}
@@ -582,11 +652,11 @@ def test_duplicate_origin_candidates_activate_only_when_local_relationship_is_pr
 
     source = _symbol("source", 3)
     edge = _relationship(source, unresolved, "references")
-    present = correspondence.prepare(
+    present = correspondence.prepare_correspondence(
         _document(first, second, unresolved, source, relationships=(edge,))
     )
     with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
-        present.require({next(iter(present.relationship_groups))})
+        present.validate_required_keys({next(iter(present.relationship_groups))})
     assert raised.value.origin is True
 
 
@@ -601,7 +671,7 @@ def test_preparation_does_not_open_files_or_mutate_the_document(
         raise AssertionError("correspondence preparation must not read files")
 
     monkeypatch.setattr("builtins.open", fail_open)
-    correspondence.prepare(document)
+    correspondence.prepare_correspondence(document)
     assert document.to_dict() == before
 
 
@@ -629,7 +699,7 @@ def test_missing_unresolved_origin_is_admission_error_with_exact_pointer() -> No
     )
     document = _document(unresolved)
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare(document)
+        correspondence.prepare_correspondence(document)
     assert raised.value.report.issues[0].code == IssueCode.IDENTITY_ORIGIN_MISSING
     assert raised.value.report.issues[0].path == ("nodes", 0, "identity", "originating_node")
 
@@ -641,7 +711,7 @@ def test_duplicate_relationship_tuple_is_rejected_after_valid_evidence() -> None
     second = _relationship(source, target, "references")
     document = _document(source, target, relationships=(first, second))
     with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
-        correspondence.prepare(document)
+        correspondence.prepare_correspondence(document)
     assert raised.value.report.issues[0].code == IssueCode.RELATIONSHIP_DUPLICATE
     assert raised.value.report.issues[0].path == ("relationships", 1)
 
@@ -649,7 +719,7 @@ def test_duplicate_relationship_tuple_is_rejected_after_valid_evidence() -> None
 def test_extreme_location_without_source_text_is_still_admitted() -> None:
     source = _symbol("source", 900)
     document = _document(source)
-    prepared = correspondence.prepare(document)
+    prepared = correspondence.prepare_correspondence(document)
     assert prepared.nodes_by_key[correspondence.node_key(source)] == (source,)
 
 
@@ -660,7 +730,7 @@ def test_empty_requested_set_still_checks_graph_admission_and_chain_eligibility(
     edge = _relationship(ordinary, chained, "references")
     document = _document(ordinary, origin, chained, relationships=(edge,))
     with pytest.raises(correspondence.CorrespondenceEligibilityError):
-        correspondence.prepare(document).validate_required_keys(set())
+        correspondence.prepare_correspondence(document).validate_required_keys(set())
 
 
 def test_same_key_unresolved_edges_keep_two_exact_pairs_without_cartesian_product() -> None:
@@ -675,8 +745,8 @@ def test_same_key_unresolved_edges_keep_two_exact_pairs_without_cartesian_produc
     nodes = (source_origin, target_origin, source_one, source_two, target_one, target_two)
     document = _document(*nodes, relationships=(first, second))
     reordered = _document(*reversed(nodes), relationships=(second, first))
-    prepared = correspondence.prepare(document)
-    permuted = correspondence.prepare(reordered)
+    prepared = correspondence.prepare_correspondence(document)
+    permuted = correspondence.prepare_correspondence(reordered)
     groups = list(prepared.relationship_groups.values())
     assert len(groups) == 1
     pairs = {(item.relationship.source, item.relationship.target) for item in groups[0]}
@@ -695,7 +765,7 @@ def test_input_serialization_survives_admission_and_eligibility_errors() -> None
     document = _document(ordinary, unresolved_origin, chained, relationships=(edge,))
     before = document.to_dict()
     with pytest.raises(correspondence.CorrespondenceEligibilityError):
-        correspondence.prepare(document)
+        correspondence.prepare_correspondence(document)
     assert document.to_dict() == before
 
 
