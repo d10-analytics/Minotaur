@@ -1093,6 +1093,7 @@ def _class_context_after_statement(
     class_plain_names.difference_update(collector.import_targets)
     class_plain_names.difference_update(collector.deleted_names)
     class_plain_names.update(collector.plain_import_names)
+    outer_plain_names = context.class_scope_outer_plain_import_names or frozenset()
     return replace(
         context,
         bound_names=(context.bound_names - context.class_scope_bound_names) | class_bound_names,
@@ -1103,6 +1104,7 @@ def _class_context_after_statement(
             context.class_scope_outer_import_targets,
         ),
         class_scope_bound_names=class_bound_names,
+        local_plain_import_names=frozenset(class_plain_names - outer_plain_names),
         plain_import_names=frozenset(class_plain_names),
     )
 
@@ -1493,6 +1495,7 @@ def _analyze_module(
                         frozenset(resolution.plain_roots) - frozenset(local_imports)
                     )
                     | local_plain_imports,
+                    local_plain_import_names=local_plain_imports,
                 ),
                 statement.body,
                 symbols[statement].node_id,
@@ -1553,6 +1556,7 @@ def _analyze_module(
                             frozenset(resolution.plain_roots) - frozenset(local_imports)
                         )
                         | local_plain_imports,
+                        local_plain_import_names=local_plain_imports,
                         receiver_name=_eligible_receiver_name(member, receiver_parameter),
                         receiver_parameter=receiver_parameter,
                     )
@@ -1922,7 +1926,7 @@ def _scoped_context(
         bound_names=bound_names - global_names - import_bound_names,
         import_targets=import_targets,
         plain_import_names=plain_import_names,
-        local_plain_import_names=local_plain_import_names,
+        local_plain_import_names=context.local_plain_import_names | local_plain_import_names,
         receiver_name=None if context.receiver_name in shadow_names else context.receiver_name,
         receiver_parameter=(
             None if context.receiver_parameter in shadow_names else context.receiver_parameter
