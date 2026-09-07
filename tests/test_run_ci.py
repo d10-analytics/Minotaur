@@ -69,6 +69,13 @@ if [[ "$name" == ruff && -n "${FAKE_NEXT_LANE_CHECK:-}" ]]; then
         printf 'gone\n' > "$FAKE_NEXT_LANE_CHECK"
     fi
 fi
+if [[ "$name" == ruff && -n "${FAKE_LINT_SENTINEL:-}" ]]; then
+    if [[ -e "$FAKE_LINT_SENTINEL" ]]; then
+        printf 'seen\n' > "${FAKE_LINT_SENTINEL_OBSERVED:?}"
+        exit 17
+    fi
+    printf 'clean\n' > "${FAKE_LINT_SENTINEL_OBSERVED:?}"
+fi
 if [[ "$name" == ruff && "${1-}" == check && -n "${FAKE_HOLD_FILE:-}" ]]; then
     : > "${FAKE_HOLD_READY:?}"
     while [[ -e "$FAKE_HOLD_FILE" ]]; do sleep 0.05; done
@@ -102,6 +109,9 @@ if [[ "${1-}" == -m ]]; then
                 git -C "$FAKE_MUTATE_CHECKOUT" -c user.email=ci@example.test \
                     -c user.name=CI commit -qm 'mutate during lane'
                 : > "${FAKE_MUTATION_DONE:-/dev/null}"
+            fi
+            if [[ -n "${FAKE_CREATE_SENTINEL:-}" ]]; then
+                : > "$FAKE_CREATE_SENTINEL"
             fi
             [[ -n "${FAKE_PYTEST_SLEEP:-}" ]] && sleep "$FAKE_PYTEST_SLEEP"
             exit "${FAKE_PYTEST_STATUS:-0}"
@@ -318,19 +328,38 @@ def test_each_selector_records_the_parity_payload_in_an_isolated_venv(
         assert build[0][3].endswith("/build")
 
 
-def test_exit_five_is_diagnostic_no_tests_and_manifest_is_reader_safe(
+def test_exit_five_is_accepted_and_manifest_is_reader_safe(
     fixture: tuple[Path, Path, Path],
 ) -> None:
     checkout, fake_python, state = fixture
     result = run_ci(checkout, fake_python, state, "test", FAKE_PYTEST_STATUS="5")
-    assert result.returncode != 0
+    assert result.returncode == 0
     evidence = manifest(state)
     row = evidence["lanes"][0]
-    assert row["status"] == "no_tests"
+    assert row["status"] == "passed"
     assert row["exit_code"] == 5
     assert row["log"] == "logs/test.log"
     assert evidence["complete"] is True
     assert (state / "minotaur-ci/runs" / evidence["run_id"] / row["log"]).is_file()
+
+
+def test_all_materializes_an_independent_source_copy_for_each_lane(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    sentinel = ".test-lane-sentinel"
+    observed = state / "lint-sentinel"
+    result = run_ci(
+        checkout,
+        fake_python,
+        state,
+        "all",
+        FAKE_CREATE_SENTINEL=sentinel,
+        FAKE_LINT_SENTINEL=sentinel,
+        FAKE_LINT_SENTINEL_OBSERVED=str(observed),
+    )
+    assert result.returncode == 0
+    assert observed.read_text(encoding="utf-8") == "clean\n"
 
 
 def test_source_copy_keeps_dirty_visible_entries_and_excludes_ignored(
