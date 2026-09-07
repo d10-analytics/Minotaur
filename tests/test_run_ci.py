@@ -549,6 +549,28 @@ def test_timeout_kills_owned_group_and_removes_disposable_root(
     assert not list((state / "tmp").glob("minotaur-ci.*/source"))
 
 
+def test_timeout_preserves_unrelated_process(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    sentinel = subprocess.Popen(["sleep", "20"])
+    try:
+        result = run_ci(
+            checkout,
+            fake_python,
+            state,
+            "test",
+            MINOTAUR_CI_TIMEOUT_SECONDS="1",
+            MINOTAUR_CI_TERM_GRACE_SECONDS="1",
+            FAKE_PYTEST_SLEEP="5",
+        )
+        assert result.returncode != 0
+        assert sentinel.poll() is None
+    finally:
+        sentinel.terminate()
+        sentinel.wait(timeout=5)
+
+
 def _assert_dead(pid_file: Path) -> None:
     pid = int(pid_file.read_text(encoding="utf-8"))
     for _ in range(100):
