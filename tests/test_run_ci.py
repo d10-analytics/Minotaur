@@ -369,6 +369,7 @@ def test_source_copy_keeps_dirty_visible_entries_and_excludes_ignored(
     (checkout / "tracked.txt").write_text("dirty\n", encoding="utf-8")
     (checkout / "tracked.txt").chmod(0o755)
     (checkout / "staged.txt").write_text("staged dirty\n", encoding="utf-8")
+    staged_mode = f"{(checkout / 'staged.txt').stat().st_mode & 0o777:03o}"
     subprocess.run(["git", "add", "staged.txt"], cwd=checkout, check=True)
     (checkout / "deleted.txt").unlink()
     untracked = checkout / "untracked.sh"
@@ -382,7 +383,7 @@ def test_source_copy_keeps_dirty_visible_entries_and_excludes_ignored(
     lines = observed.read_text(encoding="utf-8").splitlines()
     assert any(line.startswith("cwd=") and str(checkout) not in line for line in lines)
     assert "tracked.txt=file:dirty:mode=755" in lines
-    assert "staged.txt=file:staged dirty:mode=664" in lines
+    assert f"staged.txt=file:staged dirty:mode={staged_mode}" in lines
     assert "deleted.txt=absent" in lines
     assert "untracked.sh=file:untracked:mode=755" in lines
     assert "link.txt=symlink:tracked.txt" in lines
