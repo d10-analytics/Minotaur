@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 
 import orjson
@@ -9,7 +10,7 @@ import minotaur.query.correspondence as correspondence
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.evidence import Evidence
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
-from minotaur.graph_model.loading import GraphLoadError, load_graph_bytes
+from minotaur.graph_model.loading import GraphLoadError, LoadedGraph, load_graph_bytes
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import (
@@ -164,7 +165,7 @@ def _document(*nodes: Node, relationships: tuple[Relationship, ...] = ()) -> Gra
     )
 
 
-def _full_load(document: GraphDocument):
+def _full_load(document: GraphDocument) -> LoadedGraph:
     """Run the real full byte loader before a positive correspondence proof."""
     return load_graph_bytes(orjson.dumps(document.to_dict()))
 
@@ -772,8 +773,16 @@ def test_trusted_loader_does_not_bypass_comparison_id_verification() -> None:
     valid_payload = orjson.dumps(_document(source).to_dict())
     valid_full = load_graph_bytes(valid_payload)
     valid_trusted = load_graph_bytes(valid_payload, _skip_schema=True, _digest="trusted")
-    assert correspondence.prepare_correspondence(valid_full.document, side="new").nodes_by_id
-    assert correspondence.prepare_correspondence(valid_trusted.document, side="new").nodes_by_id
+    valid_full_prepared = correspondence.prepare_correspondence(valid_full.document, side="new")
+    valid_trusted_prepared = correspondence.prepare_correspondence(
+        valid_trusted.document, side="new"
+    )
+    assert valid_full_prepared.nodes_by_id == {source.id: valid_full.document.nodes[0]}
+    assert valid_trusted_prepared.nodes_by_id == {source.id: valid_trusted.document.nodes[0]}
+    assert valid_full_prepared.nodes_by_key == valid_trusted_prepared.nodes_by_key
+    assert (
+        valid_full_prepared.relationship_groups == valid_trusted_prepared.relationship_groups == {}
+    )
 
 
 @pytest.mark.parametrize(
@@ -852,10 +861,10 @@ def test_trusted_loader_does_not_bypass_comparison_id_verification() -> None:
     ],
 )
 def test_invalid_full_and_trusted_loaders_match_direct_preparation(
-    case_factory: object,
+    case_factory: Callable[[], GraphDocument],
     expected_codes: tuple[IssueCode, ...],
 ) -> None:
-    document = case_factory()  # type: ignore[operator]
+    document = case_factory()
     _assert_invalid_loader_parity(document, expected_codes)
 
 
