@@ -249,7 +249,16 @@ class CorrespondenceIndex:
                 ("target", relationship_key[1]),
             ):
                 candidates = self.nodes_by_key.get(key, ())
-                if len(candidates) > 1:
+                # Multiple unresolved occurrences with one complete ordinary
+                # origin are legitimate observations of one semantic endpoint.
+                # Endpoint uniqueness applies to ordinary candidates; for an
+                # unresolved endpoint, the origin candidate group below is the
+                # ambiguity boundary.
+                if (
+                    candidates
+                    and candidates[0].node_class != NodeClass.UNRESOLVED_REFERENCE
+                    and len(candidates) > 1
+                ):
                     raise CorrespondenceAmbiguityError(
                         relationship_key,
                         side=side,
