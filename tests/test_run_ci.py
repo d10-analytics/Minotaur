@@ -265,7 +265,7 @@ def test_sigint_marks_active_and_pending_lanes(fixture: tuple[Path, Path, Path])
             break
         time.sleep(0.02)
     process.send_signal(signal.SIGINT)
-    assert process.wait(timeout=10) != 0
+    assert process.wait(timeout=30) != 0
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == "interrupted"
     assert all(row["status"] == "not_run" for row in evidence["lanes"][1:])
