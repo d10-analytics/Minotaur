@@ -4386,6 +4386,61 @@ def test_nested_plain_dotted_imports_remain_syntactic_only(tmp_path: Path) -> No
     assert validate_document(result.document).is_valid
 
 
+def test_nested_plain_dotted_import_does_not_block_same_module_declaration(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def pkg():\n"
+        "    pass\n"
+        "if True:\n"
+        "    import pkg.sub\n"
+        "pkg()\n"
+        "value = pkg\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    app = _node_id(result, "app")
+    local_pkg = _node_id(result, "app.pkg")
+    imported_sub = _node_id(result, "pkg.sub")
+    relationships = _relationship_map(result)
+
+    assert (app, local_pkg, RelationshipKind.CALLS.value) in relationships
+    assert (app, local_pkg, RelationshipKind.REFERENCES.value) in relationships
+    assert "pkg" not in _unresolved_by_source(result).get("app", set())
+    assert not any(
+        relationship.source == app
+        and relationship.target == imported_sub
+        and relationship.kind in {
+            RelationshipKind.CALLS.value,
+            RelationshipKind.REFERENCES.value,
+        }
+        for relationship in result.document.relationships
+    )
+    assert (app, imported_sub, RelationshipKind.IMPORTS.value) in relationships
+    _assert_relation_location(
+        result,
+        "app",
+        local_pkg,
+        RelationshipKind.CALLS.value,
+        path="app.py",
+        start=(4, 0),
+        end=(4, 5),
+    )
+    _assert_relation_location(
+        result,
+        "app",
+        local_pkg,
+        RelationshipKind.REFERENCES.value,
+        path="app.py",
+        start=(5, 8),
+        end=(5, 11),
+    )
+
+
 @pytest.mark.parametrize(
     ("member", "child_path", "expected_path", "expected_method_label"),
     [
