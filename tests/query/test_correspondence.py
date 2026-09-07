@@ -1279,7 +1279,7 @@ def test_unresolved_derived_file_uses_location_path_then_node_path_then_absence(
     fallback = replace(located, id=fallback_id, location=None, path="fallback.py")
     absent = replace(fallback, id=fallback_id, path=None)
     _full_load(_document(origin))
-    for node in (located, fallback, absent):
+    for node in (located, shadowed, fallback, absent):
         _full_load(_document(origin, node, relationships=(_relationship(origin, node),)))
     origin_key = correspondence.node_key(origin)
     assert correspondence.node_key(located, origin=origin_key)[4:] == ("missing", "src/a.py")
@@ -1317,6 +1317,7 @@ def test_range_only_movement_updates_ids_and_unresolved_descendants_transitively
 def test_neutral_observations_and_nested_extensions_are_preserved_without_key_changes() -> None:
     source = _symbol("source", 0)
     target = _symbol("target", 1)
+    _full_load(_document(source))
     evidence = Evidence(
         provenance=Provenance.STATIC_ANALYSIS,
         locations=(_location("src/a.py", 4),),
