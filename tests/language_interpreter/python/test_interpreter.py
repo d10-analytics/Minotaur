@@ -4441,6 +4441,29 @@ def test_nested_plain_dotted_import_does_not_block_same_module_declaration(
     )
 
 
+def test_nested_dotted_import_invalidates_existing_direct_prefix(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "import pkg.sub\n"
+        "if True:\n"
+        "    import pkg.sub\n"
+        "pkg.sub.go()\n"
+        "value = pkg.sub.go\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    app = _node_id(result, "app")
+    imported_go = _node_id(result, "pkg.sub.go")
+    relationships = _relationship_map(result)
+
+    assert "pkg.sub.go" in _unresolved_by_source(result).get("app", set())
+    assert (app, imported_go, RelationshipKind.CALLS.value) not in relationships
+    assert (app, imported_go, RelationshipKind.REFERENCES.value) not in relationships
+
+
 @pytest.mark.parametrize(
     ("member", "child_path", "expected_path", "expected_method_label"),
     [
