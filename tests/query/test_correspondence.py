@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import orjson
 import pytest
 
 import minotaur.query.correspondence as correspondence
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.evidence import Evidence
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
+from minotaur.graph_model.loading import load_graph_bytes
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import (
@@ -437,3 +439,191 @@ def test_prepare_is_fresh_when_a_reused_id_gets_a_new_label() -> None:
     assert correspondence.node_key(first) in before.nodes_by_key
     assert correspondence.node_key(changed) in after.nodes_by_key
     assert before.nodes_by_key != after.nodes_by_key
+
+
+def test_direct_and_full_trusted_blob_loaders_feed_the_same_preparation() -> None:
+    source = _symbol("source", 0)
+    target = _symbol("target", 1)
+    document = _document(source, target, relationships=(_relationship(source, target),))
+    payload = orjson.dumps(document.to_dict())
+    full = load_graph_bytes(payload)
+    trusted = load_graph_bytes(payload, _skip_schema=True, _digest="trusted")
+    assert (
+        correspondence.prepare(full.document).relationships_by_key
+        == correspondence.prepare(trusted.document).relationships_by_key
+    )
+
+
+def test_trusted_loader_does_not_bypass_comparison_id_verification() -> None:
+    source = _symbol("source", 0)
+    altered = replace(source, symbol_kind="method")
+    document = _document(altered)
+    payload = orjson.dumps(document.to_dict())
+    loaded = load_graph_bytes(payload, _skip_schema=True, _digest="trusted")
+    with pytest.raises(correspondence.CorrespondenceAdmissionError):
+        correspondence.prepare(loaded.document)
+
+
+def test_unverifiable_digest_issue_from_real_validator_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _symbol("source", 0)
+    document = _document(source)
+    import minotaur.graph_model.validation as validation
+
+    def fail(*args: object, **kwargs: object) -> bool:
+        raise ValueError("test digest dependency failure")
+
+    monkeypatch.setattr(validation, "verify_node_id", fail)
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
+        correspondence.prepare(document)
+    assert [issue.code for issue in raised.value.report] == [IssueCode.NODE_ID_UNVERIFIABLE]
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+def test_missing_source_and_target_endpoints_keep_exact_validator_pointer(endpoint: str) -> None:
+    source = _symbol("source", 0)
+    target = _symbol("target", 1)
+    edge = _relationship(source, target)
+    edge = replace(edge, **{endpoint: "node:sha256:" + "f" * 64})
+    report = validate_document(_document(source, target, relationships=(edge,)))
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
+        correspondence.prepare(_document(source, target, relationships=(edge,)))
+    assert raised.value.report.issues == report.issues
+    assert report.issues[0].path == ("relationships", 0, endpoint)
+
+
+def test_reversed_evidence_range_and_duplicate_evidence_reports_are_admission_errors() -> None:
+    source = _symbol("source", 0)
+    target = _symbol("target", 1)
+    reversed_location = Location("src/a.py", Range(Position(2, 0), Position(1, 0)))
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS, locations=(reversed_location,))
+    duplicate = Relationship(
+        source=source.id,
+        target=target.id,
+        kind="references",
+        evidence=(evidence, evidence),
+    )
+    report = validate_document(_document(source, target, relationships=(duplicate,)))
+    assert [issue.code for issue in report] == [
+        IssueCode.RANGE_END_BEFORE_START,
+        IssueCode.EVIDENCE_DUPLICATE,
+        IssueCode.RANGE_END_BEFORE_START,
+    ]
+    with pytest.raises(correspondence.CorrespondenceAdmissionError):
+        correspondence.prepare(_document(source, target, relationships=(duplicate,)))
+
+
+def test_duplicate_evidence_location_is_rejected() -> None:
+    source = _symbol("source", 0)
+    target = _symbol("target", 1)
+    location = _location("src/a.py", 2)
+    repeated = Evidence(provenance=Provenance.STATIC_ANALYSIS, locations=(location, location))
+    edge = Relationship(source.id, target.id, "references", (repeated,))
+    report = validate_document(_document(source, target, relationships=(edge,)))
+    assert report.issues[0].code == IssueCode.EVIDENCE_LOCATION_DUPLICATE
+
+
+@pytest.mark.parametrize("kind", ["references", "calls", "imports"])
+def test_unresolved_source_participation_requires_direct_ordinary_origin(kind: str) -> None:
+    ordinary = _symbol("ordinary", 0)
+    origin = _unresolved(ordinary, "outer", 1)
+    unresolved = _unresolved(origin, "missing", 2)
+    relationship = _relationship(unresolved, ordinary, kind)
+    document = _document(ordinary, origin, unresolved, relationships=(relationship,))
+    with pytest.raises(correspondence.CorrespondenceEligibilityError):
+        correspondence.prepare(document)
+
+
+def test_unsupported_only_unresolved_source_is_retained() -> None:
+    ordinary = _symbol("ordinary", 0)
+    unresolved = _unresolved(ordinary, "missing", 1)
+    relationship = _relationship(unresolved, ordinary, "contains")
+    prepared = correspondence.prepare(
+        _document(ordinary, unresolved, relationships=(relationship,))
+    )
+    assert prepared.nodes_by_id[unresolved.id] is unresolved
+    assert not prepared.relationship_groups
+
+
+def test_unresolved_target_chain_is_rejected_only_for_supported_references() -> None:
+    ordinary = _symbol("ordinary", 0)
+    origin = _unresolved(ordinary, "outer", 1)
+    chained = _unresolved(origin, "inner", 2)
+    edge = _relationship(ordinary, chained, "references")
+    document = _document(ordinary, origin, chained, relationships=(edge,))
+    with pytest.raises(correspondence.CorrespondenceEligibilityError) as raised:
+        correspondence.prepare(document, side="old")
+    assert raised.value.endpoint == "target"
+    assert raised.value.side == "old"
+
+
+@pytest.mark.parametrize("kind", ["contains", "inherits", "implements", "python:decorates"])
+def test_unsupported_unresolved_target_keeps_validator_rule(kind: str) -> None:
+    ordinary = _symbol("ordinary", 0)
+    unresolved = _unresolved(ordinary, "missing", 1)
+    edge = _relationship(ordinary, unresolved, kind)
+    with pytest.raises(correspondence.CorrespondenceAdmissionError) as raised:
+        correspondence.prepare(_document(ordinary, unresolved, relationships=(edge,)))
+    assert raised.value.report.issues[0].code == IssueCode.RELATIONSHIP_UNRESOLVED_TARGET_KIND
+
+
+def test_duplicate_origin_candidates_activate_only_when_local_relationship_is_present() -> None:
+    first = _symbol("origin", 0)
+    second = _symbol("origin", 1)
+    unresolved = _unresolved(first, "missing", 2)
+    absent = correspondence.prepare(_document(first, second, unresolved))
+    assert (
+        absent.validate_required_keys(
+            {(correspondence.node_key(first), correspondence.node_key(second), "references")}
+        )
+        is absent
+    )
+
+    source = _symbol("source", 3)
+    edge = _relationship(source, unresolved, "references")
+    present = correspondence.prepare(
+        _document(first, second, unresolved, source, relationships=(edge,))
+    )
+    with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
+        present.require({next(iter(present.relationship_groups))})
+    assert raised.value.origin is True
+
+
+def test_preparation_does_not_open_files_or_mutate_the_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _symbol("source", 0)
+    document = _document(source)
+    before = document.to_dict()
+
+    def fail_open(*args: object, **kwargs: object) -> object:
+        raise AssertionError("correspondence preparation must not read files")
+
+    monkeypatch.setattr("builtins.open", fail_open)
+    correspondence.prepare(document)
+    assert document.to_dict() == before
+
+
+def test_input_serialization_survives_admission_and_eligibility_errors() -> None:
+    ordinary = _symbol("ordinary", 0)
+    unresolved_origin = _unresolved(ordinary, "outer", 1)
+    chained = _unresolved(unresolved_origin, "inner", 2)
+    edge = _relationship(ordinary, chained)
+    document = _document(ordinary, unresolved_origin, chained, relationships=(edge,))
+    before = document.to_dict()
+    with pytest.raises(correspondence.CorrespondenceEligibilityError):
+        correspondence.prepare(document)
+    assert document.to_dict() == before
+
+
+def test_resource_kind_is_excluded_for_every_resource_basis() -> None:
+    source = _resource("resource", 0)
+    source_kind = replace(source, symbol_kind="db:table")
+    upstream = _upstream_resource("upstream")
+    upstream_kind = replace(upstream, symbol_kind="db:table")
+    keyed = _resource_key("keyed")
+    keyed_kind = replace(keyed, symbol_kind="db:table")
+    assert correspondence.node_key(source) == correspondence.node_key(source_kind)
+    assert correspondence.node_key(upstream) == correspondence.node_key(upstream_kind)
+    assert correspondence.node_key(keyed) == correspondence.node_key(keyed_kind)
