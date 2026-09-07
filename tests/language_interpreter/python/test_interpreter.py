@@ -4194,7 +4194,26 @@ def test_dotted_import_final_binding_orders_preserve_real_routes(tmp_path: Path)
 
 @pytest.mark.parametrize(
     "binder",
-    ["pkg = object()", "def pkg(): ...", "class pkg: ...", "del pkg"],
+    [
+        "pkg = object()",
+        "pkg = other = object()",
+        "pkg: object = object()",
+        "pkg += 1",
+        "pkg, other = (1, 2)",
+        "[pkg, *other] = (1, 2)",
+        "(pkg := object())",
+        "def pkg(): ...",
+        "async def pkg(): ...",
+        "class pkg: ...",
+        "del pkg",
+        "for pkg in ():\n    pass",
+        "while False:\n    pkg = 1",
+        "with open('unused') as pkg:\n    pass",
+        "try:\n    pass\nexcept Exception as pkg:\n    pass",
+        "match 1:\n    case pkg:\n        pass",
+        "if True:\n    pkg = 1\nelse:\n    pkg = 2",
+        "try:\n    pkg = 1\nexcept Exception:\n    pass\nelse:\n    pkg = 2\nfinally:\n    pkg = 3",
+    ],
 )
 def test_dotted_import_module_binders_invalidate_every_prefix_use(
     tmp_path: Path, binder: str
