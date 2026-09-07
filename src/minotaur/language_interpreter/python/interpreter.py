@@ -1434,7 +1434,10 @@ def _analyze_module(
 ) -> None:
     aliases = _imports(module, modules, declarations, relationships, nodes, emitter, tally)
     resolution = _module_resolution(module, modules)
-    module_imports = {name: descriptor.target for name, descriptor in resolution.bindings.items()}
+    # Keep the existing whole-module import view for builtin suppression and
+    # lexical diagnostics. The structured resolution record remains the sole
+    # owner of prefix admission and direct binding category.
+    module_imports = _import_targets(module.tree.body, module.name, module.is_package)
     context = _ScopeContext(
         declarations,
         aliases,
