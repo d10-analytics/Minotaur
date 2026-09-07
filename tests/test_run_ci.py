@@ -53,6 +53,16 @@ if [[ "$name" == mypy ]]; then exit "${FAKE_MYPY_STATUS:-0}"; fi
 if [[ "${1-}" == -m ]]; then
     case "$2" in
         pytest)
+            if [[ -n "${FAKE_DESCENDANT_PID:-}" ]]; then
+                (trap '' TERM; while :; do sleep 1; done) &
+                printf '%s\n' "$!" > "$FAKE_DESCENDANT_PID"
+            fi
+            if [[ -n "${FAKE_MUTATE_CHECKOUT:-}" ]]; then
+                printf 'mutation during lane\n' > "$FAKE_MUTATE_CHECKOUT/provenance.txt"
+                git -C "$FAKE_MUTATE_CHECKOUT" add provenance.txt
+                git -C "$FAKE_MUTATE_CHECKOUT" -c user.email=ci@example.test \
+                    -c user.name=CI commit -qm 'mutate during lane'
+            fi
             [[ -n "${FAKE_PYTEST_SLEEP:-}" ]] && sleep "$FAKE_PYTEST_SLEEP"
             exit "${FAKE_PYTEST_STATUS:-0}"
             ;;
@@ -245,6 +255,62 @@ def test_timeout_kills_owned_group_and_removes_disposable_root(
     assert not list((state / "tmp").glob("minotaur-ci.*/source"))
 
 
+def _assert_dead(pid_file: Path) -> None:
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.02)
+    pytest.fail(f"descendant {pid} is still alive")
+
+
+def test_timeout_drains_term_ignoring_descendant_before_result_cleanup(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    descendant = state / "descendant.pid"
+    result = run_ci(
+        checkout,
+        fake_python,
+        state,
+        "test",
+        MINOTAUR_CI_TIMEOUT_SECONDS="1",
+        MINOTAUR_CI_TERM_GRACE_SECONDS="1",
+        FAKE_PYTEST_SLEEP="20",
+        FAKE_DESCENDANT_PID=str(descendant),
+    )
+    assert result.returncode != 0
+    assert manifest(state)["lanes"][0]["status"] == "timeout"
+    _assert_dead(descendant)
+
+
+def test_missing_setsid_marks_all_lanes_setup_failed_without_payload(
+    fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    checkout, fake_python, state = fixture
+    tool_path = tmp_path / "tools"
+    tool_path.mkdir()
+    for directory in (Path("/usr/bin"), Path("/bin")):
+        for candidate in directory.iterdir():
+            if (
+                candidate.name == "setsid"
+                or not candidate.is_file()
+                or not os.access(candidate, os.X_OK)
+            ):
+                continue
+            target = tool_path / candidate.name
+            if not target.exists():
+                target.symlink_to(candidate)
+    result = run_ci(checkout, fake_python, state, "all", PATH=str(tool_path))
+    assert result.returncode != 0
+    evidence = manifest(state)
+    assert [row["name"] for row in evidence["lanes"]] == LANES
+    assert all(row["status"] == "setup_failed" for row in evidence["lanes"])
+    assert not (state / "calls.log").exists()
+
+
 def test_sigint_marks_active_and_pending_lanes(fixture: tuple[Path, Path, Path]) -> None:
     checkout, fake_python, state = fixture
     env = os.environ.copy()
@@ -269,3 +335,35 @@ def test_sigint_marks_active_and_pending_lanes(fixture: tuple[Path, Path, Path])
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == "interrupted"
     assert all(row["status"] == "not_run" for row in evidence["lanes"][1:])
+
+
+def test_sigterm_records_final_provenance_after_lane_changes_checkout(
+    fixture: tuple[Path, Path, Path],
+) -> None:
+    checkout, fake_python, state = fixture
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "XDG_STATE_HOME": str(state),
+            "FAKE_LOG": str(state / "calls.log"),
+            "FAKE_MUTATE_CHECKOUT": str(checkout),
+            "FAKE_PYTEST_SLEEP": "20",
+            "MINOTAUR_CI_TIMEOUT_SECONDS": "10",
+            "MINOTAUR_CI_TERM_GRACE_SECONDS": "1",
+        }
+    )
+    process = subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "all"], cwd=checkout, env=env)
+    for _ in range(200):
+        calls = state / "calls.log"
+        if calls.is_file() and "pytest" in calls.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.02)
+    process.send_signal(signal.SIGTERM)
+    assert process.wait(timeout=30) != 0
+    evidence = manifest(state)
+    assert evidence["lanes"][0]["status"] == "interrupted"
+    assert evidence["final"]["commit"] != evidence["initial"]["commit"]
+    assert evidence["final"]["clean"] is True
+    assert evidence["final"]["changed"] is True
+    assert evidence["diagnostic_only"] is True
