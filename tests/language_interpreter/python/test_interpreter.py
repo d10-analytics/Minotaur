@@ -5498,3 +5498,27 @@ def test_eager_comprehension_walrus_updates_outer_overlay_generator_walrus_does_
         RelationshipKind.CALLS.value,
     ) not in _edge_labels(result)
     assert _unresolved_by_source(result)["app.outer"] == {"factory", "eager"}
+
+
+def test_immediate_class_global_write_updates_only_its_enclosing_overlay(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n"
+        "class Immediate:\n"
+        "    global helper\n"
+        "    helper = object()\n"
+        "def later():\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert _unresolved_sites(result) == {("app.later", "helper", 6)}
+    assert (
+        "app.later",
+        "library.helper",
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
