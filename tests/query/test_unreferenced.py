@@ -647,7 +647,7 @@ def test_dotted_import_relations_independently_count_as_uses(
     _write(
         call_root,
         "caller.py",
-        "import pkg.sub\n\ndef owner():\n    pkg.sub.go()\n",
+        "def owner():\n    from pkg import sub\n    return sub.go()\n",
     )
     call_graph = call_root / "call-only.json"
     assert _analyze(call_root, call_graph) == 0
@@ -672,7 +672,7 @@ def test_dotted_import_relations_independently_count_as_uses(
     _write(
         load_root,
         "loader.py",
-        "import pkg.sub\n\ndef owner():\n    loaded = pkg.sub.go\n    return loaded\n",
+        "def owner():\n    from pkg import sub\n    loaded = sub.go\n    return loaded\n",
     )
     load_graph = load_root / "load-only.json"
     assert _analyze(load_root, load_graph) == 0
@@ -692,6 +692,6 @@ def test_dotted_import_relations_independently_count_as_uses(
     load_output = capsys.readouterr()
 
     assert call_status == 0
-    assert "pkg.sub.go" not in call_output.out
+    assert call_output.out == "caller.py:1  caller.owner  function\n"
     assert load_status == 0
-    assert "pkg.sub.go" not in load_output.out
+    assert load_output.out == "loader.py:1  loader.owner  function\n"
