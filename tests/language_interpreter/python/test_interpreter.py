@@ -5615,6 +5615,152 @@ def test_try_handler_starts_after_possible_try_body_write_but_before_handler_wri
     }
 
 
+def test_try_else_preserves_success_body_state_and_post_try_uncertainty(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(flag):\n"
+        "    from library import helper\n"
+        "    try:\n"
+        "        pass\n"
+        "    except RuntimeError as helper:\n"
+        "        pass\n"
+        "    else:\n"
+        "        called = helper()\n"
+        "        referenced = helper\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    helper = _node_id(result, "library.helper")
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {8}
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.REFERENCES.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {9}
+    assert _unresolved_sites(result) >= {
+        ("app.run", "helper", 10),
+    }
+
+
+def test_try_handler_type_reads_import_before_same_named_exception_target(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "class Error:\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run():\n"
+        "    from library import Error\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Error as Error:\n"
+        "        pass\n"
+        "    return Error\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    error = _node_id(result, "library.Error")
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == error
+        and relationship.kind == RelationshipKind.REFERENCES.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {5}
+    assert _unresolved_sites(result) >= {
+        ("app.run", "Error", 7),
+    }
+
+
+def test_try_body_write_still_blocks_same_named_handler_type(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "class Error:\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run():\n"
+        "    from library import Error\n"
+        "    try:\n"
+        "        Error = object()\n"
+        "        raise RuntimeError()\n"
+        "    except Error as Error:\n"
+        "        pass\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    error = _node_id(result, "library.Error")
+    assert not any(
+        relationship.source == run
+        and relationship.target == error
+        and relationship.kind == RelationshipKind.REFERENCES.value
+        and any(
+            location.range.start.line + 1 == 6
+            for evidence in relationship.evidence
+            for location in evidence.locations
+        )
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_sites(result) >= {("app.run", "Error", 6)}
+
+
+def test_match_guard_walrus_blocks_later_guards_and_continuation(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(flag):\n"
+        "    from library import helper\n"
+        "    match flag:\n"
+        "        case _ if helper() and (helper := object()):\n"
+        "            pass\n"
+        "        case _ if helper():\n"
+        "            pass\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    helper = _node_id(result, "library.helper")
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {4}
+    assert _unresolved_sites(result) >= {
+        ("app.run", "helper", 6),
+        ("app.run", "helper", 8),
+    }
+
+
 def test_eager_comprehension_walrus_updates_outer_overlay_generator_walrus_does_not(
     tmp_path: Path,
 ) -> None:
