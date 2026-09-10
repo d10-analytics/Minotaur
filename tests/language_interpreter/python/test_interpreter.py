@@ -4569,6 +4569,261 @@ def test_nested_plain_dotted_imports_remain_syntactic_only(tmp_path: Path) -> No
     assert validate_document(result.document).is_valid
 
 
+def test_conditional_named_alias_and_relative_imports_join_exact_routes(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def go():\n    return 1\n")
+    _write(tmp_path, "other.py", "def go():\n    return 2\n")
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/library.py", "def go():\n    return 3\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def same_named(flag):\n"
+        "    if flag:\n"
+        "        from library import go\n"
+        "    else:\n"
+        "        from library import go\n"
+        "    go()\n"
+        "    value = go\n\n"
+        "def same_alias(flag):\n"
+        "    if flag:\n"
+        "        import other as lib\n"
+        "    else:\n"
+        "        import other as lib\n"
+        "    lib.go()\n"
+        "    value = lib.go\n",
+    )
+    _write(
+        tmp_path,
+        "pkg/app.py",
+        "def relative_named(flag):\n"
+        "    if flag:\n"
+        "        from .library import go\n"
+        "    else:\n"
+        "        from .library import go\n"
+        "    go()\n"
+        "    value = go\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    relationships = _relationship_map(result)
+    library_go = _node_id(result, "library.go")
+    other_go = _node_id(result, "other.go")
+    relative_go = _node_id(result, "pkg.library.go")
+
+    same_named = _node_id(result, "app.same_named")
+    same_alias = _node_id(result, "app.same_alias")
+    relative_named = _node_id(result, "pkg.app.relative_named")
+    assert (same_named, library_go, RelationshipKind.CALLS.value) in relationships
+    assert (same_named, library_go, RelationshipKind.REFERENCES.value) in relationships
+    assert (same_alias, other_go, RelationshipKind.CALLS.value) in relationships
+    assert (same_alias, other_go, RelationshipKind.REFERENCES.value) in relationships
+    assert (relative_named, relative_go, RelationshipKind.CALLS.value) in relationships
+    assert (relative_named, relative_go, RelationshipKind.REFERENCES.value) in relationships
+    assert _unresolved_by_source(result).get("app.same_named", set()) == set()
+    assert _unresolved_by_source(result).get("app.same_alias", set()) == set()
+    assert _unresolved_by_source(result).get("pkg.app.relative_named", set()) == set()
+
+    _assert_relation_location(
+        result,
+        "app.same_named",
+        library_go,
+        RelationshipKind.CALLS.value,
+        path="app.py",
+        start=(5, 4),
+        end=(5, 6),
+    )
+    _assert_relation_location(
+        result,
+        "app.same_named",
+        library_go,
+        RelationshipKind.REFERENCES.value,
+        path="app.py",
+        start=(6, 12),
+        end=(6, 14),
+    )
+    _assert_relation_location(
+        result,
+        "app.same_alias",
+        other_go,
+        RelationshipKind.CALLS.value,
+        path="app.py",
+        start=(13, 4),
+        end=(13, 10),
+    )
+    _assert_relation_location(
+        result,
+        "pkg.app.relative_named",
+        relative_go,
+        RelationshipKind.CALLS.value,
+        path="pkg/app.py",
+        start=(5, 4),
+        end=(5, 6),
+    )
+
+    app = _node_id(result, "app")
+    relative_module = _node_id(result, "pkg.app")
+    import_edges = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.kind == RelationshipKind.IMPORTS.value
+    ]
+    app_library_import = next(
+        relationship
+        for relationship in import_edges
+        if relationship.source == app and relationship.target == library_go
+    )
+    app_other_import = next(
+        relationship
+        for relationship in import_edges
+        if relationship.source == app and relationship.target == _node_id(result, "other")
+    )
+    relative_library_import = next(
+        relationship
+        for relationship in import_edges
+        if relationship.source == relative_module and relationship.target == relative_go
+    )
+    assert {
+        location.range.start.line + 1
+        for evidence in app_library_import.evidence
+        for location in evidence.locations
+    } == {3, 5}
+    assert {
+        location.range.start.line + 1
+        for evidence in app_other_import.evidence
+        for location in evidence.locations
+    } == {11, 13}
+    assert {
+        location.range.start.line + 1
+        for evidence in relative_library_import.evidence
+        for location in evidence.locations
+    } == {3, 5}
+    assert validate_document(result.document).is_valid
+
+
+def test_conditional_divergent_and_omitted_routes_are_one_unresolved_focal_use(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def go():\n    return 1\n")
+    _write(tmp_path, "other.py", "def go():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def divergent(flag):\n"
+        "    if flag:\n"
+        "        from library import go\n"
+        "    else:\n"
+        "        from other import go\n"
+        "    go()\n"
+        "    value = go\n\n"
+        "def replaced_alias(flag):\n"
+        "    if flag:\n"
+        "        import library as lib\n"
+        "    else:\n"
+        "        import other as lib\n"
+        "    lib.go()\n\n"
+        "def omitted_else(flag):\n"
+        "    if flag:\n"
+        "        from library import go\n"
+        "    go()\n\n"
+        "def importing_and_terminated(flag):\n"
+        "    if flag:\n"
+        "        from library import go\n"
+        "    else:\n"
+        "        return\n"
+        "    go()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    labels = {
+        ("app.divergent", "go", 6),
+        ("app.divergent", "go", 7),
+        ("app.replaced_alias", "lib.go", 14),
+        ("app.omitted_else", "go", 19),
+        ("app.importing_and_terminated", "go", 26),
+    }
+    assert labels <= _unresolved_sites(result)
+    for owner, text in {
+        "app.divergent": "go",
+        "app.replaced_alias": "lib.go",
+        "app.omitted_else": "go",
+        "app.importing_and_terminated": "go",
+    }.items():
+        assert _unresolved_by_source(result).get(owner, set()) == {text}
+
+    for owner, target in (
+        ("app.divergent", "library.go"),
+        ("app.divergent", "other.go"),
+        ("app.replaced_alias", "library.go"),
+        ("app.replaced_alias", "other.go"),
+        ("app.omitted_else", "library.go"),
+        ("app.importing_and_terminated", "library.go"),
+    ):
+        source = _node_id(result, owner)
+        target_id = _node_id(result, target)
+        assert not any(
+            relationship.source == source
+            and relationship.target == target_id
+            and relationship.kind
+            in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+            for relationship in result.document.relationships
+        )
+
+
+def test_conditional_all_terminated_arms_retain_agreeing_route(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def all_terminated(flag):\n"
+        "    if flag:\n"
+        "        from library import go\n"
+        "        return\n"
+        "    else:\n"
+        "        from library import go\n"
+        "        raise RuntimeError()\n"
+        "    go()\n\n"
+        "def nested_all_terminated(flag):\n"
+        "    if flag:\n"
+        "        if flag:\n"
+        "            from library import go\n"
+        "            return\n"
+        "        else:\n"
+        "            from library import go\n"
+        "            raise RuntimeError()\n"
+        "    else:\n"
+        "        from library import go\n"
+        "        raise RuntimeError()\n"
+        "    go()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    library_go = _node_id(result, "library.go")
+    relationships = _relationship_map(result)
+    for owner in ("app.all_terminated", "app.nested_all_terminated"):
+        source = _node_id(result, owner)
+        assert (source, library_go, RelationshipKind.CALLS.value) in relationships
+        assert _unresolved_by_source(result).get(owner, set()) == set()
+    _assert_relation_location(
+        result,
+        "app.all_terminated",
+        library_go,
+        RelationshipKind.CALLS.value,
+        path="app.py",
+        start=(7, 4),
+        end=(7, 6),
+    )
+    _assert_relation_location(
+        result,
+        "app.nested_all_terminated",
+        library_go,
+        RelationshipKind.CALLS.value,
+        path="app.py",
+        start=(20, 4),
+        end=(20, 6),
+    )
+    assert validate_document(result.document).is_valid
+
+
 def test_nested_plain_dotted_import_does_not_block_same_module_declaration(
     tmp_path: Path,
 ) -> None:
