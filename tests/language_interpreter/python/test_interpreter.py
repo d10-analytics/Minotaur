@@ -4333,15 +4333,15 @@ def _assert_unresolved_locations(
     starts: set[tuple[int, int]],
 ) -> None:
     source_id = _node_id(result, source_label)
-    unresolved = next(
-        node
+    unresolved_ids = {
+        node.id
         for node in result.document.nodes
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == text
-    )
+    }
     locations = {
         (location.range.start.line, location.range.start.character)
         for relationship in result.document.relationships
-        if relationship.source == source_id and relationship.target == unresolved.id
+        if relationship.source == source_id and relationship.target in unresolved_ids
         for evidence in relationship.evidence
         for location in evidence.locations
     }
@@ -4856,7 +4856,7 @@ def test_conditional_all_terminated_arms_retain_agreeing_route(tmp_path: Path) -
     assert validate_document(result.document).is_valid
 
 
-def test_nested_plain_dotted_import_does_not_block_same_module_declaration(
+def test_nested_plain_dotted_import_can_replace_same_module_declaration(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "pkg/__init__.py", "")
@@ -4873,38 +4873,20 @@ def test_nested_plain_dotted_import_does_not_block_same_module_declaration(
     imported_sub = _node_id(result, "pkg.sub")
     relationships = _relationship_map(result)
 
-    assert (app, local_pkg, RelationshipKind.CALLS.value) in relationships
-    assert (app, local_pkg, RelationshipKind.REFERENCES.value) in relationships
-    assert "pkg" not in _unresolved_by_source(result).get("app", set())
-    assert not any(
-        relationship.source == app
-        and relationship.target == imported_sub
-        and relationship.kind
-        in {
-            RelationshipKind.CALLS.value,
-            RelationshipKind.REFERENCES.value,
-        }
-        for relationship in result.document.relationships
-    )
+    assert _unresolved_by_source(result).get("app", set()) == {"pkg"}
+    for target in (local_pkg, imported_sub):
+        assert not any(
+            relationship.source == app
+            and relationship.target == target
+            and relationship.kind
+            in {
+                RelationshipKind.CALLS.value,
+                RelationshipKind.REFERENCES.value,
+            }
+            for relationship in result.document.relationships
+        )
     assert (app, imported_sub, RelationshipKind.IMPORTS.value) in relationships
-    _assert_relation_location(
-        result,
-        "app",
-        local_pkg,
-        RelationshipKind.CALLS.value,
-        path="app.py",
-        start=(4, 0),
-        end=(4, 3),
-    )
-    _assert_relation_location(
-        result,
-        "app",
-        local_pkg,
-        RelationshipKind.REFERENCES.value,
-        path="app.py",
-        start=(5, 8),
-        end=(5, 11),
-    )
+    _assert_unresolved_locations(result, "app", "pkg", {(4, 0), (5, 8)})
 
 
 def test_nested_dotted_import_reestablishes_existing_direct_prefix(tmp_path: Path) -> None:

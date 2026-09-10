@@ -2045,16 +2045,6 @@ def _join_flow_states(states: tuple[_ImportFlowState, ...]) -> _ImportFlowState:
         root_targets = tuple(state.targets.get(root) for state in states)
         root_target = root_targets[0]
         if root_target is None:
-            # A module-level dotted import may share its root with a local
-            # declaration. Keep that root available for the existing lexical
-            # declaration fallback while blocking every imported prefix.
-            if root not in states[0].local_names:
-                uncertain_routes = {
-                    name for target_map in target_maps for name in target_map if name != root
-                }
-                if uncertain_routes:
-                    joined_uncertain.update(uncertain_routes)
-                    continue
             joined_uncertain.add(root)
             continue
         root_agrees = (
@@ -2063,16 +2053,6 @@ def _join_flow_states(states: tuple[_ImportFlowState, ...]) -> _ImportFlowState:
             and all(category == categories[0] for category in categories)
         )
         if not root_agrees:
-            # The same module-level ownership rule applies when the roots are
-            # present but disagree. Function-local import roots remain
-            # uncertain as a whole through ``local_names``.
-            if root not in states[0].local_names:
-                uncertain_routes = {
-                    name for target_map in target_maps for name in target_map if name != root
-                }
-                if uncertain_routes:
-                    joined_uncertain.update(uncertain_routes)
-                    continue
             joined_uncertain.add(root)
             continue
         if not categories[0]:
