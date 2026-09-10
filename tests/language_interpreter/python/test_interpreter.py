@@ -55,6 +55,22 @@ def _unresolved_by_source(result: AnalysisResult) -> dict[str, set[str]]:
     return grouped
 
 
+def _unresolved_sites(result: AnalysisResult) -> set[tuple[str, str, int]]:
+    labels = {node.id: node.label for node in result.document.nodes}
+    texts = {
+        node.id: node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    return {
+        (labels[relationship.source], texts[relationship.target], location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.target in texts
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+
 def _edge_labels(result: AnalysisResult) -> set[tuple[str, str, str]]:
     """Return label-keyed relationship triples for readable expectations."""
     labels = {node.id: node.label for node in result.document.nodes}
@@ -966,10 +982,173 @@ def test_function_local_import_is_reportable_and_lazy_reimports_resolve(
 
     # An import binds statically. Suppressing it as if it were a local
     # assignment would erase the call instead of leaving it to a later slice.
-    assert _unresolved_by_source(result)["app.local_only"] == {"helper"}
+    assert _unresolved_by_source(result).get("app.local_only", set()) == set()
     assert ("app.lazy_reimport", "library.Thing", RelationshipKind.CALLS.value) in _edge_labels(
         result
     )
+
+
+def test_function_local_import_routes_bind_calls_and_loads_at_source_positions(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def named():\n    return 1\n")
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def dotted():\n    return 2\n")
+    _write(tmp_path, "other.py", "def aliased():\n    return 3\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n"
+        "    from library import named\n"
+        "    named()\n"
+        "    callback = named\n"
+        "    import pkg.sub\n"
+        "    pkg.sub.dotted()\n"
+        "    import other as alias\n"
+        "    alias.aliased()\n"
+        "    return callback\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    facts = {
+        fact
+        for fact in _edge_labels(result)
+        if fact[0] == "app.invoke"
+        and fact[2] in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+    }
+    assert facts == {
+        ("app.invoke", "library.named", RelationshipKind.CALLS.value),
+        ("app.invoke", "library.named", RelationshipKind.REFERENCES.value),
+        ("app.invoke", "pkg.sub.dotted", RelationshipKind.CALLS.value),
+        ("app.invoke", "other.aliased", RelationshipKind.CALLS.value),
+    }
+    assert _unresolved_by_source(result).get("app.invoke", set()) == set()
+
+
+def test_function_import_loss_and_reimport_emit_one_unresolved_site(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n"
+        "    from library import go\n"
+        "    go()\n"
+        "    del go\n"
+        "    go()\n"
+        "    from library import go\n"
+        "    go()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert ("app.invoke", "library.go", RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert _unresolved_sites(result) == {("app.invoke", "go", 5)}
+    assert ("app", "library.go", RelationshipKind.IMPORTS.value) in _edge_labels(result)
+
+
+def test_module_default_before_import_and_deferred_body_use_final_state(tmp_path: Path) -> None:
+    _write(tmp_path, "first.py", "def go():\n    return 1\n")
+    _write(tmp_path, "second.py", "def go():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def immediate(value=lib.go):\n"
+        "    return value\n\n"
+        "import first as lib\n"
+        "def deferred():\n"
+        "    return lib.go()\n\n"
+        "import second as lib\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    assert ("app.immediate", "first.go", RelationshipKind.REFERENCES.value) not in edges
+    assert ("app.immediate", "lib.go", RelationshipKind.REFERENCES.value) in edges
+    assert ("app.deferred", "first.go", RelationshipKind.CALLS.value) not in edges
+    assert ("app.deferred", "second.go", RelationshipKind.CALLS.value) in edges
+    assert _unresolved_sites(result) == {("app.immediate", "lib.go", 1)}
+
+
+def test_source_position_routes_prove_owner_location_and_syntactic_imports(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def named():\n    return 1\n")
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def dotted():\n    return 2\n")
+    _write(tmp_path, "other.py", "def aliased():\n    return 3\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n"
+        "    from library import named\n"
+        "    named()\n"
+        "    named_ref = named\n"
+        "    import pkg.sub\n"
+        "    pkg.sub.dotted()\n"
+        "    dotted_ref = pkg.sub.dotted\n"
+        "    import other as alias\n"
+        "    alias.aliased()\n"
+        "    alias_ref = alias.aliased\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    expected = {
+        ("library.named", RelationshipKind.CALLS.value, 3),
+        ("library.named", RelationshipKind.REFERENCES.value, 4),
+        ("pkg.sub.dotted", RelationshipKind.CALLS.value, 6),
+        ("pkg.sub.dotted", RelationshipKind.REFERENCES.value, 7),
+        ("other.aliased", RelationshipKind.CALLS.value, 9),
+        ("other.aliased", RelationshipKind.REFERENCES.value, 10),
+    }
+    invoke = _node_id(result, "app.invoke")
+    for target_label, kind, line in expected:
+        relationship = next(
+            relationship
+            for relationship in result.document.relationships
+            if relationship.source == invoke
+            and relationship.target == _node_id(result, target_label)
+            and relationship.kind == kind
+        )
+        assert [
+            (location.path, location.range.start.line + 1)
+            for evidence in relationship.evidence
+            for location in evidence.locations
+        ] == [("app.py", line)]
+    assert {
+        ("app", target, RelationshipKind.IMPORTS.value)
+        for target in ("library.named", "pkg.sub", "other")
+    } <= _edge_labels(result)
+    assert _unresolved_by_source(result).get("app.invoke", set()) == set()
+
+
+def test_immediate_module_call_and_default_keep_source_state_from_deferred_body(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "first.py", "def go():\n    return 1\n")
+    _write(tmp_path, "second.py", "def go():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "before = alias.go()\n"
+        "def immediate(value=alias.go):\n"
+        "    return value\n"
+        "import first as alias\n"
+        "def deferred():\n"
+        "    return alias.go()\n"
+        "import second as alias\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    assert ("app", "first.go", RelationshipKind.CALLS.value) not in edges
+    assert ("app", "second.go", RelationshipKind.CALLS.value) not in edges
+    assert ("app.deferred", "first.go", RelationshipKind.CALLS.value) not in edges
+    assert ("app.deferred", "second.go", RelationshipKind.CALLS.value) in edges
+    assert _unresolved_sites(result) == {
+        ("app", "alias.go", 1),
+        ("app.immediate", "alias.go", 2),
+    }
+    assert ("app", "first", RelationshipKind.IMPORTS.value) in edges
+    assert ("app", "second", RelationshipKind.IMPORTS.value) in edges
 
 
 def test_implicit_class_receivers_resolve_through_the_owning_class(tmp_path: Path) -> None:
@@ -1151,7 +1330,7 @@ def test_function_local_imports_del_and_match_captures_are_lexical_binders(
         node.reference_text
         for node in result.document.nodes
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
-    } == set()
+    } == {"helper"}
 
 
 def test_all_match_capture_forms_are_lexical_binders(tmp_path: Path) -> None:
@@ -1611,7 +1790,10 @@ def test_an_import_that_rebinds_the_receiver_disqualifies_it(tmp_path: Path) -> 
         "app.Runner.helper",
         RelationshipKind.CALLS.value,
     ) not in _edge_labels(result)
-    assert _unresolved_by_source(result) == {"app": {"library.self"}}
+    assert _unresolved_by_source(result) == {
+        "app": {"library.self"},
+        "app.Runner.run": {"self.helper"},
+    }
 
 
 def test_comprehension_receiver_targets_shadow_self_and_cls_only_inside_comp(
@@ -1988,8 +2170,8 @@ def test_nested_scope_import_of_a_workspace_name_stays_reportable(tmp_path: Path
     # Import bindings are not dynamic locals at any depth, and resolving them
     # is a later slice's work: the call is reported, not dropped and not
     # resolved through a module-level alias that does not exist.
-    assert _unresolved_by_source(result)["app.outer"] == {"helper"}
-    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
+    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) in _edge_labels(result)
 
 
 def test_class_body_imports_bind_in_the_class_scope_only(tmp_path: Path) -> None:
@@ -2026,7 +2208,8 @@ def test_local_import_rebinding_a_module_alias_refuses_that_alias(tmp_path: Path
     # The call is to ``b.go``. Resolving it through the module's ``lib`` would
     # record a dependency on ``a`` that this scope cannot even see.
     assert ("app.f", "a.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
-    assert _unresolved_by_source(result)["app.f"] == {"lib.go"}
+    assert _unresolved_by_source(result).get("app.f", set()) == set()
+    assert ("app.f", "b.go", RelationshipKind.CALLS.value) in _edge_labels(result)
 
 
 def test_local_from_import_rebinding_a_module_alias_refuses_that_alias(
@@ -2053,10 +2236,10 @@ def test_local_from_import_rebinding_a_module_alias_refuses_that_alias(
     edges = _edge_labels(result)
 
     assert ("app.f", "models.User", RelationshipKind.CALLS.value) not in edges
-    assert unresolved["app.f"] == {"User"}
+    assert unresolved.get("app.f", set()) == set()
     # The same rebinding seen from a nested scope, through the scope stack.
     assert ("app.nested", "models.User", RelationshipKind.CALLS.value) not in edges
-    assert unresolved["app.nested"] == {"User"}
+    assert unresolved.get("app.nested", set()) == set()
 
 
 def test_inner_scope_import_outranks_an_enclosing_assignment(tmp_path: Path) -> None:
@@ -2153,7 +2336,7 @@ def test_a_scopes_own_assignment_outranks_its_own_import(tmp_path: Path) -> None
 
     # One scope binds ``list`` twice. The assignment makes it a dynamic local,
     # which nothing static can claim, so the call reports nothing at all.
-    assert _unresolved_by_source(result)["app.outer"] == {"build"}
+    assert _unresolved_by_source(result)["app.outer"] == {"build", "list"}
 
 
 def test_lambda_default_walrus_binds_the_enclosing_function(tmp_path: Path) -> None:
@@ -4336,7 +4519,7 @@ def test_dotted_import_lexical_descriptors_preserve_nearest_routes(tmp_path: Pat
 
     result = analyze_python_workspace(tmp_path)
     unresolved = _unresolved_by_source(result)
-    assert "pkg.sub.go" in unresolved.get("app.caller", set())
+    assert unresolved.get("app.caller", set()) == set()
     run = _node_id(result, "app.Runner.run")
     target = _node_id(result, "pkg.sub.go")
     relationships = _relationship_map(result)
@@ -4374,7 +4557,7 @@ def test_nested_plain_dotted_imports_remain_syntactic_only(tmp_path: Path) -> No
     )
 
     result = analyze_python_workspace(tmp_path)
-    assert "pkg.sub.go" in _unresolved_by_source(result).get("app.function", set())
+    assert _unresolved_by_source(result).get("app.function", set()) == set()
     assert "pkg.sub.go" in _unresolved_by_source(result).get("app", set())
     imports = [
         edge
@@ -4750,6 +4933,10 @@ def test_nested_plain_dotted_imports_are_syntactic_only_in_each_container(
     _write(tmp_path, "app.py", f"{block}\n")
 
     result = analyze_python_workspace(tmp_path)
+    if owner == "app.run":
+        assert ("app.run", "pkg.sub.go", RelationshipKind.CALLS.value) in _edge_labels(result)
+        assert "pkg.sub.go" not in _unresolved_by_source(result).get(owner, set())
+        return
     assert "pkg.sub.go" in _unresolved_by_source(result).get(owner, set())
     assert not any(
         relationship.source == _node_id(result, owner)
@@ -4893,7 +5080,7 @@ def test_plain_dotted_import_final_route_orders_cover_all_legacy_families(
     "route_kind",
     ["undotted", "aliased_undotted", "aliased_dotted", "from_named", "from_aliased_named"],
 )
-def test_plain_route_history_keeps_final_real_route_and_disables_stale_prefix(
+def test_plain_route_history_preserves_source_position_and_final_route(
     tmp_path: Path, route_kind: str
 ) -> None:
     if route_kind == "undotted":
@@ -4941,9 +5128,11 @@ def test_plain_route_history_keeps_final_real_route_and_disables_stale_prefix(
     target_a_id = _node_id(result, target_a)
     assert (app, target_b_id, RelationshipKind.CALLS.value) in relationships
     assert (app, target_b_id, RelationshipKind.REFERENCES.value) in relationships
-    assert (app, target_a_id, RelationshipKind.CALLS.value) not in relationships
-    assert (app, target_a_id, RelationshipKind.REFERENCES.value) not in relationships
-    assert "pkg.go" not in _unresolved_by_source(result).get("app", set())
+    # Immediate module expressions use the route active at their own source
+    # position, so the first route remains represented alongside the final one.
+    assert (app, target_a_id, RelationshipKind.CALLS.value) in relationships
+    assert (app, target_a_id, RelationshipKind.REFERENCES.value) in relationships
+    assert _unresolved_by_source(result).get("app", set()) == {"pkg.go"}
 
 
 @pytest.mark.parametrize("plain_first", [True, False])
@@ -4966,10 +5155,11 @@ def test_plain_and_undotted_pkg_route_preserve_or_reject_qualified_members(
         assert ("app", "pkg.other.go", RelationshipKind.CALLS.value) in edges
         assert not _unresolved_by_source(result).get("app")
     else:
-        assert _unresolved_by_source(result)["app"] >= {"pkg.sub.go", "pkg.other.go", "pkg"}
+        assert ("app", "pkg.sub.go", RelationshipKind.CALLS.value) in edges
+        assert _unresolved_by_source(result)["app"] >= {"pkg.other.go", "pkg"}
         declaration_ids = {
             node.id
-            for label in ("pkg.sub.go", "pkg.other.go", "pkg")
+            for label in ("pkg.other.go", "pkg")
             for node in _nodes(result, label)
             if node.node_class != NodeClass.UNRESOLVED_REFERENCE
         }
@@ -5058,7 +5248,7 @@ def test_lexical_same_target_routes_survive_and_different_near_routes_refuse_out
 
     result = analyze_python_workspace(tmp_path)
     assert ("app.same", target_label, RelationshipKind.CALLS.value) in _edge_labels(result)
-    assert "pkg.go" in _unresolved_by_source(result).get("app.different", set())
+    assert _unresolved_by_source(result).get("app.different", set()) == set()
     assert ("app.different", target_label, RelationshipKind.CALLS.value) not in _edge_labels(result)
 
 
@@ -5106,7 +5296,7 @@ def test_plain_prefix_does_not_bypass_parameter_or_dynamic_assignment_locals(
     result = analyze_python_workspace(tmp_path)
     unresolved = _unresolved_by_source(result)
     assert "pkg.sub.go" not in unresolved.get("app.parameter", set())
-    assert "pkg.sub.go" not in unresolved.get("app.assigned", set())
+    assert unresolved.get("app.assigned", set()) == {"build"}
     assert "build" in unresolved.get("app.assigned", set())
     assert ("app.parameter", "pkg.sub.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
     assert ("app.assigned", "pkg.sub.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
@@ -5146,3 +5336,644 @@ def test_final_real_route_keeps_secondary_root_reference_for_missing_member(
         2,
         3,
     }
+
+
+def test_nested_callables_use_final_enclosing_function_import_state(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "first.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "second.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from first import helper\n\n"
+        "def outer():\n"
+        "    def before():\n"
+        "        return helper()\n"
+        "    callback = lambda: helper()\n"
+        "    from second import helper\n"
+        "    def after():\n"
+        "        return helper()\n"
+        "    return before, callback, after\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    first = _node_id(result, "first.helper")
+    second = _node_id(result, "second.helper")
+    calls = {
+        (relationship.target, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {(second, 5), (second, 6), (second, 9)}
+    assert all(
+        relationship.target != first
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+    )
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
+
+
+def test_deferred_callable_final_replacement_blocks_routes_at_final_owner_state(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "first.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "second.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    def blocked():\n"
+        "        return helper()\n"
+        "    from first import helper\n"
+        "    from second import helper\n"
+        "    def sibling():\n"
+        "        return helper()\n"
+        "    helper = object()\n"
+        "    return blocked, sibling\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    calls = {
+        (relationship.target, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == set()
+    assert _unresolved_sites(result) == {
+        ("app.outer", "helper", 3),
+        ("app.outer", "helper", 7),
+    }
+
+
+def test_nested_callable_import_does_not_mutate_enclosing_or_sibling_routes(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "first.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "second.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    from first import helper\n"
+        "    def nested():\n"
+        "        from second import helper\n"
+        "        return helper()\n"
+        "    def sibling():\n"
+        "        return helper()\n"
+        "    return helper, nested, sibling\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    first = _node_id(result, "first.helper")
+    second = _node_id(result, "second.helper")
+    calls = {
+        (relationship.target, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {(second, 5), (first, 7)}
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
+
+
+def test_try_handler_blocks_import_replaced_before_exception(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    from library import helper\n"
+        "    try:\n"
+        "        helper = object()\n"
+        "        raise RuntimeError()\n"
+        "    except RuntimeError:\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    library_helper = _node_id(result, "library.helper")
+    assert _unresolved_sites(result) == {("app.outer", "helper", 7)}
+    assert (
+        "app.outer",
+        library_helper,
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
+
+
+@pytest.mark.parametrize(
+    ("compound", "call_line", "reference_line", "unresolved_lines"),
+    [
+        (
+            "if flag:\n"
+            "        called = helper()\n"
+            "        referenced = helper\n"
+            "        helper = object()\n",
+            4,
+            5,
+            {7},
+        ),
+        (
+            "for value in values:\n"
+            "        called = helper()\n"
+            "        referenced = helper\n"
+            "        helper = object()\n",
+            4,
+            5,
+            {7},
+        ),
+        (
+            "while flag:\n"
+            "        called = helper()\n"
+            "        referenced = helper\n"
+            "        helper = object()\n",
+            4,
+            5,
+            {7},
+        ),
+        (
+            "with resource:\n"
+            "        called = helper()\n"
+            "        referenced = helper\n"
+            "        helper = object()\n",
+            4,
+            5,
+            {7},
+        ),
+        (
+            "match flag:\n"
+            "        case _:\n"
+            "            called = helper()\n"
+            "            referenced = helper\n"
+            "            helper = object()\n",
+            5,
+            6,
+            {8},
+        ),
+    ],
+)
+def test_compound_body_preserves_incoming_call_and_reference_before_mutation(
+    tmp_path: Path,
+    compound: str,
+    call_line: int,
+    reference_line: int,
+    unresolved_lines: set[int],
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(flag, values, resource):\n"
+        "    from library import helper\n"
+        f"    {compound}"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    helper = _node_id(result, "library.helper")
+    relationships = {
+        relationship.kind: relationship
+        for relationship in result.document.relationships
+        if relationship.source == run and relationship.target == helper
+    }
+    assert {
+        location.range.start.line + 1
+        for evidence in relationships[RelationshipKind.CALLS.value].evidence
+        for location in evidence.locations
+    } == {call_line}
+    assert {
+        location.range.start.line + 1
+        for evidence in relationships[RelationshipKind.REFERENCES.value].evidence
+        for location in evidence.locations
+    } == {reference_line}
+    assert _unresolved_sites(result) >= {("app.run", "helper", line) for line in unresolved_lines}
+
+
+def test_try_handler_starts_after_possible_try_body_write_but_before_handler_write(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(flag):\n"
+        "    from library import helper\n"
+        "    try:\n"
+        "        called = helper()\n"
+        "        referenced = helper\n"
+        "        helper = object()\n"
+        "    except RuntimeError:\n"
+        "        handled = helper()\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    helper = _node_id(result, "library.helper")
+    calls = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+    ]
+    references = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    ]
+    assert {
+        location.range.start.line + 1
+        for relationship in calls
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {4}
+    assert {
+        location.range.start.line + 1
+        for relationship in references
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {5}
+    assert _unresolved_sites(result) >= {
+        ("app.run", "helper", 8),
+        ("app.run", "helper", 9),
+    }
+
+
+def test_try_else_preserves_success_body_state_and_post_try_uncertainty(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(flag):\n"
+        "    from library import helper\n"
+        "    try:\n"
+        "        pass\n"
+        "    except RuntimeError as helper:\n"
+        "        pass\n"
+        "    else:\n"
+        "        called = helper()\n"
+        "        referenced = helper\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    helper = _node_id(result, "library.helper")
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {8}
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.REFERENCES.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {9}
+    assert _unresolved_sites(result) >= {
+        ("app.run", "helper", 10),
+    }
+
+
+def test_try_handler_type_reads_import_before_same_named_exception_target(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "class Error:\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run():\n"
+        "    from library import Error\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Error as Error:\n"
+        "        pass\n"
+        "    return Error\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    error = _node_id(result, "library.Error")
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == error
+        and relationship.kind == RelationshipKind.REFERENCES.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {5}
+    assert _unresolved_sites(result) >= {
+        ("app.run", "Error", 7),
+    }
+
+
+def test_try_body_write_still_blocks_same_named_handler_type(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "class Error:\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run():\n"
+        "    from library import Error\n"
+        "    try:\n"
+        "        Error = object()\n"
+        "        raise RuntimeError()\n"
+        "    except Error as Error:\n"
+        "        pass\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    error = _node_id(result, "library.Error")
+    assert not any(
+        relationship.source == run
+        and relationship.target == error
+        and relationship.kind == RelationshipKind.REFERENCES.value
+        and any(
+            location.range.start.line + 1 == 6
+            for evidence in relationship.evidence
+            for location in evidence.locations
+        )
+        for relationship in result.document.relationships
+    )
+    assert _unresolved_sites(result) >= {("app.run", "Error", 6)}
+
+
+def test_match_guard_walrus_blocks_later_guards_and_continuation(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(flag):\n"
+        "    from library import helper\n"
+        "    match flag:\n"
+        "        case _ if helper() and (helper := object()):\n"
+        "            pass\n"
+        "        case _ if helper():\n"
+        "            pass\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    helper = _node_id(result, "library.helper")
+    assert {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {4}
+    assert _unresolved_sites(result) >= {
+        ("app.run", "helper", 6),
+        ("app.run", "helper", 8),
+    }
+
+
+def test_eager_comprehension_walrus_updates_outer_overlay_generator_walrus_does_not(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def eager():\n    return 1\ndef deferred():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer(items):\n"
+        "    from library import eager, deferred\n"
+        "    [item for item in items if (eager := factory(item))]\n"
+        "    eager()\n"
+        "    (item for item in items if (deferred := factory(item)))\n"
+        "    deferred()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert (
+        "app.outer",
+        "library.deferred",
+        RelationshipKind.CALLS.value,
+    ) in _edge_labels(result)
+    assert (
+        "app.outer",
+        "library.eager",
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
+    assert _unresolved_by_source(result)["app.outer"] == {"factory", "eager"}
+
+
+def test_immediate_class_global_write_updates_only_its_enclosing_overlay(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n"
+        "class Immediate:\n"
+        "    global helper\n"
+        "    helper = object()\n"
+        "def later():\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert _unresolved_sites(result) == {("app.later", "helper", 6)}
+    assert (
+        "app.later",
+        "library.helper",
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
+
+
+def test_nested_class_method_uses_final_enclosing_function_import_state(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import helper\n"
+        "\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        def run(self):\n"
+        "            return helper()\n"
+        "    from other import helper\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert (
+        "app.outer",
+        "other.helper",
+        RelationshipKind.CALLS.value,
+    ) in _edge_labels(result)
+    calls = {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.outer")
+        and relationship.target == _node_id(result, "other.helper")
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {6}
+    assert _unresolved_sites(result) == set()
+    assert (
+        "app.outer",
+        "lib.helper",
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
+
+
+def test_nested_class_method_keeps_own_import_and_outer_sibling_route(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import helper\n"
+        "\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        def run(self):\n"
+        "            from other import helper\n"
+        "            return helper()\n"
+        "        def value(self):\n"
+        "            from other import helper\n"
+        "            return helper\n"
+        "    def sibling():\n"
+        "        return helper()\n"
+        "    return Inner, sibling\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    labels = {node.id: node.label for node in result.document.nodes}
+    calls = {
+        (labels[relationship.target], location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {("other.helper", 7), ("lib.helper", 12)}
+    references = {
+        (labels[relationship.target], location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.REFERENCES.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert references == {("other.helper", 10)}
+    assert _unresolved_sites(result) == set()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["helper = object()", "del helper"],
+)
+def test_nested_global_mutation_invalidates_only_current_callable_overlay(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import helper\n"
+        "def outer():\n"
+        "    def assignment():\n"
+        "        global helper\n"
+        f"        {mutation}\n"
+        "        return helper()\n"
+        "    def deletion():\n"
+        "        global helper\n"
+        "        del helper\n"
+        "        return helper()\n"
+        "    def loaded():\n"
+        "        global helper\n"
+        "        del helper\n"
+        "        return helper\n"
+        "    def restored():\n"
+        "        global helper\n"
+        "        del helper\n"
+        "        from lib import helper\n"
+        "        return helper()\n"
+        "    return assignment, deletion, loaded, restored\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert _unresolved_sites(result) == {
+        ("app.outer", "helper", 6),
+        ("app.outer", "helper", 10),
+        ("app.outer", "helper", 14),
+    }
+    calls = {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.outer")
+        and relationship.target == _node_id(result, "lib.helper")
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {19}
+
+
+def test_module_lambda_body_uses_final_state_with_immediate_defaults_and_parameters(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "defaulted = lambda value=helper: value\n"
+        "called = lambda: helper()\n"
+        "from lib import helper\n"
+        "shadowed = lambda helper: helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert _unresolved_sites(result) == {("app", "helper", 1)}
+    called = _node_id(result, "lib.helper")
+    locations = {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app")
+        and relationship.target == called
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert locations == {2}

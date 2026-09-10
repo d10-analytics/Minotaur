@@ -190,7 +190,7 @@ def test_dotted_import_call_graph_drives_inbound_impact(
     _write(
         tmp_path,
         "caller.py",
-        "import pkg.sub\n\ndef owner():\n    pkg.sub.go()\n",
+        "def owner():\n    from pkg import sub\n    return sub.go()\n",
     )
     graph = tmp_path / "call-only.json"
     assert _analyze(tmp_path, graph) == 0
@@ -228,7 +228,7 @@ def test_dotted_import_load_graph_does_not_create_impact(
     _write(
         tmp_path,
         "loader.py",
-        "import pkg.sub\n\ndef owner():\n    loaded = pkg.sub.go\n    return loaded\n",
+        "def owner():\n    from pkg import sub\n    loaded = sub.go\n    return loaded\n",
     )
     graph = tmp_path / "load-only.json"
     assert _analyze(tmp_path, graph) == 0
@@ -269,3 +269,39 @@ def test_dotted_import_load_graph_does_not_create_impact(
     assert impact_output.out == "depth 0: pkg.sub.go\n"
     assert "loader.owner" not in callers.out
     assert "loader.owner" not in impact_output.out
+
+
+def test_lost_import_route_has_no_inbound_impact_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "caller.py",
+        "def owner():\n    from pkg import sub\n    sub = object()\n    return sub.go()\n",
+    )
+    graph = tmp_path / "lost-route.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "caller.owner", "pkg.sub.go") == []
+
+    status = cli.main(
+        [
+            "query",
+            "impact",
+            "pkg.sub.go",
+            "--depth",
+            "1",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "depth 0: pkg.sub.go\n"
+    assert "caller.owner" not in captured.out
