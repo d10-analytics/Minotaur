@@ -551,6 +551,80 @@ def test_supplied_schema_failures_name_the_source(body: str, message: str) -> No
     assert message in str(error.value)
 
 
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        pytest.param("title = 'no section'\n", "[minotaur]", id="missing-section"),
+        pytest.param("minotaur = 5\n", "must be a table", id="non-mapping-section"),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = ['src']\nunknown = true\n",
+            "unknown config field: unknown",
+            id="unknown-key",
+        ),
+        pytest.param("[minotaur]\ntargets = ['src']\n", "schema_version", id="missing-version"),
+        pytest.param(
+            "[minotaur]\nschema_version = true\ntargets = ['src']\n",
+            "schema_version must be an integer",
+            id="boolean-version",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = '1'\ntargets = ['src']\n",
+            "schema_version must be an integer",
+            id="non-integer-version",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 2\ntargets = ['src']\n",
+            "unsupported schema_version",
+            id="unsupported-version",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\nroot = 5\ntargets = ['src']\n",
+            "config root must be a string",
+            id="non-string-root",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ngraph = 5\ntargets = ['src']\n",
+            "config graph must be a string",
+            id="non-string-graph",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\nsystems_dir = 5\ntargets = ['src']\n",
+            "config systems_dir must be a string",
+            id="non-string-systems-dir",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\n",
+            "missing required field: targets",
+            id="missing-targets",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = []\n",
+            "config targets must not be empty",
+            id="empty-targets",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = 'src'\n",
+            "config targets must be a list of strings",
+            id="non-list-targets",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = [1]\n",
+            "config targets must be a list of strings",
+            id="non-string-target",
+        ),
+    ],
+)
+def test_disk_schema_failures_name_the_config_source(
+    tmp_path: Path, body: str, message: str
+) -> None:
+    cfg = _write(tmp_path, ".minotaur.toml", body)
+
+    with pytest.raises(ConfigError, match=re.escape(str(cfg))) as error:
+        resolve_config(tmp_path)
+
+    assert message in str(error.value)
+
+
 def test_raw_defaults_and_explicit_empty_values_remain_distinct_from_disk_values(
     tmp_path: Path,
 ) -> None:
