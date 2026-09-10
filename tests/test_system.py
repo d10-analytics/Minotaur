@@ -755,6 +755,24 @@ def test_supplied_definition_conflicts_name_both_exact_sources(tmp_path: Path) -
     assert str(second) in text
 
 
+def test_supplied_definition_overlap_names_both_exact_sources(tmp_path: Path) -> None:
+    first = tmp_path / "capture" / "first.toml"
+    second = tmp_path / "capture" / "second.toml"
+
+    with pytest.raises(FileListedInTwoSystems) as error:
+        system.load_systems_data(
+            {
+                first: {"schema_version": 1, "name": "first", "files": ["shared.py"]},
+                second: {"schema_version": 1, "name": "second", "files": ["shared.py"]},
+            }
+        )
+
+    text = str(error.value)
+    assert "file listed in two systems: shared.py" in text
+    assert str(first) in text
+    assert str(second) in text
+
+
 def test_individual_validator_is_the_owner_for_both_natural_routes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
