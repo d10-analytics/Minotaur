@@ -5522,3 +5522,154 @@ def test_immediate_class_global_write_updates_only_its_enclosing_overlay(
         "library.helper",
         RelationshipKind.CALLS.value,
     ) not in _edge_labels(result)
+
+
+def test_nested_class_method_uses_final_enclosing_function_import_state(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import helper\n"
+        "\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        def run(self):\n"
+        "            return helper()\n"
+        "    from other import helper\n"
+        "    return Inner\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert (
+        "app.outer",
+        "other.helper",
+        RelationshipKind.CALLS.value,
+    ) in _edge_labels(result)
+    calls = {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.outer")
+        and relationship.target == _node_id(result, "other.helper")
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {6}
+    assert _unresolved_sites(result) == set()
+    assert (
+        "app.outer",
+        "lib.helper",
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
+
+
+def test_nested_class_method_keeps_own_import_and_outer_sibling_route(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import helper\n"
+        "\n"
+        "def outer():\n"
+        "    class Inner:\n"
+        "        def run(self):\n"
+        "            from other import helper\n"
+        "            return helper()\n"
+        "    def sibling():\n"
+        "        return helper()\n"
+        "    return Inner, sibling\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    labels = {node.id: node.label for node in result.document.nodes}
+    calls = {
+        (labels[relationship.target], location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {("other.helper", 7), ("lib.helper", 9)}
+    assert _unresolved_sites(result) == set()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["helper = object()", "del helper"],
+)
+def test_nested_global_mutation_invalidates_only_current_callable_overlay(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import helper\n"
+        "def outer():\n"
+        "    def assignment():\n"
+        "        global helper\n"
+        f"        {mutation}\n"
+        "        return helper()\n"
+        "    def deletion():\n"
+        "        global helper\n"
+        "        del helper\n"
+        "        return helper()\n"
+        "    def restored():\n"
+        "        global helper\n"
+        "        del helper\n"
+        "        from lib import helper\n"
+        "        return helper()\n"
+        "    return assignment, deletion, restored\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert _unresolved_sites(result) == {
+        ("app.outer", "helper", 6),
+        ("app.outer", "helper", 10),
+    }
+    calls = {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.outer")
+        and relationship.target == _node_id(result, "lib.helper")
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {15}
+
+
+def test_module_lambda_body_uses_final_state_with_immediate_defaults_and_parameters(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "defaulted = lambda value=helper: value\n"
+        "called = lambda: helper()\n"
+        "from lib import helper\n"
+        "shadowed = lambda helper: helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert _unresolved_sites(result) == {("app", "helper", 1)}
+    called = _node_id(result, "lib.helper")
+    locations = {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app")
+        and relationship.target == called
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert locations == {2}
