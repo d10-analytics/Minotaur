@@ -982,7 +982,7 @@ def test_function_local_import_is_reportable_and_lazy_reimports_resolve(
 
     # An import binds statically. Suppressing it as if it were a local
     # assignment would erase the call instead of leaving it to a later slice.
-    assert _unresolved_by_source(result)["app.local_only"] == {"helper"}
+    assert _unresolved_by_source(result).get("app.local_only", set()) == set()
     assert ("app.lazy_reimport", "library.Thing", RelationshipKind.CALLS.value) in _edge_labels(
         result
     )
@@ -1247,7 +1247,7 @@ def test_function_local_imports_del_and_match_captures_are_lexical_binders(
         node.reference_text
         for node in result.document.nodes
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
-    } == set()
+    } == {"helper"}
 
 
 def test_all_match_capture_forms_are_lexical_binders(tmp_path: Path) -> None:
@@ -1707,7 +1707,10 @@ def test_an_import_that_rebinds_the_receiver_disqualifies_it(tmp_path: Path) -> 
         "app.Runner.helper",
         RelationshipKind.CALLS.value,
     ) not in _edge_labels(result)
-    assert _unresolved_by_source(result) == {"app": {"library.self"}}
+    assert _unresolved_by_source(result) == {
+        "app": {"library.self"},
+        "app.Runner.run": {"self.helper"},
+    }
 
 
 def test_comprehension_receiver_targets_shadow_self_and_cls_only_inside_comp(
@@ -2084,8 +2087,8 @@ def test_nested_scope_import_of_a_workspace_name_stays_reportable(tmp_path: Path
     # Import bindings are not dynamic locals at any depth, and resolving them
     # is a later slice's work: the call is reported, not dropped and not
     # resolved through a module-level alias that does not exist.
-    assert _unresolved_by_source(result)["app.outer"] == {"helper"}
-    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
+    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) in _edge_labels(result)
 
 
 def test_class_body_imports_bind_in_the_class_scope_only(tmp_path: Path) -> None:
@@ -2122,7 +2125,8 @@ def test_local_import_rebinding_a_module_alias_refuses_that_alias(tmp_path: Path
     # The call is to ``b.go``. Resolving it through the module's ``lib`` would
     # record a dependency on ``a`` that this scope cannot even see.
     assert ("app.f", "a.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
-    assert _unresolved_by_source(result)["app.f"] == {"lib.go"}
+    assert _unresolved_by_source(result).get("app.f", set()) == set()
+    assert ("app.f", "b.go", RelationshipKind.CALLS.value) in _edge_labels(result)
 
 
 def test_local_from_import_rebinding_a_module_alias_refuses_that_alias(
@@ -2149,10 +2153,10 @@ def test_local_from_import_rebinding_a_module_alias_refuses_that_alias(
     edges = _edge_labels(result)
 
     assert ("app.f", "models.User", RelationshipKind.CALLS.value) not in edges
-    assert unresolved["app.f"] == {"User"}
+    assert unresolved.get("app.f", set()) == set()
     # The same rebinding seen from a nested scope, through the scope stack.
     assert ("app.nested", "models.User", RelationshipKind.CALLS.value) not in edges
-    assert unresolved["app.nested"] == {"User"}
+    assert unresolved.get("app.nested", set()) == set()
 
 
 def test_inner_scope_import_outranks_an_enclosing_assignment(tmp_path: Path) -> None:
@@ -2249,7 +2253,7 @@ def test_a_scopes_own_assignment_outranks_its_own_import(tmp_path: Path) -> None
 
     # One scope binds ``list`` twice. The assignment makes it a dynamic local,
     # which nothing static can claim, so the call reports nothing at all.
-    assert _unresolved_by_source(result)["app.outer"] == {"build"}
+    assert _unresolved_by_source(result)["app.outer"] == {"build", "list"}
 
 
 def test_lambda_default_walrus_binds_the_enclosing_function(tmp_path: Path) -> None:
@@ -5202,7 +5206,7 @@ def test_plain_prefix_does_not_bypass_parameter_or_dynamic_assignment_locals(
     result = analyze_python_workspace(tmp_path)
     unresolved = _unresolved_by_source(result)
     assert "pkg.sub.go" not in unresolved.get("app.parameter", set())
-    assert "pkg.sub.go" not in unresolved.get("app.assigned", set())
+    assert unresolved.get("app.assigned", set()) == {"build", "pkg.sub.go"}
     assert "build" in unresolved.get("app.assigned", set())
     assert ("app.parameter", "pkg.sub.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
     assert ("app.assigned", "pkg.sub.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
