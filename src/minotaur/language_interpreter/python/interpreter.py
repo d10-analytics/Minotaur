@@ -240,6 +240,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.call_receiver_parameters: dict[ast.Call, str | None] = {}
         self.call_excludes_enclosing_class: dict[ast.Call, bool] = {}
         self.class_header_expressions: set[ast.AST] = set()
+        self.definition_header_expressions: set[ast.AST] = set()
         self.reference_bound_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_global_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_shadow_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
@@ -780,6 +781,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for expression in _signature_nodes(node):
+            self.definition_header_expressions.add(expression)
             self.visit(expression)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
@@ -2531,12 +2533,14 @@ def _calls(
         if (
             visitor.call_excludes_enclosing_class[candidate]
             and candidate.func not in visitor.class_header_expressions
+            and candidate.func not in visitor.definition_header_expressions
         ):
             expression_context = _without_enclosing_class_scope(context)
         call_import_targets = visitor.call_import_targets[candidate]
         if (
             visitor.call_excludes_enclosing_class[candidate]
             and candidate.func not in visitor.class_header_expressions
+            and candidate.func not in visitor.definition_header_expressions
         ):
             call_import_targets = _without_import_roots(
                 call_import_targets, enclosing_class_target_names
@@ -2545,12 +2549,14 @@ def _calls(
         if (
             visitor.call_excludes_enclosing_class[candidate]
             and candidate.func not in visitor.class_header_expressions
+            and candidate.func not in visitor.definition_header_expressions
         ):
             call_import_bound -= context.import_targets.keys()
         call_uncertain_names = visitor.call_uncertain_import_names[candidate]
         if (
             visitor.call_excludes_enclosing_class[candidate]
             and candidate.func not in visitor.class_header_expressions
+            and candidate.func not in visitor.definition_header_expressions
         ):
             call_uncertain_names -= context.uncertain_import_names - (
                 context.class_scope_outer_uncertain_import_names or frozenset()
@@ -2583,12 +2589,14 @@ def _calls(
         if (
             visitor.reference_excludes_enclosing_class[reference]
             and reference not in visitor.class_header_expressions
+            and reference not in visitor.definition_header_expressions
         ):
             expression_context = _without_enclosing_class_scope(context)
         reference_import_targets = visitor.reference_import_targets[reference]
         if (
             visitor.reference_excludes_enclosing_class[reference]
             and reference not in visitor.class_header_expressions
+            and reference not in visitor.definition_header_expressions
         ):
             reference_import_targets = _without_import_roots(
                 reference_import_targets, enclosing_class_target_names
@@ -2597,12 +2605,14 @@ def _calls(
         if (
             visitor.reference_excludes_enclosing_class[reference]
             and reference not in visitor.class_header_expressions
+            and reference not in visitor.definition_header_expressions
         ):
             reference_import_bound -= context.import_targets.keys()
         reference_uncertain_names = visitor.reference_uncertain_import_names[reference]
         if (
             visitor.reference_excludes_enclosing_class[reference]
             and reference not in visitor.class_header_expressions
+            and reference not in visitor.definition_header_expressions
         ):
             reference_uncertain_names -= context.uncertain_import_names - (
                 context.class_scope_outer_uncertain_import_names or frozenset()
