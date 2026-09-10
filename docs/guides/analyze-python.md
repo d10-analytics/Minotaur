@@ -9,7 +9,7 @@ The graph meanings and supported Python binding boundaries are collected in
 the [structural analysis contract](../concepts/structural-analysis-contract.md).
 Use that contract when interpreting an import, call, reference, or unresolved
 relationship; this guide focuses on running the analysis and the Python
-module-scope behavior.
+module and callable binding behavior.
 
 Analysis records source bytes and the selected targets for later freshness
 checks. See [Graph freshness and snapshot order](../concepts/freshness.md) for
@@ -136,21 +136,17 @@ text, preserving the expression it names: `(left + right).denominator` is not
 labelled `left + right.denominator`, and `items[0].name` remains
 `items[0].name`.
 
-Names bound in the lexical scope that owns the load (including parameters,
-assignment targets, loop and context-manager targets, comprehension and walrus
-targets, and nonlocal names) are suppressed instead of being reported as
-unresolved, because a load through a local name says nothing static about the
-workspace. This suppression applies to function and method bodies only:
-module-level and class-body bindings are still reported, so a module-level loop
-variable used as `module_level_name.attr`, or a class attribute used as
-`attr.thing` in the class body, remains an unresolved fact. A global
-declaration remains eligible for resolution. A name bound by an `import` or
-`from ... import` statement is never a dynamic local, including inside a
-function body: a function-local `from lib import helper` followed by `helper()`
-is reported as unresolved until function-local import resolution lands, and a
-function-local import that rebinds a module alias to a different target
-(`import lib` at module level, `import other as lib` in the body) refuses to
-resolve through the module alias and reports `lib.helper` as unresolved.
+Names bound as ordinary dynamic locals in the lexical scope that owns the load
+(including parameters, assignments, loop and context-manager targets, match
+captures, and comprehension targets) are suppressed in function and method
+bodies. A walrus target binds the enclosing function. A direct import is a
+different category: `from lib import helper`, `from .lib import helper`,
+`import pkg.sub`, and their aliases are reportable and resolve calls and loads
+after the import at that source position. Before the import, or after a
+managed imported name is assigned or deleted, the use is one unresolved site;
+it does not fall through to an outer route. A later direct reimport restores its
+route. `global` names remain eligible for module routes and `nonlocal` names
+are bound to their enclosing lexical scope.
 
 References to Python builtin names are suppressed. The builtin set is
 `dir(builtins)` taken at analysis time; the rationale is recorded at the point
@@ -178,22 +174,25 @@ a consumer can identify the site that established the relationship.
 
 ### Module-scope dotted imports
 
-At module scope, a plain import such as `import pkg.sub` can admit
-component-bounded descendants. A later `pkg.sub.child.go()` use appends the
-remaining components once and asks the existing qualified-declaration lookup
-for the exact target ID; a separate `import pkg.sub.child` is not required.
+At module scope, and after the same direct import in a function, a plain import
+such as `import pkg.sub` can admit component-bounded descendants. A later
+`pkg.sub.child.go()` use appends the remaining components once and asks the
+existing qualified-declaration lookup for the exact target ID; a separate
+`import pkg.sub.child` is not required.
 `pkg.other` and `pkg.submarine` are outside the `pkg.sub` component boundary,
 and an overlapping eligible prefix uses the longest component match. The
 import statement still emits its own `IMPORTS` fact: it never implies a
 `CALLS` or `REFERENCES` edge to every member.
 
-The module resolver aggregates direct bindings before resolving expressions.
-Competing module binders conservatively invalidate every use of an affected
-plain prefix. A later true alias can retain its real route, while a later
-plain dotted import cannot preserve an earlier corrupted alias route. Plain
-dotted imports inside functions, classes, or control-flow containers remain
-syntactic evidence in this slice; they do not create a new module prefix for
-the enclosing analysis.
+The resolver aggregates direct module bindings while expression resolution uses
+the source-position state. Competing module binders conservatively invalidate
+every use of an affected plain prefix. A later true alias can retain its real
+route, while a later plain dotted import cannot preserve an earlier corrupted
+alias route. Direct function-body imports install a callable-local route;
+Class-body plain imports retain conservative behavior: they may refine an
+already-visible plain package route, while a class-only route remains syntactic
+evidence. Imports in control-flow containers remain syntactic evidence and do
+not establish a route for their contained or later uses.
 
 The lookup preserves distinct node IDs for same-labelled declarations. For
 the natural collision cases, a lowercase `child` selects the function at
@@ -202,13 +201,63 @@ selects the package method at `pkg/sub/__init__.py`, graph
 `Range(1, 4)-(1, 22)`; a class-only package method has that latter location.
 Those are current qualified-lookup outcomes, not owner or declaration-kind
 precedence rules. Graph ranges are zero-based. Query output uses one-based
-line and column values, such as `caller.py:4:5` for the caller proof.
+line and column values, such as `caller.py:3:12` for the caller proof.
 
 These claims are proved by the named natural tests in the [structural
 analysis contract](../concepts/structural-analysis-contract.md#supported-behavior-and-proof).
-The slice does not provide per-expression source-order precision, control-flow
-joins, general local-prefix production, interprocedural runtime side effects,
-or runtime dispatch; unresolved cases remain explicit.
+The slice does not provide control-flow joins, control-flow-local import
+production, invocation timing, interprocedural callable side effects, or
+runtime dispatch; unresolved cases remain explicit.
+
+### Binding timing and class boundaries
+
+Module and class execution use source order. Immediate calls and loads see the
+route active at their own expression. Function and method bodies are deferred
+and use final module state; nested deferred functions, lambdas, and methods use
+the final state of their owning enclosing function. Defaults, decorators,
+annotations, and class headers execute in their enclosing scope at definition
+time. A lambda body is deferred, but its defaults and parameters are immediate
+or lexical. This policy does not simulate invocation or callable side effects.
+
+Class headers run in the enclosing scope, while the class body has a separate
+sequential namespace. Earlier class assignments or imports can affect later
+headers, and deletion can reveal an enclosing route. Ordinary class locals and
+class imports are hidden from method bodies; methods use their own imports and
+enclosing function or module routes. Existing class behavior may refine an
+already-visible plain package route, while a class-only plain import remains
+syntactic evidence. The analyzer does not provide direct class-import support.
+
+Assignment effects follow expression order: ordinary assignment reads its
+right-hand side before writing targets, augmented assignment reads its target
+before its right-hand side and write, and a walrus commits after its value
+before later siblings. Attribute and subscript stores preserve their base load;
+annotation-only statements do not invent a binding. Structural sites after a
+direct `return` or `raise` remain visible, but unreachable code cannot advance
+binding state.
+
+### Compound statements and comprehensions
+
+Imports in `if`, loop, `try`, `with`, and `match` bodies remain syntactic
+`IMPORTS` facts. They do not establish a control-flow-local route or a branch
+join. Possibly changed roots become uncertain at continuation, while untouched
+routes retain their state. Direct imports in a function body outside such a
+container remain supported.
+
+The first iterable of a comprehension is evaluated in the enclosing scope;
+later iterables, filters, and result expressions see comprehension-local
+targets. List, set, and dict comprehension bodies are eager and a walrus can
+update the enclosing callable overlay. A generator expression body is lazy and
+does not update that overlay; the analyzer does not simulate generator
+invocation.
+
+### Query consequences
+
+A resolved `CALLS` relationship appears in `query callers` and inbound
+`query impact`. A resolved `REFERENCES` relationship counts as a use for
+`query unreferenced`, but does not create a caller or inbound impact path.
+Unresolved text is recall-only for caller matching and is not a resolved use of
+a candidate target. The exact public proofs and their one-based output are
+listed in the [structural analysis contract](../concepts/structural-analysis-contract.md#supported-behavior-and-proof).
 
 The output uses the canonical Minotaur wire contract described in the
 [Minotaur graph format reference](../formats/minotaur-graph-v1.md).
