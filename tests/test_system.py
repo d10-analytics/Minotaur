@@ -738,6 +738,16 @@ def test_supplied_bytes_report_decode_errors_at_the_supplied_source(tmp_path: Pa
     assert str(source) in str(error.value)
 
 
+def test_supplied_bytes_report_toml_errors_at_the_supplied_source(tmp_path: Path) -> None:
+    source = tmp_path / "absent" / "definition.toml"
+
+    with pytest.raises(ConfigError) as error:
+        system.load_systems_data({source: b"[broken\n"})
+
+    assert "invalid TOML" in str(error.value)
+    assert str(source) in str(error.value)
+
+
 def test_supplied_definition_conflicts_name_both_exact_sources(tmp_path: Path) -> None:
     first = tmp_path / "capture" / "first.toml"
     second = tmp_path / "capture" / "second.toml"
