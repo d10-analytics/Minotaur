@@ -231,6 +231,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_propagate_mutations: list[bool] = []
         self._scope_mutated_names: list[set[str]] = []
         self._flow_nested_depth = 0
+        self._flow_conditional_depth = 0
         self._flow_mutate_targets = False
         self._receiver_name = receiver_name
         self._receiver_parameter = receiver_parameter
@@ -691,6 +692,17 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._block_flow_imports(names)
         return self._flow_state() or state
 
+    @staticmethod
+    def _flow_state_copy(state: _ImportFlowState) -> _ImportFlowState:
+        """Copy mutable flow containers before visiting one conditional arm."""
+        return replace(
+            state,
+            targets=dict(state.targets),
+            uncertain_names=frozenset(state.uncertain_names),
+            local_names=frozenset(state.local_names),
+            plain_roots=frozenset(state.plain_roots),
+        )
+
     def visit_Import(self, node: ast.Import) -> None:
         state = self._flow_state()
         if state is None or state.flow_frozen:
@@ -702,7 +714,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         uncertain_names = set(state.uncertain_names)
         plain_roots = set(state.plain_roots)
         for alias in node.names:
-            if self._flow_nested_depth:
+            if self._flow_nested_depth or (
+                self._flow_conditional_depth and alias.asname is None and "." in alias.name
+            ):
                 root = alias.name.partition(".")[0]
                 targets = _without_import_roots(targets, (root,))
                 uncertain_names.add(root)
@@ -819,13 +833,28 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self.visit(node.test)
-        body_state = self._flow_state() or state
-        touched = _flow_touched_names((*node.body, *node.orelse))
-        self._scope_import_states[-1] = body_state
-        self._visit_block(node.body, nested=True)
-        self._scope_import_states[-1] = body_state
-        self._visit_block(node.orelse, nested=True)
-        self._blocked_flow_state(body_state, touched)
+        entry_state = self._flow_state() or state
+
+        self._scope_import_states[-1] = self._flow_state_copy(entry_state)
+        self._flow_conditional_depth += 1
+        try:
+            self._visit_block(node.body)
+            body_state = self._flow_state() or entry_state
+        finally:
+            self._flow_conditional_depth -= 1
+
+        self._scope_import_states[-1] = self._flow_state_copy(entry_state)
+        if node.orelse:
+            self._flow_conditional_depth += 1
+            try:
+                self._visit_block(node.orelse)
+                else_state = self._flow_state() or entry_state
+            finally:
+                self._flow_conditional_depth -= 1
+        else:
+            else_state = self._flow_state_copy(entry_state)
+
+        self._scope_import_states[-1] = _join_flow_states((body_state, else_state))
 
     def visit_For(self, node: ast.For) -> None:
         self._visit_loop(node)
@@ -1981,6 +2010,53 @@ def _module_flow_states(
     final_state = replace(final_state, targets=dict(final_state.targets))
     visitor._pop_scope()
     return states, final_state
+
+
+def _join_flow_states(states: tuple[_ImportFlowState, ...]) -> _ImportFlowState:
+    """Join conditional arms while retaining only agreeing import routes."""
+    if not states:
+        return _ImportFlowState(flow_sensitive=True)
+
+    roots = set().union(
+        *(
+            set(_import_binding_roots(state.targets))
+            | set(state.uncertain_names)
+            | set(state.plain_roots)
+            for state in states
+        )
+    )
+    joined_targets: dict[str, str] = {}
+    joined_uncertain: set[str] = set()
+    joined_plain_roots: set[str] = set()
+    for root in roots:
+        target_maps = tuple(
+            {
+                name: target
+                for name, target in state.targets.items()
+                if name == root or name.startswith(f"{root}.")
+            }
+            for state in states
+        )
+        categories = tuple(root in state.plain_roots for state in states)
+        uncertain = any(root in state.uncertain_names for state in states)
+        if not uncertain and all(target_map == target_maps[0] for target_map in target_maps):
+            joined_targets.update(target_maps[0])
+        else:
+            joined_uncertain.add(root)
+        if all(category == categories[0] for category in categories):
+            if categories[0]:
+                joined_plain_roots.add(root)
+        else:
+            joined_uncertain.add(root)
+
+    return _ImportFlowState(
+        targets=joined_targets,
+        uncertain_names=frozenset(joined_uncertain),
+        local_names=states[0].local_names,
+        flow_sensitive=any(state.flow_sensitive for state in states),
+        flow_frozen=all(state.flow_frozen for state in states),
+        plain_roots=frozenset(joined_plain_roots),
+    )
 
 
 def _apply_class_directive_writes(visitor: _ScopeCallVisitor, node: ast.ClassDef) -> None:
