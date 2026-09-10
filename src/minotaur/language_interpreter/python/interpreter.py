@@ -683,6 +683,14 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             )
         )
 
+    def _blocked_flow_state(
+        self, state: _ImportFlowState, names: frozenset[str]
+    ) -> _ImportFlowState:
+        """Return ``state`` with compound-uncertain roots blocked."""
+        self._scope_import_states[-1] = state
+        self._block_flow_imports(names)
+        return self._flow_state() or state
+
     def visit_Import(self, node: ast.Import) -> None:
         state = self._flow_state()
         if state is None or state.flow_frozen:
@@ -811,13 +819,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self.visit(node.test)
+        body_state = self._flow_state() or state
         touched = _flow_touched_names((*node.body, *node.orelse))
-        self._block_flow_imports(touched)
-        blocked_state = self._flow_state() or state
+        self._scope_import_states[-1] = body_state
         self._visit_block(node.body, nested=True)
-        self._scope_import_states[-1] = blocked_state
+        self._scope_import_states[-1] = body_state
         self._visit_block(node.orelse, nested=True)
-        self._scope_import_states[-1] = blocked_state
+        self._blocked_flow_state(body_state, touched)
 
     def visit_For(self, node: ast.For) -> None:
         self._visit_loop(node)
@@ -833,12 +841,14 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.visit(node.iter)
         self.visit(node.target)
         self._record_dynamic_names(_target_names(node.target))
-        self._block_flow_imports(_flow_touched_names((*node.body, *node.orelse)))
-        blocked_state = self._flow_state() or state
+        body_state = self._flow_state() or state
+        body_touched = _flow_touched_names(node.body)
+        self._scope_import_states[-1] = body_state
         self._visit_block(node.body, nested=True)
-        self._scope_import_states[-1] = blocked_state
+        body_exit_state = self._blocked_flow_state(body_state, body_touched)
+        self._scope_import_states[-1] = body_exit_state
         self._visit_block(node.orelse, nested=True)
-        self._scope_import_states[-1] = blocked_state
+        self._blocked_flow_state(body_exit_state, _flow_touched_names(node.orelse))
 
     def visit_While(self, node: ast.While) -> None:
         state = self._flow_state()
@@ -846,12 +856,14 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self.visit(node.test)
-        self._block_flow_imports(_flow_touched_names((*node.body, *node.orelse)))
-        blocked_state = self._flow_state() or state
+        body_state = self._flow_state() or state
+        body_touched = _flow_touched_names(node.body)
+        self._scope_import_states[-1] = body_state
         self._visit_block(node.body, nested=True)
-        self._scope_import_states[-1] = blocked_state
+        body_exit_state = self._blocked_flow_state(body_state, body_touched)
+        self._scope_import_states[-1] = body_exit_state
         self._visit_block(node.orelse, nested=True)
-        self._scope_import_states[-1] = blocked_state
+        self._blocked_flow_state(body_exit_state, _flow_touched_names(node.orelse))
 
     def visit_With(self, node: ast.With) -> None:
         self._visit_with(node)
@@ -865,11 +877,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             if item.optional_vars is not None:
                 self.visit(item.optional_vars)
                 self._record_dynamic_names(_target_names(item.optional_vars))
-        self._block_flow_imports(_flow_touched_names(node.body))
-        blocked_state = self._flow_state()
+        body_state = self._flow_state()
+        if body_state is None:
+            self._visit_block(node.body, nested=True)
+            return
+        self._scope_import_states[-1] = body_state
         self._visit_block(node.body, nested=True)
-        if blocked_state is not None:
-            self._scope_import_states[-1] = blocked_state
+        self._blocked_flow_state(body_state, _flow_touched_names(node.body))
 
     def visit_Try(self, node: ast.Try) -> None:
         self._visit_try(node)
@@ -882,27 +896,26 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         if state is None:
             self.generic_visit(node)
             return
-        self._block_flow_imports(
-            _flow_touched_names(
-                (
-                    *node.body,
-                    *node.orelse,
-                    *(statement for handler in node.handlers for statement in handler.body),
-                    *node.finalbody,
-                )
-            )
-        )
         handler_names = frozenset(
             handler.name for handler in node.handlers if handler.name is not None
         )
-        self._block_flow_imports(handler_names)
-        blocked_state = self._flow_state() or state
-        self._scope_import_states[-1] = blocked_state
+        body_state = self._flow_state() or state
+        body_touched = _flow_touched_names(node.body)
+        self._scope_import_states[-1] = body_state
         self._visit_block(node.body, nested=True)
+        body_exit_state = self._blocked_flow_state(body_state, body_touched)
+        # A handler can observe a write made before an exception in the try
+        # body. Keep that uncertainty, while isolating each handler from the
+        # writes made by its siblings.
+        handler_state = self._blocked_flow_state(body_exit_state, handler_names)
+        self._scope_import_states[-1] = handler_state
         self._visit_block(node.orelse, nested=True)
-        self._scope_import_states[-1] = blocked_state
+        orelse_exit_state = self._blocked_flow_state(
+            body_exit_state, _flow_touched_names(node.orelse)
+        )
+        handler_exit_names: set[str] = set(handler_names)
         for handler in node.handlers:
-            self._scope_import_states[-1] = blocked_state
+            self._scope_import_states[-1] = handler_state
             if handler.type is not None:
                 self.visit(handler.type)
             if handler.name is not None:
@@ -910,9 +923,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self._visit_block(handler.body, nested=True)
             if handler.name is not None:
                 self._record_deleted_names(frozenset((handler.name,)))
-        self._scope_import_states[-1] = blocked_state
+            handler_exit_names.update(_flow_touched_names(handler.body))
+        final_state = self._blocked_flow_state(
+            orelse_exit_state, frozenset(handler_exit_names)
+        )
+        self._scope_import_states[-1] = final_state
         self._visit_block(node.finalbody, nested=True)
-        self._scope_import_states[-1] = blocked_state
+        self._blocked_flow_state(final_state, _flow_touched_names(node.finalbody))
 
     def visit_Match(self, node: ast.Match) -> None:
         state = self._flow_state()
@@ -920,21 +937,19 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self.visit(node.subject)
-        self._block_flow_imports(
-            _flow_touched_names(tuple(statement for case in node.cases for statement in case.body))
-        )
-        self._block_flow_imports(
-            frozenset(name for case in node.cases for name in _pattern_capture_names(case.pattern))
-        )
-        blocked_state = self._flow_state() or state
+        case_state = self._flow_state() or state
+        touched: set[str] = set()
         for case in node.cases:
-            self._scope_import_states[-1] = blocked_state
+            self._scope_import_states[-1] = case_state
             self.visit(case.pattern)
-            self._record_dynamic_names(_pattern_capture_names(case.pattern))
+            captures = _pattern_capture_names(case.pattern)
+            self._record_dynamic_names(captures)
             if case.guard is not None:
                 self.visit(case.guard)
             self._visit_block(case.body, nested=True)
-        self._scope_import_states[-1] = blocked_state
+            touched.update(captures)
+            touched.update(_flow_touched_names(case.body))
+        self._blocked_flow_state(case_state, frozenset(touched))
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for expression in _signature_nodes(node):
