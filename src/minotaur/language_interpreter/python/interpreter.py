@@ -200,6 +200,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_type_param_names: list[frozenset[str]] = []
         self._scope_propagate_mutations: list[bool] = []
         self._scope_mutated_names: list[set[str]] = []
+        self._flow_nested_depth = 0
+        self._flow_mutate_targets = False
         self._receiver_name = receiver_name
         self._receiver_parameter = receiver_parameter
         self.call_bound_names: dict[ast.Call, frozenset[str]] = {}
@@ -392,9 +394,15 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._visit_block(node.body)
         self._pop_scope()
 
-    def _visit_block(self, statements: Iterable[ast.stmt]) -> None:
-        for statement in statements:
-            self.visit(statement)
+    def _visit_block(self, statements: Iterable[ast.stmt], *, nested: bool = False) -> None:
+        if nested:
+            self._flow_nested_depth += 1
+        try:
+            for statement in statements:
+                self.visit(statement)
+        finally:
+            if nested:
+                self._flow_nested_depth -= 1
 
     def _flow_state(self) -> _ImportFlowState | None:
         if not self._scope_import_states:
@@ -465,16 +473,25 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         state = self._flow_state()
         if state is None:
             return
-        targets = dict(state.targets)
+        targets = state.targets if self._flow_mutate_targets else dict(state.targets)
+        if not isinstance(targets, dict):
+            targets = dict(targets)
         bound_names: set[str] = set()
+        uncertain_names = set(state.uncertain_names)
         for alias in node.names:
+            if self._flow_nested_depth and alias.asname is None and "." in alias.name:
+                root = alias.name.partition(".")[0]
+                targets = _without_import_roots(targets, (root,))
+                uncertain_names.add(root)
+                bound_names.add(root)
+                continue
             _update_import_bindings(targets, alias)
             bound_names.add(alias.asname or alias.name.partition(".")[0])
         self._set_flow_state(
             replace(
                 state,
                 targets=targets,
-                uncertain_names=state.uncertain_names - bound_names,
+                uncertain_names=frozenset(uncertain_names - bound_names),
             )
         )
 
@@ -482,7 +499,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         state = self._flow_state()
         if state is None:
             return
-        targets = dict(state.targets)
+        targets = state.targets if self._flow_mutate_targets else dict(state.targets)
+        if not isinstance(targets, dict):
+            targets = dict(targets)
         bound_names: set[str] = set()
         uncertain_names = set(state.uncertain_names)
         base = _relative_module(self._module_name, self._is_package, node.module, node.level)
@@ -553,10 +572,10 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.visit(node.test)
         test_state = self._flow_state() or state
         self._set_flow_state(test_state)
-        self._visit_block(node.body)
+        self._visit_block(node.body, nested=True)
         body_state = self._flow_state()
         self._set_flow_state(test_state)
-        self._visit_block(node.orelse)
+        self._visit_block(node.orelse, nested=True)
         else_state = self._flow_state()
         continuing: list[_ImportFlowState] = []
         if _block_can_continue(node.body):
@@ -580,11 +599,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.visit(node.target)
         self._record_dynamic_names(_target_names(node.target))
         body_entry = self._flow_state() or state
-        self._visit_block(node.body)
+        self._visit_block(node.body, nested=True)
         body_state = self._flow_state() or body_entry
         loop_state = _meet_import_flow_states((state, body_state))
         self._set_flow_state(loop_state)
-        self._visit_block(node.orelse)
+        self._visit_block(node.orelse, nested=True)
         else_state = self._flow_state() or loop_state
         # The else suite is skipped by every break path. Meeting it with the
         # loop state preserves zero-iteration and break exits.
@@ -598,11 +617,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.visit(node.test)
         test_state = self._flow_state() or state
         self._set_flow_state(test_state)
-        self._visit_block(node.body)
+        self._visit_block(node.body, nested=True)
         body_state = self._flow_state() or test_state
         loop_state = _meet_import_flow_states((state, body_state))
         self._set_flow_state(loop_state)
-        self._visit_block(node.orelse)
+        self._visit_block(node.orelse, nested=True)
         else_state = self._flow_state() or loop_state
         self._set_flow_state(_meet_import_flow_states((loop_state, else_state)))
 
@@ -618,7 +637,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             if item.optional_vars is not None:
                 self.visit(item.optional_vars)
                 self._record_dynamic_names(_target_names(item.optional_vars))
-        self._visit_block(node.body)
+        self._visit_block(node.body, nested=True)
 
     def visit_Try(self, node: ast.Try) -> None:
         self._visit_try(node)
@@ -632,8 +651,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self._set_flow_state(state)
-        self._visit_block(node.body)
-        self._visit_block(node.orelse)
+        self._visit_block(node.body, nested=True)
+        self._visit_block(node.orelse, nested=True)
         continuing = [self._flow_state() or state]
         for handler in node.handlers:
             self._set_flow_state(state)
@@ -641,13 +660,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 self.visit(handler.type)
             if handler.name is not None:
                 self._record_dynamic_names(frozenset((handler.name,)))
-            self._visit_block(handler.body)
+            self._visit_block(handler.body, nested=True)
             if handler.name is not None:
                 self._record_deleted_names(frozenset((handler.name,)))
             if _block_can_continue(handler.body):
                 continuing.append(self._flow_state() or state)
         self._set_flow_state(_meet_import_flow_states(continuing))
-        self._visit_block(node.finalbody)
+        self._visit_block(node.finalbody, nested=True)
 
     def visit_Match(self, node: ast.Match) -> None:
         state = self._flow_state()
@@ -662,7 +681,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self._record_dynamic_names(_pattern_capture_names(case.pattern))
             if case.guard is not None:
                 self.visit(case.guard)
-            self._visit_block(case.body)
+            self._visit_block(case.body, nested=True)
             if _block_can_continue(case.body):
                 continuing.append(self._flow_state() or state)
         self._set_flow_state(_meet_import_flow_states(continuing))
@@ -1071,6 +1090,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 self.visit(expression)
             self.visit(value)
             self._pop_scope()
+        name = getattr(node, "name", None)
+        if isinstance(name, ast.Name):
+            self._record_dynamic_names(frozenset((name.id,)))
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         # A nested class statement has two distinct execution contexts. Its
@@ -1110,6 +1132,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             exclude_enclosing_class=True,
             class_scope=True,
             type_param_names=type_param_names,
+            import_targets={},
+            import_flow_sensitive=True,
         )
         self._scope_global_names[-1] = _global_names_in_statements(
             statement
@@ -1546,7 +1570,9 @@ def _import_targets(
     return collector.import_targets
 
 
-def _module_flow_states(module: _Module) -> tuple[dict[ast.stmt, _ImportFlowState], _ImportFlowState]:
+def _module_flow_states(
+    module: _Module,
+) -> tuple[dict[ast.stmt, _ImportFlowState], _ImportFlowState]:
     """Capture module binding state immediately before each top-level statement."""
     visitor = _ScopeCallVisitor(module.name, module.is_package)
     visitor._push_scope(
@@ -1559,11 +1585,14 @@ def _module_flow_states(module: _Module) -> tuple[dict[ast.stmt, _ImportFlowStat
         import_targets={},
         import_flow_sensitive=True,
     )
+    visitor._flow_mutate_targets = True
     states: dict[ast.stmt, _ImportFlowState] = {}
+    capture_next = True
     for statement in module.tree.body:
         state = visitor._flow_state()
-        if state is not None:
-            states[statement] = state
+        is_definition = isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        if state is not None and (capture_next or is_definition):
+            states[statement] = replace(state, targets=dict(state.targets))
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             visitor._visit_definition_header(statement)
             visitor._record_dynamic_names(frozenset((statement.name,)))
@@ -1573,7 +1602,9 @@ def _module_flow_states(module: _Module) -> tuple[dict[ast.stmt, _ImportFlowStat
             visitor._record_dynamic_names(frozenset((statement.name,)))
         else:
             visitor.visit(statement)
+        capture_next = is_definition
     final_state = visitor._flow_state() or _ImportFlowState(flow_sensitive=True)
+    final_state = replace(final_state, targets=dict(final_state.targets))
     visitor._pop_scope()
     return states, final_state
 
@@ -1996,7 +2027,7 @@ def _analyze_module(
                 uncertain_import_names=frozenset(header_imports)
                 | header_context.uncertain_import_names,
                 authoritative_import_names=header_context.authoritative_import_names
-                - _import_binding_roots(header_imports),
+                - header_imports,
             )
             _decorator_references(
                 statement,
@@ -2348,11 +2379,12 @@ def _calls(
             frozenset(),
             frozenset(),
             frozenset(),
-            import_targets=context.import_targets,
+            import_targets=dict(context.import_targets),
             import_uncertain_names=context.uncertain_import_names,
             local_import_names=context.authoritative_import_names,
             import_flow_sensitive=True,
         )
+        visitor._flow_mutate_targets = True
         for statement in statements:
             visitor.visit(statement)
         visitor._pop_scope()
