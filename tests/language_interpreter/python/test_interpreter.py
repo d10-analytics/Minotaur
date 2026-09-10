@@ -5581,6 +5581,9 @@ def test_nested_class_method_keeps_own_import_and_outer_sibling_route(
         "        def run(self):\n"
         "            from other import helper\n"
         "            return helper()\n"
+        "        def value(self):\n"
+        "            from other import helper\n"
+        "            return helper\n"
         "    def sibling():\n"
         "        return helper()\n"
         "    return Inner, sibling\n",
@@ -5596,7 +5599,15 @@ def test_nested_class_method_keeps_own_import_and_outer_sibling_route(
         for evidence in relationship.evidence
         for location in evidence.locations
     }
-    assert calls == {("other.helper", 7), ("lib.helper", 9)}
+    assert calls == {("other.helper", 7), ("lib.helper", 12)}
+    references = {
+        (labels[relationship.target], location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.REFERENCES.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert references == {("other.helper", 10)}
     assert _unresolved_sites(result) == set()
 
 
@@ -5622,18 +5633,23 @@ def test_nested_global_mutation_invalidates_only_current_callable_overlay(
         "        global helper\n"
         "        del helper\n"
         "        return helper()\n"
+        "    def loaded():\n"
+        "        global helper\n"
+        "        del helper\n"
+        "        return helper\n"
         "    def restored():\n"
         "        global helper\n"
         "        del helper\n"
         "        from lib import helper\n"
         "        return helper()\n"
-        "    return assignment, deletion, restored\n",
+        "    return assignment, deletion, loaded, restored\n",
     )
 
     result = analyze_python_workspace(tmp_path)
     assert _unresolved_sites(result) == {
         ("app.outer", "helper", 6),
         ("app.outer", "helper", 10),
+        ("app.outer", "helper", 14),
     }
     calls = {
         location.range.start.line + 1
@@ -5644,7 +5660,7 @@ def test_nested_global_mutation_invalidates_only_current_callable_overlay(
         for evidence in relationship.evidence
         for location in evidence.locations
     }
-    assert calls == {15}
+    assert calls == {19}
 
 
 def test_module_lambda_body_uses_final_state_with_immediate_defaults_and_parameters(
