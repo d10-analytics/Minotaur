@@ -4339,7 +4339,7 @@ def _assert_unresolved_locations(
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == text
     )
     locations = {
-        (location.range.start.line, location.range.start.column)
+        (location.range.start.line, location.range.start.character)
         for relationship in result.document.relationships
         if relationship.source == source_id and relationship.target == unresolved.id
         for evidence in relationship.evidence
@@ -4545,6 +4545,7 @@ def test_dotted_import_fallback_builtin_and_missing_boundaries(tmp_path: Path) -
 def test_nested_plain_dotted_imports_remain_syntactic_only(tmp_path: Path) -> None:
     _write(tmp_path, "pkg/__init__.py", "")
     _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(tmp_path, "pkg/other.py", "def go():\n    return 2\n")
     _write(
         tmp_path,
         "app.py",
@@ -4553,19 +4554,50 @@ def test_nested_plain_dotted_imports_remain_syntactic_only(tmp_path: Path) -> No
         "    return pkg.sub.go()\n"
         "if True:\n"
         "    import pkg.sub\n"
-        "    pkg.sub.go()\n",
+        "    pkg.sub.go()\n"
+        "else:\n"
+        "    import pkg.sub\n"
+        "    import pkg.other\n"
+        "    pkg.sub.go()\n"
+        "pkg.sub.go()\n"
+        "pkg.other.go()\n",
     )
 
     result = analyze_python_workspace(tmp_path)
     assert _unresolved_by_source(result).get("app.function", set()) == set()
-    assert "pkg.sub.go" in _unresolved_by_source(result).get("app", set())
+    assert _unresolved_by_source(result).get("app", set()) == {"pkg.other.go"}
+    app = _node_id(result, "app")
+    sub_go = _node_id(result, "pkg.sub.go")
+    assert (app, sub_go, RelationshipKind.CALLS.value) in _relationship_map(result)
+    _assert_unresolved_locations(result, "app", "pkg.other.go", {(11, 0)})
+    for start, end in [((5, 4), (5, 14)), ((9, 4), (9, 14)), ((10, 0), (10, 10))]:
+        _assert_relation_location(
+            result,
+            "app",
+            sub_go,
+            RelationshipKind.CALLS.value,
+            path="app.py",
+            start=start,
+            end=end,
+        )
     imports = [
         edge
         for edge in result.document.relationships
         if edge.kind == RelationshipKind.IMPORTS.value
     ]
-    assert len(imports) == 1
-    assert len(imports[0].evidence[0].locations) == 2
+    assert len(imports) == 2
+    sub_import = next(edge for edge in imports if edge.target == _node_id(result, "pkg.sub"))
+    other_import = next(edge for edge in imports if edge.target == _node_id(result, "pkg.other"))
+    assert {
+        location.range.start.line + 1
+        for evidence in sub_import.evidence
+        for location in evidence.locations
+    } == {2, 5, 8}
+    assert {
+        location.range.start.line + 1
+        for evidence in other_import.evidence
+        for location in evidence.locations
+    } == {9}
     assert validate_document(result.document).is_valid
 
 
@@ -5157,7 +5189,16 @@ def test_invalidated_plain_route_blocks_secondary_root_decoys_for_call_and_load(
             "class Runner:\n    import pkg.sub\n    value = pkg.sub.go()\n    other = pkg.sub.go",
             "app.Runner",
         ),
-        ("if True:\n    import pkg.sub\n    pkg.sub.go()\n    value = pkg.sub.go", "app"),
+        (
+            "if True:\n"
+            "    import pkg.sub\n"
+            "    pkg.sub.go()\n"
+            "else:\n"
+            "    import pkg.sub\n"
+            "    pkg.sub.go()\n"
+            "    value = pkg.sub.go",
+            "app",
+        ),
         (
             "if False:\n    pass\nelse:\n    import pkg.sub\n"
             "    pkg.sub.go()\n    value = pkg.sub.go",
@@ -5188,6 +5229,16 @@ def test_nested_plain_dotted_imports_are_syntactic_only_in_each_container(
     _write(tmp_path, "app.py", f"{block}\n")
 
     result = analyze_python_workspace(tmp_path)
+    if block.startswith("if "):
+        assert ("app", "pkg.sub.go", RelationshipKind.CALLS.value) in _edge_labels(result)
+        assert "pkg.sub.go" not in _unresolved_by_source(result).get(owner, set())
+        imports = [
+            relationship
+            for relationship in result.document.relationships
+            if relationship.kind == RelationshipKind.IMPORTS.value
+        ]
+        assert len(imports) == 1
+        return
     if owner == "app.run":
         assert ("app.run", "pkg.sub.go", RelationshipKind.CALLS.value) in _edge_labels(result)
         assert "pkg.sub.go" not in _unresolved_by_source(result).get(owner, set())

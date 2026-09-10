@@ -232,6 +232,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_mutated_names: list[set[str]] = []
         self._flow_nested_depth = 0
         self._flow_conditional_depth = 0
+        self._conditional_entry_plain_roots: list[frozenset[str]] = []
         self._flow_mutate_targets = False
         self._receiver_name = receiver_name
         self._receiver_parameter = receiver_parameter
@@ -714,10 +715,19 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         uncertain_names = set(state.uncertain_names)
         plain_roots = set(state.plain_roots)
         for alias in node.names:
-            if self._flow_nested_depth or (
-                self._flow_conditional_depth and alias.asname is None and "." in alias.name
+            root = alias.name.partition(".")[0]
+            if self._flow_nested_depth:
+                targets = _without_import_roots(targets, (root,))
+                uncertain_names.add(root)
+                plain_roots.discard(root)
+                bound_names.add(root)
+                continue
+            if (
+                self._flow_conditional_depth
+                and alias.asname is None
+                and "." in alias.name
+                and root in self._conditional_entry_plain_roots[-1]
             ):
-                root = alias.name.partition(".")[0]
                 targets = _without_import_roots(targets, (root,))
                 uncertain_names.add(root)
                 plain_roots.discard(root)
@@ -836,14 +846,17 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         entry_state = self._flow_state() or state
 
         self._scope_import_states[-1] = self._flow_state_copy(entry_state)
+        self._conditional_entry_plain_roots.append(entry_state.plain_roots)
         self._flow_conditional_depth += 1
         try:
             self._visit_block(node.body)
             body_state = self._flow_state() or entry_state
         finally:
             self._flow_conditional_depth -= 1
+            self._conditional_entry_plain_roots.pop()
 
         self._scope_import_states[-1] = self._flow_state_copy(entry_state)
+        self._conditional_entry_plain_roots.append(entry_state.plain_roots)
         if node.orelse:
             self._flow_conditional_depth += 1
             try:
@@ -851,7 +864,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 else_state = self._flow_state() or entry_state
             finally:
                 self._flow_conditional_depth -= 1
+                self._conditional_entry_plain_roots.pop()
         else:
+            self._conditional_entry_plain_roots.pop()
             else_state = self._flow_state_copy(entry_state)
 
         self._scope_import_states[-1] = _join_flow_states((body_state, else_state))
@@ -2013,7 +2028,12 @@ def _module_flow_states(
 
 
 def _join_flow_states(states: tuple[_ImportFlowState, ...]) -> _ImportFlowState:
-    """Join conditional arms while retaining only agreeing import routes."""
+    """Join conditional arms while retaining only agreeing import routes.
+
+    Plain dotted imports need component-level agreement. The package root and
+    route category must agree in every arm, while a qualified prefix survives
+    only when every arm establishes that exact prefix with the same target.
+    """
     if not states:
         return _ImportFlowState(flow_sensitive=True)
 
@@ -2039,15 +2059,48 @@ def _join_flow_states(states: tuple[_ImportFlowState, ...]) -> _ImportFlowState:
         )
         categories = tuple(root in state.plain_roots for state in states)
         uncertain = any(root in state.uncertain_names for state in states)
-        if not uncertain and all(target_map == target_maps[0] for target_map in target_maps):
-            joined_targets.update(target_maps[0])
-        else:
+        root_targets = tuple(state.targets.get(root) for state in states)
+        root_target = root_targets[0]
+        if root_target is None:
             joined_uncertain.add(root)
-        if all(category == categories[0] for category in categories):
-            if categories[0]:
-                joined_plain_roots.add(root)
-        else:
+            continue
+        root_agrees = (
+            not uncertain
+            and all(target == root_target for target in root_targets)
+            and all(category == categories[0] for category in categories)
+        )
+        if not root_agrees:
             joined_uncertain.add(root)
+            continue
+        if not categories[0]:
+            if all(target_map == target_maps[0] for target_map in target_maps):
+                joined_targets.update(target_maps[0])
+            else:
+                joined_uncertain.add(root)
+            continue
+
+        joined_targets[root] = root_target
+        joined_plain_roots.add(root)
+        prefixes = sorted(
+            {name for target_map in target_maps for name in target_map if name != root},
+            key=lambda name: (len(name.split(".")), name),
+        )
+        uncertain_prefixes: set[str] = set()
+        for prefix in prefixes:
+            if any(
+                prefix == parent or prefix.startswith(f"{parent}.") for parent in uncertain_prefixes
+            ):
+                joined_uncertain.add(prefix)
+                uncertain_prefixes.add(prefix)
+                continue
+            prefix_targets = tuple(state.targets.get(prefix) for state in states)
+            if prefix_targets[0] is not None and all(
+                target == prefix_targets[0] for target in prefix_targets
+            ):
+                joined_targets[prefix] = prefix_targets[0]
+            else:
+                joined_uncertain.add(prefix)
+                uncertain_prefixes.add(prefix)
 
     return _ImportFlowState(
         targets=joined_targets,
@@ -3357,6 +3410,12 @@ def _resolve_call(
 ) -> str | None:
     head = text.partition(".")[0]
     local_target = context.import_targets.get(head)
+    if (
+        "." not in text
+        and head in context.uncertain_import_names
+        and f"{context.module_name}.{text}" in context.declarations
+    ):
+        return context.declarations[f"{context.module_name}.{text}"]
     if any(text == name or text.startswith(f"{name}.") for name in context.uncertain_import_names):
         return None
     if (
@@ -3366,6 +3425,8 @@ def _resolve_call(
         and head not in context.authoritative_import_names
     ):
         return None
+    if head in context.plain_import_names and "." not in text:
+        return context.declarations.get(f"{context.module_name}.{text}")
     if head in context.bound_names and head != context.receiver_name:
         return None
     # Module aliases are a final-state convenience only when the source
@@ -3387,8 +3448,6 @@ def _resolve_call(
         _, _, tail = text.partition(".")
         return class_declarations.get(tail)
     if head in context.plain_import_names:
-        if "." not in text:
-            return None
         for prefix, plain_target in sorted(
             context.import_targets.items(),
             key=lambda item: len(item[0].split(".")),
