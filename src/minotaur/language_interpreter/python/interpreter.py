@@ -67,23 +67,6 @@ class _DeclaredSymbol:
 
 
 @dataclass(frozen=True, slots=True)
-class _BindingDescriptor:
-    """The binding category and target retained for one visible import."""
-
-    target: str
-    category: str
-
-
-@dataclass(frozen=True, slots=True)
-class _ModuleResolution:
-    """One module-wide aggregation of direct bindings and qualified prefixes."""
-
-    bindings: Mapping[str, _BindingDescriptor]
-    prefixes: Mapping[str, str]
-    plain_roots: frozenset[str]
-
-
-@dataclass(frozen=True, slots=True)
 class _ScopeContext:
     declarations: Mapping[str, str]
     aliases: Mapping[str, str]
@@ -98,9 +81,6 @@ class _ScopeContext:
     # class-body and function-local imports all land in this one table so that
     # a local rebinding can be told apart from the module alias it shadows.
     import_targets: Mapping[str, str] = field(default_factory=dict)
-    plain_import_names: frozenset[str] = frozenset()
-    local_plain_import_names: frozenset[str] = frozenset()
-    module_resolution: _ModuleResolution | None = None
     # When analyzing a direct class body, retain the class-only contribution
     # separately so a nested class method can discard every enclosing class
     # namespace while restoring the module/function imports beneath it.
@@ -109,10 +89,35 @@ class _ScopeContext:
     # are not; nested classes and methods retain these names.
     class_scope_type_param_names: frozenset[str] = frozenset()
     class_scope_outer_import_targets: Mapping[str, str] | None = None
-    class_scope_outer_plain_import_names: frozenset[str] | None = None
+    # A name whose import binding is flow-dependent remains reportable, but it
+    # cannot resolve through an outer or module alias. This distinguishes an
+    # uncertain import from an ordinary dynamic local, which is suppressed.
+    uncertain_import_names: frozenset[str] = frozenset()
+    # Function-flow imports are authoritative once executed. Class imports
+    # retain their existing conservative resolution because class statements
+    # execute in a separate, sequential namespace.
+    authoritative_import_names: frozenset[str] = frozenset()
     is_package: bool = False
     receiver_name: str | None = None
     receiver_parameter: str | None = None
+    modules: Mapping[str, _Module] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _ImportFlowState:
+    """Definite and uncertain import values at one source position.
+
+    ``local_names`` is lexical: every import-bound name in a function belongs
+    to that function even before its import executes. A name is either mapped
+    to one definite target, uncertain, or currently an ordinary dynamic local.
+    The last category is represented by absence from both ``targets`` and
+    ``uncertain_names`` so existing dynamic-local suppression remains in force.
+    """
+
+    targets: Mapping[str, str] = field(default_factory=dict)
+    uncertain_names: frozenset[str] = frozenset()
+    local_names: frozenset[str] = frozenset()
+    flow_sensitive: bool = False
 
 
 @dataclass
@@ -141,8 +146,10 @@ class _ImportTally:
         self.prefixes = {}
         self._suffixes = _module_suffixes(modules)
 
-    def note_unresolved(self, name: str) -> None:
+    def note_unresolved(self, name: str, *, root_mismatch_eligible: bool = True) -> None:
         self.unresolved += 1
+        if not root_mismatch_eligible:
+            return
         prefix = self._suffixes.get(name)
         if prefix is None and "." in name:
             # ``from pkg.mod import symbol``: the module part is what must match.
@@ -186,8 +193,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_bound_names: list[frozenset[str]] = []
         self._scope_global_names: list[frozenset[str]] = []
         self._scope_shadow_names: list[frozenset[str]] = []
-        self._scope_import_targets: list[Mapping[str, str]] = []
-        self._scope_plain_import_names: list[frozenset[str]] = []
+        self._scope_import_states: list[_ImportFlowState] = []
         self._scope_receiver_overrides: list[tuple[str | None, str | None] | None] = []
         self._scope_excludes_enclosing_class: list[bool] = []
         self._scope_is_class: list[bool] = []
@@ -198,8 +204,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.call_global_names: dict[ast.Call, frozenset[str]] = {}
         self.call_shadow_names: dict[ast.Call, frozenset[str]] = {}
         self.call_import_targets: dict[ast.Call, Mapping[str, str]] = {}
-        self.call_plain_import_names: dict[ast.Call, frozenset[str]] = {}
         self.call_import_bound: dict[ast.Call, frozenset[str]] = {}
+        self.call_uncertain_import_names: dict[ast.Call, frozenset[str]] = {}
+        self.call_authoritative_import_names: dict[ast.Call, frozenset[str]] = {}
         self.call_receiver_names: dict[ast.Call, str | None] = {}
         self.call_receiver_parameters: dict[ast.Call, str | None] = {}
         self.call_excludes_enclosing_class: dict[ast.Call, bool] = {}
@@ -207,8 +214,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.reference_global_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_shadow_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_import_targets: dict[ast.Name | ast.Attribute, Mapping[str, str]] = {}
-        self.reference_plain_import_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_import_bound: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
+        self.reference_uncertain_import_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
+        self.reference_authoritative_import_names: dict[
+            ast.Name | ast.Attribute, frozenset[str]
+        ] = {}
         self.reference_receiver_names: dict[ast.Name | ast.Attribute, str | None] = {}
         self.reference_receiver_parameters: dict[ast.Name | ast.Attribute, str | None] = {}
         self.reference_excludes_enclosing_class: dict[ast.Name | ast.Attribute, bool] = {}
@@ -220,8 +230,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.call_global_names[node] = global_names
         self.call_shadow_names[node] = shadow_names
         self.call_import_targets[node] = self._scope_imports()
-        self.call_plain_import_names[node] = self._scope_plain_imports()
         self.call_import_bound[node] = import_bound
+        self.call_uncertain_import_names[node] = self._scope_uncertain_imports()
+        self.call_authoritative_import_names[node] = self._scope_authoritative_imports()
         self.call_receiver_names[node], self.call_receiver_parameters[node] = (
             self._scope_receivers()
         )
@@ -271,8 +282,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.reference_global_names[node] = global_names
             self.reference_shadow_names[node] = shadow_names
             self.reference_import_targets[node] = self._scope_imports()
-            self.reference_plain_import_names[node] = self._scope_plain_imports()
             self.reference_import_bound[node] = import_bound
+            self.reference_uncertain_import_names[node] = self._scope_uncertain_imports()
+            self.reference_authoritative_import_names[node] = self._scope_authoritative_imports()
             self.reference_receiver_names[node], self.reference_receiver_parameters[node] = (
                 self._scope_receivers()
             )
@@ -282,9 +294,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._visit_function(node)
+        self._record_dynamic_names(frozenset((node.name,)))
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._visit_function(node)
+        self._record_dynamic_names(frozenset((node.name,)))
 
     def _visit_function(
         self,
@@ -300,11 +314,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         )
         self._visit_definition_header(node)
         self._pop_scope()
-        bound_names, import_targets, plain_import_names = _scope_binders(
+        bound_names, local_import_names, uncertain_import_names = _scope_binders(
             node, self._module_name, self._is_package
         )
         receiver_override = None
-        shadow_names = bound_names
+        shadow_names = bound_names | local_import_names
         if nested_class_method:
             receiver_parameter = _receiver_parameter_name(node)
             receiver_override = (
@@ -335,15 +349,273 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             bound_names,
             _global_names(node),
             shadow_names,
-            import_targets,
-            plain_import_names=plain_import_names,
+            import_uncertain_names=uncertain_import_names,
+            local_import_names=local_import_names,
+            import_flow_sensitive=True,
             receiver_override=receiver_override,
             exclude_enclosing_class=nested_class_method,
         )
-        for statement in node.body:
-            self.visit(statement)
+        self._visit_block(node.body)
         self._pop_scope()
         self._restore_class_scopes(class_scopes)
+
+    def visit_function_body(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Visit a directly attributed function body with flow-sensitive imports."""
+        bound_names, local_import_names, uncertain_import_names = _scope_binders(
+            node, self._module_name, self._is_package
+        )
+        shadow_names = bound_names | local_import_names
+        if self._receiver_parameter is not None:
+            shadow_names -= frozenset((self._receiver_parameter,))
+        self._push_scope(
+            bound_names,
+            _global_names(node),
+            shadow_names,
+            import_uncertain_names=uncertain_import_names,
+            local_import_names=local_import_names,
+            import_flow_sensitive=True,
+        )
+        self._visit_block(node.body)
+        self._pop_scope()
+
+    def _visit_block(self, statements: Iterable[ast.stmt]) -> None:
+        for statement in statements:
+            self.visit(statement)
+
+    def _flow_state(self) -> _ImportFlowState | None:
+        if not self._scope_import_states:
+            return None
+        state = self._scope_import_states[-1]
+        return state if state.flow_sensitive else None
+
+    def _set_flow_state(self, state: _ImportFlowState) -> None:
+        if self._flow_state() is not None:
+            self._scope_import_states[-1] = state
+
+    def _record_dynamic_names(self, names: frozenset[str]) -> None:
+        state = self._flow_state()
+        if state is None:
+            return
+        affected = names & (
+            state.local_names | state.uncertain_names | _import_binding_roots(state.targets)
+        )
+        if not affected:
+            return
+        self._set_flow_state(
+            replace(
+                state,
+                targets=_without_import_roots(state.targets, affected),
+                uncertain_names=state.uncertain_names | affected,
+            )
+        )
+
+    def _record_deleted_names(self, names: frozenset[str]) -> None:
+        state = self._flow_state()
+        if state is None:
+            return
+        affected = names & (
+            state.local_names | state.uncertain_names | _import_binding_roots(state.targets)
+        )
+        if not affected:
+            return
+        self._set_flow_state(
+            replace(
+                state,
+                targets=_without_import_roots(state.targets, affected),
+                uncertain_names=state.uncertain_names | affected,
+            )
+        )
+
+    def visit_Import(self, node: ast.Import) -> None:
+        state = self._flow_state()
+        if state is None:
+            return
+        targets = dict(state.targets)
+        bound_names: set[str] = set()
+        for alias in node.names:
+            _update_import_bindings(targets, alias)
+            bound_names.add(alias.asname or alias.name.partition(".")[0])
+        self._set_flow_state(
+            replace(
+                state,
+                targets=targets,
+                uncertain_names=state.uncertain_names - bound_names,
+            )
+        )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        state = self._flow_state()
+        if state is None:
+            return
+        targets = dict(state.targets)
+        bound_names: set[str] = set()
+        base = _relative_module(self._module_name, self._is_package, node.module, node.level)
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            name = alias.asname or alias.name
+            _update_named_import_binding(
+                targets,
+                name,
+                f"{base}.{alias.name}" if base else alias.name,
+            )
+            bound_names.add(name)
+        self._set_flow_state(
+            replace(
+                state,
+                targets=targets,
+                uncertain_names=state.uncertain_names - bound_names,
+            )
+        )
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        names: set[str] = set()
+        for target in node.targets:
+            self.visit(target)
+            names.update(_target_names(target))
+        self._record_dynamic_names(frozenset(names))
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+        self.visit(node.target)
+        self._record_dynamic_names(_target_names(node.target))
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.target)
+        self.visit(node.value)
+        self._record_dynamic_names(_target_names(node.target))
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self.visit(node.target)
+        self._record_dynamic_names(_target_names(node.target))
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        names: set[str] = set()
+        for target in node.targets:
+            self.visit(target)
+            names.update(
+                child.id
+                for child in ast.walk(target)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Del)
+            )
+        self._record_deleted_names(frozenset(names))
+
+    def visit_If(self, node: ast.If) -> None:
+        state = self._flow_state()
+        if state is None:
+            self.generic_visit(node)
+            return
+        self.visit(node.test)
+        self._set_flow_state(state)
+        self._visit_block(node.body)
+        body_state = self._flow_state()
+        self._set_flow_state(state)
+        self._visit_block(node.orelse)
+        else_state = self._flow_state()
+        continuing: list[_ImportFlowState] = []
+        if _block_can_continue(node.body):
+            continuing.append(body_state or state)
+        if not node.orelse or _block_can_continue(node.orelse):
+            continuing.append(else_state or state)
+        self._set_flow_state(_meet_import_flow_states(continuing or [state]))
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_loop(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_loop(node)
+
+    def _visit_loop(self, node: ast.For | ast.AsyncFor) -> None:
+        state = self._flow_state()
+        if state is None:
+            self.generic_visit(node)
+            return
+        self.visit(node.iter)
+        self.visit(node.target)
+        self._record_dynamic_names(_target_names(node.target))
+        body_entry = self._flow_state() or state
+        self._visit_block(node.body)
+        body_state = self._flow_state() or body_entry
+        loop_state = _meet_import_flow_states((state, body_state))
+        self._set_flow_state(loop_state)
+        self._visit_block(node.orelse)
+
+    def visit_While(self, node: ast.While) -> None:
+        state = self._flow_state()
+        if state is None:
+            self.generic_visit(node)
+            return
+        self.visit(node.test)
+        self._set_flow_state(state)
+        self._visit_block(node.body)
+        body_state = self._flow_state() or state
+        self._set_flow_state(_meet_import_flow_states((state, body_state)))
+        self._visit_block(node.orelse)
+
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_with(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self._visit_with(node)
+
+    def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self.visit(item.optional_vars)
+                self._record_dynamic_names(_target_names(item.optional_vars))
+        self._visit_block(node.body)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try(node)
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        state = self._flow_state()
+        if state is None:
+            self.generic_visit(node)
+            return
+        self._set_flow_state(state)
+        self._visit_block(node.body)
+        self._visit_block(node.orelse)
+        continuing = [self._flow_state() or state]
+        for handler in node.handlers:
+            self._set_flow_state(state)
+            if handler.type is not None:
+                self.visit(handler.type)
+            if handler.name is not None:
+                self._record_dynamic_names(frozenset((handler.name,)))
+            self._visit_block(handler.body)
+            if handler.name is not None:
+                self._record_deleted_names(frozenset((handler.name,)))
+            if _block_can_continue(handler.body):
+                continuing.append(self._flow_state() or state)
+        self._set_flow_state(_meet_import_flow_states(continuing))
+        self._visit_block(node.finalbody)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        state = self._flow_state()
+        if state is None:
+            self.generic_visit(node)
+            return
+        self.visit(node.subject)
+        continuing = [state]
+        for case in node.cases:
+            self._set_flow_state(state)
+            self.visit(case.pattern)
+            self._record_dynamic_names(_pattern_capture_names(case.pattern))
+            if case.guard is not None:
+                self.visit(case.guard)
+            self._visit_block(case.body)
+            if _block_can_continue(case.body):
+                continuing.append(self._flow_state() or state)
+        self._set_flow_state(_meet_import_flow_states(continuing))
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for expression in _signature_nodes(node):
@@ -405,7 +677,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         global_names: frozenset[str],
         shadow_names: frozenset[str],
         import_targets: Mapping[str, str] | None = None,
-        plain_import_names: frozenset[str] = frozenset(),
+        import_uncertain_names: frozenset[str] = frozenset(),
+        local_import_names: frozenset[str] = frozenset(),
+        import_flow_sensitive: bool = False,
         receiver_override: tuple[str | None, str | None] | None = None,
         exclude_enclosing_class: bool = False,
         class_scope: bool = False,
@@ -414,8 +688,14 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_bound_names.append(bound_names)
         self._scope_global_names.append(global_names)
         self._scope_shadow_names.append(shadow_names)
-        self._scope_import_targets.append(import_targets or {})
-        self._scope_plain_import_names.append(plain_import_names)
+        self._scope_import_states.append(
+            _ImportFlowState(
+                import_targets or {},
+                import_uncertain_names,
+                local_import_names,
+                import_flow_sensitive,
+            )
+        )
         self._scope_receiver_overrides.append(receiver_override)
         self._scope_excludes_enclosing_class.append(exclude_enclosing_class)
         self._scope_is_class.append(class_scope)
@@ -425,8 +705,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_bound_names.pop()
         self._scope_global_names.pop()
         self._scope_shadow_names.pop()
-        self._scope_import_targets.pop()
-        self._scope_plain_import_names.pop()
+        self._scope_import_states.pop()
         self._scope_receiver_overrides.pop()
         self._scope_excludes_enclosing_class.pop()
         self._scope_is_class.pop()
@@ -441,8 +720,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 frozenset[str],
                 frozenset[str],
                 frozenset[str],
-                Mapping[str, str],
-                frozenset[str],
+                _ImportFlowState,
                 tuple[str | None, str | None] | None,
                 bool,
                 bool,
@@ -458,8 +736,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     frozenset[str],
                     frozenset[str],
                     frozenset[str],
-                    Mapping[str, str],
-                    frozenset[str],
+                    _ImportFlowState,
                     tuple[str | None, str | None] | None,
                     bool,
                     bool,
@@ -477,8 +754,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                         self._scope_bound_names[index],
                         self._scope_global_names[index],
                         self._scope_shadow_names[index],
-                        self._scope_import_targets[index],
-                        self._scope_plain_import_names[index],
+                        self._scope_import_states[index],
                         self._scope_receiver_overrides[index],
                         self._scope_excludes_enclosing_class[index],
                         self._scope_is_class[index],
@@ -494,8 +770,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 self._scope_bound_names[index] = type_param_names
                 self._scope_global_names[index] = frozenset()
                 self._scope_shadow_names[index] = type_param_names
-                self._scope_import_targets[index] = {}
-                self._scope_plain_import_names[index] = frozenset()
+                self._scope_import_states[index] = _ImportFlowState()
                 self._scope_receiver_overrides[index] = None
                 self._scope_excludes_enclosing_class[index] = False
                 self._scope_is_class[index] = False
@@ -503,8 +778,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 del self._scope_bound_names[index]
                 del self._scope_global_names[index]
                 del self._scope_shadow_names[index]
-                del self._scope_import_targets[index]
-                del self._scope_plain_import_names[index]
+                del self._scope_import_states[index]
                 del self._scope_receiver_overrides[index]
                 del self._scope_excludes_enclosing_class[index]
                 del self._scope_is_class[index]
@@ -520,8 +794,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     frozenset[str],
                     frozenset[str],
                     frozenset[str],
-                    Mapping[str, str],
-                    frozenset[str],
+                    _ImportFlowState,
                     tuple[str | None, str | None] | None,
                     bool,
                     bool,
@@ -541,8 +814,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             del self._scope_bound_names[marker_index]
             del self._scope_global_names[marker_index]
             del self._scope_shadow_names[marker_index]
-            del self._scope_import_targets[marker_index]
-            del self._scope_plain_import_names[marker_index]
+            del self._scope_import_states[marker_index]
             del self._scope_receiver_overrides[marker_index]
             del self._scope_excludes_enclosing_class[marker_index]
             del self._scope_is_class[marker_index]
@@ -553,8 +825,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 restored_bound_names,
                 restored_global_names,
                 restored_shadow_names,
-                restored_import_targets,
-                restored_plain_import_names,
+                restored_import_state,
                 restored_receiver_override,
                 restored_excludes_enclosing_class,
                 restored_is_class,
@@ -563,8 +834,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self._scope_bound_names.insert(index, restored_bound_names)
             self._scope_global_names.insert(index, restored_global_names)
             self._scope_shadow_names.insert(index, restored_shadow_names)
-            self._scope_import_targets.insert(index, restored_import_targets)
-            self._scope_plain_import_names.insert(index, restored_plain_import_names)
+            self._scope_import_states.insert(index, restored_import_state)
             self._scope_receiver_overrides.insert(index, restored_receiver_override)
             self._scope_excludes_enclosing_class.insert(index, restored_excludes_enclosing_class)
             self._scope_is_class.insert(index, restored_is_class)
@@ -576,6 +846,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 return override
         return self._receiver_name, self._receiver_parameter
 
+    @property
+    def _scope_import_targets(self) -> list[Mapping[str, str]]:
+        """Compatibility view of the import-state stack used by diagnostics tests."""
+        return [state.targets for state in self._scope_import_states]
+
     def _scope_imports(self) -> Mapping[str, str]:
         """Return the import binding each visible name resolves to.
 
@@ -584,18 +859,45 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         an enclosing scope imported the same name from elsewhere.
         """
         merged: dict[str, str] = {}
-        for frame in self._scope_import_targets:
-            merged.update(frame)
+        for shadow_names, global_names, state in zip(
+            self._scope_shadow_names,
+            self._scope_global_names,
+            self._scope_import_states,
+            strict=True,
+        ):
+            merged = _without_import_roots(merged, shadow_names | global_names)
+            merged.update(state.targets)
         return merged
 
-    def _scope_plain_imports(self) -> frozenset[str]:
-        merged: dict[str, bool] = {}
-        for targets, plain_names in zip(
-            self._scope_import_targets, self._scope_plain_import_names, strict=True
+    def _scope_uncertain_imports(self) -> frozenset[str]:
+        """Return visible names whose import target is not flow-definite."""
+        uncertain: set[str] = set()
+        for shadow_names, global_names, state in zip(
+            self._scope_shadow_names,
+            self._scope_global_names,
+            self._scope_import_states,
+            strict=True,
         ):
-            for name in targets:
-                merged[name] = name in plain_names
-        return frozenset(name for name, is_plain in merged.items() if is_plain)
+            uncertain.difference_update(shadow_names | global_names)
+            uncertain.update(state.uncertain_names)
+        return frozenset(uncertain)
+
+    def _scope_authoritative_imports(self) -> frozenset[str]:
+        """Return definite imports established by function-flow states."""
+        authoritative: set[str] = set()
+        for shadow_names, global_names, state in zip(
+            self._scope_shadow_names,
+            self._scope_global_names,
+            self._scope_import_states,
+            strict=True,
+        ):
+            authoritative.difference_update(shadow_names | global_names)
+            target_names = _import_binding_roots(state.targets)
+            if state.flow_sensitive:
+                authoritative.update(target_names)
+            else:
+                authoritative.difference_update(target_names)
+        return frozenset(authoritative)
 
     def _scope_names(
         self,
@@ -604,32 +906,31 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         global_names: set[str] = set()
         import_bound_names: set[str] = set()
         seen_names: set[str] = set()
-        for bound_frame, global_frame, import_frame in reversed(
+        for bound_frame, global_frame, import_state in reversed(
             tuple(
                 zip(
                     self._scope_bound_names,
                     self._scope_global_names,
-                    self._scope_import_targets,
+                    self._scope_import_states,
                     strict=True,
                 )
             )
         ):
-            for name in bound_frame:
-                if name not in seen_names:
-                    bound_names.add(name)
-                    seen_names.add(name)
-            # An import binds the name in this frame just as an assignment
-            # does. It is not a dynamic local, so claiming the name here is
-            # what stops an enclosing scope's assignment from silencing it,
-            # while an assignment in this same frame still wins above.
-            for name in import_frame:
-                if name not in seen_names:
+            active_import_names = (
+                _import_binding_roots(import_state.targets) | import_state.uncertain_names
+            )
+            for name in bound_frame | global_frame | active_import_names:
+                if name in seen_names:
+                    continue
+                if import_state.flow_sensitive and name in active_import_names:
                     import_bound_names.add(name)
-                    seen_names.add(name)
-            for name in global_frame:
-                if name not in seen_names:
+                elif name in bound_frame:
+                    bound_names.add(name)
+                elif name in active_import_names:
+                    import_bound_names.add(name)
+                else:
                     global_names.add(name)
-                    seen_names.add(name)
+                seen_names.add(name)
         shadow_names = frozenset().union(*self._scope_shadow_names)
         return (
             frozenset(bound_names),
@@ -689,6 +990,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self._record_class_bindings(statement)
         self._pop_scope()
         self._restore_class_scopes(enclosing_class_scopes)
+        self._record_dynamic_names(frozenset((node.name,)))
 
     def _record_class_bindings(self, statement: ast.stmt) -> None:
         """Add one class statement's bindings for later headers.
@@ -714,14 +1016,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             global_names,
             self._scope_type_param_names[-1],
         )
-        self._scope_import_targets[-1] = _class_import_targets_after_statement(
-            self._scope_import_targets[-1], collector, global_names
+        import_state = self._scope_import_states[-1]
+        self._scope_import_states[-1] = replace(
+            import_state,
+            targets=_class_import_targets_after_statement(
+                import_state.targets, collector, global_names
+            ),
         )
-        current_plain = set(self._scope_plain_import_names[-1])
-        current_plain.difference_update(collector.import_targets)
-        current_plain.difference_update(collector.deleted_names)
-        current_plain.update(collector.plain_import_names)
-        self._scope_plain_import_names[-1] = frozenset(current_plain)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if not isinstance(node.ctx, ast.Load):
@@ -739,13 +1040,115 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.reference_global_names[node] = global_names
         self.reference_shadow_names[node] = shadow_names
         self.reference_import_targets[node] = self._scope_imports()
-        self.reference_plain_import_names[node] = self._scope_plain_imports()
         self.reference_import_bound[node] = import_bound
+        self.reference_uncertain_import_names[node] = self._scope_uncertain_imports()
+        self.reference_authoritative_import_names[node] = self._scope_authoritative_imports()
         self.reference_receiver_names[node], self.reference_receiver_parameters[node] = (
             self._scope_receivers()
         )
         self.reference_excludes_enclosing_class[node] = any(self._scope_excludes_enclosing_class)
         self._visit_chain_interiors(node)
+
+
+def _import_bindings(alias: ast.alias) -> dict[str, str]:
+    """Return the names and qualified targets introduced by one import.
+
+    An unaliased dotted import binds its root package, while each dotted
+    prefix remains useful for static member lookup (``import pkg.mod`` makes
+    both ``pkg`` and ``pkg.mod`` available to the resolver). An explicit alias
+    binds only that alias to the complete imported name.
+    """
+    if alias.asname is not None:
+        return {alias.asname: alias.name}
+    parts = alias.name.split(".")
+    return {".".join(parts[:index]): ".".join(parts[:index]) for index in range(1, len(parts) + 1)}
+
+
+def _update_import_bindings(bindings: dict[str, str], alias: ast.alias) -> None:
+    """Apply one import while clearing aliases invalidated by rebinding.
+
+    A later ``import other as package`` rebinds ``package`` and therefore
+    invalidates dotted prefixes left by an earlier ``import package.module``.
+    Unaliased siblings such as ``import package.util, package.models`` retain
+    each other's prefixes because they bind the same root package.
+    """
+    imported = _import_bindings(alias)
+    root = alias.asname or alias.name.partition(".")[0]
+    if alias.asname is not None or bindings.get(root) not in (None, root):
+        for name in tuple(bindings):
+            if name == root or name.startswith(f"{root}."):
+                del bindings[name]
+    bindings.update(imported)
+
+
+def _update_named_import_binding(bindings: dict[str, str], name: str, target: str) -> None:
+    """Replace a named import and invalidate its previously bound prefixes."""
+    for existing in tuple(bindings):
+        if existing == name or existing.startswith(f"{name}."):
+            del bindings[existing]
+    bindings[name] = target
+
+
+def _import_binding_roots(bindings: Mapping[str, str]) -> frozenset[str]:
+    """Return the Python names bound by an import-target table."""
+    return frozenset(name.partition(".")[0] for name in bindings)
+
+
+def _without_import_roots(bindings: Mapping[str, str], names: Iterable[str]) -> dict[str, str]:
+    """Copy import targets while removing every prefix owned by ``names``."""
+    roots = frozenset(names)
+    return {
+        name: target for name, target in bindings.items() if name.partition(".")[0] not in roots
+    }
+
+
+def _meet_import_flow_states(states: Iterable[_ImportFlowState]) -> _ImportFlowState:
+    """Keep only import values established identically on every path."""
+    paths = tuple(states)
+    if not paths:
+        return _ImportFlowState(flow_sensitive=True)
+    local_names = frozenset().union(*(state.local_names for state in paths))
+    roots = local_names | frozenset().union(
+        *(state.uncertain_names | _import_binding_roots(state.targets) for state in paths)
+    )
+    targets: dict[str, str] = {}
+    uncertain_names: set[str] = set()
+    for root in roots:
+        path_targets = tuple(
+            {
+                name: target
+                for name, target in state.targets.items()
+                if name.partition(".")[0] == root
+            }
+            for state in paths
+        )
+        if path_targets[0] and all(mapping == path_targets[0] for mapping in path_targets[1:]):
+            targets.update(path_targets[0])
+            continue
+        all_dynamic_or_unshadowed = all(
+            not mapping and root not in state.uncertain_names
+            for state, mapping in zip(paths, path_targets, strict=True)
+        )
+        if not all_dynamic_or_unshadowed:
+            uncertain_names.add(root)
+    return _ImportFlowState(
+        targets,
+        frozenset(uncertain_names),
+        local_names,
+        flow_sensitive=True,
+    )
+
+
+def _block_can_continue(statements: list[ast.stmt]) -> bool:
+    """Whether a block has a statically visible path to its following statement."""
+    if not statements:
+        return True
+    final = statements[-1]
+    if isinstance(final, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+        return False
+    if isinstance(final, ast.If) and final.orelse:
+        return _block_can_continue(final.body) or _block_can_continue(final.orelse)
+    return True
 
 
 class _BindingCollector(ast.NodeVisitor):
@@ -760,7 +1163,6 @@ class _BindingCollector(ast.NodeVisitor):
         self.names: set[str] = set()
         self.deleted_names: set[str] = set()
         self.import_targets: dict[str, str] = {}
-        self.plain_import_names: set[str] = set()
         self.global_names: set[str] = set()
         self.nonlocal_names: set[str] = set()
         self._module_name = module_name
@@ -779,20 +1181,17 @@ class _BindingCollector(ast.NodeVisitor):
         # target is recorded exactly as ``_imports`` records an alias, so the
         # two can be compared.
         for alias in node.names:
-            name = alias.asname or alias.name.partition(".")[0]
-            self.import_targets[name] = alias.name
-            if alias.asname is None and "." in alias.name:
-                self.plain_import_names.add(name)
-            else:
-                self.plain_import_names.discard(name)
+            _update_import_bindings(self.import_targets, alias)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         base = _relative_module(self._module_name, self._is_package, node.module, node.level)
         for alias in node.names:
             if alias.name != "*":
-                name = alias.asname or alias.name
-                self.import_targets[name] = f"{base}.{alias.name}" if base else alias.name
-                self.plain_import_names.discard(name)
+                _update_named_import_binding(
+                    self.import_targets,
+                    alias.asname or alias.name,
+                    f"{base}.{alias.name}" if base else alias.name,
+                )
 
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, ast.Del):
@@ -960,26 +1359,30 @@ def _scope_binders(
     statement: ast.FunctionDef | ast.AsyncFunctionDef,
     module_name: str,
     is_package: bool,
-) -> tuple[frozenset[str], dict[str, str], frozenset[str]]:
-    """Return one function's dynamic binders and its import bindings.
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Return dynamic binders and initial import flow for one function.
 
-    A name bound only by an ``import`` statement is a static binding whose
-    target a later slice can resolve, so it is reported like a module-level
-    alias rather than suppressed as a dynamic local. A name that is both
-    imported and assigned needs no special case here: it is a binder, and the
-    dynamic-local guard runs before anything consults these import bindings.
+    Import names are lexical, but their targets are not available until their
+    statements execute. Parameters and type parameters already have ordinary
+    dynamic values on entry; every other local import name starts uncertain so
+    a pre-import use cannot fall through to an outer alias.
     """
     collector = _BindingCollector(module_name, is_package)
-    collector.names.update(_argument_names(statement.args))
-    collector.names.update(_type_param_names(statement))
+    entry_dynamic_names = frozenset(_argument_names(statement.args) | _type_param_names(statement))
+    collector.names.update(entry_dynamic_names)
     for body_statement in statement.body:
         collector.visit(body_statement)
     collector.names.difference_update(collector.global_names)
     collector.names.update(collector.nonlocal_names)
+    local_import_names = (
+        _import_binding_roots(collector.import_targets)
+        - frozenset(collector.global_names)
+        - frozenset(collector.nonlocal_names)
+    )
     return (
         frozenset(collector.names),
-        collector.import_targets,
-        frozenset(collector.plain_import_names),
+        local_import_names,
+        local_import_names - entry_dynamic_names,
     )
 
 
@@ -997,72 +1400,46 @@ def _import_targets(
     return collector.import_targets
 
 
-def _module_resolution(module: _Module, modules: Mapping[str, _Module]) -> _ModuleResolution:
-    """Aggregate direct module bindings and eligible qualified prefixes.
-
-    The syntactic importer still owns import facts. This record only captures
-    the binding category needed by the shared expression resolver, retaining
-    every direct encounter until the final binding and prefix admission are
-    known.
-    """
-    bindings: dict[str, _BindingDescriptor] = {}
-    plain_events: dict[str, list[str]] = {}
-    real_events: set[str] = set()
-    direct_names: set[str] = set()
-
-    def record(name: str, target: str, category: str) -> None:
-        bindings[name] = _BindingDescriptor(target, category)
-        if category == "plain":
-            plain_events.setdefault(name, []).append(target)
-        else:
-            real_events.add(name)
-        direct_names.add(name)
-
-    for statement in module.tree.body:
-        if isinstance(statement, ast.Import):
-            for alias in statement.names:
-                name = alias.asname or alias.name.partition(".")[0]
-                category = "plain" if alias.asname is None and "." in alias.name else "real"
-                record(name, alias.name, category)
-        elif isinstance(statement, ast.ImportFrom):
-            if statement.module == "__future__":
-                continue
-            base = _relative_module(
-                module.name, module.is_package, statement.module, statement.level
-            )
-            if base is None:
-                continue
-            for alias in statement.names:
-                if alias.name != "*":
-                    name = alias.asname or alias.name
-                    target = f"{base}.{alias.name}" if base else alias.name
-                    record(name, target, "real")
-
-    collector = _BindingCollector(module.name, module.is_package)
-    nested_import_names: set[str] = set()
-    for statement in module.tree.body:
-        collector.visit(statement)
-        if not isinstance(statement, (ast.Import, ast.ImportFrom)):
-            nested_collector = _BindingCollector(module.name, module.is_package)
-            nested_collector.visit(statement)
-            nested_import_names.update(nested_collector.import_targets)
-    # A Store binding in the same module remains a conservative invalidator,
-    # even when it shares a name with a direct import.
-    competing_names = (collector.names | set(collector.import_targets)) - direct_names
-    competing_names.update(collector.names & direct_names)
-    competing_names.update(nested_import_names)
-    blocked_names = real_events | competing_names
-    prefixes: dict[str, str] = {}
-    for name, targets in plain_events.items():
-        if name in blocked_names:
-            continue
-        for target in targets:
-            if target in modules:
-                prefixes[target] = target
-    plain_roots = frozenset(
-        name for name, descriptor in bindings.items() if descriptor.category == "plain"
+def _module_flow_states(module: _Module) -> tuple[dict[ast.stmt, _ImportFlowState], _ImportFlowState]:
+    """Capture module binding state immediately before each top-level statement."""
+    visitor = _ScopeCallVisitor(module.name, module.is_package)
+    visitor._push_scope(
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        # Direct imports become visible only when their statement is visited;
+        # the lexical collector's final table is used solely to seed deferred
+        # body analysis after this timeline has completed.
+        import_targets={},
+        import_flow_sensitive=True,
     )
-    return _ModuleResolution(bindings, prefixes, plain_roots)
+    states: dict[ast.stmt, _ImportFlowState] = {}
+    for statement in module.tree.body:
+        state = visitor._flow_state()
+        if state is not None:
+            states[statement] = state
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            visitor._visit_definition_header(statement)
+            visitor._record_dynamic_names(frozenset((statement.name,)))
+        elif isinstance(statement, ast.ClassDef):
+            for expression in _class_header_nodes(statement):
+                visitor.visit(expression)
+            visitor._record_dynamic_names(frozenset((statement.name,)))
+        else:
+            visitor.visit(statement)
+    final_state = visitor._flow_state() or _ImportFlowState(flow_sensitive=True)
+    visitor._pop_scope()
+    return states, final_state
+
+
+def _context_for_flow_state(context: _ScopeContext, state: _ImportFlowState) -> _ScopeContext:
+    """Overlay one source-position module state on an analysis context."""
+    return replace(
+        context,
+        import_targets=state.targets,
+        uncertain_import_names=state.uncertain_names,
+        authoritative_import_names=_import_binding_roots(state.targets),
+    )
 
 
 def _class_context_after_statement(
@@ -1087,11 +1464,6 @@ def _class_context_after_statement(
         collector.global_names,
         context.class_scope_type_param_names,
     )
-    class_plain_names = set(context.plain_import_names)
-    class_plain_names.difference_update(collector.import_targets)
-    class_plain_names.difference_update(collector.deleted_names)
-    class_plain_names.update(collector.plain_import_names)
-    outer_plain_names = context.class_scope_outer_plain_import_names or frozenset()
     return replace(
         context,
         bound_names=(context.bound_names - context.class_scope_bound_names) | class_bound_names,
@@ -1102,8 +1474,6 @@ def _class_context_after_statement(
             context.class_scope_outer_import_targets,
         ),
         class_scope_bound_names=class_bound_names,
-        local_plain_import_names=frozenset(class_plain_names - outer_plain_names),
-        plain_import_names=frozenset(class_plain_names),
     )
 
 
@@ -1431,11 +1801,8 @@ def _analyze_module(
     builtin_names: frozenset[str],
 ) -> None:
     aliases = _imports(module, modules, declarations, relationships, nodes, emitter, tally)
-    resolution = _module_resolution(module, modules)
-    # Keep the existing whole-module import view for builtin suppression and
-    # lexical diagnostics. The structured resolution record remains the sole
-    # owner of prefix admission and direct binding category.
     module_imports = _import_targets(module.tree.body, module.name, module.is_package)
+    module_states, final_module_state = _module_flow_states(module)
     context = _ScopeContext(
         declarations,
         aliases,
@@ -1447,9 +1814,8 @@ def _analyze_module(
         frozenset(),
         builtin_names,
         module_imports,
-        frozenset(resolution.plain_roots),
-        module_resolution=resolution,
         is_package=module.is_package,
+        modules=modules,
     )
     for symbol in symbols.values():
         relationships.add(
@@ -1458,17 +1824,34 @@ def _analyze_module(
             RelationshipKind.CONTAINS.value,
             None,
         )
-    _calls(
-        context,
-        [
-            statement
-            for statement in module.tree.body
-            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        ],
-        module.module_id,
-    )
+    pending: list[ast.stmt] = []
+
+    def flush_pending() -> None:
+        if not pending:
+            return
+        first_state = module_states.get(pending[0], final_module_state)
+        _calls(_context_for_flow_state(context, first_state), list(pending), module.module_id)
+        pending.clear()
+
     for statement in module.tree.body:
+        state = module_states.get(statement, final_module_state)
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            flush_pending()
+            header_binders, header_imports, _ = _scope_binders(
+                statement, module.name, module.is_package
+            )
+            header_context = _context_for_flow_state(context, state)
+            header_context = replace(
+                header_context,
+                bound_names=header_binders,
+                import_targets=_without_import_roots(
+                    header_context.import_targets, header_imports
+                ),
+                uncertain_import_names=frozenset(header_imports)
+                | header_context.uncertain_import_names,
+                authoritative_import_names=header_context.authoritative_import_names
+                - _import_binding_roots(header_imports),
+            )
             _decorator_references(
                 statement,
                 module.module_id,
@@ -1479,29 +1862,22 @@ def _analyze_module(
             # Defaults, annotations, and decorators execute in the enclosing
             # scope; body loads use the function's lexical binders.
             _calls(
-                replace(context, bound_names=frozenset(_type_param_names(statement))),
+                replace(
+                    header_context,
+                    bound_names=frozenset(_type_param_names(statement)),
+                ),
                 [],
                 symbols[statement].node_id,
                 prefix_nodes=_signature_nodes(statement),
             )
-            binders, local_imports, local_plain_imports = _scope_binders(
-                statement, module.name, module.is_package
-            )
             _calls(
-                replace(
-                    context,
-                    bound_names=binders,
-                    import_targets={**module_imports, **local_imports},
-                    plain_import_names=(
-                        frozenset(resolution.plain_roots) - frozenset(local_imports)
-                    )
-                    | local_plain_imports,
-                    local_plain_import_names=local_plain_imports,
-                ),
+                _context_for_flow_state(context, final_module_state),
                 statement.body,
                 symbols[statement].node_id,
+                function_scope=statement,
             )
         elif isinstance(statement, ast.ClassDef):
+            flush_pending()
             _decorator_references(
                 statement,
                 module.module_id,
@@ -1522,12 +1898,11 @@ def _analyze_module(
             # visible to later method headers, but class scope is invisible to
             # method bodies.
             class_context = replace(
-                context,
+                _context_for_flow_state(context, state),
                 bound_names=frozenset(_type_param_names(statement)),
                 class_scope_bound_names=frozenset(_type_param_names(statement)),
                 class_scope_type_param_names=frozenset(_type_param_names(statement)),
                 class_scope_outer_import_targets=context.import_targets,
-                class_scope_outer_plain_import_names=context.plain_import_names,
             )
             _calls(
                 class_context,
@@ -1545,19 +1920,10 @@ def _analyze_module(
                         module.path,
                         relationships,
                     )
-                    binders, local_imports, local_plain_imports = _scope_binders(
-                        member, module.name, module.is_package
-                    )
                     receiver_parameter = _receiver_parameter_name(member)
                     method_context = replace(
-                        context,
-                        bound_names=binders | frozenset(_type_param_names(statement)),
-                        import_targets={**module_imports, **local_imports},
-                        plain_import_names=(
-                            frozenset(resolution.plain_roots) - frozenset(local_imports)
-                        )
-                        | local_plain_imports,
-                        local_plain_import_names=local_plain_imports,
+                        _context_for_flow_state(context, final_module_state),
+                        bound_names=frozenset(_type_param_names(statement)),
                         receiver_name=_eligible_receiver_name(member, receiver_parameter),
                         receiver_parameter=receiver_parameter,
                     )
@@ -1579,6 +1945,7 @@ def _analyze_module(
                         member.body,
                         symbols[member].node_id,
                         symbols[member].class_declarations,
+                        function_scope=member,
                     )
                 else:
                     _calls(
@@ -1590,7 +1957,9 @@ def _analyze_module(
                 class_context = _class_context_after_statement(
                     class_context, member, module.name, module.is_package
                 )
-
+        else:
+            pending.append(statement)
+    flush_pending()
 
 def _decorator_references(
     statement: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
@@ -1682,10 +2051,14 @@ def _imports(
     tally: _ImportTally,
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
-    # Syntactic import facts are collected at every nesting depth.  The
-    # returned aliases remain module-scoped, however: nested bindings are
-    # owned by their lexical scope collectors and must not leak into callers
-    # outside that scope.
+    # This traversal intentionally differs from _BindingCollector's
+    # scope-bounded walk: _imports records graph edges and tally counts for
+    # every syntactically unambiguous import, regardless of execution scope.
+    # Conditional definitions have a separate declaration-grain concern, but
+    # imports remain unambiguous at every nesting depth (O-03/M-4).
+    # Keep the returned alias table module-scoped: the source-ordered scope
+    # visitor supplies nested bindings at each expression, so exposing them
+    # here would leak a function or class import into unrelated scopes.
     module_statements = frozenset(module.tree.body)
     for statement in ast.walk(module.tree):
         if isinstance(statement, ast.Import):
@@ -1709,9 +2082,10 @@ def _imports(
                         _location(module.path, statement),
                     )
                     if statement in module_statements:
-                        aliases[alias.asname or alias.name.split(".")[0]] = alias.name
+                        _update_import_bindings(aliases, alias)
         elif isinstance(statement, ast.ImportFrom):
-            # Future imports are compiler directives, not workspace imports.
+            # ``__future__`` imports are compile-time directives, not workspace
+            # dependencies; exclude them from the graph and unresolved tally.
             if statement.module == "__future__":
                 continue
             base = _relative_module(
@@ -1724,9 +2098,9 @@ def _imports(
                 and target_module is not None
                 and not any(alias.name == "*" for alias in statement.names)
             ):
-                # A nested named import has both a module dependency and a
-                # declaration dependency. The module edge is emitted once
-                # before the per-name edges below.
+                # A nested named import depends on its containing module as
+                # well as the selected declaration; emit that module edge
+                # once, before the per-name symbol edges below.
                 relationships.add(
                     module.module_id,
                     target_module.module_id,
@@ -1735,19 +2109,21 @@ def _imports(
                 )
             for alias in statement.names:
                 if alias.name == "*":
-                    # Star imports depend on the module as a whole; they do
-                    # not name a declaration or a synthetic ``.*`` member.
-                    if base is not None:
-                        reference = base
-                    elif root_escape:
-                        reference = "." * statement.level + (statement.module or "")
-                    else:
-                        reference = statement.module or ""
+                    # Star imports record the module dependency only. Expanding
+                    # declarations according to ``__all__`` is a separate
+                    # concern deferred to the declaration-grain analysis.
+                    star_reference = (
+                        base
+                        if base is not None
+                        else ("." * statement.level + (statement.module or ""))
+                    )
                     if target_module is None:
-                        tally.note_unresolved(reference)
+                        tally.note_unresolved(
+                            star_reference, root_mismatch_eligible=not root_escape
+                        )
                         emitter.unresolved(
                             module.module_id,
-                            reference,
+                            star_reference,
                             _location(module.path, statement),
                             nodes,
                             relationships,
@@ -1761,20 +2137,11 @@ def _imports(
                             _location(module.path, statement),
                         )
                     continue
-                if base is not None:
-                    reference = f"{base}.{alias.name}" if base else alias.name
-                elif root_escape:
-                    reference = (
-                        "." * statement.level
-                        + (f"{statement.module}." if statement.module else "")
-                        + alias.name
-                    )
-                else:
-                    reference = (
-                        f"{statement.module}.{alias.name}" if statement.module else alias.name
-                    )
+                reference = _relative_import_reference(
+                    base, statement.module, statement.level, alias.name
+                )
                 if root_escape:
-                    tally.note_unresolved(reference)
+                    tally.note_unresolved(reference, root_mismatch_eligible=False)
                     emitter.unresolved(
                         module.module_id,
                         reference,
@@ -1802,7 +2169,7 @@ def _imports(
                         _location(module.path, statement),
                     )
                     if statement in module_statements:
-                        aliases[alias.asname or alias.name] = reference
+                        _update_named_import_binding(aliases, alias.asname or alias.name, reference)
             if statement in module_statements and target_module is not None and base is not None:
                 aliases.setdefault(base.rsplit(".", 1)[-1], base)
     return aliases
@@ -1814,6 +2181,7 @@ def _calls(
     caller: str,
     class_declarations: Mapping[str, str] | None = None,
     prefix_nodes: tuple[ast.AST, ...] = (),
+    function_scope: ast.FunctionDef | ast.AsyncFunctionDef | None = None,
 ) -> None:
     visitor = _ScopeCallVisitor(
         context.module_name,
@@ -1823,8 +2191,25 @@ def _calls(
     )
     for node in prefix_nodes:
         visitor.visit(node)
-    for statement in statements:
-        visitor.visit(statement)
+    if function_scope is not None:
+        visitor.visit_function_body(function_scope)
+    else:
+        # Module and class execution are source ordered too. A flow frame here
+        # lets an import install a route before its first use and lets a later
+        # direct write remove that route, while deferred function bodies keep
+        # their dedicated final-state handling below.
+        visitor._push_scope(
+            frozenset(),
+            frozenset(),
+            frozenset(),
+            import_targets=context.import_targets,
+            import_uncertain_names=context.uncertain_import_names,
+            local_import_names=context.authoritative_import_names,
+            import_flow_sensitive=True,
+        )
+        for statement in statements:
+            visitor.visit(statement)
+        visitor._pop_scope()
     for candidate in visitor.calls:
         expression_context = context
         if visitor.call_excludes_enclosing_class[candidate]:
@@ -1839,14 +2224,11 @@ def _calls(
                 expression_context.bound_names | visitor.call_bound_names[candidate],
                 visitor.call_global_names[candidate],
                 visitor.call_shadow_names[candidate],
-                {**expression_context.import_targets, **visitor.call_import_targets[candidate]},
+                visitor.call_import_targets[candidate],
                 visitor.call_import_bound[candidate],
-                (
-                    expression_context.plain_import_names
-                    - frozenset(visitor.call_import_targets[candidate])
-                )
-                | visitor.call_plain_import_names[candidate],
-                visitor.call_plain_import_names[candidate],
+                visitor.call_uncertain_import_names[candidate],
+                visitor.call_authoritative_import_names[candidate],
+                visitor.call_bound_names[candidate] | visitor.call_import_bound[candidate],
             ),
             caller,
             candidate.func,
@@ -1868,17 +2250,12 @@ def _calls(
                 expression_context.bound_names | visitor.reference_bound_names[reference],
                 visitor.reference_global_names[reference],
                 visitor.reference_shadow_names[reference],
-                {
-                    **expression_context.import_targets,
-                    **visitor.reference_import_targets[reference],
-                },
+                visitor.reference_import_targets[reference],
                 visitor.reference_import_bound[reference],
-                (
-                    expression_context.plain_import_names
-                    - frozenset(visitor.reference_import_targets[reference])
-                )
-                | visitor.reference_plain_import_names[reference],
-                visitor.reference_plain_import_names[reference],
+                visitor.reference_uncertain_import_names[reference],
+                visitor.reference_authoritative_import_names[reference],
+                visitor.reference_bound_names[reference]
+                | visitor.reference_import_bound[reference],
             ),
             caller,
             reference,
@@ -1894,12 +2271,10 @@ def _without_enclosing_class_scope(context: _ScopeContext) -> _ScopeContext:
     if outer_import_targets is None:
         return context
     type_param_names = context.class_scope_type_param_names
-    outer_plain_import_names = context.class_scope_outer_plain_import_names or frozenset()
     return replace(
         context,
         bound_names=(context.bound_names - context.class_scope_bound_names) | type_param_names,
         import_targets=outer_import_targets,
-        plain_import_names=outer_plain_import_names,
         class_scope_bound_names=type_param_names,
         class_scope_type_param_names=type_param_names,
         class_scope_outer_import_targets=None,
@@ -1913,8 +2288,9 @@ def _scoped_context(
     shadow_names: frozenset[str],
     import_targets: Mapping[str, str],
     import_bound_names: frozenset[str],
-    plain_import_names: frozenset[str],
-    local_plain_import_names: frozenset[str],
+    uncertain_import_names: frozenset[str],
+    authoritative_import_names: frozenset[str],
+    import_shadow_names: frozenset[str],
 ) -> _ScopeContext:
     """Narrow one scope's context to the bindings visible at one expression.
 
@@ -1922,12 +2298,22 @@ def _scoped_context(
     them. They are removed from the binders the enclosing scope contributes:
     the nearest binding governs, and an import is not a dynamic local.
     """
+    visible_import_targets = _without_import_roots(context.import_targets, import_shadow_names)
+    visible_uncertain_names = set(context.uncertain_import_names - import_shadow_names)
+    visible_authoritative_names = set(context.authoritative_import_names - import_shadow_names)
+    visitor_import_names = _import_binding_roots(import_targets) | uncertain_import_names
+    visible_import_targets = _without_import_roots(visible_import_targets, visitor_import_names)
+    visible_import_targets.update(import_targets)
+    visible_uncertain_names.difference_update(visitor_import_names)
+    visible_uncertain_names.update(uncertain_import_names)
+    visible_authoritative_names.difference_update(visitor_import_names)
+    visible_authoritative_names.update(authoritative_import_names)
     return replace(
         context,
         bound_names=bound_names - global_names - import_bound_names,
-        import_targets=import_targets,
-        plain_import_names=plain_import_names,
-        local_plain_import_names=context.local_plain_import_names | local_plain_import_names,
+        import_targets=visible_import_targets,
+        uncertain_import_names=frozenset(visible_uncertain_names),
+        authoritative_import_names=frozenset(visible_authoritative_names),
         receiver_name=None if context.receiver_name in shadow_names else context.receiver_name,
         receiver_parameter=(
             None if context.receiver_parameter in shadow_names else context.receiver_parameter
@@ -2017,7 +2403,12 @@ def _suppress_builtin(expression: ast.expr, context: _ScopeContext) -> bool:
     the builtin escape suppression in every such module.
     """
     root = _attribute_root_name(expression)
-    return root is not None and root in context.builtins and root not in context.import_targets
+    return (
+        root is not None
+        and root in context.builtins
+        and root not in context.import_targets
+        and root not in context.uncertain_import_names
+    )
 
 
 def _attribute_root_name(expression: ast.expr) -> str | None:
@@ -2051,54 +2442,71 @@ def _resolve_call(
 ) -> str | None:
     head = text.partition(".")[0]
     local_target = context.import_targets.get(head)
+    if head in context.uncertain_import_names:
+        return None
     if (
         local_target is not None
         and head in context.aliases
         and local_target != context.aliases[head]
+        and head not in context.authoritative_import_names
     ):
-        # A local import rebound this name to something else. Resolving through
-        # the module alias would attribute the call to a module the scope
-        # cannot see; local imports themselves are not resolved yet, so the
-        # expression stays unresolved.
         return None
     if head in context.bound_names and head != context.receiver_name:
         return None
-    if head in context.local_plain_import_names:
+    # Module aliases are a final-state convenience only when the source
+    # position has an active direct import route. This prevents a later import
+    # from leaking backward into an earlier default or class header.
+    if head in context.aliases and head not in context.authoritative_import_names:
         return None
-    descriptor = context.module_resolution.bindings.get(head) if context.module_resolution else None
-    if head in context.plain_import_names:
-        # Plain dotted imports carry ownership/provenance even when their
-        # module is absent or their prefix was invalidated. They never fall
-        # through to synthetic or same-module lookup.
-        if descriptor is None or descriptor.category != "plain":
-            return None
-        if "." not in text or context.module_resolution is None:
-            return None
-        for prefix, target in sorted(
-            context.module_resolution.prefixes.items(),
-            key=lambda item: len(item[0].split(".")),
-            reverse=True,
-        ):
-            if text == prefix:
-                return context.declarations.get(target)
-            marker = f"{prefix}."
-            if text.startswith(marker):
-                suffix = text[len(marker) :]
-                return context.declarations.get(f"{target}.{suffix}")
-        return None
-    if "." not in text:
-        target_name = context.aliases.get(text, f"{context.module_name}.{text}")
-        return context.declarations.get(target_name)
-    _, _, tail = text.partition(".")
     if head == context.receiver_name and class_declarations is not None:
         # ``self`` is tied to the class statement that owns the caller, not to
         # whichever same-named class was assigned to the module name last.
         # Resolve through that statement's method table so repeated method
         # names remain last-wins locally without leaking across class objects.
+        if "." not in text:
+            return None
+        _, _, tail = text.partition(".")
         return class_declarations.get(tail)
-    alias_target_name = context.aliases.get(head)
-    if alias_target_name is not None:
-        return context.declarations.get(f"{alias_target_name}.{tail}")
+    # A module prefix is eligible only while its root still denotes itself.
+    # Later aliases such as ``import other as pkg`` invalidate ``pkg.util``;
+    # bypassing the alias table here would resurrect that stale module path.
+    root_alias = context.aliases.get(head)
+    root_is_unrebound = (root_alias == head or local_target == head) and (
+        local_target is None or local_target == head
+    )
+    if "." in text and root_is_unrebound:
+        parts = text.split(".")
+        for index in range(len(parts), 0, -1):
+            prefix = ".".join(parts[:index])
+            if prefix in context.modules:
+                # Prefer the module's full qualified declaration before the
+                # flat table's class key. This prevents a module and class
+                # with the same name from colliding without rekeying the
+                # shared declarations table. Minotaur intentionally analyzes
+                # the workspace as a whole, so importing a parent module
+                # permits a qualified child lookup without a separate child
+                # import. The visible root binding remains required: a
+                # workspace file alone does not authorize an unbound expression.
+                return context.declarations.get(text)
+    # Analysis declarations cover the workspace as a whole, so resolve a
+    # dotted call through its longest imported prefix. This preserves a
+    # specific alias such as ``pkg.submodule`` when a shorter ``pkg`` alias is
+    # also visible, and keeps unaliased dotted imports aligned with Python's
+    # root-package binding.
+    parts = text.split(".")
+    for index in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:index])
+        alias_target_name = context.import_targets.get(prefix)
+        if alias_target_name is None:
+            alias_target_name = context.aliases.get(prefix)
+        if alias_target_name is None:
+            continue
+        suffix = ".".join(parts[index:])
+        target_name = f"{alias_target_name}.{suffix}" if suffix else alias_target_name
+        # Once a prefix is bound, an absent member is unresolved; falling back
+        # to a shorter alias could attribute the same source expression to a
+        # different workspace object.
+        return context.declarations.get(target_name)
     return context.declarations.get(f"{context.module_name}.{text}")
 
 
@@ -2123,6 +2531,27 @@ def _relative_module(
     if imported:
         base.extend(imported.split("."))
     return ".".join(base)
+
+
+def _relative_import_reference(
+    base: str | None, imported: str | None, level: int, name: str
+) -> str:
+    """Render an imported name without losing an invalid relative prefix.
+
+    A relative import that ascends beyond the analyzed package has no resolved
+    module base, but its source spelling still identifies what was requested.
+    Retaining the leading dots keeps that unresolved fact distinct from a
+    bare absolute import and prevents it from looking like a root-mismatch
+    candidate.
+    """
+    if base is not None:
+        return f"{base}.{name}" if base else name
+    if level > 0:
+        prefix = "." * level
+        if imported:
+            prefix += f"{imported}."
+        return f"{prefix}{name}"
+    return f"{imported}.{name}" if imported else name
 
 
 def _module_location(path: str, line_index: LineIndex) -> Location:
