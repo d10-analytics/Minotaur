@@ -4907,13 +4907,19 @@ def test_nested_plain_dotted_import_does_not_block_same_module_declaration(
     )
 
 
-def test_nested_dotted_import_invalidates_existing_direct_prefix(tmp_path: Path) -> None:
+def test_nested_dotted_import_reestablishes_existing_direct_prefix(tmp_path: Path) -> None:
     _write(tmp_path, "pkg/__init__.py", "")
     _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
     _write(
         tmp_path,
         "app.py",
-        "import pkg.sub\nif True:\n    import pkg.sub\npkg.sub.go()\nvalue = pkg.sub.go\n",
+        "import pkg.sub\n"
+        "if True:\n"
+        "    import pkg.sub\n"
+        "else:\n"
+        "    import pkg.sub\n"
+        "pkg.sub.go()\n"
+        "value = pkg.sub.go\n",
     )
 
     result = analyze_python_workspace(tmp_path)
@@ -4921,9 +4927,87 @@ def test_nested_dotted_import_invalidates_existing_direct_prefix(tmp_path: Path)
     imported_go = _node_id(result, "pkg.sub.go")
     relationships = _relationship_map(result)
 
-    assert "pkg.sub.go" in _unresolved_by_source(result).get("app", set())
-    assert (app, imported_go, RelationshipKind.CALLS.value) not in relationships
-    assert (app, imported_go, RelationshipKind.REFERENCES.value) not in relationships
+    assert _unresolved_by_source(result).get("app", set()) == set()
+    assert (app, imported_go, RelationshipKind.CALLS.value) in relationships
+    assert (app, imported_go, RelationshipKind.REFERENCES.value) in relationships
+    _assert_relation_location(
+        result,
+        "app",
+        imported_go,
+        RelationshipKind.CALLS.value,
+        path="app.py",
+        start=(5, 0),
+        end=(5, 10),
+    )
+    _assert_relation_location(
+        result,
+        "app",
+        imported_go,
+        RelationshipKind.REFERENCES.value,
+        path="app.py",
+        start=(6, 8),
+        end=(6, 18),
+    )
+
+
+def test_conditional_uncertain_imports_do_not_resolve_outer_declarations(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def foo():\n    return 1\n")
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def foo():\n"
+        "    return 0\n"
+        "def named(flag):\n"
+        "    if flag:\n"
+        "        from library import foo\n"
+        "    foo()\n"
+        "    value = foo\n"
+        "def alias(flag):\n"
+        "    if flag:\n"
+        "        import library as foo\n"
+        "    foo()\n"
+        "    value = foo\n"
+        "def pkg():\n"
+        "    return 0\n"
+        "def plain(flag):\n"
+        "    if flag:\n"
+        "        import pkg.sub\n"
+        "    pkg()\n"
+        "    value = pkg\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    labels = _unresolved_sites(result)
+    assert {
+        ("app.named", "foo", 6),
+        ("app.named", "foo", 7),
+        ("app.alias", "foo", 11),
+        ("app.alias", "foo", 12),
+        ("app.plain", "pkg", 18),
+        ("app.plain", "pkg", 19),
+    } <= labels
+    assert _unresolved_by_source(result).get("app.named", set()) == {"foo"}
+    assert _unresolved_by_source(result).get("app.alias", set()) == {"foo"}
+    assert _unresolved_by_source(result).get("app.plain", set()) == {"pkg"}
+    for owner, target in (
+        ("app.named", "app.foo"),
+        ("app.alias", "app.foo"),
+        ("app.plain", "app.pkg"),
+    ):
+        source = _node_id(result, owner)
+        target_id = _node_id(result, target)
+        assert not any(
+            relationship.source == source
+            and relationship.target == target_id
+            and relationship.kind
+            in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+            for relationship in result.document.relationships
+        )
+    assert validate_document(result.document).is_valid
 
 
 @pytest.mark.parametrize(
