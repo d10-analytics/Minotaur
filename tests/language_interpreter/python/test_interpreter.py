@@ -6386,3 +6386,179 @@ def test_module_lambda_body_uses_final_state_with_immediate_defaults_and_paramet
         for location in evidence.locations
     }
     assert locations == {2}
+
+
+def test_conditional_class_directives_invalidate_owner_without_sibling_leak(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n"
+        "flag = True\n"
+        "class Global:\n"
+        "    global helper\n"
+        "    if flag:\n"
+        "        helper = object()\n"
+        "    else:\n"
+        "        pass\n"
+        "    value = helper()\n"
+        "    def method(self):\n"
+        "        return helper()\n"
+        "\n"
+        "def sibling():\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    assert ("app.Global", "library.helper", RelationshipKind.CALLS.value) in edges
+    assert ("app.Global.method", "library.helper", RelationshipKind.CALLS.value) not in edges
+    assert ("app.sibling", "library.helper", RelationshipKind.CALLS.value) not in edges
+    assert _unresolved_sites(result) >= {
+        ("app.Global.method", "helper", 11),
+        ("app.sibling", "helper", 14),
+    }
+    assert _unresolved_by_source(result).get("app.Global.method", set()) == {"helper"}
+    assert _unresolved_by_source(result).get("app.sibling", set()) == {"helper"}
+
+
+def test_conditional_class_nonlocal_write_preserves_sibling_module_route(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from library import helper\n"
+        "def outer(flag):\n"
+        "    from library import helper\n"
+        "    class Nonlocal:\n"
+        "        nonlocal helper\n"
+        "        if flag:\n"
+        "            helper = object()\n"
+        "        else:\n"
+        "            pass\n"
+        "        value = helper()\n"
+        "        def method(self):\n"
+        "            return helper()\n"
+        "    return helper()\n"
+        "\n"
+        "def sibling():\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) in edges
+    assert ("app.sibling", "library.helper", RelationshipKind.CALLS.value) in edges
+    _assert_unresolved_locations(
+        result,
+        "app.outer",
+        "helper",
+        {(11, 19), (12, 11)},
+    )
+    assert _unresolved_by_source(result).get("app.outer", set()) == {"helper"}
+    assert _unresolved_by_source(result).get("app.sibling", set()) == set()
+
+
+def test_conditional_deferred_callables_use_reimported_owner_and_skip_class_locals(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "first.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "second.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from first import helper\n"
+        "def outer(flag):\n"
+        "    def before():\n"
+        "        return helper()\n"
+        "    callback = lambda: helper()\n"
+        "    if flag:\n"
+        "        from second import helper\n"
+        "    else:\n"
+        "        from second import helper\n"
+        "    during = helper()\n"
+        "    class Nested:\n"
+        "        if flag:\n"
+        "            from second import helper\n"
+        "        else:\n"
+        "            from second import helper\n"
+        "        def method(self):\n"
+        "            return helper()\n"
+        "    def shadowed(helper):\n"
+        "        return helper()\n"
+        "    from first import helper\n"
+        "    def after():\n"
+        "        return helper()\n"
+        "    return before, callback, Nested, shadowed, after\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    first = _node_id(result, "first.helper")
+    second = _node_id(result, "second.helper")
+    outer = _node_id(result, "app.outer")
+    calls = {
+        (relationship.target, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert {item for item in calls if item[0] == second} == {(second, 10)}
+    assert {item for item in calls if item[0] == first} == {
+        (first, 4),
+        (first, 5),
+        (first, 17),
+        (first, 22),
+    }
+    assert (outer, first, RelationshipKind.CALLS.value) in _relationship_map(result)
+    assert (outer, second, RelationshipKind.CALLS.value) in _relationship_map(result)
+    assert _unresolved_sites(result) == set()
+
+
+def test_inner_if_in_loop_resolves_prewrite_use_but_freezes_post_loop_route(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(flag, values):\n"
+        "    from library import helper\n"
+        "    for value in values:\n"
+        "        if flag:\n"
+        "            called = helper()\n"
+        "            referenced = helper\n"
+        "            from other import helper\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    helper = _node_id(result, "library.helper")
+    calls = {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    references = {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.REFERENCES.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {5}
+    assert references == {6}
+    assert _unresolved_sites(result) == {("app.run", "helper", 8)}
+    assert ("app.run", "other.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
