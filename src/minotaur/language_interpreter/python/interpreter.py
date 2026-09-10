@@ -2545,7 +2545,9 @@ def _calls(
             call_import_targets = _without_import_roots(
                 call_import_targets, enclosing_class_target_names
             )
-        call_import_bound = visitor.call_import_bound[candidate]
+        call_import_bound = (
+            visitor.call_import_bound[candidate] - visitor.call_bound_names[candidate]
+        )
         if (
             visitor.call_excludes_enclosing_class[candidate]
             and candidate.func not in visitor.class_header_expressions
@@ -2601,7 +2603,9 @@ def _calls(
             reference_import_targets = _without_import_roots(
                 reference_import_targets, enclosing_class_target_names
             )
-        reference_import_bound = visitor.reference_import_bound[reference]
+        reference_import_bound = (
+            visitor.reference_import_bound[reference] - visitor.reference_bound_names[reference]
+        )
         if (
             visitor.reference_excludes_enclosing_class[reference]
             and reference not in visitor.class_header_expressions
