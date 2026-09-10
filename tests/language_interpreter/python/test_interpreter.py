@@ -5557,9 +5557,7 @@ def test_compound_body_preserves_incoming_call_and_reference_before_mutation(
         for evidence in relationships[RelationshipKind.REFERENCES.value].evidence
         for location in evidence.locations
     } == {reference_line}
-    assert _unresolved_sites(result) >= {
-        ("app.run", "helper", line) for line in unresolved_lines
-    }
+    assert _unresolved_sites(result) >= {("app.run", "helper", line) for line in unresolved_lines}
 
 
 def test_try_handler_starts_after_possible_try_body_write_but_before_handler_write(
