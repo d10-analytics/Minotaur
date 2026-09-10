@@ -4932,6 +4932,43 @@ def test_nested_dotted_import_reestablishes_existing_direct_prefix(tmp_path: Pat
     )
 
 
+def test_conditional_plain_alias_root_disagreement_blocks_call_and_load(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(tmp_path, "alternate.py", "def go():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def pkg():\n"
+        "    return 0\n"
+        "if True:\n"
+        "    import pkg.sub\n"
+        "else:\n"
+        "    import alternate as pkg\n"
+        "pkg.go()\n"
+        "value = pkg.go\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    app = _node_id(result, "app")
+    relationships = _relationship_map(result)
+    assert _unresolved_by_source(result).get("app", set()) == {"pkg.go"}
+    _assert_unresolved_locations(result, "app", "pkg.go", {(6, 0), (7, 8)})
+    for target in ("app.pkg", "pkg.sub.go", "alternate.go"):
+        target_id = _node_id(result, target)
+        assert not any(
+            relationship.source == app
+            and relationship.target == target_id
+            and relationship.kind
+            in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+            for relationship in result.document.relationships
+        )
+    assert (app, _node_id(result, "pkg.sub"), RelationshipKind.IMPORTS.value) in relationships
+    assert (app, _node_id(result, "alternate"), RelationshipKind.IMPORTS.value) in relationships
+
+
 def test_conditional_uncertain_imports_do_not_resolve_outer_declarations(
     tmp_path: Path,
 ) -> None:
