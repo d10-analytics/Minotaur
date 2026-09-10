@@ -221,6 +221,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.references: list[ast.Name | ast.Attribute] = []
         self._scope_bound_names: list[frozenset[str]] = []
         self._scope_global_names: list[frozenset[str]] = []
+        self._scope_nonlocal_names: list[frozenset[str]] = []
         self._scope_shadow_names: list[frozenset[str]] = []
         self._scope_import_states: list[_ImportFlowState] = []
         self._scope_receiver_overrides: list[tuple[str | None, str | None] | None] = []
@@ -442,7 +443,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             for deferred_node, deferred_class_method in deferred_callables:
                 if isinstance(deferred_node, ast.Lambda):
                     self._visit_lambda_body(deferred_node, final_state)
-                else:
+                elif isinstance(deferred_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     self._visit_function(
                         deferred_node,
                         nested_class_method=deferred_class_method,
@@ -489,7 +490,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             for deferred_node, deferred_class_method in deferred_callables:
                 if isinstance(deferred_node, ast.Lambda):
                     self._visit_lambda_body(deferred_node, final_state)
-                else:
+                elif isinstance(deferred_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     self._visit_function(
                         deferred_node,
                         nested_class_method=deferred_class_method,
@@ -529,6 +530,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         state = self._flow_state()
         if state is not None and state.flow_frozen:
             return
+        self._propagate_class_directive_names(names)
         for index, propagates in enumerate(self._scope_propagate_mutations):
             if propagates:
                 self._scope_mutated_names[index].update(names)
@@ -552,6 +554,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         state = self._flow_state()
         if state is not None and state.flow_frozen:
             return
+        self._propagate_class_directive_names(names)
         for index, propagates in enumerate(self._scope_propagate_mutations):
             if propagates:
                 self._scope_mutated_names[index].update(names)
@@ -570,6 +573,30 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 plain_roots=state.plain_roots - affected,
             )
         )
+
+    def _propagate_class_directive_names(self, names: frozenset[str]) -> None:
+        """Apply immediate class global/nonlocal writes to the enclosing overlay."""
+        if not self._scope_is_class or not self._scope_is_class[-1]:
+            return
+        names &= self._scope_global_names[-1] | self._scope_nonlocal_names[-1]
+        if not names:
+            return
+        for index in range(len(self._scope_import_states) - 2, -1, -1):
+            state = self._scope_import_states[index]
+            if not state.flow_sensitive or state.flow_frozen:
+                continue
+            affected = names & (
+                state.local_names | state.uncertain_names | _import_binding_roots(state.targets)
+            )
+            if not affected:
+                return
+            self._scope_import_states[index] = replace(
+                state,
+                targets=_without_import_roots(state.targets, affected),
+                uncertain_names=state.uncertain_names | affected,
+                plain_roots=state.plain_roots - affected,
+            )
+            return
 
     def _block_flow_imports(self, names: frozenset[str]) -> None:
         """Block routes introduced only on a conditional execution path."""
@@ -982,6 +1009,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
     ) -> None:
         self._scope_bound_names.append(bound_names)
         self._scope_global_names.append(global_names)
+        self._scope_nonlocal_names.append(frozenset())
         self._scope_shadow_names.append(shadow_names)
         self._scope_import_states.append(
             _ImportFlowState(
@@ -1003,6 +1031,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_propagate_mutations.pop()
         self._scope_bound_names.pop()
         self._scope_global_names.pop()
+        self._scope_nonlocal_names.pop()
         self._scope_shadow_names.pop()
         self._scope_import_states.pop()
         self._scope_receiver_overrides.pop()
@@ -1017,6 +1046,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         tuple[
             int,
             tuple[
+                frozenset[str],
                 frozenset[str],
                 frozenset[str],
                 frozenset[str],
@@ -1035,6 +1065,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             tuple[
                 int,
                 tuple[
+                    frozenset[str],
                     frozenset[str],
                     frozenset[str],
                     frozenset[str],
@@ -1057,6 +1088,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     (
                         self._scope_bound_names[index],
                         self._scope_global_names[index],
+                        self._scope_nonlocal_names[index],
                         self._scope_shadow_names[index],
                         self._scope_import_states[index],
                         self._scope_receiver_overrides[index],
@@ -1075,6 +1107,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 # nested method body is analyzed.
                 self._scope_bound_names[index] = type_param_names
                 self._scope_global_names[index] = frozenset()
+                self._scope_nonlocal_names[index] = frozenset()
                 self._scope_shadow_names[index] = type_param_names
                 self._scope_import_states[index] = _ImportFlowState()
                 self._scope_receiver_overrides[index] = None
@@ -1085,6 +1118,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             else:
                 del self._scope_bound_names[index]
                 del self._scope_global_names[index]
+                del self._scope_nonlocal_names[index]
                 del self._scope_shadow_names[index]
                 del self._scope_import_states[index]
                 del self._scope_receiver_overrides[index]
@@ -1104,6 +1138,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     frozenset[str],
                     frozenset[str],
                     frozenset[str],
+                    frozenset[str],
                     _ImportFlowState,
                     tuple[str | None, str | None] | None,
                     bool,
@@ -1116,7 +1151,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         ],
     ) -> None:
         for _, frame in sorted(removed, reverse=True):
-            if not frame[7]:
+            if not frame[8]:
                 continue
             marker_index = next(
                 index
@@ -1125,6 +1160,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             )
             del self._scope_bound_names[marker_index]
             del self._scope_global_names[marker_index]
+            del self._scope_nonlocal_names[marker_index]
             del self._scope_shadow_names[marker_index]
             del self._scope_import_states[marker_index]
             del self._scope_receiver_overrides[marker_index]
@@ -1138,6 +1174,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             (
                 restored_bound_names,
                 restored_global_names,
+                restored_nonlocal_names,
                 restored_shadow_names,
                 restored_import_state,
                 restored_receiver_override,
@@ -1149,6 +1186,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             ) = frame
             self._scope_bound_names.insert(index, restored_bound_names)
             self._scope_global_names.insert(index, restored_global_names)
+            self._scope_nonlocal_names.insert(index, restored_nonlocal_names)
             self._scope_shadow_names.insert(index, restored_shadow_names)
             self._scope_import_states.insert(index, restored_import_state)
             self._scope_receiver_overrides.insert(index, restored_receiver_override)
@@ -1177,9 +1215,10 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         an enclosing scope imported the same name from elsewhere.
         """
         merged: dict[str, str] = {}
-        for shadow_names, global_names, state in zip(
+        for shadow_names, global_names, _nonlocal_names, state in zip(
             self._scope_shadow_names,
             self._scope_global_names,
+            self._scope_nonlocal_names,
             self._scope_import_states,
             strict=True,
         ):
@@ -1199,9 +1238,10 @@ class _ScopeCallVisitor(ast.NodeVisitor):
     def _scope_uncertain_imports(self) -> frozenset[str]:
         """Return visible names whose import target is not flow-definite."""
         uncertain: set[str] = set()
-        for shadow_names, global_names, state in zip(
+        for shadow_names, global_names, _nonlocal_names, state in zip(
             self._scope_shadow_names,
             self._scope_global_names,
+            self._scope_nonlocal_names,
             self._scope_import_states,
             strict=True,
         ):
@@ -1219,9 +1259,10 @@ class _ScopeCallVisitor(ast.NodeVisitor):
     def _scope_plain_imports(self) -> frozenset[str]:
         """Return visible roots introduced by unaliased dotted imports."""
         plain: set[str] = set()
-        for shadow_names, global_names, state in zip(
+        for shadow_names, global_names, _nonlocal_names, state in zip(
             self._scope_shadow_names,
             self._scope_global_names,
+            self._scope_nonlocal_names,
             self._scope_import_states,
             strict=True,
         ):
@@ -1239,9 +1280,10 @@ class _ScopeCallVisitor(ast.NodeVisitor):
     def _scope_authoritative_imports(self) -> frozenset[str]:
         """Return definite imports established by function-flow states."""
         authoritative: set[str] = set()
-        for shadow_names, global_names, state in zip(
+        for shadow_names, global_names, _nonlocal_names, state in zip(
             self._scope_shadow_names,
             self._scope_global_names,
+            self._scope_nonlocal_names,
             self._scope_import_states,
             strict=True,
         ):
@@ -1267,11 +1309,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         global_names: set[str] = set()
         import_bound_names: set[str] = set()
         seen_names: set[str] = set()
-        for bound_frame, global_frame, import_state in reversed(
+        for bound_frame, global_frame, nonlocal_frame, import_state in reversed(
             tuple(
                 zip(
                     self._scope_bound_names,
                     self._scope_global_names,
+                    self._scope_nonlocal_names,
                     self._scope_import_states,
                     strict=True,
                 )
@@ -1283,7 +1326,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             for name in bound_frame | global_frame | active_import_names:
                 if name in seen_names:
                     continue
-                if name in bound_frame and name not in import_state.local_names:
+                if name in nonlocal_frame:
+                    continue
+                if name in global_frame:
+                    global_names.add(name)
+                elif name in bound_frame and name not in import_state.local_names:
                     bound_names.add(name)
                 elif name in active_import_names:
                     import_bound_names.add(name)
@@ -1341,6 +1388,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             type_param_names=type_param_names,
         )
         self._scope_global_names[-1] = _global_names_in_statements(
+            statement
+            for statement in node.body
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+        self._scope_nonlocal_names[-1] = _nonlocal_names_in_statements(
             statement
             for statement in node.body
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -1817,6 +1869,7 @@ def _module_flow_states(
             for expression in _class_header_nodes(statement):
                 visitor.visit(expression)
             visitor._record_dynamic_names(frozenset((statement.name,)))
+            _apply_class_directive_writes(visitor, statement)
         else:
             visitor.visit(statement)
         capture_next = is_definition
@@ -1824,6 +1877,30 @@ def _module_flow_states(
     final_state = replace(final_state, targets=dict(final_state.targets))
     visitor._pop_scope()
     return states, final_state
+
+
+def _apply_class_directive_writes(visitor: _ScopeCallVisitor, node: ast.ClassDef) -> None:
+    """Apply immediate class global/nonlocal writes to the module timeline."""
+    directives = _global_names_in_statements(node.body) | _nonlocal_names_in_statements(node.body)
+    if not directives or not visitor._scope_import_states:
+        return
+    state = visitor._scope_import_states[-1]
+    for statement in node.body:
+        touched = _flow_touched_names((statement,)) & directives
+        if not touched:
+            continue
+        affected = touched & (
+            state.local_names | state.uncertain_names | _import_binding_roots(state.targets)
+        )
+        if not affected:
+            continue
+        state = replace(
+            state,
+            targets=_without_import_roots(state.targets, affected),
+            uncertain_names=state.uncertain_names | affected,
+            plain_roots=state.plain_roots - affected,
+        )
+    visitor._scope_import_states[-1] = state
 
 
 def _context_for_flow_state(context: _ScopeContext, state: _ImportFlowState) -> _ScopeContext:
@@ -1899,6 +1976,13 @@ def _global_names_in_statements(statements: Iterable[ast.stmt]) -> frozenset[str
     for statement in statements:
         collector.visit(statement)
     return frozenset(collector.global_names)
+
+
+def _nonlocal_names_in_statements(statements: Iterable[ast.stmt]) -> frozenset[str]:
+    collector = _BindingCollector()
+    for statement in statements:
+        collector.visit(statement)
+    return frozenset(collector.nonlocal_names)
 
 
 def _receiver_parameter_name(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
