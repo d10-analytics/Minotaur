@@ -67,6 +67,23 @@ class _DeclaredSymbol:
 
 
 @dataclass(frozen=True, slots=True)
+class _BindingDescriptor:
+    """Retain the selected target and category for one module binding."""
+
+    target: str
+    category: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ModuleResolution:
+    """Retain module-level binding categories and eligible dotted prefixes."""
+
+    bindings: Mapping[str, _BindingDescriptor]
+    prefixes: Mapping[str, str]
+    plain_roots: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class _ScopeContext:
     declarations: Mapping[str, str]
     aliases: Mapping[str, str]
@@ -81,6 +98,9 @@ class _ScopeContext:
     # class-body and function-local imports all land in this one table so that
     # a local rebinding can be told apart from the module alias it shadows.
     import_targets: Mapping[str, str] = field(default_factory=dict)
+    plain_import_names: frozenset[str] = frozenset()
+    local_plain_import_names: frozenset[str] = frozenset()
+    module_resolution: _ModuleResolution | None = None
     # When analyzing a direct class body, retain the class-only contribution
     # separately so a nested class method can discard every enclosing class
     # namespace while restoring the module/function imports beneath it.
@@ -89,6 +109,7 @@ class _ScopeContext:
     # are not; nested classes and methods retain these names.
     class_scope_type_param_names: frozenset[str] = frozenset()
     class_scope_outer_import_targets: Mapping[str, str] | None = None
+    class_scope_outer_plain_import_names: frozenset[str] | None = None
     # A name whose import binding is flow-dependent remains reportable, but it
     # cannot resolve through an outer or module alias. This distinguishes an
     # uncertain import from an ordinary dynamic local, which is suppressed.
@@ -118,6 +139,8 @@ class _ImportFlowState:
     uncertain_names: frozenset[str] = frozenset()
     local_names: frozenset[str] = frozenset()
     flow_sensitive: bool = False
+    flow_frozen: bool = False
+    plain_roots: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -208,6 +231,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.call_global_names: dict[ast.Call, frozenset[str]] = {}
         self.call_shadow_names: dict[ast.Call, frozenset[str]] = {}
         self.call_import_targets: dict[ast.Call, Mapping[str, str]] = {}
+        self.call_plain_import_names: dict[ast.Call, frozenset[str]] = {}
         self.call_import_bound: dict[ast.Call, frozenset[str]] = {}
         self.call_uncertain_import_names: dict[ast.Call, frozenset[str]] = {}
         self.call_authoritative_import_names: dict[ast.Call, frozenset[str]] = {}
@@ -218,6 +242,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.reference_global_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_shadow_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_import_targets: dict[ast.Name | ast.Attribute, Mapping[str, str]] = {}
+        self.reference_plain_import_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_import_bound: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_uncertain_import_names: dict[ast.Name | ast.Attribute, frozenset[str]] = {}
         self.reference_authoritative_import_names: dict[
@@ -234,6 +259,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.call_global_names[node] = global_names
         self.call_shadow_names[node] = shadow_names
         self.call_import_targets[node] = self._scope_imports()
+        self.call_plain_import_names[node] = self._scope_plain_imports()
         self.call_import_bound[node] = import_bound
         self.call_uncertain_import_names[node] = self._scope_uncertain_imports()
         self.call_authoritative_import_names[node] = self._scope_authoritative_imports()
@@ -286,6 +312,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.reference_global_names[node] = global_names
             self.reference_shadow_names[node] = shadow_names
             self.reference_import_targets[node] = self._scope_imports()
+            self.reference_plain_import_names[node] = self._scope_plain_imports()
             self.reference_import_bound[node] = import_bound
             self.reference_uncertain_import_names[node] = self._scope_uncertain_imports()
             self.reference_authoritative_import_names[node] = self._scope_authoritative_imports()
@@ -395,14 +422,20 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._pop_scope()
 
     def _visit_block(self, statements: Iterable[ast.stmt], *, nested: bool = False) -> None:
+        entry_state = self._flow_state()
         if nested:
             self._flow_nested_depth += 1
         try:
             for statement in statements:
                 self.visit(statement)
+                state = self._flow_state()
+                if state is not None and isinstance(statement, (ast.Return, ast.Raise)):
+                    self._set_flow_state(replace(state, flow_frozen=True))
         finally:
             if nested:
                 self._flow_nested_depth -= 1
+                if entry_state is not None:
+                    self._scope_import_states[-1] = entry_state
 
     def _flow_state(self) -> _ImportFlowState | None:
         if not self._scope_import_states:
@@ -411,14 +444,17 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         return state if state.flow_sensitive else None
 
     def _set_flow_state(self, state: _ImportFlowState) -> None:
-        if self._flow_state() is not None:
+        current = self._flow_state()
+        if current is not None and (not current.flow_frozen or state.flow_frozen):
             self._scope_import_states[-1] = state
 
     def _record_dynamic_names(self, names: frozenset[str]) -> None:
+        state = self._flow_state()
+        if state is not None and state.flow_frozen:
+            return
         for index, propagates in enumerate(self._scope_propagate_mutations):
             if propagates:
                 self._scope_mutated_names[index].update(names)
-        state = self._flow_state()
         if state is None:
             return
         affected = names & (
@@ -431,14 +467,17 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 state,
                 targets=_without_import_roots(state.targets, affected),
                 uncertain_names=state.uncertain_names | affected,
+                plain_roots=state.plain_roots - affected,
             )
         )
 
     def _record_deleted_names(self, names: frozenset[str]) -> None:
+        state = self._flow_state()
+        if state is not None and state.flow_frozen:
+            return
         for index, propagates in enumerate(self._scope_propagate_mutations):
             if propagates:
                 self._scope_mutated_names[index].update(names)
-        state = self._flow_state()
         if state is None:
             return
         affected = names & (
@@ -451,6 +490,21 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 state,
                 targets=_without_import_roots(state.targets, affected),
                 uncertain_names=state.uncertain_names | affected,
+                plain_roots=state.plain_roots - affected,
+            )
+        )
+
+    def _block_flow_imports(self, names: frozenset[str]) -> None:
+        """Block routes introduced only on a conditional execution path."""
+        state = self._flow_state()
+        if state is None or state.flow_frozen or not names:
+            return
+        self._set_flow_state(
+            replace(
+                state,
+                targets=_without_import_roots(state.targets, names),
+                uncertain_names=state.uncertain_names | names,
+                plain_roots=state.plain_roots - names,
             )
         )
 
@@ -466,50 +520,65 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             if name != prefix and not name.startswith(f"{prefix}.")
         }
         self._set_flow_state(
-            replace(state, targets=targets, uncertain_names=state.uncertain_names | {prefix})
+            replace(
+                state,
+                targets=targets,
+                uncertain_names=state.uncertain_names | {prefix},
+                plain_roots=state.plain_roots - {prefix.partition(".")[0]},
+            )
         )
 
     def visit_Import(self, node: ast.Import) -> None:
         state = self._flow_state()
-        if state is None:
+        if state is None or state.flow_frozen:
             return
         targets = state.targets if self._flow_mutate_targets else dict(state.targets)
         if not isinstance(targets, dict):
             targets = dict(targets)
         bound_names: set[str] = set()
         uncertain_names = set(state.uncertain_names)
+        plain_roots = set(state.plain_roots)
         for alias in node.names:
-            if self._flow_nested_depth and alias.asname is None and "." in alias.name:
+            if self._flow_nested_depth:
                 root = alias.name.partition(".")[0]
                 targets = _without_import_roots(targets, (root,))
                 uncertain_names.add(root)
+                plain_roots.discard(root)
                 bound_names.add(root)
                 continue
+            root = alias.asname or alias.name.partition(".")[0]
+            plain_roots.discard(root)
+            if alias.asname is None and "." in alias.name:
+                plain_roots.add(root)
             _update_import_bindings(targets, alias)
-            bound_names.add(alias.asname or alias.name.partition(".")[0])
+            bound_names.add(root)
         self._set_flow_state(
             replace(
                 state,
                 targets=targets,
                 uncertain_names=frozenset(uncertain_names - bound_names),
+                plain_roots=frozenset(plain_roots),
             )
         )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         state = self._flow_state()
-        if state is None:
+        if state is None or state.flow_frozen:
             return
         targets = state.targets if self._flow_mutate_targets else dict(state.targets)
         if not isinstance(targets, dict):
             targets = dict(targets)
         bound_names: set[str] = set()
         uncertain_names = set(state.uncertain_names)
+        plain_roots = set(state.plain_roots)
         base = _relative_module(self._module_name, self._is_package, node.module, node.level)
         for alias in node.names:
             if alias.name == "*":
                 continue
             name = alias.asname or alias.name
-            if node.level > 0 and base is None:
+            plain_roots.discard(name)
+            if self._flow_nested_depth or (node.level > 0 and base is None):
+                targets = _without_import_roots(targets, (name,))
                 bound_names.add(name)
                 uncertain_names.add(name)
             else:
@@ -525,6 +594,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 state,
                 targets=targets,
                 uncertain_names=frozenset(uncertain_names),
+                plain_roots=frozenset(plain_roots),
             )
         )
 
@@ -540,11 +610,21 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.visit(node.annotation)
         if node.value is not None:
             self.visit(node.value)
-        self.visit(node.target)
-        self._record_dynamic_names(_target_names(node.target))
+            self.visit(node.target)
+            self._record_dynamic_names(_target_names(node.target))
+        elif isinstance(node.target, ast.Attribute):
+            self.visit(node.target.value)
+        elif isinstance(node.target, ast.Subscript):
+            self.visit(node.target.value)
+            self.visit(node.target.slice)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        target_context = getattr(node.target, "ctx", None)
+        if target_context is not None:
+            node.target.ctx = ast.Load()
         self.visit(node.target)
+        if target_context is not None:
+            node.target.ctx = target_context
         self.visit(node.value)
         self._record_dynamic_names(_target_names(node.target))
 
@@ -570,19 +650,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self.visit(node.test)
-        test_state = self._flow_state() or state
-        self._set_flow_state(test_state)
+        touched = _flow_touched_names((*node.body, *node.orelse))
+        self._block_flow_imports(touched)
+        blocked_state = self._flow_state() or state
         self._visit_block(node.body, nested=True)
-        body_state = self._flow_state()
-        self._set_flow_state(test_state)
+        self._scope_import_states[-1] = blocked_state
         self._visit_block(node.orelse, nested=True)
-        else_state = self._flow_state()
-        continuing: list[_ImportFlowState] = []
-        if _block_can_continue(node.body):
-            continuing.append(body_state or test_state)
-        if not node.orelse or _block_can_continue(node.orelse):
-            continuing.append(else_state or test_state)
-        self._set_flow_state(_meet_import_flow_states(continuing or [state]))
+        self._scope_import_states[-1] = blocked_state
 
     def visit_For(self, node: ast.For) -> None:
         self._visit_loop(node)
@@ -598,16 +672,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.visit(node.iter)
         self.visit(node.target)
         self._record_dynamic_names(_target_names(node.target))
-        body_entry = self._flow_state() or state
+        self._block_flow_imports(_flow_touched_names((*node.body, *node.orelse)))
+        blocked_state = self._flow_state() or state
         self._visit_block(node.body, nested=True)
-        body_state = self._flow_state() or body_entry
-        loop_state = _meet_import_flow_states((state, body_state))
-        self._set_flow_state(loop_state)
+        self._scope_import_states[-1] = blocked_state
         self._visit_block(node.orelse, nested=True)
-        else_state = self._flow_state() or loop_state
-        # The else suite is skipped by every break path. Meeting it with the
-        # loop state preserves zero-iteration and break exits.
-        self._set_flow_state(_meet_import_flow_states((loop_state, else_state)))
+        self._scope_import_states[-1] = blocked_state
 
     def visit_While(self, node: ast.While) -> None:
         state = self._flow_state()
@@ -615,15 +685,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self.visit(node.test)
-        test_state = self._flow_state() or state
-        self._set_flow_state(test_state)
+        self._block_flow_imports(_flow_touched_names((*node.body, *node.orelse)))
+        blocked_state = self._flow_state() or state
         self._visit_block(node.body, nested=True)
-        body_state = self._flow_state() or test_state
-        loop_state = _meet_import_flow_states((state, body_state))
-        self._set_flow_state(loop_state)
+        self._scope_import_states[-1] = blocked_state
         self._visit_block(node.orelse, nested=True)
-        else_state = self._flow_state() or loop_state
-        self._set_flow_state(_meet_import_flow_states((loop_state, else_state)))
+        self._scope_import_states[-1] = blocked_state
 
     def visit_With(self, node: ast.With) -> None:
         self._visit_with(node)
@@ -637,7 +704,11 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             if item.optional_vars is not None:
                 self.visit(item.optional_vars)
                 self._record_dynamic_names(_target_names(item.optional_vars))
+        self._block_flow_imports(_flow_touched_names(node.body))
+        blocked_state = self._flow_state()
         self._visit_block(node.body, nested=True)
+        if blocked_state is not None:
+            self._scope_import_states[-1] = blocked_state
 
     def visit_Try(self, node: ast.Try) -> None:
         self._visit_try(node)
@@ -650,12 +721,27 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         if state is None:
             self.generic_visit(node)
             return
-        self._set_flow_state(state)
+        self._block_flow_imports(
+            _flow_touched_names(
+                (
+                    *node.body,
+                    *node.orelse,
+                    *(statement for handler in node.handlers for statement in handler.body),
+                    *node.finalbody,
+                )
+            )
+        )
+        handler_names = frozenset(
+            handler.name for handler in node.handlers if handler.name is not None
+        )
+        self._block_flow_imports(handler_names)
+        blocked_state = self._flow_state() or state
+        self._scope_import_states[-1] = blocked_state
         self._visit_block(node.body, nested=True)
         self._visit_block(node.orelse, nested=True)
-        continuing = [self._flow_state() or state]
+        self._scope_import_states[-1] = blocked_state
         for handler in node.handlers:
-            self._set_flow_state(state)
+            self._scope_import_states[-1] = blocked_state
             if handler.type is not None:
                 self.visit(handler.type)
             if handler.name is not None:
@@ -663,10 +749,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self._visit_block(handler.body, nested=True)
             if handler.name is not None:
                 self._record_deleted_names(frozenset((handler.name,)))
-            if _block_can_continue(handler.body):
-                continuing.append(self._flow_state() or state)
-        self._set_flow_state(_meet_import_flow_states(continuing))
+        self._scope_import_states[-1] = blocked_state
         self._visit_block(node.finalbody, nested=True)
+        self._scope_import_states[-1] = blocked_state
 
     def visit_Match(self, node: ast.Match) -> None:
         state = self._flow_state()
@@ -674,17 +759,25 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self.visit(node.subject)
-        continuing = [state]
+        self._block_flow_imports(
+            _flow_touched_names(tuple(statement for case in node.cases for statement in case.body))
+        )
+        self._block_flow_imports(
+            frozenset(
+                name
+                for case in node.cases
+                for name in _pattern_capture_names(case.pattern)
+            )
+        )
+        blocked_state = self._flow_state() or state
         for case in node.cases:
-            self._set_flow_state(state)
+            self._scope_import_states[-1] = blocked_state
             self.visit(case.pattern)
             self._record_dynamic_names(_pattern_capture_names(case.pattern))
             if case.guard is not None:
                 self.visit(case.guard)
             self._visit_block(case.body, nested=True)
-            if _block_can_continue(case.body):
-                continuing.append(self._flow_state() or state)
-        self._set_flow_state(_meet_import_flow_states(continuing))
+        self._scope_import_states[-1] = blocked_state
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for expression in _signature_nodes(node):
@@ -1023,6 +1116,19 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             uncertain.update(state.uncertain_names)
         return frozenset(uncertain)
 
+    def _scope_plain_imports(self) -> frozenset[str]:
+        """Return visible roots introduced by unaliased dotted imports."""
+        plain: set[str] = set()
+        for shadow_names, global_names, state in zip(
+            self._scope_shadow_names,
+            self._scope_global_names,
+            self._scope_import_states,
+            strict=True,
+        ):
+            plain.difference_update(shadow_names | global_names)
+            plain.update(state.plain_roots)
+        return frozenset(plain)
+
     def _scope_authoritative_imports(self) -> frozenset[str]:
         """Return definite imports established by function-flow states."""
         authoritative: set[str] = set()
@@ -1199,6 +1305,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.reference_global_names[node] = global_names
         self.reference_shadow_names[node] = shadow_names
         self.reference_import_targets[node] = self._scope_imports()
+        self.reference_plain_import_names[node] = self._scope_plain_imports()
         self.reference_import_bound[node] = import_bound
         self.reference_uncertain_import_names[node] = self._scope_uncertain_imports()
         self.reference_authoritative_import_names[node] = self._scope_authoritative_imports()
@@ -1261,55 +1368,6 @@ def _without_import_roots(bindings: Mapping[str, str], names: Iterable[str]) -> 
     }
 
 
-def _meet_import_flow_states(states: Iterable[_ImportFlowState]) -> _ImportFlowState:
-    """Keep only import values established identically on every path."""
-    paths = tuple(states)
-    if not paths:
-        return _ImportFlowState(flow_sensitive=True)
-    local_names = frozenset().union(*(state.local_names for state in paths))
-    roots = local_names | frozenset().union(
-        *(state.uncertain_names | _import_binding_roots(state.targets) for state in paths)
-    )
-    targets: dict[str, str] = {}
-    uncertain_names: set[str] = set()
-    for root in roots:
-        path_targets = tuple(
-            {
-                name: target
-                for name, target in state.targets.items()
-                if name.partition(".")[0] == root
-            }
-            for state in paths
-        )
-        if path_targets[0] and all(mapping == path_targets[0] for mapping in path_targets[1:]):
-            targets.update(path_targets[0])
-            continue
-        all_dynamic_or_unshadowed = all(
-            not mapping and root not in state.uncertain_names
-            for state, mapping in zip(paths, path_targets, strict=True)
-        )
-        if not all_dynamic_or_unshadowed:
-            uncertain_names.add(root)
-    return _ImportFlowState(
-        targets,
-        frozenset(uncertain_names),
-        local_names,
-        flow_sensitive=True,
-    )
-
-
-def _block_can_continue(statements: list[ast.stmt]) -> bool:
-    """Whether a block has a statically visible path to its following statement."""
-    if not statements:
-        return True
-    final = statements[-1]
-    if isinstance(final, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
-        return False
-    if isinstance(final, ast.If) and final.orelse:
-        return _block_can_continue(final.body) or _block_can_continue(final.orelse)
-    return True
-
-
 class _BindingCollector(ast.NodeVisitor):
     """Collect lexical binders without crossing nested execution scopes.
 
@@ -1323,6 +1381,7 @@ class _BindingCollector(ast.NodeVisitor):
         self.deleted_names: set[str] = set()
         self.import_targets: dict[str, str] = {}
         self.import_names: set[str] = set()
+        self.plain_import_names: set[str] = set()
         self.uncertain_import_names: set[str] = set()
         self.global_names: set[str] = set()
         self.nonlocal_names: set[str] = set()
@@ -1343,7 +1402,10 @@ class _BindingCollector(ast.NodeVisitor):
         # two can be compared.
         for alias in node.names:
             _update_import_bindings(self.import_targets, alias)
-            self.import_names.add(alias.asname or alias.name.partition(".")[0])
+            name = alias.asname or alias.name.partition(".")[0]
+            self.import_names.add(name)
+            if alias.asname is None and "." in alias.name:
+                self.plain_import_names.add(name)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         base = _relative_module(self._module_name, self._is_package, node.module, node.level)
@@ -1570,6 +1632,63 @@ def _import_targets(
     return collector.import_targets
 
 
+def _module_resolution(module: _Module, modules: Mapping[str, _Module]) -> _ModuleResolution:
+    """Build the baseline declaration and dotted-prefix resolution view."""
+    bindings: dict[str, _BindingDescriptor] = {}
+    plain_events: dict[str, list[str]] = {}
+    real_events: set[str] = set()
+    direct_names: set[str] = set()
+
+    def record(name: str, target: str, category: str) -> None:
+        bindings[name] = _BindingDescriptor(target, category)
+        direct_names.add(name)
+        if category == "plain":
+            plain_events.setdefault(name, []).append(target)
+        else:
+            real_events.add(name)
+
+    for statement in module.tree.body:
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                name = alias.asname or alias.name.partition(".")[0]
+                category = "plain" if alias.asname is None and "." in alias.name else "real"
+                record(name, alias.name, category)
+        elif isinstance(statement, ast.ImportFrom) and statement.module != "__future__":
+            base = _relative_module(
+                module.name, module.is_package, statement.module, statement.level
+            )
+            if base is None:
+                continue
+            for alias in statement.names:
+                if alias.name != "*":
+                    name = alias.asname or alias.name
+                    record(name, f"{base}.{alias.name}" if base else alias.name, "real")
+
+    collector = _BindingCollector(module.name, module.is_package)
+    nested_import_names: set[str] = set()
+    for statement in module.tree.body:
+        collector.visit(statement)
+        if not isinstance(statement, (ast.Import, ast.ImportFrom)):
+            nested_collector = _BindingCollector(module.name, module.is_package)
+            nested_collector.visit(statement)
+            nested_import_names.update(nested_collector.import_targets)
+    competing_names = (collector.names | set(collector.import_targets)) - direct_names
+    competing_names.update(collector.names & direct_names)
+    competing_names.update(nested_import_names)
+    blocked_names = real_events | competing_names
+    prefixes: dict[str, str] = {}
+    for name, targets in plain_events.items():
+        if name in blocked_names:
+            continue
+        for target in targets:
+            if target in modules:
+                prefixes[target] = target
+    plain_roots = frozenset(
+        name for name, descriptor in bindings.items() if descriptor.category == "plain"
+    )
+    return _ModuleResolution(bindings, prefixes, plain_roots)
+
+
 def _module_flow_states(
     module: _Module,
 ) -> tuple[dict[ast.stmt, _ImportFlowState], _ImportFlowState]:
@@ -1614,6 +1733,7 @@ def _context_for_flow_state(context: _ScopeContext, state: _ImportFlowState) -> 
     return replace(
         context,
         import_targets=state.targets,
+        plain_import_names=state.plain_roots,
         uncertain_import_names=state.uncertain_names,
         authoritative_import_names=_import_binding_roots(state.targets),
     )
@@ -1641,6 +1761,9 @@ def _class_context_after_statement(
         collector.global_names,
         context.class_scope_type_param_names,
     )
+    plain_import_names = set(context.plain_import_names)
+    plain_import_names.difference_update(collector.import_names)
+    plain_import_names.update(collector.plain_import_names)
     return replace(
         context,
         bound_names=(context.bound_names - context.class_scope_bound_names) | class_bound_names,
@@ -1650,6 +1773,7 @@ def _class_context_after_statement(
             collector.global_names,
             context.class_scope_outer_import_targets,
         ),
+        plain_import_names=frozenset(plain_import_names),
         class_scope_bound_names=class_bound_names,
     )
 
@@ -1731,6 +1855,14 @@ def _is_staticmethod(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 
 _RECEIVER_NAMES = frozenset({"self", "cls"})
 _IMPLICIT_CLASSMETHODS = frozenset({"__new__", "__init_subclass__", "__class_getitem__"})
+
+
+def _flow_touched_names(statements: Iterable[ast.stmt]) -> frozenset[str]:
+    """Return names whose bindings may change in a control-flow suite."""
+    collector = _BindingCollector()
+    for statement in statements:
+        collector.visit(statement)
+    return frozenset(collector.names | collector.import_names | collector.deleted_names)
 
 
 def _target_names(target: ast.expr) -> frozenset[str]:
@@ -1979,6 +2111,7 @@ def _analyze_module(
 ) -> None:
     aliases = _imports(module, modules, declarations, relationships, nodes, emitter, tally)
     module_imports = _import_targets(module.tree.body, module.name, module.is_package)
+    module_resolution = _module_resolution(module, modules)
     module_states, final_module_state = _module_flow_states(module)
     context = _ScopeContext(
         declarations,
@@ -1993,6 +2126,8 @@ def _analyze_module(
         module_imports,
         is_package=module.is_package,
         modules=modules,
+        module_resolution=module_resolution,
+        plain_import_names=module_resolution.plain_roots,
     )
     for symbol in symbols.values():
         relationships.add(
@@ -2080,6 +2215,7 @@ def _analyze_module(
                 class_scope_bound_names=frozenset(_type_param_names(statement)),
                 class_scope_type_param_names=frozenset(_type_param_names(statement)),
                 class_scope_outer_import_targets=context.import_targets,
+                class_scope_outer_plain_import_names=context.plain_import_names,
             )
             _calls(
                 class_context,
@@ -2403,6 +2539,7 @@ def _calls(
                 visitor.call_global_names[candidate],
                 visitor.call_shadow_names[candidate],
                 visitor.call_import_targets[candidate],
+                visitor.call_plain_import_names[candidate],
                 visitor.call_import_bound[candidate],
                 visitor.call_uncertain_import_names[candidate],
                 visitor.call_authoritative_import_names[candidate],
@@ -2429,6 +2566,7 @@ def _calls(
                 visitor.reference_global_names[reference],
                 visitor.reference_shadow_names[reference],
                 visitor.reference_import_targets[reference],
+                visitor.reference_plain_import_names[reference],
                 visitor.reference_import_bound[reference],
                 visitor.reference_uncertain_import_names[reference],
                 visitor.reference_authoritative_import_names[reference],
@@ -2453,9 +2591,11 @@ def _without_enclosing_class_scope(context: _ScopeContext) -> _ScopeContext:
         context,
         bound_names=(context.bound_names - context.class_scope_bound_names) | type_param_names,
         import_targets=outer_import_targets,
+        plain_import_names=context.class_scope_outer_plain_import_names or frozenset(),
         class_scope_bound_names=type_param_names,
         class_scope_type_param_names=type_param_names,
         class_scope_outer_import_targets=None,
+        class_scope_outer_plain_import_names=None,
     )
 
 
@@ -2465,6 +2605,7 @@ def _scoped_context(
     global_names: frozenset[str],
     shadow_names: frozenset[str],
     import_targets: Mapping[str, str],
+    plain_import_names: frozenset[str],
     import_bound_names: frozenset[str],
     uncertain_import_names: frozenset[str],
     authoritative_import_names: frozenset[str],
@@ -2477,11 +2618,14 @@ def _scoped_context(
     the nearest binding governs, and an import is not a dynamic local.
     """
     visible_import_targets = _without_import_roots(context.import_targets, import_shadow_names)
+    visible_plain_names = set(context.plain_import_names - import_shadow_names)
     visible_uncertain_names = set(context.uncertain_import_names - import_shadow_names)
     visible_authoritative_names = set(context.authoritative_import_names - import_shadow_names)
     visitor_import_names = _import_binding_roots(import_targets) | uncertain_import_names
     visible_import_targets = _without_import_roots(visible_import_targets, visitor_import_names)
     visible_import_targets.update(import_targets)
+    visible_plain_names.difference_update(import_shadow_names)
+    visible_plain_names.update(plain_import_names)
     visible_uncertain_names.difference_update(visitor_import_names)
     visible_uncertain_names.update(uncertain_import_names)
     visible_authoritative_names.difference_update(visitor_import_names)
@@ -2490,6 +2634,7 @@ def _scoped_context(
         context,
         bound_names=bound_names - global_names - import_bound_names,
         import_targets=visible_import_targets,
+        plain_import_names=frozenset(visible_plain_names),
         uncertain_import_names=frozenset(visible_uncertain_names),
         authoritative_import_names=frozenset(visible_authoritative_names),
         receiver_name=None if context.receiver_name in shadow_names else context.receiver_name,
@@ -2645,27 +2790,33 @@ def _resolve_call(
             return None
         _, _, tail = text.partition(".")
         return class_declarations.get(tail)
-    # A module prefix is eligible only while its root still denotes itself.
-    # Later aliases such as ``import other as pkg`` invalidate ``pkg.util``;
-    # bypassing the alias table here would resurrect that stale module path.
-    root_alias = context.aliases.get(head)
-    root_is_unrebound = (root_alias == head or local_target == head) and (
-        local_target is None or local_target == head
-    )
-    if "." in text and root_is_unrebound:
-        parts = text.split(".")
-        for index in range(len(parts), 0, -1):
-            prefix = ".".join(parts[:index])
-            if prefix in context.modules:
-                # Prefer the module's full qualified declaration before the
-                # flat table's class key. This prevents a module and class
-                # with the same name from colliding without rekeying the
-                # shared declarations table. Minotaur intentionally analyzes
-                # the workspace as a whole, so importing a parent module
-                # permits a qualified child lookup without a separate child
-                # import. The visible root binding remains required: a
-                # workspace file alone does not authorize an unbound expression.
-                return context.declarations.get(text)
+    if head in context.plain_import_names:
+        if "." not in text:
+            return None
+        for prefix, plain_target in sorted(
+            context.import_targets.items(),
+            key=lambda item: len(item[0].split(".")),
+            reverse=True,
+        ):
+            if prefix == head:
+                continue
+            marker = f"{prefix}."
+            if text.startswith(marker):
+                suffix = text[len(marker) :]
+                return context.declarations.get(f"{plain_target}.{suffix}")
+        if context.module_resolution is not None:
+            for prefix, target in sorted(
+                context.module_resolution.prefixes.items(),
+                key=lambda item: len(item[0].split(".")),
+                reverse=True,
+            ):
+                if text == prefix:
+                    return context.declarations.get(target)
+                marker = f"{prefix}."
+                if text.startswith(marker):
+                    suffix = text[len(marker) :]
+                    return context.declarations.get(f"{target}.{suffix}")
+        return None
     # Analysis declarations cover the workspace as a whole, so resolve a
     # dotted call through its longest imported prefix. This preserves a
     # specific alias such as ``pkg.submodule`` when a shorter ``pkg`` alias is
@@ -2674,13 +2825,13 @@ def _resolve_call(
     parts = text.split(".")
     for index in range(len(parts), 0, -1):
         prefix = ".".join(parts[:index])
-        alias_target_name = context.import_targets.get(prefix)
-        if alias_target_name is None:
-            alias_target_name = context.aliases.get(prefix)
-        if alias_target_name is None:
+        resolved_target: str | None = context.import_targets.get(prefix)
+        if resolved_target is None:
+            resolved_target = context.aliases.get(prefix)
+        if resolved_target is None:
             continue
         suffix = ".".join(parts[index:])
-        target_name = f"{alias_target_name}.{suffix}" if suffix else alias_target_name
+        target_name = f"{resolved_target}.{suffix}" if suffix else resolved_target
         # Once a prefix is bound, an absent member is unresolved; falling back
         # to a shorter alias could attribute the same source expression to a
         # different workspace object.
