@@ -509,6 +509,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         state = self._flow_state()
         if state is None or state.flow_frozen or not names:
             return
+        names &= state.local_names | state.uncertain_names | _import_binding_roots(state.targets)
+        if not names:
+            return
         self._set_flow_state(
             replace(
                 state,
