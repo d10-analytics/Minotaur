@@ -5471,6 +5471,150 @@ def test_try_handler_blocks_import_replaced_before_exception(
     ) not in _edge_labels(result)
 
 
+@pytest.mark.parametrize(
+    ("compound", "call_line", "reference_line", "unresolved_lines"),
+    [
+        (
+            "if flag:\n"
+            "        called = helper()\n"
+            "        referenced = helper\n"
+            "        helper = object()\n",
+            4,
+            5,
+            {7},
+        ),
+        (
+            "for value in values:\n"
+            "        called = helper()\n"
+            "        referenced = helper\n"
+            "        helper = object()\n",
+            4,
+            5,
+            {7},
+        ),
+        (
+            "while flag:\n"
+            "        called = helper()\n"
+            "        referenced = helper\n"
+            "        helper = object()\n",
+            4,
+            5,
+            {7},
+        ),
+        (
+            "with resource:\n"
+            "        called = helper()\n"
+            "        referenced = helper\n"
+            "        helper = object()\n",
+            4,
+            5,
+            {7},
+        ),
+        (
+            "match flag:\n"
+            "        case _:\n"
+            "            called = helper()\n"
+            "            referenced = helper\n"
+            "            helper = object()\n",
+            5,
+            6,
+            {8},
+        ),
+    ],
+)
+def test_compound_body_preserves_incoming_call_and_reference_before_mutation(
+    tmp_path: Path,
+    compound: str,
+    call_line: int,
+    reference_line: int,
+    unresolved_lines: set[int],
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(flag, values, resource):\n"
+        "    from library import helper\n"
+        f"    {compound}"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    helper = _node_id(result, "library.helper")
+    relationships = {
+        relationship.kind: relationship
+        for relationship in result.document.relationships
+        if relationship.source == run and relationship.target == helper
+    }
+    assert {
+        location.range.start.line + 1
+        for evidence in relationships[RelationshipKind.CALLS.value].evidence
+        for location in evidence.locations
+    } == {call_line}
+    assert {
+        location.range.start.line + 1
+        for evidence in relationships[RelationshipKind.REFERENCES.value].evidence
+        for location in evidence.locations
+    } == {reference_line}
+    assert _unresolved_sites(result) >= {
+        ("app.run", "helper", line) for line in unresolved_lines
+    }
+
+
+def test_try_handler_starts_after_possible_try_body_write_but_before_handler_write(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def run(flag):\n"
+        "    from library import helper\n"
+        "    try:\n"
+        "        called = helper()\n"
+        "        referenced = helper\n"
+        "        helper = object()\n"
+        "    except RuntimeError:\n"
+        "        handled = helper()\n"
+        "    return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    run = _node_id(result, "app.run")
+    helper = _node_id(result, "library.helper")
+    calls = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.CALLS.value
+    ]
+    references = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == run
+        and relationship.target == helper
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    ]
+    assert {
+        location.range.start.line + 1
+        for relationship in calls
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {4}
+    assert {
+        location.range.start.line + 1
+        for relationship in references
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {5}
+    assert _unresolved_sites(result) >= {
+        ("app.run", "helper", 8),
+        ("app.run", "helper", 9),
+    }
+
+
 def test_eager_comprehension_walrus_updates_outer_overlay_generator_walrus_does_not(
     tmp_path: Path,
 ) -> None:
