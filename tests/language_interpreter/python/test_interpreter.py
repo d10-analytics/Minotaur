@@ -55,6 +55,22 @@ def _unresolved_by_source(result: AnalysisResult) -> dict[str, set[str]]:
     return grouped
 
 
+def _unresolved_sites(result: AnalysisResult) -> set[tuple[str, str, int]]:
+    labels = {node.id: node.label for node in result.document.nodes}
+    texts = {
+        node.id: node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    return {
+        (labels[relationship.source], texts[relationship.target], location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.target in texts
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+
 def _edge_labels(result: AnalysisResult) -> set[tuple[str, str, str]]:
     """Return label-keyed relationship triples for readable expectations."""
     labels = {node.id: node.label for node in result.document.nodes}
@@ -970,6 +986,86 @@ def test_function_local_import_is_reportable_and_lazy_reimports_resolve(
     assert ("app.lazy_reimport", "library.Thing", RelationshipKind.CALLS.value) in _edge_labels(
         result
     )
+
+
+def test_function_local_import_routes_bind_calls_and_loads_at_source_positions(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def named():\n    return 1\n")
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def dotted():\n    return 2\n")
+    _write(tmp_path, "other.py", "def aliased():\n    return 3\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n"
+        "    from library import named\n"
+        "    named()\n"
+        "    callback = named\n"
+        "    import pkg.sub\n"
+        "    pkg.sub.dotted()\n"
+        "    import other as alias\n"
+        "    alias.aliased()\n"
+        "    return callback\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    facts = {
+        fact
+        for fact in _edge_labels(result)
+        if fact[0] == "app.invoke"
+        and fact[2] in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+    }
+    assert facts == {
+        ("app.invoke", "library.named", RelationshipKind.CALLS.value),
+        ("app.invoke", "library.named", RelationshipKind.REFERENCES.value),
+        ("app.invoke", "pkg.sub.dotted", RelationshipKind.CALLS.value),
+        ("app.invoke", "other.aliased", RelationshipKind.CALLS.value),
+    }
+    assert _unresolved_by_source(result).get("app.invoke", set()) == set()
+
+
+def test_function_import_loss_and_reimport_emit_one_unresolved_site(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n"
+        "    from library import go\n"
+        "    go()\n"
+        "    del go\n"
+        "    go()\n"
+        "    from library import go\n"
+        "    go()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert ("app.invoke", "library.go", RelationshipKind.CALLS.value) in _edge_labels(result)
+    assert _unresolved_sites(result) == {("app.invoke", "go", 5)}
+    assert ("app", "library.go", RelationshipKind.IMPORTS.value) in _edge_labels(result)
+
+
+def test_module_default_before_import_and_deferred_body_use_final_state(tmp_path: Path) -> None:
+    _write(tmp_path, "first.py", "def go():\n    return 1\n")
+    _write(tmp_path, "second.py", "def go():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def immediate(value=lib.go):\n"
+        "    return value\n\n"
+        "import first as lib\n"
+        "def deferred():\n"
+        "    return lib.go()\n\n"
+        "import second as lib\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    assert ("app.immediate", "first.go", RelationshipKind.REFERENCES.value) not in edges
+    assert ("app.immediate", "lib.go", RelationshipKind.REFERENCES.value) in edges
+    assert ("app.deferred", "first.go", RelationshipKind.CALLS.value) not in edges
+    assert ("app.deferred", "second.go", RelationshipKind.CALLS.value) in edges
+    assert _unresolved_sites(result) == {("app.immediate", "lib.go", 1)}
 
 
 def test_implicit_class_receivers_resolve_through_the_owning_class(tmp_path: Path) -> None:
