@@ -907,23 +907,28 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # A handler can observe a write made before an exception in the try
         # body. Keep that uncertainty, while isolating each handler from the
         # writes made by its siblings.
-        handler_state = self._blocked_flow_state(body_exit_state, handler_names)
-        self._scope_import_states[-1] = handler_state
+        self._scope_import_states[-1] = body_exit_state
         self._visit_block(node.orelse, nested=True)
         orelse_exit_state = self._blocked_flow_state(
             body_exit_state, _flow_touched_names(node.orelse)
         )
         handler_exit_names: set[str] = set(handler_names)
         for handler in node.handlers:
-            self._scope_import_states[-1] = handler_state
+            # The exception type is evaluated before the ``as`` target is
+            # assigned, so an imported name may still be referenced there.
+            self._scope_import_states[-1] = body_exit_state
             if handler.type is not None:
                 self.visit(handler.type)
             if handler.name is not None:
                 self._record_dynamic_names(frozenset((handler.name,)))
+            handler_state = self._flow_state() or body_exit_state
+            self._scope_import_states[-1] = handler_state
             self._visit_block(handler.body, nested=True)
             if handler.name is not None:
                 self._record_deleted_names(frozenset((handler.name,)))
             handler_exit_names.update(_flow_touched_names(handler.body))
+            if handler.type is not None:
+                handler_exit_names.update(_flow_touched_node(handler.type))
         final_state = self._blocked_flow_state(
             orelse_exit_state, frozenset(handler_exit_names)
         )
@@ -944,11 +949,21 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.visit(case.pattern)
             captures = _pattern_capture_names(case.pattern)
             self._record_dynamic_names(captures)
+            guard_state = self._flow_state() or case_state
             if case.guard is not None:
+                self._scope_import_states[-1] = guard_state
                 self.visit(case.guard)
+                guard_state = self._flow_state() or guard_state
+            # A failed guard can leave its walrus and pattern bindings in
+            # place, so later cases inherit the post-guard state. Body writes
+            # remain isolated to the selected alternative.
+            self._scope_import_states[-1] = guard_state
             self._visit_block(case.body, nested=True)
+            case_state = guard_state
             touched.update(captures)
             touched.update(_flow_touched_names(case.body))
+            if case.guard is not None:
+                touched.update(_flow_touched_node(case.guard))
         self._blocked_flow_state(case_state, frozenset(touched))
 
     def _visit_definition_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -2148,6 +2163,13 @@ def _flow_touched_names(statements: Iterable[ast.stmt]) -> frozenset[str]:
     collector = _BindingCollector()
     for statement in statements:
         collector.visit(statement)
+    return frozenset(collector.names | collector.import_names | collector.deleted_names)
+
+
+def _flow_touched_node(node: ast.AST) -> frozenset[str]:
+    """Return names whose bindings may change while evaluating one node."""
+    collector = _BindingCollector()
+    collector.visit(node)
     return frozenset(collector.names | collector.import_names | collector.deleted_names)
 
 
