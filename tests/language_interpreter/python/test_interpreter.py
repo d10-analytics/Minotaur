@@ -1068,6 +1068,88 @@ def test_module_default_before_import_and_deferred_body_use_final_state(tmp_path
     assert _unresolved_sites(result) == {("app.immediate", "lib.go", 1)}
 
 
+def test_source_position_routes_prove_owner_location_and_syntactic_imports(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def named():\n    return 1\n")
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def dotted():\n    return 2\n")
+    _write(tmp_path, "other.py", "def aliased():\n    return 3\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def invoke():\n"
+        "    from library import named\n"
+        "    named()\n"
+        "    named_ref = named\n"
+        "    import pkg.sub\n"
+        "    pkg.sub.dotted()\n"
+        "    dotted_ref = pkg.sub.dotted\n"
+        "    import other as alias\n"
+        "    alias.aliased()\n"
+        "    alias_ref = alias.aliased\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    expected = {
+        ("library.named", RelationshipKind.CALLS.value, 3),
+        ("library.named", RelationshipKind.REFERENCES.value, 4),
+        ("pkg.sub.dotted", RelationshipKind.CALLS.value, 6),
+        ("pkg.sub.dotted", RelationshipKind.REFERENCES.value, 7),
+        ("other.aliased", RelationshipKind.CALLS.value, 9),
+        ("other.aliased", RelationshipKind.REFERENCES.value, 10),
+    }
+    invoke = _node_id(result, "app.invoke")
+    for target_label, kind, line in expected:
+        relationship = next(
+            relationship
+            for relationship in result.document.relationships
+            if relationship.source == invoke
+            and relationship.target == _node_id(result, target_label)
+            and relationship.kind == kind
+        )
+        assert [
+            (location.path, location.range.start.line + 1)
+            for evidence in relationship.evidence
+            for location in evidence.locations
+        ] == [("app.py", line)]
+    assert {("app", target, RelationshipKind.IMPORTS.value) for target in (
+        "library.named", "pkg.sub", "other"
+    )} <= _edge_labels(result)
+    assert _unresolved_by_source(result).get("app.invoke", set()) == set()
+
+
+def test_immediate_module_call_and_default_keep_source_state_from_deferred_body(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "first.py", "def go():\n    return 1\n")
+    _write(tmp_path, "second.py", "def go():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "before = alias.go()\n"
+        "def immediate(value=alias.go):\n"
+        "    return value\n"
+        "import first as alias\n"
+        "def deferred():\n"
+        "    return alias.go()\n"
+        "import second as alias\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+    assert ("app", "first.go", RelationshipKind.CALLS.value) not in edges
+    assert ("app", "second.go", RelationshipKind.CALLS.value) not in edges
+    assert ("app.deferred", "first.go", RelationshipKind.CALLS.value) not in edges
+    assert ("app.deferred", "second.go", RelationshipKind.CALLS.value) in edges
+    assert _unresolved_sites(result) == {
+        ("app", "alias.go", 1),
+        ("app.immediate", "alias.go", 2),
+    }
+    assert ("app", "first", RelationshipKind.IMPORTS.value) in edges
+    assert ("app", "second", RelationshipKind.IMPORTS.value) in edges
+
+
 def test_implicit_class_receivers_resolve_through_the_owning_class(tmp_path: Path) -> None:
     _write(
         tmp_path,
@@ -4436,7 +4518,7 @@ def test_dotted_import_lexical_descriptors_preserve_nearest_routes(tmp_path: Pat
 
     result = analyze_python_workspace(tmp_path)
     unresolved = _unresolved_by_source(result)
-    assert "pkg.sub.go" in unresolved.get("app.caller", set())
+    assert unresolved.get("app.caller", set()) == set()
     run = _node_id(result, "app.Runner.run")
     target = _node_id(result, "pkg.sub.go")
     relationships = _relationship_map(result)
@@ -4474,7 +4556,7 @@ def test_nested_plain_dotted_imports_remain_syntactic_only(tmp_path: Path) -> No
     )
 
     result = analyze_python_workspace(tmp_path)
-    assert "pkg.sub.go" in _unresolved_by_source(result).get("app.function", set())
+    assert _unresolved_by_source(result).get("app.function", set()) == set()
     assert "pkg.sub.go" in _unresolved_by_source(result).get("app", set())
     imports = [
         edge
@@ -4850,6 +4932,10 @@ def test_nested_plain_dotted_imports_are_syntactic_only_in_each_container(
     _write(tmp_path, "app.py", f"{block}\n")
 
     result = analyze_python_workspace(tmp_path)
+    if owner == "app.run":
+        assert ("app.run", "pkg.sub.go", RelationshipKind.CALLS.value) in _edge_labels(result)
+        assert "pkg.sub.go" not in _unresolved_by_source(result).get(owner, set())
+        return
     assert "pkg.sub.go" in _unresolved_by_source(result).get(owner, set())
     assert not any(
         relationship.source == _node_id(result, owner)
@@ -4993,7 +5079,7 @@ def test_plain_dotted_import_final_route_orders_cover_all_legacy_families(
     "route_kind",
     ["undotted", "aliased_undotted", "aliased_dotted", "from_named", "from_aliased_named"],
 )
-def test_plain_route_history_keeps_final_real_route_and_disables_stale_prefix(
+def test_plain_route_history_preserves_source_position_and_final_route(
     tmp_path: Path, route_kind: str
 ) -> None:
     if route_kind == "undotted":
@@ -5041,9 +5127,11 @@ def test_plain_route_history_keeps_final_real_route_and_disables_stale_prefix(
     target_a_id = _node_id(result, target_a)
     assert (app, target_b_id, RelationshipKind.CALLS.value) in relationships
     assert (app, target_b_id, RelationshipKind.REFERENCES.value) in relationships
-    assert (app, target_a_id, RelationshipKind.CALLS.value) not in relationships
-    assert (app, target_a_id, RelationshipKind.REFERENCES.value) not in relationships
-    assert "pkg.go" not in _unresolved_by_source(result).get("app", set())
+    # Immediate module expressions use the route active at their own source
+    # position, so the first route remains represented alongside the final one.
+    assert (app, target_a_id, RelationshipKind.CALLS.value) in relationships
+    assert (app, target_a_id, RelationshipKind.REFERENCES.value) in relationships
+    assert _unresolved_by_source(result).get("app", set()) == {"pkg.go"}
 
 
 @pytest.mark.parametrize("plain_first", [True, False])
@@ -5066,10 +5154,11 @@ def test_plain_and_undotted_pkg_route_preserve_or_reject_qualified_members(
         assert ("app", "pkg.other.go", RelationshipKind.CALLS.value) in edges
         assert not _unresolved_by_source(result).get("app")
     else:
-        assert _unresolved_by_source(result)["app"] >= {"pkg.sub.go", "pkg.other.go", "pkg"}
+        assert ("app", "pkg.sub.go", RelationshipKind.CALLS.value) in edges
+        assert _unresolved_by_source(result)["app"] >= {"pkg.other.go", "pkg"}
         declaration_ids = {
             node.id
-            for label in ("pkg.sub.go", "pkg.other.go", "pkg")
+            for label in ("pkg.other.go", "pkg")
             for node in _nodes(result, label)
             if node.node_class != NodeClass.UNRESOLVED_REFERENCE
         }
@@ -5158,7 +5247,7 @@ def test_lexical_same_target_routes_survive_and_different_near_routes_refuse_out
 
     result = analyze_python_workspace(tmp_path)
     assert ("app.same", target_label, RelationshipKind.CALLS.value) in _edge_labels(result)
-    assert "pkg.go" in _unresolved_by_source(result).get("app.different", set())
+    assert _unresolved_by_source(result).get("app.different", set()) == set()
     assert ("app.different", target_label, RelationshipKind.CALLS.value) not in _edge_labels(result)
 
 
@@ -5206,7 +5295,7 @@ def test_plain_prefix_does_not_bypass_parameter_or_dynamic_assignment_locals(
     result = analyze_python_workspace(tmp_path)
     unresolved = _unresolved_by_source(result)
     assert "pkg.sub.go" not in unresolved.get("app.parameter", set())
-    assert unresolved.get("app.assigned", set()) == {"build", "pkg.sub.go"}
+    assert unresolved.get("app.assigned", set()) == {"build"}
     assert "build" in unresolved.get("app.assigned", set())
     assert ("app.parameter", "pkg.sub.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
     assert ("app.assigned", "pkg.sub.go", RelationshipKind.CALLS.value) not in _edge_labels(result)
