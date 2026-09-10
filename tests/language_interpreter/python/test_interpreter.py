@@ -1113,9 +1113,10 @@ def test_source_position_routes_prove_owner_location_and_syntactic_imports(
             for evidence in relationship.evidence
             for location in evidence.locations
         ] == [("app.py", line)]
-    assert {("app", target, RelationshipKind.IMPORTS.value) for target in (
-        "library.named", "pkg.sub", "other"
-    )} <= _edge_labels(result)
+    assert {
+        ("app", target, RelationshipKind.IMPORTS.value)
+        for target in ("library.named", "pkg.sub", "other")
+    } <= _edge_labels(result)
     assert _unresolved_by_source(result).get("app.invoke", set()) == set()
 
 
