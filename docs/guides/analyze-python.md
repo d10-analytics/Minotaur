@@ -239,9 +239,12 @@ binding state.
 
 Imports in `if`, loop, `try`, `with`, and `match` bodies remain syntactic
 `IMPORTS` facts. They do not establish a control-flow-local route or a branch
-join. Possibly changed roots become uncertain at continuation, while untouched
-routes retain their state. Direct imports in a function body outside such a
-container remain supported.
+join. An already-established route remains available to an ordered body read
+until a direct write changes it; a possibly changed root is uncertain at
+continuation, while untouched routes retain their state. On a successful `try`
+path, `else` sees the body state, and a handler type is read before its `as`
+target. A match-guard write affects later guards and continuation. Direct
+imports in a function body outside such a container remain supported.
 
 The first iterable of a comprehension is evaluated in the enclosing scope;
 later iterables, filters, and result expressions see comprehension-local
