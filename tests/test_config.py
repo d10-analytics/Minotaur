@@ -410,6 +410,321 @@ def test_configless_explicit_root_still_emits_a_docs_systems_default(
     assert resolved.systems_dir == root / "docs" / "systems"
 
 
+def test_parse_config_bytes_preserves_raw_values_without_source_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Captured labels are diagnostics only, including a currently-linked label."""
+    target = tmp_path / "current" / ".minotaur.toml"
+    target.parent.mkdir()
+    linked = tmp_path / "archive" / "label.toml"
+    linked.parent.mkdir()
+    linked.symlink_to(target)
+    absent = tmp_path / "missing" / "historical.toml"
+    data = (
+        b"[minotaur]\n"
+        b"schema_version = 1\nroot = 'raw-root'\n"
+        b"graph = 'raw-graph'\ntargets = ['z.py', '', 'a.py']\n"
+        b"systems_dir = 'raw-systems'\n"
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("supplied config parsing consulted the filesystem")
+
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(config, "_anchor_config", forbidden)
+
+    first = config.parse_config_bytes(data, source=absent)
+    second = config.parse_config_bytes(data, source=linked)
+
+    assert first == second
+    assert first.root == "raw-root"
+    assert first.graph == "raw-graph"
+    assert first.targets == ("z.py", "", "a.py")
+    assert first.systems_dir == "raw-systems"
+    with pytest.raises(AttributeError):
+        first.root = "changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        pytest.param(b"\xff", "invalid UTF-8", id="invalid-utf8"),
+        pytest.param(b"[minotaur\n", "invalid TOML", id="invalid-toml"),
+    ],
+)
+def test_supplied_bytes_decode_failures_name_the_source(data: bytes, message: str) -> None:
+    source = "historical-label.toml"
+
+    with pytest.raises(ConfigError, match=re.escape(source)) as error:
+        config.parse_config_bytes(data, source=source)
+
+    assert message in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        pytest.param(b"\xff", "invalid UTF-8", id="invalid-utf8"),
+        pytest.param(b"[minotaur\n", "invalid TOML", id="invalid-toml"),
+    ],
+)
+def test_disk_decode_failures_name_the_file(tmp_path: Path, data: bytes, message: str) -> None:
+    path = tmp_path / "broken.toml"
+    path.write_bytes(data)
+
+    with pytest.raises(ConfigError, match=re.escape(str(path))) as error:
+        config.read_toml_file(path)
+
+    assert message in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        pytest.param("title = 'no section'\n", "[minotaur]", id="missing-section"),
+        pytest.param("minotaur = 5\n", "must be a table", id="non-mapping-section"),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = ['src']\nunknown = true\n",
+            "unknown config field: unknown",
+            id="unknown-key",
+        ),
+        pytest.param("[minotaur]\ntargets = ['src']\n", "schema_version", id="missing-version"),
+        pytest.param(
+            "[minotaur]\nschema_version = true\ntargets = ['src']\n",
+            "schema_version must be an integer",
+            id="boolean-version",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = '1'\ntargets = ['src']\n",
+            "schema_version must be an integer",
+            id="non-integer-version",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 2\ntargets = ['src']\n",
+            "unsupported schema_version",
+            id="unsupported-version",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\nroot = 5\ntargets = ['src']\n",
+            "config root must be a string",
+            id="non-string-root",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ngraph = 5\ntargets = ['src']\n",
+            "config graph must be a string",
+            id="non-string-graph",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\nsystems_dir = 5\ntargets = ['src']\n",
+            "config systems_dir must be a string",
+            id="non-string-systems-dir",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\n",
+            "missing required field: targets",
+            id="missing-targets",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = []\n",
+            "config targets must not be empty",
+            id="empty-targets",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = 'src'\n",
+            "config targets must be a list of strings",
+            id="non-list-targets",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = [1]\n",
+            "config targets must be a list of strings",
+            id="non-string-target",
+        ),
+    ],
+)
+def test_supplied_schema_failures_name_the_source(body: str, message: str) -> None:
+    source = "captured-config.toml"
+
+    with pytest.raises(ConfigError, match=re.escape(source)) as error:
+        config.parse_config_bytes(body.encode(), source=source)
+
+    assert message in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        pytest.param("title = 'no section'\n", "[minotaur]", id="missing-section"),
+        pytest.param("minotaur = 5\n", "must be a table", id="non-mapping-section"),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = ['src']\nunknown = true\n",
+            "unknown config field: unknown",
+            id="unknown-key",
+        ),
+        pytest.param("[minotaur]\ntargets = ['src']\n", "schema_version", id="missing-version"),
+        pytest.param(
+            "[minotaur]\nschema_version = true\ntargets = ['src']\n",
+            "schema_version must be an integer",
+            id="boolean-version",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = '1'\ntargets = ['src']\n",
+            "schema_version must be an integer",
+            id="non-integer-version",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 2\ntargets = ['src']\n",
+            "unsupported schema_version",
+            id="unsupported-version",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\nroot = 5\ntargets = ['src']\n",
+            "config root must be a string",
+            id="non-string-root",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ngraph = 5\ntargets = ['src']\n",
+            "config graph must be a string",
+            id="non-string-graph",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\nsystems_dir = 5\ntargets = ['src']\n",
+            "config systems_dir must be a string",
+            id="non-string-systems-dir",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\n",
+            "missing required field: targets",
+            id="missing-targets",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = []\n",
+            "config targets must not be empty",
+            id="empty-targets",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = 'src'\n",
+            "config targets must be a list of strings",
+            id="non-list-targets",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = [1]\n",
+            "config targets must be a list of strings",
+            id="non-string-target",
+        ),
+    ],
+)
+def test_disk_schema_failures_name_the_config_source(
+    tmp_path: Path, body: str, message: str
+) -> None:
+    cfg = _write(tmp_path, ".minotaur.toml", body)
+
+    with pytest.raises(ConfigError, match=re.escape(str(cfg))) as error:
+        resolve_config(tmp_path)
+
+    assert message in str(error.value)
+
+
+def test_raw_defaults_and_explicit_empty_values_remain_distinct_from_disk_values(
+    tmp_path: Path,
+) -> None:
+    omitted = config.parse_config_bytes(
+        b"[minotaur]\nschema_version = 1\ntargets = ['src']\n",
+        source="omitted.toml",
+    )
+    assert omitted == config.ValidatedConfig(
+        root="", graph="minotaur-graph.json", targets=("src",), systems_dir="docs/systems"
+    )
+
+    cfg = _write(
+        tmp_path,
+        "cfg/.minotaur.toml",
+        "[minotaur]\nschema_version = 1\nroot = ''\ngraph = ''\ntargets = ['']\nsystems_dir = ''\n",
+    )
+    raw = config.parse_config_bytes(cfg.read_bytes(), source=cfg)
+    resolved = resolve_config(cfg.parent)
+
+    assert raw == config.ValidatedConfig(root="", graph="", targets=("",), systems_dir="")
+    assert resolved.root == cfg.parent.resolve()
+    assert resolved.graph == cfg.parent.resolve()
+    assert resolved.targets == (cfg.parent.resolve(),)
+    assert resolved.systems_dir == cfg.parent.resolve()
+
+
+def test_raw_validation_precedes_anchor_for_mixed_invalid_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        "[minotaur]\nschema_version = 1\ntargets = ['../escape.py']\nsystems_dir = 5\n",
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("invalid raw config entered disk anchoring")
+
+    monkeypatch.setattr(config, "_anchor_config", forbidden)
+
+    with pytest.raises(ConfigError, match=re.escape(str(cfg))) as error:
+        resolve_config(tmp_path)
+
+    assert "config systems_dir must be a string" in str(error.value)
+
+
+def test_valid_raw_escaping_target_reaches_anchor_and_reports_containment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        "[minotaur]\nschema_version = 1\ntargets = ['../escape.py']\nsystems_dir = 'systems'\n",
+    )
+    calls = 0
+    original = config._anchor_config
+
+    def counting(validated: config.ValidatedConfig, *, source: Path) -> object:
+        nonlocal calls
+        calls += 1
+        return original(validated, source=source)
+
+    monkeypatch.setattr(config, "_anchor_config", counting)
+
+    with pytest.raises(ConfigError, match=re.escape(str(cfg))) as error:
+        resolve_config(tmp_path)
+
+    assert calls == 1
+    assert "config target escapes root" in str(error.value)
+
+
+def test_disk_and_supplied_routes_share_the_private_raw_validator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _write(tmp_path, ".minotaur.toml", _CONFIG)
+    original = config._validate_config
+    calls: list[Path | str] = []
+
+    def changed(raw: dict[str, object], *, source: Path | str) -> config.ValidatedConfig:
+        calls.append(source)
+        validated = original(raw, source=source)
+        return config.ValidatedConfig(
+            root="mutated-root",
+            graph=validated.graph,
+            targets=("mutated.py",),
+            systems_dir=validated.systems_dir,
+        )
+
+    monkeypatch.setattr(config, "_validate_config", changed)
+
+    disk = resolve_config(tmp_path)
+    supplied = config.parse_config_bytes(_CONFIG.encode(), source="captured.toml")
+
+    assert disk.root == (tmp_path / "mutated-root").resolve()
+    assert disk.targets == ((tmp_path / "mutated-root" / "mutated.py").resolve(),)
+    assert supplied.root == "mutated-root"
+    assert supplied.targets == ("mutated.py",)
+    assert calls == [cfg.resolve(), "captured.toml"]
+
+
 def test_systems_dir_is_resolved_exactly_once_by_the_single_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -511,9 +826,11 @@ def test_config_reloads_through_the_tomli_fallback(
         _write(cfg_dir, ".minotaur.toml", _CONFIG)
 
         resolved = module.resolve_config(cfg_dir)
+        captured = module.parse_config_bytes(_CONFIG.encode(), source="historical.toml")
 
         assert resolved.targets == ((cfg_dir / "src").resolve(),)
-        assert loads_calls  # The real config file was parsed via the stand-in.
+        assert captured.targets == ("src",)
+        assert len(loads_calls) >= 2  # Disk and supplied routes use tomli.loads.
     finally:
         monkeypatch.undo()
         module.__dict__.clear()

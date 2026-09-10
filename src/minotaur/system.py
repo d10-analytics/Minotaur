@@ -37,13 +37,13 @@ from __future__ import annotations
 
 import difflib
 import unicodedata
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
 from pathlib import Path
 
-from minotaur.config import read_toml_file
+from minotaur.config import read_toml_bytes, read_toml_file
 from minotaur.graph_model.identity import is_valid_node_id_format
 from minotaur.graph_model.node import Node
 
@@ -188,9 +188,27 @@ def load_systems(systems_dir: Path) -> tuple[System, ...]:
         definition = child / _SYSTEM_FILENAME
         if not definition.is_file():
             continue  # D-03: a directory without system.toml defines no system.
-        loaded.append(_LoadedSystem(system=_parse_definition(definition), definition=definition))
-    _reject_cross_system_conflicts(loaded)
-    return tuple(sorted((item.system for item in loaded), key=lambda system: system.name))
+        loaded.append(_validate_definition(read_toml_file(definition), source=definition))
+    return _finalize_systems(loaded)
+
+
+def load_systems_data(
+    definitions: Mapping[Path, bytes | Mapping[str, object]],
+) -> tuple[System, ...]:
+    """Validate supplied definition bytes/data with disk-equivalent behavior.
+
+    Keys identify the definition source for diagnostics and preserve the
+    defining directory as provenance; they need not exist.  Sources are
+    processed in lexical path order.  Bytes use the config owner's guarded
+    decoder, while mappings are already-decoded TOML declarations.  Every
+    candidate is validated before duplicate-name and cross-system overlap
+    checks run, and this route performs no filesystem discovery or probing.
+    """
+    loaded: list[_LoadedSystem] = []
+    for source, data in sorted(definitions.items(), key=lambda item: str(item[0])):
+        raw = read_toml_bytes(data, source=source) if isinstance(data, bytes) else data
+        loaded.append(_validate_definition(raw, source=source))
+    return _finalize_systems(loaded)
 
 
 def resolve_system(systems: Sequence[System], name: str) -> System:
@@ -318,56 +336,56 @@ def _node_file(node: Node) -> str | None:
     return node.path
 
 
-def _parse_definition(path: Path) -> System:
-    """Parse and strictly validate one ``system.toml``, returning its system.
+def _validate_definition(raw: Mapping[str, object], *, source: Path) -> _LoadedSystem:
+    """Validate one decoded declaration and retain its source provenance.
 
-    Every read and TOML parse goes through :func:`config.read_toml_file`, the
-    config owner's guarded neutral helper (this module never imports or calls
-    a TOML parser), so an unreadable or invalid file already raises the
-    helper's file-attributed :class:`~minotaur.config.ConfigError`.  Every
-    other rejection below raises a typed, file-attributed error naming this
-    definition file, and no partial system is returned.
+    This is the one individual-definition owner for both disk and supplied
+    routes.  Validation is pure with respect to the source path: it neither
+    resolves nor probes the path, and it returns no partially validated
+    declaration when a field fails.
     """
-    raw = read_toml_file(path)
     for field in raw:
         if field not in _KNOWN_SYSTEM_FIELDS:
-            raise UnknownSystemField(f"unknown system field: {field} (in {path})")
+            raise UnknownSystemField(f"unknown system field: {field} (in {source})")
 
     version = raw.get("schema_version")
     if version is None:
-        raise MissingField(f"missing required field: schema_version (in {path})")
+        raise MissingField(f"missing required field: schema_version (in {source})")
     if isinstance(version, bool) or not isinstance(version, int):
-        raise UnsupportedSchemaVersion(f"schema_version must be an integer (in {path})")
+        raise UnsupportedSchemaVersion(f"schema_version must be an integer (in {source})")
     if version != _SCHEMA_VERSION:
         raise UnsupportedSchemaVersion(
-            f"unsupported schema_version: {version} (expected {_SCHEMA_VERSION}) (in {path})"
+            f"unsupported schema_version: {version} (expected {_SCHEMA_VERSION}) (in {source})"
         )
 
     name = raw.get("name")
     if name is None:
-        raise MissingField(f"missing required field: name (in {path})")
+        raise MissingField(f"missing required field: name (in {source})")
     if not isinstance(name, str) or not name:
-        raise InvalidSystemName(f"system name must be a non-empty string (in {path})")
+        raise InvalidSystemName(f"system name must be a non-empty string (in {source})")
     if any(unicodedata.category(character) == "Cc" for character in name):
         raise InvalidSystemName(
-            f"system name must not contain Unicode control characters (category Cc) (in {path})"
+            f"system name must not contain Unicode control characters (category Cc) (in {source})"
         )
 
     files_value = raw.get("files")
     if files_value is None:
-        raise MissingField(f"missing required field: files (in {path})")
+        raise MissingField(f"missing required field: files (in {source})")
     if not isinstance(files_value, list):
-        raise InvalidFileList(f"system files must be a list of file paths (in {path})")
+        raise InvalidFileList(f"system files must be a list of file paths (in {source})")
     if not files_value:
-        raise InvalidFileList(f"system files must not be empty (in {path})")
+        raise InvalidFileList(f"system files must not be empty (in {source})")
 
     # D-02: the scope vocabulary is an explicit list of root-relative
     # individual file paths — never directories, globs, or node IDs.  The
     # "all files under X" convenience entry is deliberately not offered in
     # this version; it belongs here, at the file-list validation site, and
     # should be added only if real repositories demonstrate the need.
-    entries = tuple(_require_file_entry(entry, path) for entry in files_value)
-    return System(name=name, files=_dedupe(entries), definition_directory=path.parent)
+    entries = tuple(_require_file_entry(entry, source) for entry in files_value)
+    return _LoadedSystem(
+        system=System(name=name, files=_dedupe(entries), definition_directory=source.parent),
+        definition=source,
+    )
 
 
 def _require_file_entry(entry: object, path: Path) -> str:
@@ -427,11 +445,13 @@ def _dedupe(entries: Sequence[str]) -> tuple[str, ...]:
     return tuple(unique)
 
 
-def _reject_cross_system_conflicts(loaded: Sequence[_LoadedSystem]) -> None:
-    """Reject duplicate system names and files declared by two systems.
+def _finalize_systems(loaded: Sequence[_LoadedSystem]) -> tuple[System, ...]:
+    """Reject set conflicts and publish systems in declared-name order.
 
-    Runs after every definition parsed, in sorted-directory order, so the
-    reported conflict (and the two defining files it names) is deterministic.
+    This is the one whole-set owner for both loading routes.  It runs only
+    after every individual definition has passed validation, so no partial
+    tuple is ever exposed and individual errors take precedence over set
+    conflicts.
     """
     by_name: dict[str, Path] = {}
     by_file: dict[str, Path] = {}
@@ -452,3 +472,4 @@ def _reject_cross_system_conflicts(loaded: Sequence[_LoadedSystem]) -> None:
                     f"(declared in {prior} and {item.definition})"
                 )
             by_file[file] = item.definition
+    return tuple(sorted((item.system for item in loaded), key=lambda system: system.name))

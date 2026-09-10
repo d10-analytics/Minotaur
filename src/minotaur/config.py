@@ -32,7 +32,7 @@ uses the standard-library ``tomllib`` and the conditional dependency installs
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +57,16 @@ class ConfigError(ValueError):
     The message names the offending field or path so a caller (the CLI maps
     this error to exit status 2) can point the user at the exact problem.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedConfig:
+    """A validated configuration declaration before filesystem anchoring."""
+
+    root: str
+    graph: str
+    targets: tuple[str, ...]
+    systems_dir: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,13 +207,30 @@ def read_toml_file(path: Path) -> dict[str, object]:
     naming the path, mirroring the project-config read/parse errors.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        data = path.read_bytes()
     except OSError as error:
         raise ConfigError(f"cannot read TOML file: {path}") from error
+    return read_toml_bytes(data, source=path)
+
+
+def read_toml_bytes(data: bytes, *, source: Path | str) -> dict[str, object]:
+    """Decode and TOML-parse supplied UTF-8 bytes without filesystem access."""
     try:
-        return tomllib.loads(text)
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ConfigError(f"invalid UTF-8 in TOML: {source}") from error
+    try:
+        raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
-        raise ConfigError(f"invalid TOML in {path}: {error}") from error
+        raise ConfigError(f"invalid TOML in {source}: {error}") from error
+    if not isinstance(raw, dict):
+        raise ConfigError(f"TOML document must be a table: {source}")
+    return raw
+
+
+def parse_config_bytes(data: bytes, *, source: Path | str) -> ValidatedConfig:
+    """Validate a supplied config blob without consulting its path or disk."""
+    return _validate_config(read_toml_bytes(data, source=source), source=source)
 
 
 def _parse_config(path: Path) -> _ParsedConfig:
@@ -213,25 +240,82 @@ def _parse_config(path: Path) -> _ParsedConfig:
     config path, and no resolved set is returned until every R-05/R-06
     violation has been rejected.
     """
-    config_dir = path.resolve().parent
     raw = read_toml_file(path)
+    validated = _validate_config(raw, source=path)
+    return _anchor_config(validated, source=path)
+
+
+def _validate_config(raw: Mapping[str, object], *, source: Path | str) -> ValidatedConfig:
+    """Validate raw config declarations without consulting the filesystem."""
     section = raw.get(_SECTION)
     if section is None:
-        raise ConfigError(f"missing [{_SECTION}] section in {path}")
-    if not isinstance(section, dict):
-        raise ConfigError(f"[{_SECTION}] must be a table in {path}")
+        raise ConfigError(f"missing [{_SECTION}] section in {source}")
+    if not isinstance(section, Mapping):
+        raise ConfigError(f"[{_SECTION}] must be a table in {source}")
     for name in section:
         if name not in _KNOWN_FIELDS:
-            raise ConfigError(f"unknown config field: {name}")
-    _validate_schema_version(section, path)
-    config_root = _config_root(section, config_dir)
-    graph = _config_graph(section, config_root)
-    targets = _config_targets(section, config_root)
-    systems_dir = _config_systems_dir(section, config_root)
-    return _ParsedConfig(root=config_root, graph=graph, targets=targets, systems_dir=systems_dir)
+            raise ConfigError(f"unknown config field: {name} (in {source})")
+    _validate_schema_version(section, source)
+
+    root = section.get("root")
+    if root is None:
+        root = ""
+    elif not isinstance(root, str):
+        raise ConfigError(f"config root must be a string (in {source})")
+
+    graph = section.get("graph")
+    if graph is None:
+        graph = _DEFAULT_GRAPH_FILENAME
+    elif not isinstance(graph, str):
+        raise ConfigError(f"config graph must be a string (in {source})")
+
+    targets = section.get("targets")
+    if targets is None:
+        raise ConfigError(f"missing required field: targets (in {source})")
+    if not isinstance(targets, list) or any(not isinstance(item, str) for item in targets):
+        raise ConfigError(f"config targets must be a list of strings (in {source})")
+    if not targets:
+        raise ConfigError(f"config targets must not be empty (in {source})")
+
+    systems_dir = section.get("systems_dir")
+    if systems_dir is None:
+        systems_dir = _DEFAULT_SYSTEMS_DIR
+    elif not isinstance(systems_dir, str):
+        raise ConfigError(f"config systems_dir must be a string (in {source})")
+
+    return ValidatedConfig(
+        root=root,
+        graph=graph,
+        targets=tuple(targets),
+        systems_dir=systems_dir,
+    )
 
 
-def _validate_schema_version(section: dict[object, object], path: Path) -> None:
+def _anchor_config(validated: ValidatedConfig, *, source: Path) -> _ParsedConfig:
+    """Apply ordinary disk anchoring to one validated declaration."""
+    config_dir = source.resolve().parent
+    config_root = (config_dir / validated.root).resolve()
+    graph = (config_root / validated.graph).resolve()
+    anchored: list[Path] = []
+    for raw_target in validated.targets:
+        target = (config_root / raw_target).resolve()
+        try:
+            target.relative_to(config_root)
+        except ValueError as error:
+            raise ConfigError(
+                f"config target escapes root: {raw_target} (root is {config_root}) (in {source})"
+            ) from error
+        anchored.append(target)
+    systems_dir = (config_root / validated.systems_dir).resolve()
+    return _ParsedConfig(
+        root=config_root,
+        graph=graph,
+        targets=tuple(anchored),
+        systems_dir=systems_dir,
+    )
+
+
+def _validate_schema_version(section: Mapping[object, object], path: Path | str) -> None:
     """Reject a missing, mistyped, or unsupported ``schema_version``."""
     version = section.get("schema_version")
     if version is None:
@@ -239,73 +323,9 @@ def _validate_schema_version(section: dict[object, object], path: Path) -> None:
     if isinstance(version, bool) or not isinstance(version, int):
         raise ConfigError(f"schema_version must be an integer (in {path})")
     if version != _SCHEMA_VERSION:
-        raise ConfigError(f"unsupported schema_version: {version} (expected {_SCHEMA_VERSION})")
-
-
-def _config_root(section: dict[object, object], config_dir: Path) -> Path:
-    """Resolve ``root`` against the config directory, defaulting to it."""
-    value = section.get("root")
-    if value is None:
-        return config_dir
-    if not isinstance(value, str):
-        raise ConfigError("config root must be a string")
-    return (config_dir / value).resolve()
-
-
-def _config_graph(section: dict[object, object], config_root: Path) -> Path:
-    """Resolve ``graph`` against the declared root, defaulting its name.
-
-    The configured graph is anchored but never root-containment-checked; an
-    explicit output outside the root keeps today's explicit-output freedom.
-    """
-    value = section.get("graph")
-    if value is None:
-        return (config_root / _DEFAULT_GRAPH_FILENAME).resolve()
-    if not isinstance(value, str):
-        raise ConfigError("config graph must be a string")
-    return (config_root / value).resolve()
-
-
-def _config_targets(section: dict[object, object], config_root: Path) -> tuple[Path, ...]:
-    """Validate ``targets`` and return each one anchored inside the root.
-
-    ``targets`` is required and must be a non-empty list of strings.  Every
-    config-sourced target is anchored at the declared project root and must
-    stay inside it; an escaping target is rejected naming the offending path.
-    """
-    value = section.get("targets")
-    if value is None:
-        raise ConfigError("missing required field: targets")
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ConfigError("config targets must be a list of strings")
-    if not value:
-        raise ConfigError("config targets must not be empty")
-    anchored: list[Path] = []
-    for raw_target in value:
-        target = (config_root / raw_target).resolve()
-        try:
-            target.relative_to(config_root)
-        except ValueError as error:
-            raise ConfigError(
-                f"config target escapes root: {raw_target} (root is {config_root})"
-            ) from error
-        anchored.append(target)
-    return tuple(anchored)
-
-
-def _config_systems_dir(section: dict[object, object], config_root: Path) -> Path:
-    """Resolve ``systems_dir`` against the declared root, defaulting it.
-
-    The field is optional: a configured relative value is anchored at the
-    declared project root, and an omitted field defaults to ``docs/systems``
-    under that root.  A non-string value is rejected naming the field.
-    """
-    value = section.get("systems_dir")
-    if value is None:
-        return (config_root / _DEFAULT_SYSTEMS_DIR).resolve()
-    if not isinstance(value, str):
-        raise ConfigError("config systems_dir must be a string")
-    return (config_root / value).resolve()
+        raise ConfigError(
+            f"unsupported schema_version: {version} (expected {_SCHEMA_VERSION}) (in {path})"
+        )
 
 
 def _git_work_tree_root(start: Path) -> Path | None:

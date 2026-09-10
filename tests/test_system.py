@@ -531,6 +531,309 @@ def test_invalid_toml_in_a_definition_fails_through_the_config_helper(
 
 
 # ---------------------------------------------------------------------------
+# Supplied definition sets share disk validation and ownership
+# ---------------------------------------------------------------------------
+
+
+def test_supplied_definition_set_matches_disk_values_and_keeps_source_provenance(
+    tmp_path: Path,
+) -> None:
+    """Bytes and decoded maps produce the same declarations as disk loading."""
+    systems_dir = tmp_path / "disk-systems"
+    alpha_text = (
+        'schema_version = 1\nname = "alpha"\nfiles = ["src/a.py", "src/a.py", "src/a/extra.py"]\n'
+    )
+    omega_text = 'schema_version = 1\nname = "omega"\nfiles = ["src/o.py"]\n'
+    alpha_definition = _write_definition(systems_dir, "z-directory", alpha_text)
+    omega_definition = _write_definition(systems_dir, "a-directory", omega_text)
+
+    captured_alpha = tmp_path / "captured" / "alpha.toml"
+    captured_omega = tmp_path / "captured" / "omega.toml"
+    supplied = system.load_systems_data(
+        {
+            captured_omega: omega_text.encode("utf-8"),
+            captured_alpha: {
+                "schema_version": 1,
+                "name": "alpha",
+                "files": ["src/a.py", "src/a.py", "src/a/extra.py"],
+            },
+        }
+    )
+    disk = system.load_systems(systems_dir)
+
+    assert disk == supplied
+    assert [item.name for item in supplied] == ["alpha", "omega"]
+    assert [item.files for item in supplied] == [
+        ("src/a.py", "src/a/extra.py"),
+        ("src/o.py",),
+    ]
+    assert [item.definition_directory for item in disk] == [
+        alpha_definition.parent,
+        omega_definition.parent,
+    ]
+    assert [item.definition_directory for item in supplied] == [
+        captured_alpha.parent,
+        captured_omega.parent,
+    ]
+    assert not captured_alpha.exists()
+    assert not captured_omega.exists()
+
+
+def test_supplied_definition_set_never_probes_or_resolves_source_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Historical labels may be absent without affecting pure validation."""
+    source = tmp_path / "missing" / "definition.toml"
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("supplied source label was accessed")
+
+    monkeypatch.setattr(Path, "is_dir", forbidden)
+    monkeypatch.setattr(Path, "is_file", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(Path, "resolve", forbidden)
+
+    loaded = system.load_systems_data(
+        {
+            source: {
+                "schema_version": 1,
+                "name": "captured",
+                "files": ["historical/file.py"],
+            }
+        }
+    )
+
+    assert loaded == (System("captured", ("historical/file.py",)),)
+    assert loaded[0].definition_directory == source.parent
+
+
+def test_disk_individual_failure_precedes_later_malformed_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first invalid definition stops disk reads before a later parse."""
+    systems_dir = tmp_path / "systems"
+    first = _write_definition(
+        systems_dir, "a-definition", 'schema_version = 2\nname = "a"\nfiles = ["a.py"]\n'
+    )
+    later = _write_definition(systems_dir, "z-definition", "[broken\n")
+    attempted: list[Path] = []
+    read = system.read_toml_file
+
+    def recording_read(source: Path) -> dict[str, object]:
+        attempted.append(source)
+        return read(source)
+
+    monkeypatch.setattr(system, "read_toml_file", recording_read)
+    with pytest.raises(UnsupportedSchemaVersion) as error:
+        system.load_systems(systems_dir)
+
+    assert str(first) in str(error.value)
+    assert attempted == [first]
+    assert later not in attempted
+
+
+def test_supplied_individual_failure_precedes_later_malformed_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first invalid supplied bytes stop decoding before later bytes."""
+    first = tmp_path / "a-definition.toml"
+    later = tmp_path / "z-definition.toml"
+    attempted: list[Path] = []
+    decode = system.read_toml_bytes
+
+    def recording_decode(data: bytes, *, source: Path) -> dict[str, object]:
+        attempted.append(source)
+        return decode(data, source=source)
+
+    monkeypatch.setattr(system, "read_toml_bytes", recording_decode)
+    with pytest.raises(UnsupportedSchemaVersion) as error:
+        system.load_systems_data(
+            {
+                later: b"[broken\n",
+                first: b'schema_version = 2\nname = "a"\nfiles = ["a.py"]\n',
+            }
+        )
+
+    assert str(first) in str(error.value)
+    assert attempted == [first]
+    assert later not in attempted
+
+
+@pytest.mark.parametrize("route", ["disk", "supplied"])
+def test_individual_failure_precedes_duplicate_conflict_on_each_route(
+    tmp_path: Path, route: str
+) -> None:
+    """A later invalid individual wins over an earlier duplicate pair."""
+    if route == "disk":
+        systems_dir = tmp_path / "systems"
+        _write_definition(
+            systems_dir, "a-first", 'schema_version = 1\nname = "dup"\nfiles = ["a.py"]\n'
+        )
+        _write_definition(
+            systems_dir, "b-second", 'schema_version = 1\nname = "dup"\nfiles = ["b.py"]\n'
+        )
+        broken = _write_definition(
+            systems_dir, "z-invalid", 'schema_version = 2\nname = "later"\nfiles = ["z.py"]\n'
+        )
+
+        def loader() -> tuple[System, ...]:
+            return system.load_systems(systems_dir)
+    else:
+        first = tmp_path / "a-first.toml"
+        second = tmp_path / "b-second.toml"
+        broken = tmp_path / "z-invalid.toml"
+        definitions = {
+            first: {"schema_version": 1, "name": "dup", "files": ["a.py"]},
+            second: {"schema_version": 1, "name": "dup", "files": ["b.py"]},
+            broken: {"schema_version": 2, "name": "later", "files": ["z.py"]},
+        }
+
+        def loader() -> tuple[System, ...]:
+            return system.load_systems_data(definitions)
+
+    with pytest.raises(UnsupportedSchemaVersion) as error:
+        loader()
+
+    assert str(broken) in str(error.value)
+
+
+@pytest.mark.parametrize("route", ["disk", "supplied"])
+def test_each_route_is_all_or_nothing_when_a_later_definition_is_invalid(
+    tmp_path: Path, route: str
+) -> None:
+    """A valid lexical prefix never escapes as a partial system tuple."""
+    if route == "disk":
+        systems_dir = tmp_path / "systems"
+        _write_definition(systems_dir, "a-valid", _VALID)
+        broken = _write_definition(
+            systems_dir, "z-invalid", 'schema_version = 2\nname = "broken"\nfiles = ["z.py"]\n'
+        )
+
+        def loader() -> tuple[System, ...]:
+            return system.load_systems(systems_dir)
+    else:
+        valid = tmp_path / "a-valid.toml"
+        broken = tmp_path / "z-invalid.toml"
+
+        def loader() -> tuple[System, ...]:
+            return system.load_systems_data(
+                {
+                    valid: {"schema_version": 1, "name": "auth", "files": ["a.py"]},
+                    broken: {"schema_version": 2, "name": "broken", "files": ["z.py"]},
+                }
+            )
+
+    with pytest.raises(UnsupportedSchemaVersion) as error:
+        loader()
+    assert str(broken) in str(error.value)
+
+
+def test_supplied_bytes_report_decode_errors_at_the_supplied_source(tmp_path: Path) -> None:
+    source = tmp_path / "absent" / "definition.toml"
+
+    with pytest.raises(ConfigError) as error:
+        system.load_systems_data({source: b"\xff"})
+
+    assert "invalid UTF-8" in str(error.value)
+    assert str(source) in str(error.value)
+
+
+def test_supplied_bytes_report_toml_errors_at_the_supplied_source(tmp_path: Path) -> None:
+    source = tmp_path / "absent" / "definition.toml"
+
+    with pytest.raises(ConfigError) as error:
+        system.load_systems_data({source: b"[broken\n"})
+
+    assert "invalid TOML" in str(error.value)
+    assert str(source) in str(error.value)
+
+
+def test_supplied_definition_conflicts_name_both_exact_sources(tmp_path: Path) -> None:
+    first = tmp_path / "capture" / "first.toml"
+    second = tmp_path / "capture" / "second.toml"
+
+    with pytest.raises(DuplicateSystemName) as error:
+        system.load_systems_data(
+            {
+                first: {"schema_version": 1, "name": "same", "files": ["one.py"]},
+                second: {"schema_version": 1, "name": "same", "files": ["two.py"]},
+            }
+        )
+
+    text = str(error.value)
+    assert str(first) in text
+    assert str(second) in text
+
+
+def test_supplied_definition_overlap_names_both_exact_sources(tmp_path: Path) -> None:
+    first = tmp_path / "capture" / "first.toml"
+    second = tmp_path / "capture" / "second.toml"
+
+    with pytest.raises(FileListedInTwoSystems) as error:
+        system.load_systems_data(
+            {
+                first: {"schema_version": 1, "name": "first", "files": ["shared.py"]},
+                second: {"schema_version": 1, "name": "second", "files": ["shared.py"]},
+            }
+        )
+
+    text = str(error.value)
+    assert "file listed in two systems: shared.py" in text
+    assert str(first) in text
+    assert str(second) in text
+
+
+def test_individual_validator_is_the_owner_for_both_natural_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    systems_dir = tmp_path / "systems"
+    _write_definition(systems_dir, "auth", _VALID)
+    supplied_source = tmp_path / "captured" / "auth.toml"
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("individual owner called")
+
+    monkeypatch.setattr(system, "_validate_definition", fail)
+    with pytest.raises(RuntimeError, match="individual owner called"):
+        system.load_systems(systems_dir)
+    with pytest.raises(RuntimeError, match="individual owner called"):
+        system.load_systems_data(
+            {
+                supplied_source: {
+                    "schema_version": 1,
+                    "name": "auth",
+                    "files": ["src/auth/api.py"],
+                }
+            }
+        )
+
+
+def test_set_finalizer_is_the_owner_for_both_natural_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    systems_dir = tmp_path / "systems"
+    _write_definition(systems_dir, "auth", _VALID)
+    supplied_source = tmp_path / "captured" / "auth.toml"
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("set owner called")
+
+    monkeypatch.setattr(system, "_finalize_systems", fail)
+    with pytest.raises(RuntimeError, match="set owner called"):
+        system.load_systems(systems_dir)
+    with pytest.raises(RuntimeError, match="set owner called"):
+        system.load_systems_data(
+            {
+                supplied_source: {
+                    "schema_version": 1,
+                    "name": "auth",
+                    "files": ["src/auth/api.py"],
+                }
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
 # D-12 / F-02: unknown-system resolution carries nearest loaded names
 # ---------------------------------------------------------------------------
 
