@@ -764,11 +764,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             _flow_touched_names(tuple(statement for case in node.cases for statement in case.body))
         )
         self._block_flow_imports(
-            frozenset(
-                name
-                for case in node.cases
-                for name in _pattern_capture_names(case.pattern)
-            )
+            frozenset(name for case in node.cases for name in _pattern_capture_names(case.pattern))
         )
         blocked_state = self._flow_state() or state
         for case in node.cases:
@@ -1758,9 +1754,8 @@ def _class_context_after_statement(
         uncertain_import_names.update(collector.import_names)
     uncertain_import_names.difference_update(collector.deleted_names)
     deleted_plain_names = (
-        context.class_scope_deleted_plain_names | (
-            frozenset(collector.deleted_names) & context.plain_import_names
-        )
+        context.class_scope_deleted_plain_names
+        | (frozenset(collector.deleted_names) & context.plain_import_names)
     ) - frozenset(collector.import_names)
     return replace(
         context,
@@ -2156,9 +2151,7 @@ def _analyze_module(
             header_context = replace(
                 header_context,
                 bound_names=header_binders,
-                import_targets=_without_import_roots(
-                    header_context.import_targets, header_imports
-                ),
+                import_targets=_without_import_roots(header_context.import_targets, header_imports),
                 uncertain_import_names=frozenset(header_imports)
                 | header_context.uncertain_import_names,
                 authoritative_import_names=header_context.authoritative_import_names
@@ -2274,6 +2267,7 @@ def _analyze_module(
         else:
             pending.append(statement)
     flush_pending()
+
 
 def _decorator_references(
     statement: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
@@ -2534,9 +2528,7 @@ def _calls(
         child for header in visitor.class_header_expressions for child in ast.walk(header)
     }
     definition_header_nodes = {
-        child
-        for header in visitor.definition_header_expressions
-        for child in ast.walk(header)
+        child for header in visitor.definition_header_expressions for child in ast.walk(header)
     }
     outer_targets = context.class_scope_outer_import_targets or {}
     class_local_plain_names = frozenset(
@@ -2584,9 +2576,7 @@ def _calls(
             )
         call_plain_import_names = visitor.call_plain_import_names[candidate]
         if context.class_scope_outer_import_targets is not None:
-            blocked_plain_names = frozenset(
-                call_plain_import_names | class_local_plain_names
-            )
+            blocked_plain_names = frozenset(call_plain_import_names | class_local_plain_names)
             call_plain_import_names = frozenset(
                 call_plain_import_names & context.plain_import_names
             )
@@ -2656,9 +2646,8 @@ def _calls(
             reference_import_targets = _without_import_roots(
                 reference_import_targets, enclosing_class_target_names
             )
-            reference_uncertain_names -= (
-                context.uncertain_import_names
-                - (context.class_scope_outer_uncertain_import_names or frozenset())
+            reference_uncertain_names -= context.uncertain_import_names - (
+                context.class_scope_outer_uncertain_import_names or frozenset()
             )
         if (
             visitor.reference_excludes_enclosing_class[reference]
@@ -2667,23 +2656,16 @@ def _calls(
             reference_uncertain_names -= context.uncertain_import_names - (
                 context.class_scope_outer_uncertain_import_names or frozenset()
             )
-            if (
-                context.class_scope_outer_import_targets is None
-                and reference in class_header_nodes
-            ):
+            if context.class_scope_outer_import_targets is None and reference in class_header_nodes:
                 reference_uncertain_names.update(
                     name
-                    for name in _import_binding_roots(
-                        visitor.reference_import_targets[reference]
-                    )
+                    for name in _import_binding_roots(visitor.reference_import_targets[reference])
                     if context.import_targets.get(name)
                     != visitor.reference_import_targets[reference].get(name)
                 )
         reference_plain_import_names = visitor.reference_plain_import_names[reference]
         if context.class_scope_outer_import_targets is not None:
-            blocked_plain_names = frozenset(
-                reference_plain_import_names | class_local_plain_names
-            )
+            blocked_plain_names = frozenset(reference_plain_import_names | class_local_plain_names)
             reference_plain_import_names = frozenset(
                 reference_plain_import_names & context.plain_import_names
             )
@@ -2692,8 +2674,7 @@ def _calls(
             )
         if reference in class_header_nodes:
             reference_uncertain_names.update(
-                context.class_scope_deleted_plain_names
-                & frozenset((_base_identifier(reference),))
+                context.class_scope_deleted_plain_names & frozenset((_base_identifier(reference),))
             )
         _emit_expression_facts(
             _scoped_context(
@@ -2738,9 +2719,7 @@ def _without_enclosing_class_scope(context: _ScopeContext) -> _ScopeContext:
         bound_names=(context.bound_names - context.class_scope_bound_names) | type_param_names,
         import_targets=outer_import_targets,
         plain_import_names=context.class_scope_outer_plain_import_names or frozenset(),
-        uncertain_import_names=(
-            context.class_scope_outer_uncertain_import_names or frozenset()
-        ),
+        uncertain_import_names=(context.class_scope_outer_uncertain_import_names or frozenset()),
         class_scope_bound_names=type_param_names,
         class_scope_type_param_names=type_param_names,
         class_scope_outer_import_targets=None,
