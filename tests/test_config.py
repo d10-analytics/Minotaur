@@ -469,9 +469,7 @@ def test_supplied_bytes_decode_failures_name_the_source(data: bytes, message: st
         pytest.param(b"[minotaur\n", "invalid TOML", id="invalid-toml"),
     ],
 )
-def test_disk_decode_failures_name_the_file(
-    tmp_path: Path, data: bytes, message: str
-) -> None:
+def test_disk_decode_failures_name_the_file(tmp_path: Path, data: bytes, message: str) -> None:
     path = tmp_path / "broken.toml"
     path.write_bytes(data)
 
@@ -567,8 +565,7 @@ def test_raw_defaults_and_explicit_empty_values_remain_distinct_from_disk_values
     cfg = _write(
         tmp_path,
         "cfg/.minotaur.toml",
-        "[minotaur]\nschema_version = 1\nroot = ''\ngraph = ''\n"
-        "targets = ['']\nsystems_dir = ''\n",
+        "[minotaur]\nschema_version = 1\nroot = ''\ngraph = ''\ntargets = ['']\nsystems_dir = ''\n",
     )
     raw = config.parse_config_bytes(cfg.read_bytes(), source=cfg)
     resolved = resolve_config(cfg.parent)
