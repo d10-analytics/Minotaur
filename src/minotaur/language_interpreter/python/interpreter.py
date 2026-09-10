@@ -929,9 +929,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             handler_exit_names.update(_flow_touched_names(handler.body))
             if handler.type is not None:
                 handler_exit_names.update(_flow_touched_node(handler.type))
-        final_state = self._blocked_flow_state(
-            orelse_exit_state, frozenset(handler_exit_names)
-        )
+        final_state = self._blocked_flow_state(orelse_exit_state, frozenset(handler_exit_names))
         self._scope_import_states[-1] = final_state
         self._visit_block(node.finalbody, nested=True)
         self._blocked_flow_state(final_state, _flow_touched_names(node.finalbody))
