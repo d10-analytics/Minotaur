@@ -271,6 +271,133 @@ def test_dotted_import_load_graph_does_not_create_impact(
     assert "loader.owner" not in impact_output.out
 
 
+def test_conditional_call_graph_drives_inbound_impact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "caller.py",
+        "def owner(flag):\n"
+        "    if flag:\n"
+        "        import pkg.sub\n"
+        "    else:\n"
+        "        import pkg.sub\n"
+        "    return pkg.sub.go()\n",
+    )
+    graph = tmp_path / "conditional-call.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "caller.owner", "pkg.sub.go") == ["calls"]
+
+    status = cli.main(
+        [
+            "query",
+            "impact",
+            "pkg.sub.go",
+            "--depth",
+            "1",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out.splitlines() == [
+        "depth 0: pkg.sub.go",
+        "depth 1: caller.owner",
+    ]
+
+
+def test_ambiguous_conditional_continuation_has_no_inbound_impact_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(tmp_path, "alternate.py", "def replacement():\n    return 2\n")
+    _write(
+        tmp_path,
+        "caller.py",
+        "def owner(flag):\n"
+        "    if flag:\n"
+        "        import pkg.sub\n"
+        "    else:\n"
+        "        import alternate as pkg\n"
+        "    return pkg.sub.go()\n",
+    )
+    graph = tmp_path / "ambiguous-call.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "caller.owner", "pkg.sub.go") == []
+
+    status = cli.main(
+        [
+            "query",
+            "impact",
+            "pkg.sub.go",
+            "--depth",
+            "1",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "depth 0: pkg.sub.go\n"
+    assert "caller.owner" not in captured.out
+
+
+def test_conditional_load_graph_does_not_create_inbound_impact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "loader.py",
+        "def owner(flag):\n"
+        "    if flag:\n"
+        "        import pkg.sub\n"
+        "    else:\n"
+        "        import pkg.sub\n"
+        "    loaded = pkg.sub.go\n"
+        "    return loaded\n",
+    )
+    graph = tmp_path / "conditional-load.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "loader.owner", "pkg.sub.go") == ["references"]
+
+    status = cli.main(
+        [
+            "query",
+            "impact",
+            "pkg.sub.go",
+            "--depth",
+            "1",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "depth 0: pkg.sub.go\n"
+    assert "loader.owner" not in captured.out
+
+
 def test_lost_import_route_has_no_inbound_impact_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

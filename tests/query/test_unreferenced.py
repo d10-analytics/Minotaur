@@ -695,3 +695,82 @@ def test_dotted_import_relations_independently_count_as_uses(
     assert call_output.out == "caller.py:1  caller.owner  function\n"
     assert load_status == 0
     assert load_output.out == "loader.py:1  loader.owner  function\n"
+
+
+def test_conditional_load_keeps_target_out_of_unreferenced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "loader.py",
+        "def owner(flag):\n"
+        "    if flag:\n"
+        "        import pkg.sub\n"
+        "    else:\n"
+        "        import pkg.sub\n"
+        "    loaded = pkg.sub.go\n"
+        "    return loaded\n",
+    )
+    graph = tmp_path / "conditional-load.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "loader.owner", "pkg.sub.go") == ["references"]
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert status == 0
+    assert "pkg.sub.go" not in {result["symbol"] for result in payload["results"]}
+    assert "loader.owner" in {result["symbol"] for result in payload["results"]}
+
+
+def test_ambiguous_conditional_continuation_stays_unreferenced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(tmp_path, "alternate.py", "def replacement():\n    return 2\n")
+    _write(
+        tmp_path,
+        "caller.py",
+        "def owner(flag):\n"
+        "    if flag:\n"
+        "        import pkg.sub\n"
+        "    else:\n"
+        "        import alternate as pkg\n"
+        "    return pkg.sub.go()\n",
+    )
+    graph = tmp_path / "ambiguous-call.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "caller.owner", "pkg.sub.go") == []
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert status == 0
+    assert "pkg.sub.go" in {result["symbol"] for result in payload["results"]}
