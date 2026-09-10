@@ -857,9 +857,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             return
         self._visit_lambda_body(node, self._flow_state())
 
-    def _visit_lambda_body(
-        self, node: ast.Lambda, owner_state: _ImportFlowState | None
-    ) -> None:
+    def _visit_lambda_body(self, node: ast.Lambda, owner_state: _ImportFlowState | None) -> None:
         bound_names = frozenset(_argument_names(node.args))
         self._push_scope(
             bound_names,

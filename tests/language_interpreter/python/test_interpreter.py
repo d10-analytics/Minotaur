@@ -5336,3 +5336,165 @@ def test_final_real_route_keeps_secondary_root_reference_for_missing_member(
         2,
         3,
     }
+
+
+def test_nested_callables_use_final_enclosing_function_import_state(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "first.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "second.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from first import helper\n\n"
+        "def outer():\n"
+        "    def before():\n"
+        "        return helper()\n"
+        "    callback = lambda: helper()\n"
+        "    from second import helper\n"
+        "    def after():\n"
+        "        return helper()\n"
+        "    return before, callback, after\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    first = _node_id(result, "first.helper")
+    second = _node_id(result, "second.helper")
+    calls = {
+        (relationship.target, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {(second, 5), (second, 6), (second, 9)}
+    assert all(
+        relationship.target != first
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+    )
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
+
+
+def test_deferred_callable_final_replacement_blocks_routes_at_final_owner_state(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "first.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "second.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    def blocked():\n"
+        "        return helper()\n"
+        "    from first import helper\n"
+        "    from second import helper\n"
+        "    def sibling():\n"
+        "        return helper()\n"
+        "    helper = object()\n"
+        "    return blocked, sibling\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    calls = {
+        (relationship.target, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == set()
+    assert _unresolved_sites(result) == {
+        ("app.outer", "helper", 3),
+        ("app.outer", "helper", 7),
+    }
+
+
+def test_nested_callable_import_does_not_mutate_enclosing_or_sibling_routes(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "first.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "second.py", "def helper():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    from first import helper\n"
+        "    def nested():\n"
+        "        from second import helper\n"
+        "        return helper()\n"
+        "    def sibling():\n"
+        "        return helper()\n"
+        "    return helper, nested, sibling\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    outer = _node_id(result, "app.outer")
+    first = _node_id(result, "first.helper")
+    second = _node_id(result, "second.helper")
+    calls = {
+        (relationship.target, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    assert calls == {(second, 5), (first, 7)}
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
+
+
+def test_try_handler_blocks_import_replaced_before_exception(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    from library import helper\n"
+        "    try:\n"
+        "        helper = object()\n"
+        "        raise RuntimeError()\n"
+        "    except RuntimeError:\n"
+        "        return helper()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    library_helper = _node_id(result, "library.helper")
+    assert _unresolved_sites(result) == {("app.outer", "helper", 7)}
+    assert (
+        "app.outer",
+        library_helper,
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
+
+
+def test_eager_comprehension_walrus_updates_outer_overlay_generator_walrus_does_not(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "library.py", "def eager():\n    return 1\ndef deferred():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer(items):\n"
+        "    from library import eager, deferred\n"
+        "    [item for item in items if (eager := factory(item))]\n"
+        "    eager()\n"
+        "    (item for item in items if (deferred := factory(item)))\n"
+        "    deferred()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert (
+        "app.outer",
+        "library.deferred",
+        RelationshipKind.CALLS.value,
+    ) in _edge_labels(result)
+    assert (
+        "app.outer",
+        "library.eager",
+        RelationshipKind.CALLS.value,
+    ) not in _edge_labels(result)
+    assert _unresolved_by_source(result)["app.outer"] == {"factory", "eager"}
