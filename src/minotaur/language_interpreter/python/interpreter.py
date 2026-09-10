@@ -198,6 +198,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_excludes_enclosing_class: list[bool] = []
         self._scope_is_class: list[bool] = []
         self._scope_type_param_names: list[frozenset[str]] = []
+        self._scope_propagate_mutations: list[bool] = []
+        self._scope_mutated_names: list[set[str]] = []
         self._receiver_name = receiver_name
         self._receiver_parameter = receiver_parameter
         self.call_bound_names: dict[ast.Call, frozenset[str]] = {}
@@ -306,14 +308,26 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         *,
         nested_class_method: bool = False,
     ) -> None:
+        owner_state = self._flow_state()
         self._push_scope(
             frozenset(_type_param_names(node)),
             frozenset(),
             frozenset(),
             exclude_enclosing_class=nested_class_method,
+            import_targets=owner_state.targets if owner_state is not None else None,
+            import_uncertain_names=(
+                owner_state.uncertain_names if owner_state is not None else frozenset()
+            ),
+            local_import_names=(
+                owner_state.local_names if owner_state is not None else frozenset()
+            ),
+            import_flow_sensitive=owner_state is not None,
+            propagate_mutations=owner_state is not None,
         )
         self._visit_definition_header(node)
-        self._pop_scope()
+        header_mutations = self._pop_scope()
+        if owner_state is not None and header_mutations:
+            self._record_dynamic_names(header_mutations)
         bound_names, local_import_names, uncertain_import_names = _scope_binders(
             node, self._module_name, self._is_package
         )
@@ -393,6 +407,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self._scope_import_states[-1] = state
 
     def _record_dynamic_names(self, names: frozenset[str]) -> None:
+        for index, propagates in enumerate(self._scope_propagate_mutations):
+            if propagates:
+                self._scope_mutated_names[index].update(names)
         state = self._flow_state()
         if state is None:
             return
@@ -410,6 +427,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         )
 
     def _record_deleted_names(self, names: frozenset[str]) -> None:
+        for index, propagates in enumerate(self._scope_propagate_mutations):
+            if propagates:
+                self._scope_mutated_names[index].update(names)
         state = self._flow_state()
         if state is None:
             return
@@ -424,6 +444,21 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 targets=_without_import_roots(state.targets, affected),
                 uncertain_names=state.uncertain_names | affected,
             )
+        )
+
+    def _record_dynamic_attribute(self, node: ast.Attribute) -> None:
+        """Invalidate an imported qualified prefix assigned through a member."""
+        state = self._flow_state()
+        if state is None:
+            return
+        prefix = _expression_text(node)
+        targets = {
+            name: target
+            for name, target in state.targets.items()
+            if name != prefix and not name.startswith(f"{prefix}.")
+        }
+        self._set_flow_state(
+            replace(state, targets=targets, uncertain_names=state.uncertain_names | {prefix})
         )
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -449,22 +484,28 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             return
         targets = dict(state.targets)
         bound_names: set[str] = set()
+        uncertain_names = set(state.uncertain_names)
         base = _relative_module(self._module_name, self._is_package, node.module, node.level)
         for alias in node.names:
             if alias.name == "*":
                 continue
             name = alias.asname or alias.name
-            _update_named_import_binding(
-                targets,
-                name,
-                f"{base}.{alias.name}" if base else alias.name,
-            )
+            if node.level > 0 and base is None:
+                bound_names.add(name)
+                uncertain_names.add(name)
+            else:
+                _update_named_import_binding(
+                    targets,
+                    name,
+                    f"{base}.{alias.name}" if base else alias.name,
+                )
+                uncertain_names.discard(name)
             bound_names.add(name)
         self._set_flow_state(
             replace(
                 state,
                 targets=targets,
-                uncertain_names=state.uncertain_names - bound_names,
+                uncertain_names=frozenset(uncertain_names),
             )
         )
 
@@ -510,17 +551,18 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self.visit(node.test)
-        self._set_flow_state(state)
+        test_state = self._flow_state() or state
+        self._set_flow_state(test_state)
         self._visit_block(node.body)
         body_state = self._flow_state()
-        self._set_flow_state(state)
+        self._set_flow_state(test_state)
         self._visit_block(node.orelse)
         else_state = self._flow_state()
         continuing: list[_ImportFlowState] = []
         if _block_can_continue(node.body):
-            continuing.append(body_state or state)
+            continuing.append(body_state or test_state)
         if not node.orelse or _block_can_continue(node.orelse):
-            continuing.append(else_state or state)
+            continuing.append(else_state or test_state)
         self._set_flow_state(_meet_import_flow_states(continuing or [state]))
 
     def visit_For(self, node: ast.For) -> None:
@@ -543,6 +585,10 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         loop_state = _meet_import_flow_states((state, body_state))
         self._set_flow_state(loop_state)
         self._visit_block(node.orelse)
+        else_state = self._flow_state() or loop_state
+        # The else suite is skipped by every break path. Meeting it with the
+        # loop state preserves zero-iteration and break exits.
+        self._set_flow_state(_meet_import_flow_states((loop_state, else_state)))
 
     def visit_While(self, node: ast.While) -> None:
         state = self._flow_state()
@@ -550,11 +596,15 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
         self.visit(node.test)
-        self._set_flow_state(state)
+        test_state = self._flow_state() or state
+        self._set_flow_state(test_state)
         self._visit_block(node.body)
-        body_state = self._flow_state() or state
-        self._set_flow_state(_meet_import_flow_states((state, body_state)))
+        body_state = self._flow_state() or test_state
+        loop_state = _meet_import_flow_states((state, body_state))
+        self._set_flow_state(loop_state)
         self._visit_block(node.orelse)
+        else_state = self._flow_state() or loop_state
+        self._set_flow_state(_meet_import_flow_states((loop_state, else_state)))
 
     def visit_With(self, node: ast.With) -> None:
         self._visit_with(node)
@@ -639,7 +689,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._visit_comprehension(node.generators, (node.elt,))
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
-        self._visit_comprehension(node.generators, (node.elt,))
+        self._visit_comprehension(node.generators, (node.elt,), lazy=True)
 
     def visit_DictComp(self, node: ast.DictComp) -> None:
         self._visit_comprehension(node.generators, (node.key, node.value))
@@ -648,6 +698,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self,
         generators: list[ast.comprehension],
         result_expressions: tuple[ast.expr, ...],
+        *,
+        lazy: bool = False,
     ) -> None:
         if not generators:
             for expression in result_expressions:
@@ -658,18 +710,64 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # targets, which are local to the comprehension.
         self.visit(generators[0].iter)
         first_target_names = _target_names(generators[0].target)
-        self._push_scope(first_target_names, frozenset(), first_target_names)
+        owner_state = self._flow_state()
+        helper_targets = (
+            _without_import_roots(owner_state.targets, first_target_names)
+            if owner_state is not None
+            else {}
+        )
+        helper_uncertain = (
+            frozenset(
+                name
+                for name in owner_state.uncertain_names
+                if name.partition(".")[0] not in first_target_names
+            )
+            if owner_state is not None
+            else frozenset()
+        )
+        helper_local_names = (
+            owner_state.local_names - first_target_names if owner_state is not None else frozenset()
+        )
+        eager = not lazy
+        # Generator bodies run lazily; list/set/dict comprehension bodies run
+        # while the enclosing expression is evaluated. The first iterable is
+        # visited above in either case because Python evaluates it eagerly.
+        self._push_scope(
+            first_target_names,
+            frozenset(),
+            first_target_names,
+            import_targets=helper_targets,
+            import_uncertain_names=helper_uncertain,
+            local_import_names=helper_local_names,
+            import_flow_sensitive=owner_state is not None,
+            propagate_mutations=owner_state is not None and eager,
+        )
         for condition in generators[0].ifs:
             self.visit(condition)
         for generator in generators[1:]:
             self.visit(generator.iter)
-            self._scope_bound_names[-1] |= _target_names(generator.target)
-            self._scope_shadow_names[-1] |= _target_names(generator.target)
+            target_names = _target_names(generator.target)
+            self._scope_bound_names[-1] |= target_names
+            self._scope_shadow_names[-1] |= target_names
+            helper_state = self._flow_state()
+            if helper_state is not None:
+                self._scope_import_states[-1] = replace(
+                    helper_state,
+                    targets=_without_import_roots(helper_state.targets, target_names),
+                    uncertain_names=frozenset(
+                        name
+                        for name in helper_state.uncertain_names
+                        if name.partition(".")[0] not in target_names
+                    ),
+                    local_names=helper_state.local_names - target_names,
+                )
             for condition in generator.ifs:
                 self.visit(condition)
         for expression in result_expressions:
             self.visit(expression)
-        self._pop_scope()
+        mutations = self._pop_scope()
+        if owner_state is not None and eager and mutations:
+            self._record_dynamic_names(mutations)
 
     def _push_scope(
         self,
@@ -684,6 +782,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         exclude_enclosing_class: bool = False,
         class_scope: bool = False,
         type_param_names: frozenset[str] = frozenset(),
+        propagate_mutations: bool = False,
     ) -> None:
         self._scope_bound_names.append(bound_names)
         self._scope_global_names.append(global_names)
@@ -700,8 +799,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_excludes_enclosing_class.append(exclude_enclosing_class)
         self._scope_is_class.append(class_scope)
         self._scope_type_param_names.append(type_param_names)
+        self._scope_propagate_mutations.append(propagate_mutations)
+        self._scope_mutated_names.append(set())
 
-    def _pop_scope(self) -> None:
+    def _pop_scope(self) -> frozenset[str]:
+        mutations = frozenset(self._scope_mutated_names.pop())
+        self._scope_propagate_mutations.pop()
         self._scope_bound_names.pop()
         self._scope_global_names.pop()
         self._scope_shadow_names.pop()
@@ -710,6 +813,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._scope_excludes_enclosing_class.pop()
         self._scope_is_class.pop()
         self._scope_type_param_names.pop()
+        return mutations
 
     def _remove_class_scopes(
         self,
@@ -723,6 +827,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 _ImportFlowState,
                 tuple[str | None, str | None] | None,
                 bool,
+                bool,
+                frozenset[str],
                 bool,
                 frozenset[str],
             ],
@@ -739,6 +845,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     _ImportFlowState,
                     tuple[str | None, str | None] | None,
                     bool,
+                    bool,
+                    frozenset[str],
                     bool,
                     frozenset[str],
                 ],
@@ -759,6 +867,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                         self._scope_excludes_enclosing_class[index],
                         self._scope_is_class[index],
                         self._scope_type_param_names[index],
+                        self._scope_propagate_mutations[index],
+                        frozenset(self._scope_mutated_names[index]),
                     ),
                 )
             )
@@ -774,6 +884,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 self._scope_receiver_overrides[index] = None
                 self._scope_excludes_enclosing_class[index] = False
                 self._scope_is_class[index] = False
+                self._scope_propagate_mutations[index] = False
+                self._scope_mutated_names[index] = set()
             else:
                 del self._scope_bound_names[index]
                 del self._scope_global_names[index]
@@ -783,6 +895,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 del self._scope_excludes_enclosing_class[index]
                 del self._scope_is_class[index]
                 del self._scope_type_param_names[index]
+                del self._scope_propagate_mutations[index]
+                del self._scope_mutated_names[index]
         return removed
 
     def _restore_class_scopes(
@@ -799,12 +913,14 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     bool,
                     bool,
                     frozenset[str],
+                    bool,
+                    frozenset[str],
                 ],
             ]
         ],
     ) -> None:
         for _, frame in sorted(removed, reverse=True):
-            if not frame[-1]:
+            if not frame[7]:
                 continue
             marker_index = next(
                 index
@@ -819,6 +935,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             del self._scope_excludes_enclosing_class[marker_index]
             del self._scope_is_class[marker_index]
             del self._scope_type_param_names[marker_index]
+            del self._scope_propagate_mutations[marker_index]
+            del self._scope_mutated_names[marker_index]
 
         for index, frame in sorted(removed):
             (
@@ -830,6 +948,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 restored_excludes_enclosing_class,
                 restored_is_class,
                 restored_type_param_names,
+                restored_propagate_mutations,
+                restored_mutated_names,
             ) = frame
             self._scope_bound_names.insert(index, restored_bound_names)
             self._scope_global_names.insert(index, restored_global_names)
@@ -839,6 +959,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             self._scope_excludes_enclosing_class.insert(index, restored_excludes_enclosing_class)
             self._scope_is_class.insert(index, restored_is_class)
             self._scope_type_param_names.insert(index, restored_type_param_names)
+            self._scope_propagate_mutations.insert(index, restored_propagate_mutations)
+            self._scope_mutated_names.insert(index, set(restored_mutated_names))
 
     def _scope_receivers(self) -> tuple[str | None, str | None]:
         for override in reversed(self._scope_receiver_overrides):
@@ -958,15 +1080,27 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # scopes are not lexical. Keep the type parameters in both phases;
         # unlike ordinary class locals, they remain visible lexically.
         type_param_names = frozenset(_type_param_names(node))
+        owner_state = self._flow_state()
         self._push_scope(
             type_param_names,
             frozenset(),
             frozenset(),
             type_param_names=type_param_names,
+            import_targets=owner_state.targets if owner_state is not None else None,
+            import_uncertain_names=(
+                owner_state.uncertain_names if owner_state is not None else frozenset()
+            ),
+            local_import_names=(
+                owner_state.local_names if owner_state is not None else frozenset()
+            ),
+            import_flow_sensitive=owner_state is not None,
+            propagate_mutations=owner_state is not None,
         )
         for header in _class_header_nodes(node):
             self.visit(header)
-        self._pop_scope()
+        header_mutations = self._pop_scope()
+        if owner_state is not None and header_mutations:
+            self._record_dynamic_names(header_mutations)
 
         enclosing_class_scopes = self._remove_class_scopes()
         self._push_scope(
@@ -1030,6 +1164,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             # member fact, but they still load the base object, which is an
             # ordinary reference to it.
             self.visit(node.value)
+            self._record_dynamic_attribute(node)
             return
         bound_names, global_names, shadow_names, import_bound = self._scope_names()
         # Record only the outermost attribute of a chain; whether it is
@@ -1163,6 +1298,8 @@ class _BindingCollector(ast.NodeVisitor):
         self.names: set[str] = set()
         self.deleted_names: set[str] = set()
         self.import_targets: dict[str, str] = {}
+        self.import_names: set[str] = set()
+        self.uncertain_import_names: set[str] = set()
         self.global_names: set[str] = set()
         self.nonlocal_names: set[str] = set()
         self._module_name = module_name
@@ -1182,14 +1319,20 @@ class _BindingCollector(ast.NodeVisitor):
         # two can be compared.
         for alias in node.names:
             _update_import_bindings(self.import_targets, alias)
+            self.import_names.add(alias.asname or alias.name.partition(".")[0])
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         base = _relative_module(self._module_name, self._is_package, node.module, node.level)
         for alias in node.names:
             if alias.name != "*":
+                name = alias.asname or alias.name
+                self.import_names.add(name)
+                if node.level > 0 and base is None:
+                    self.uncertain_import_names.add(name)
+                    continue
                 _update_named_import_binding(
                     self.import_targets,
-                    alias.asname or alias.name,
+                    name,
                     f"{base}.{alias.name}" if base else alias.name,
                 )
 
@@ -1292,9 +1435,12 @@ def _class_dynamic_names_after_statement(
     deleted_names = (
         frozenset(collector.deleted_names) - global_name_set - frozenset(protected_names)
     )
-    imported_names = frozenset(collector.import_targets)
+    imported_names = frozenset(collector.import_names)
+    uncertain_imported_names = frozenset(collector.uncertain_import_names)
     dynamic_names = frozenset(collector.names) - global_name_set - deleted_names
-    return (current_names - imported_names - deleted_names) | dynamic_names
+    return (
+        (current_names - imported_names - deleted_names) | dynamic_names | uncertain_imported_names
+    )
 
 
 def _class_import_targets_after_statement(
@@ -1305,8 +1451,9 @@ def _class_import_targets_after_statement(
 ) -> dict[str, str]:
     """Apply one class statement's imports and deletions in source order."""
     deleted_names = frozenset(collector.deleted_names) - frozenset(global_names)
+    import_targets = _without_import_roots(current_targets, collector.import_names)
     import_targets = {
-        name: target for name, target in current_targets.items() if name not in deleted_names
+        name: target for name, target in import_targets.items() if name not in deleted_names
     }
     if outer_targets is not None:
         import_targets.update(
@@ -1372,17 +1519,16 @@ def _scope_binders(
     collector.names.update(entry_dynamic_names)
     for body_statement in statement.body:
         collector.visit(body_statement)
-    collector.names.difference_update(collector.global_names)
-    collector.names.update(collector.nonlocal_names)
+    collector.names.difference_update(collector.global_names | collector.nonlocal_names)
     local_import_names = (
-        _import_binding_roots(collector.import_targets)
+        frozenset(collector.import_names)
         - frozenset(collector.global_names)
         - frozenset(collector.nonlocal_names)
     )
     return (
         frozenset(collector.names),
         local_import_names,
-        local_import_names - entry_dynamic_names,
+        (local_import_names - entry_dynamic_names) | frozenset(collector.uncertain_import_names),
     )
 
 
@@ -2442,7 +2588,7 @@ def _resolve_call(
 ) -> str | None:
     head = text.partition(".")[0]
     local_target = context.import_targets.get(head)
-    if head in context.uncertain_import_names:
+    if any(text == name or text.startswith(f"{name}.") for name in context.uncertain_import_names):
         return None
     if (
         local_target is not None
