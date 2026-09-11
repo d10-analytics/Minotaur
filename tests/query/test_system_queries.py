@@ -1253,6 +1253,189 @@ def test_reporting_snapshot_direct_query_variants_and_invocation_errors() -> Non
         )
 
 
+def _row_reporting_fixture() -> tuple[GraphDocument, tuple[System, ...]]:
+    order_a = _projection_symbol("orders.a", "orders/a.py", 0)
+    order_b = _projection_symbol("orders.b", "orders/b.py", 0)
+    caller_a = _projection_symbol("callers.a", "callers/a.py", 0)
+    caller_b = _projection_symbol("callers.b", "callers/b.py", 0)
+    caller_c = _projection_symbol("callers.c", "callers/c.py", 0)
+    billing = _projection_symbol("billing.ship", "billing.py", 0)
+    loose = _projection_symbol("loose.value", "loose.py", 0)
+    external = _projection_upstream("gateway.ship")
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+
+    def edge(source: Node, target: Node, kind: str) -> Relationship:
+        return Relationship(source=source.id, target=target.id, kind=kind, evidence=(evidence,))
+
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(caller_c, order_b, external, billing, caller_a, loose, order_a, caller_b),
+        relationships=(
+            edge(order_b, external, "imports"),
+            edge(caller_b, order_b, "imports"),
+            edge(order_a, billing, "calls"),
+            edge(caller_c, order_b, "calls"),
+            edge(order_a, order_b, "calls"),
+            edge(caller_a, order_a, "calls"),
+            edge(order_b, loose, "references"),
+            edge(caller_b, order_b, "references"),
+        ),
+    )
+    systems = (System("orders", ("orders/a.py", "orders/b.py")), System("billing", ("billing.py",)))
+    return document, systems
+
+
+def test_detailed_reports_attach_exact_row_contributors_and_preserve_order() -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+
+    surface = snapshot.report("surface", "orders", details=True)
+    assert [record.path for record in surface.results] == ["orders/a.py", "orders/b.py"]
+    assert surface.relationships is not None
+    assert [
+        (item.source.id, item.target.id, item.kind) for item in surface.relationships
+    ] == sorted((item.source.id, item.target.id, item.kind) for item in surface.relationships)
+    assert list(surface.row_relationships or {}) == [
+        ("orders/a.py", "orders.a"),
+        ("orders/b.py", "orders.b"),
+    ]
+    assert [item.kind for item in surface.row_relationships[("orders/a.py", "orders.a")]] == [
+        "calls"
+    ]
+    b_details = surface.row_relationships[("orders/b.py", "orders.b")]
+    assert [(item.source.id, item.target.id, item.kind) for item in b_details] == sorted(
+        (item.source.id, item.target.id, item.kind) for item in b_details
+    )
+
+    consumers = snapshot.report("consumers", "orders", details=True)
+    assert [record.file for record in consumers.results] == [
+        "callers/a.py",
+        "callers/b.py",
+        "callers/c.py",
+    ]
+    assert list(consumers.row_relationships or {}) == [
+        ("callers/a.py",),
+        ("callers/b.py",),
+        ("callers/c.py",),
+    ]
+    assert [item.kind for item in consumers.row_relationships[("callers/b.py",)]] == [
+        "imports",
+        "references",
+    ]
+
+    dependencies = snapshot.report("system-deps", "orders", details=True)
+    assert [record.category for record in dependencies.results] == [
+        "external",
+        "no_system",
+        "system: billing",
+    ]
+    assert list(dependencies.row_relationships or {}) == [
+        ("external",),
+        ("no_system",),
+        ("system: billing",),
+    ]
+    assert [item.kind for item in dependencies.row_relationships[("external",)]] == ["imports"]
+    assert [item.kind for item in dependencies.row_relationships[("no_system",)]] == ["references"]
+    assert [item.kind for item in dependencies.row_relationships[("system: billing",)]] == ["calls"]
+    assert "row_relationships" not in dependencies.to_dict()
+
+
+def test_row_relationships_are_copied_immutable_and_constructor_validated() -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    detailed = snapshot.report("surface", "orders", details=True)
+    assert detailed.row_relationships is not None
+    supplied = dict(detailed.row_relationships)
+    rebuilt = system_query.SystemReport(
+        query=detailed.query,
+        system_name=detailed.system_name,
+        results=detailed.results,
+        coverage=detailed.coverage,
+        relationships=detailed.relationships,
+        row_relationships=supplied,
+    )
+    supplied.clear()
+    assert list(rebuilt.row_relationships or {}) == list(detailed.row_relationships)
+    with pytest.raises(TypeError):
+        detailed.row_relationships[("orders/a.py", "orders.a")] = ()  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="requires detailed"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=tuple(detailed.results),
+            coverage=detailed.coverage,
+            row_relationships={},
+        )
+    with pytest.raises(ValueError, match="unexpected row key"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={("wrong.py", "wrong"): ()},
+        )
+    with pytest.raises(ValueError, match="partition"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships[:-1],
+            row_relationships=detailed.row_relationships,
+        )
+
+
+def test_report_selection_and_detail_projection_are_shared_and_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    target = resolve_system(systems, "orders")
+    sentinel = system_query.SurfaceRecord(
+        category="system: orders", kinds=("calls",), path="sentinel.py", symbol="sentinel"
+    )
+    real_selector = system_query._select_report
+    selection = system_query._ReportSelection(
+        records_by_key={("sentinel.py", "sentinel"): sentinel},
+        relationships_by_key={("sentinel.py", "sentinel"): ()},
+    )
+    monkeypatch.setattr(system_query, "_select_report", lambda *_args: selection)
+    assert system_query.surface(systems, snapshot.index, target) == (sentinel,)
+    assert snapshot.report("surface", "orders").results == (sentinel,)
+    monkeypatch.setattr(system_query, "_select_report", real_selector)
+
+    real_detail = system_query._relationship_detail
+
+    def distinctive_detail(
+        document: GraphDocument,
+        relationship: Relationship,
+        source_node: Node,
+        target_node: Node,
+    ) -> system_query.RelationshipDetail:
+        detail = real_detail(document, relationship, source_node, target_node)
+        source = dataclasses.replace(detail.source, label="canonical-owner")
+        return dataclasses.replace(detail, source=source)
+
+    monkeypatch.setattr(system_query, "_relationship_detail", distinctive_detail)
+    detailed = snapshot.report("surface", "orders", details=True)
+    assert detailed.row_relationships is not None
+    assert any(
+        item.source.label == "canonical-owner"
+        for values in detailed.row_relationships.values()
+        for item in values
+    )
+
+    def fail_detail(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("compact reports must not project relationship details")
+
+    monkeypatch.setattr(system_query, "_relationship_detail", fail_detail)
+    assert snapshot.report("surface", "orders").relationships is None
+    with pytest.raises(AssertionError, match="compact reports"):
+        snapshot.report("surface", "orders", details=True)
+
+
 def _projection_file_with_namespace(path: str, namespace: str) -> Node:
     identity = NodeIdentity(IdentityBasis.FILE_PATH, namespace)
     return Node(
