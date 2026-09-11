@@ -219,10 +219,25 @@ class _ReportSelection:
 
     records_by_key: Mapping[RowKey, object]
     relationships_by_key: Mapping[RowKey, tuple[_ResolvedRelationship, ...]]
+    resolved_relationships: tuple[_ResolvedRelationship, ...] = field(default_factory=tuple)
 
     @property
     def records(self) -> tuple[Any, ...]:
         return tuple(self.records_by_key.values())
+
+
+def _resolve_supported_relationships(index: GraphIndex) -> tuple[_ResolvedRelationship, ...]:
+    """Resolve every supported edge once, independent of a report boundary."""
+    resolved: list[_ResolvedRelationship] = []
+    for kind in _BOUNDARY_KINDS:
+        for relationship in index.relationships(kind):
+            source = index.nodes.get(relationship.source)
+            destination = index.nodes.get(relationship.target)
+            if source is None or destination is None:
+                continue
+            resolved.append((relationship, source, destination))
+    resolved.sort(key=lambda item: item[0].tuple_key)
+    return tuple(resolved)
 
 
 def _select_report(
@@ -233,44 +248,39 @@ def _select_report(
 ) -> _ReportSelection:
     """Select records and their exact contributing edges in one shared pass."""
     grouped: dict[RowKey, list[_ResolvedRelationship]] = defaultdict(list)
-    kinds = _SURFACE_KINDS if query == "surface" else _BOUNDARY_KINDS
-    for kind in kinds:
-        for relationship in index.relationships(kind):
-            source = index.nodes.get(relationship.source)
-            destination = index.nodes.get(relationship.target)
-            if source is None or destination is None:
+    resolved = _resolve_supported_relationships(index)
+    for relationship, source, destination in resolved:
+        source_in = _in_scope(systems, target, source)
+        destination_in = _in_scope(systems, target, destination)
+        row_key: RowKey
+        if query == "surface":
+            if relationship.kind not in _SURFACE_KINDS or not destination_in or source_in:
                 continue
-            source_in = _in_scope(systems, target, source)
-            destination_in = _in_scope(systems, target, destination)
-            row_key: RowKey
-            if query == "surface":
-                if not destination_in or source_in:
-                    continue
-                path = _endpoint_file(systems, destination)
-                if path is None:  # pragma: no cover - in-scope implies a listed file.
-                    continue
-                row_key = (path, destination.label)
-            elif query == "consumers":
-                if not destination_in or source_in:
-                    continue
-                path = _endpoint_file(systems, source)
-                if path is None:
-                    continue
-                row_key = (path,)
+            path = _endpoint_file(systems, destination)
+            if path is None:  # pragma: no cover - in-scope implies a listed file.
+                continue
+            row_key = (path, destination.label)
+        elif query == "consumers":
+            if not destination_in or source_in:
+                continue
+            path = _endpoint_file(systems, source)
+            if path is None:
+                continue
+            row_key = (path,)
+        else:
+            if not source_in or destination_in:
+                continue
+            membership = classify_endpoint(systems, destination)
+            if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
+                category = f"system: {membership.system.name}"
+            elif membership.kind is EndpointKind.NO_SYSTEM:
+                category = "no_system"
             else:
-                if not source_in or destination_in:
-                    continue
-                membership = classify_endpoint(systems, destination)
-                if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
-                    category = f"system: {membership.system.name}"
-                elif membership.kind is EndpointKind.NO_SYSTEM:
-                    category = "no_system"
-                else:
-                    category = "external"
-                if category == f"system: {target.name}":
-                    continue
-                row_key = (category,)
-            grouped[row_key].append((relationship, source, destination))
+                category = "external"
+            if category == f"system: {target.name}":
+                continue
+            row_key = (category,)
+        grouped[row_key].append((relationship, source, destination))
 
     ordered_relationships = {
         row_key: tuple(sorted(edges, key=lambda item: item[0].tuple_key))
@@ -329,6 +339,7 @@ def _select_report(
     return _ReportSelection(
         records_by_key=MappingProxyType(records_by_key),
         relationships_by_key=MappingProxyType(ordered_relationships),
+        resolved_relationships=resolved,
     )
 
 
