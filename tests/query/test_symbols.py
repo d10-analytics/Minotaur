@@ -379,6 +379,83 @@ def test_dotted_import_call_graph_drives_exact_callers(
     assert captured.out == "caller.py:3:12  caller.owner\n"
 
 
+def test_conditional_call_graph_drives_exact_callers_with_location(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(
+        tmp_path,
+        "caller.py",
+        "def owner(flag):\n"
+        "    if flag:\n"
+        "        import pkg.sub\n"
+        "    else:\n"
+        "        import pkg.sub\n"
+        "    return pkg.sub.go()\n",
+    )
+    graph = tmp_path / "conditional-call.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "caller.owner", "pkg.sub.go") == ["calls"]
+
+    status = cli.main(
+        [
+            "query",
+            "callers",
+            "pkg.sub.go",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "caller.py:6:12  caller.owner\n"
+
+
+def test_ambiguous_conditional_continuation_is_callers_recall_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/sub.py", "def go():\n    return 1\n")
+    _write(tmp_path, "alternate.py", "def replacement():\n    return 2\n")
+    _write(
+        tmp_path,
+        "caller.py",
+        "def owner(flag):\n"
+        "    if flag:\n"
+        "        import pkg.sub\n"
+        "    else:\n"
+        "        import alternate as pkg\n"
+        "    return pkg.sub.go()\n",
+    )
+    graph = tmp_path / "ambiguous-call.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "caller.owner", "pkg.sub.go") == []
+
+    status = cli.main(
+        [
+            "query",
+            "callers",
+            "pkg.sub.go",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "caller.py:6:12  pkg.sub.go [unresolved]\n"
+
+
 def test_lost_import_route_callers_keep_unresolved_text_without_stale_call(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
