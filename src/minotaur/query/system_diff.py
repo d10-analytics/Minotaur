@@ -313,17 +313,6 @@ def _endpoint_structure(
     }
 
 
-def _structural_relationship(
-    snapshot: ReportingSnapshot, relationship: RelationshipDetail
-) -> object:
-    """Return canonical endpoint fields that are structural for row comparison."""
-    return {
-        "source": _freeze(_endpoint_structure(snapshot, relationship.source)),
-        "target": _freeze(_endpoint_structure(snapshot, relationship.target)),
-        "kind": relationship.kind,
-    }
-
-
 def _report_payload(
     snapshot: ReportingSnapshot, query: str, name: str
 ) -> dict[tuple[str, ...], dict[str, object]]:
@@ -356,7 +345,6 @@ def _report_payload(
             "record": record,
             "relationships": evidence,
             "involved_systems": tuple(sorted(involved)),
-            "structural_relationships": _structural_relationship_set(snapshot, evidence),
         }
     return result
 
@@ -375,18 +363,6 @@ def _all_reports(
     return result
 
 
-def _structural_relationship_set(
-    snapshot: ReportingSnapshot, relationships: tuple[RelationshipDetail, ...]
-) -> tuple[object, ...]:
-    """Deduplicate paired endpoint structures while retaining all evidence."""
-    structures: list[object] = []
-    for relationship in relationships:
-        structure = _structural_relationship(snapshot, relationship)
-        if structure not in structures:
-            structures.append(structure)
-    return tuple(sorted(structures, key=repr))
-
-
 def _row_changes(
     old: ReportingSnapshot,
     new: ReportingSnapshot,
@@ -402,9 +378,7 @@ def _row_changes(
             old_row, new_row = left.get(key), right.get(key)
             old_record = old_row.get("record") if old_row else None
             new_record = new_row.get("record") if new_row else None
-            old_structural = old_row.get("structural_relationships") if old_row else None
-            new_structural = new_row.get("structural_relationships") if new_row else None
-            if old_record == new_record and (old_structural == new_structural):
+            if old_record == new_record:
                 continue
             old_names = old_row.get("involved_systems", ()) if old_row else ()
             new_names = new_row.get("involved_systems", ()) if new_row else ()
