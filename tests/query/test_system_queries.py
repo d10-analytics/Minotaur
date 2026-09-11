@@ -1159,6 +1159,9 @@ def test_reporting_snapshot_reuses_index_and_records_unavailable_selection() -> 
     assert first.coverage.selection == {"status": "unavailable"}
     assert first.relationships is None
     assert detailed_empty.relationships == ()
+    assert detailed_empty.row_relationships == {}
+    with pytest.raises(TypeError):
+        detailed_empty.row_relationships[()] = ()  # type: ignore[index]
     assert snapshot.index is snapshot.index
     assert second.coverage.source_diagnostics == {"status": "unavailable"}
     with pytest.raises(ValueError, match="unknown system query"):
@@ -1251,6 +1254,540 @@ def test_reporting_snapshot_direct_query_variants_and_invocation_errors() -> Non
         system_query.compose_system_query(
             observed_report, system_query.QueryInvocation(False, (), None)
         )
+
+
+def _row_reporting_fixture() -> tuple[GraphDocument, tuple[System, ...]]:
+    order_a = _projection_symbol("orders.a", "orders/a.py", 0)
+    order_b = _projection_symbol("orders.b", "orders/b.py", 0)
+    caller_a = _projection_symbol("callers.a", "callers/a.py", 0)
+    caller_b = _projection_symbol("callers.b", "callers/b.py", 0)
+    caller_c = _projection_symbol("callers.c", "callers/c.py", 0)
+    billing = _projection_symbol("billing.ship", "billing.py", 0)
+    loose = _projection_symbol("loose.value", "loose.py", 0)
+    external = _projection_upstream("gateway.ship")
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+
+    def edge(source: Node, target: Node, kind: str) -> Relationship:
+        return Relationship(source=source.id, target=target.id, kind=kind, evidence=(evidence,))
+
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(caller_c, order_b, external, billing, caller_a, loose, order_a, caller_b),
+        relationships=(
+            edge(order_b, external, "imports"),
+            edge(caller_b, order_b, "imports"),
+            edge(order_a, billing, "calls"),
+            edge(caller_c, order_b, "calls"),
+            edge(order_a, order_b, "calls"),
+            edge(caller_a, order_a, "calls"),
+            edge(order_b, loose, "references"),
+            edge(caller_b, order_b, "references"),
+        ),
+    )
+    systems = (System("orders", ("orders/a.py", "orders/b.py")), System("billing", ("billing.py",)))
+    return document, systems
+
+
+def test_detailed_reports_attach_exact_row_contributors_and_preserve_order() -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+
+    surface = snapshot.report("surface", "orders", details=True)
+    assert [record.path for record in surface.results] == ["orders/a.py", "orders/b.py"]
+    assert surface.relationships is not None
+    assert [
+        (item.source.id, item.target.id, item.kind) for item in surface.relationships
+    ] == sorted((item.source.id, item.target.id, item.kind) for item in surface.relationships)
+    assert list(surface.row_relationships or {}) == [
+        ("orders/a.py", "orders.a"),
+        ("orders/b.py", "orders.b"),
+    ]
+    assert [item.kind for item in surface.row_relationships[("orders/a.py", "orders.a")]] == [
+        "calls"
+    ]
+    b_details = surface.row_relationships[("orders/b.py", "orders.b")]
+    assert [(item.source.id, item.target.id, item.kind) for item in b_details] == sorted(
+        (item.source.id, item.target.id, item.kind) for item in b_details
+    )
+
+    consumers = snapshot.report("consumers", "orders", details=True)
+    assert [record.file for record in consumers.results] == [
+        "callers/a.py",
+        "callers/b.py",
+        "callers/c.py",
+    ]
+    assert list(consumers.row_relationships or {}) == [
+        ("callers/a.py",),
+        ("callers/b.py",),
+        ("callers/c.py",),
+    ]
+    assert [item.kind for item in consumers.row_relationships[("callers/b.py",)]] == [
+        "imports",
+        "references",
+    ]
+
+    dependencies = snapshot.report("system-deps", "orders", details=True)
+    assert [record.category for record in dependencies.results] == [
+        "external",
+        "no_system",
+        "system: billing",
+    ]
+    assert list(dependencies.row_relationships or {}) == [
+        ("external",),
+        ("no_system",),
+        ("system: billing",),
+    ]
+    assert [item.kind for item in dependencies.row_relationships[("external",)]] == ["imports"]
+    assert [item.kind for item in dependencies.row_relationships[("no_system",)]] == ["references"]
+    assert [item.kind for item in dependencies.row_relationships[("system: billing",)]] == ["calls"]
+    assert "row_relationships" not in dependencies.to_dict()
+
+
+def test_row_maps_preserve_exact_edges_and_pathless_inbound_rules() -> None:
+    document, systems = _row_reporting_fixture()
+    nodes = {node.label: node for node in document.nodes}
+    pathless = nodes["gateway.ship"]
+    target = nodes["orders.b"]
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+    document = dataclasses.replace(
+        document,
+        relationships=document.relationships
+        + (
+            Relationship(
+                source=pathless.id,
+                target=target.id,
+                kind="calls",
+                evidence=(evidence,),
+            ),
+        ),
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+
+    def identities(
+        report: system_query.SystemReport[object],
+    ) -> dict[tuple[str, ...], tuple[tuple[str, str, str], ...]]:
+        assert report.row_relationships is not None
+        return {
+            key: tuple((item.source.id, item.target.id, item.kind) for item in values)
+            for key, values in report.row_relationships.items()
+        }
+
+    surface = snapshot.report("surface", "orders", details=True)
+    surface_ids = identities(surface)
+    assert set(surface_ids) == {
+        ("orders/a.py", "orders.a"),
+        ("orders/b.py", "orders.b"),
+    }
+    assert surface_ids[("orders/a.py", "orders.a")] == (
+        (nodes["callers.a"].id, nodes["orders.a"].id, "calls"),
+    )
+    assert surface_ids[("orders/b.py", "orders.b")] == tuple(
+        sorted(
+            (
+                (nodes["callers.b"].id, nodes["orders.b"].id, "references"),
+                (nodes["callers.c"].id, nodes["orders.b"].id, "calls"),
+                (pathless.id, nodes["orders.b"].id, "calls"),
+            )
+        )
+    )
+
+    consumers = snapshot.report("consumers", "orders", details=True)
+    consumer_ids = identities(consumers)
+    assert consumer_ids[("callers/b.py",)] == tuple(
+        sorted(
+            (
+                (nodes["callers.b"].id, nodes["orders.b"].id, "imports"),
+                (nodes["callers.b"].id, nodes["orders.b"].id, "references"),
+            )
+        )
+    )
+    assert all(pathless.id not in edge for edges in consumer_ids.values() for edge in edges)
+
+
+def test_row_contributor_outputs_are_independent_of_input_order() -> None:
+    document, systems = _row_reporting_fixture()
+    permuted = dataclasses.replace(
+        document,
+        nodes=tuple(reversed(document.nodes)),
+        relationships=tuple(reversed(document.relationships)),
+    )
+    first = system_query.ReportingSnapshot.prepare(document, systems)
+    second = system_query.ReportingSnapshot.prepare(permuted, systems)
+
+    def fingerprint(report: system_query.SystemReport[object]) -> tuple[object, object]:
+        assert report.row_relationships is not None
+        row_values = tuple(
+            (
+                key,
+                tuple((item.source.id, item.target.id, item.kind) for item in values),
+            )
+            for key, values in report.row_relationships.items()
+        )
+        return report.to_dict(), row_values
+
+    for query in ("surface", "consumers", "system-deps"):
+        assert fingerprint(first.report(query, "orders", details=True)) == fingerprint(
+            second.report(query, "orders", details=True)
+        )
+
+
+def test_shared_resolution_keeps_complete_supported_edges_before_row_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, systems = _row_reporting_fixture()
+    nodes = {node.label: node for node in document.nodes}
+    missing = _projection_symbol("missing.source", "missing.py", 0)
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+    unsupported = Relationship(
+        source=nodes["orders.a"].id,
+        target=nodes["orders.b"].id,
+        kind="contains",
+        evidence=(evidence,),
+    )
+    missing_endpoint = Relationship(
+        source=missing.id,
+        target=nodes["orders.a"].id,
+        kind="calls",
+        evidence=(evidence,),
+    )
+    expanded = dataclasses.replace(
+        document,
+        relationships=document.relationships + (unsupported, missing_endpoint),
+    )
+    index = GraphIndex.build(expanded)
+    expected = tuple(
+        sorted(
+            (relationship.source, relationship.target, relationship.kind)
+            for relationship in expanded.relationships
+            if relationship.kind in {"calls", "references", "imports"}
+            and relationship.source in index.nodes
+            and relationship.target in index.nodes
+        )
+    )
+    resolved = system_query._resolve_supported_relationships(index)
+    assert tuple(item[0].tuple_key for item in resolved) == expected
+    assert all(item[0].kind in {"calls", "references", "imports"} for item in resolved)
+
+    calls: list[tuple[tuple[str, str, str], ...]] = []
+    real_resolver = system_query._resolve_supported_relationships
+
+    def recording_resolver(current_index: GraphIndex) -> tuple[object, ...]:
+        values = real_resolver(current_index)
+        calls.append(tuple(item[0].tuple_key for item in values))
+        return values
+
+    monkeypatch.setattr(system_query, "_resolve_supported_relationships", recording_resolver)
+    target = resolve_system(systems, "orders")
+    standalone = system_query.surface(systems, index, target)
+    detailed = system_query.ReportingSnapshot.prepare(expanded, systems).report(
+        "surface", "orders", details=True
+    )
+    assert standalone == detailed.results
+    assert calls == [expected, expected]
+    assert detailed.relationships is not None
+    surface_expected = tuple(
+        sorted(
+            item
+            for item in expected
+            if item[1] in {nodes["orders.a"].id, nodes["orders.b"].id}
+            and item[0] not in {nodes["orders.a"].id, nodes["orders.b"].id}
+            and item[2] in {"calls", "references"}
+        )
+    )
+    assert (
+        tuple((item.source.id, item.target.id, item.kind) for item in detailed.relationships)
+        == surface_expected
+    )
+
+
+def test_row_relationships_are_copied_immutable_and_constructor_validated() -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    detailed = snapshot.report("surface", "orders", details=True)
+    assert detailed.row_relationships is not None
+    supplied = dict(detailed.row_relationships)
+    rebuilt = system_query.SystemReport(
+        query=detailed.query,
+        system_name=detailed.system_name,
+        results=detailed.results,
+        coverage=detailed.coverage,
+        relationships=detailed.relationships,
+        row_relationships=supplied,
+    )
+    supplied.clear()
+    assert list(rebuilt.row_relationships or {}) == list(detailed.row_relationships)
+    assert all(isinstance(values, tuple) for values in rebuilt.row_relationships.values())
+    with pytest.raises(TypeError):
+        detailed.row_relationships[("orders/a.py", "orders.a")] = ()  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="requires detailed"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=tuple(detailed.results),
+            coverage=detailed.coverage,
+            row_relationships={},
+        )
+    with pytest.raises(ValueError, match="unexpected row key"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={("wrong.py", "wrong"): ()},
+        )
+    with pytest.raises(ValueError, match="cover every report result"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={next(iter(detailed.row_relationships)): ()},
+        )
+    with pytest.raises(ValueError, match="keys must be tuples"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={"orders/a.py": ()},  # type: ignore[dict-item]
+        )
+    with pytest.raises(ValueError, match="RelationshipDetail tuples"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={
+                key: (object(),) if key == next(iter(detailed.row_relationships)) else values
+                for key, values in detailed.row_relationships.items()
+            },
+        )
+    with pytest.raises(ValueError, match="partition"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={
+                key: detailed.row_relationships[next(iter(detailed.row_relationships))]
+                if key != next(iter(detailed.row_relationships))
+                else detailed.row_relationships[key]
+                for key in detailed.row_relationships
+            },
+        )
+    with pytest.raises(ValueError, match="partition"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships[:-1],
+            row_relationships=detailed.row_relationships,
+        )
+
+
+def test_report_selection_and_detail_projection_are_shared_and_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    target = resolve_system(systems, "orders")
+    sentinel = system_query.SurfaceRecord(
+        category="system: orders", kinds=("calls",), path="sentinel.py", symbol="sentinel"
+    )
+    real_selector = system_query._select_report
+    selection = system_query._ReportSelection(
+        records_by_key={("sentinel.py", "sentinel"): sentinel},
+        relationships_by_key={("sentinel.py", "sentinel"): ()},
+    )
+    monkeypatch.setattr(system_query, "_select_report", lambda *_args: selection)
+    assert system_query.surface(systems, snapshot.index, target) == (sentinel,)
+    assert snapshot.report("surface", "orders").results == (sentinel,)
+    monkeypatch.setattr(system_query, "_select_report", real_selector)
+
+    real_detail = system_query._relationship_detail
+
+    def distinctive_detail(
+        document: GraphDocument,
+        relationship: Relationship,
+        source_node: Node,
+        target_node: Node,
+    ) -> system_query.RelationshipDetail:
+        detail = real_detail(document, relationship, source_node, target_node)
+        source = dataclasses.replace(detail.source, label="canonical-owner")
+        return dataclasses.replace(detail, source=source)
+
+    monkeypatch.setattr(system_query, "_relationship_detail", distinctive_detail)
+    detailed = snapshot.report("surface", "orders", details=True)
+    assert detailed.row_relationships is not None
+    assert any(
+        item.source.label == "canonical-owner"
+        for values in detailed.row_relationships.values()
+        for item in values
+    )
+
+    def fail_detail(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("compact reports must not project relationship details")
+
+    monkeypatch.setattr(system_query, "_relationship_detail", fail_detail)
+    assert snapshot.report("surface", "orders").relationships is None
+    with pytest.raises(AssertionError, match="compact reports"):
+        snapshot.report("surface", "orders", details=True)
+
+
+def test_relationship_details_exposes_complete_supported_edge_domain() -> None:
+    document, systems = _row_reporting_fixture()
+    nodes = {node.label: node for node in document.nodes}
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+    missing_source = _projection_symbol("missing.source", "missing.py", 0)
+    pathless_inbound = Relationship(
+        source=nodes["gateway.ship"].id,
+        target=nodes["orders.b"].id,
+        kind="calls",
+        evidence=(evidence,),
+    )
+    unsupported = Relationship(
+        source=nodes["orders.a"].id,
+        target=nodes["orders.b"].id,
+        kind="contains",
+        evidence=(evidence,),
+    )
+    missing_endpoint = Relationship(
+        source=missing_source.id,
+        target=nodes["orders.a"].id,
+        kind="references",
+        evidence=(evidence,),
+    )
+    expanded = dataclasses.replace(
+        document,
+        relationships=document.relationships + (pathless_inbound, unsupported, missing_endpoint),
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(expanded, systems)
+
+    details = snapshot.relationship_details()
+    actual = tuple((item.source.id, item.target.id, item.kind) for item in details)
+    expected = tuple(
+        sorted(
+            (relationship.source, relationship.target, relationship.kind)
+            for relationship in expanded.relationships
+            if relationship.kind in {"calls", "references", "imports"}
+            and relationship.source in snapshot.index.nodes
+            and relationship.target in snapshot.index.nodes
+        )
+    )
+    assert actual == expected
+    assert len(details) == 9
+    assert any(item.source.id == nodes["gateway.ship"].id for item in details)
+    assert any(item.target.id == nodes["loose.value"].id for item in details)
+    assert any(item.target.id == nodes["gateway.ship"].id for item in details)
+    assert all(item.kind != "contains" for item in details)
+    assert all(missing_source.id != item.source.id for item in details)
+
+
+def test_relationship_details_reuses_shared_resolution_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    relationship = document.relationships[0]
+    resolved = (
+        (
+            relationship,
+            snapshot.index.nodes[relationship.source],
+            snapshot.index.nodes[relationship.target],
+        ),
+    )
+    calls: list[GraphIndex] = []
+
+    def recording_resolver(index: GraphIndex) -> tuple[tuple[Relationship, Node, Node], ...]:
+        calls.append(index)
+        return resolved
+
+    monkeypatch.setattr(system_query, "_resolve_supported_relationships", recording_resolver)
+    details = snapshot.relationship_details()
+
+    assert calls == [snapshot.index]
+    assert tuple((item.source.id, item.target.id, item.kind) for item in details) == (
+        relationship.tuple_key,
+    )
+
+
+def test_relationship_details_are_permutation_stable_with_sorted_evidence_sites() -> None:
+    document, systems = _row_reporting_fixture()
+    relationship = document.relationships[0]
+    evidence = Evidence(
+        provenance=Provenance.STATIC_ANALYSIS,
+        locations=(
+            Location("z.py", Range(Position(4, 0), Position(4, 1))),
+            Location("a.py", Range(Position(2, 0), Position(2, 1))),
+        ),
+    )
+    enriched = dataclasses.replace(
+        document,
+        relationships=(
+            dataclasses.replace(relationship, evidence=(evidence,)),
+            *document.relationships[1:],
+        ),
+    )
+    permuted = dataclasses.replace(
+        enriched,
+        nodes=tuple(reversed(enriched.nodes)),
+        relationships=tuple(reversed(enriched.relationships)),
+    )
+
+    first = system_query.ReportingSnapshot.prepare(enriched, systems).relationship_details()
+    second = system_query.ReportingSnapshot.prepare(permuted, systems).relationship_details()
+    assert first == second
+    assert [(item.source.id, item.target.id, item.kind) for item in first] == sorted(
+        (item.source.id, item.target.id, item.kind) for item in first
+    )
+    enriched_detail = next(
+        item
+        for item in first
+        if (item.source.id, item.target.id, item.kind) == relationship.tuple_key
+    )
+    assert [site["path"] for site in enriched_detail.evidence[0].to_dict()["sites"]] == [
+        "a.py",
+        "z.py",
+    ]
+
+
+def test_relationship_details_uses_canonical_owner_and_stays_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    real_detail = system_query._relationship_detail
+
+    def distinctive_detail(
+        current_document: GraphDocument,
+        relationship: Relationship,
+        source: Node,
+        target: Node,
+    ) -> system_query.RelationshipDetail:
+        detail = real_detail(current_document, relationship, source, target)
+        return dataclasses.replace(
+            detail, source=dataclasses.replace(detail.source, label="canonical")
+        )
+
+    monkeypatch.setattr(system_query, "_relationship_detail", distinctive_detail)
+    details = snapshot.relationship_details()
+    assert details
+    assert all(item.source.label == "canonical" for item in details)
+
+    def fail_detail(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("compact reports must not project relationship details")
+
+    monkeypatch.setattr(system_query, "_relationship_detail", fail_detail)
+    assert snapshot.report("surface", "orders").relationships is None
+    with pytest.raises(AssertionError, match="compact reports"):
+        snapshot.relationship_details()
 
 
 def _projection_file_with_namespace(path: str, namespace: str) -> Node:

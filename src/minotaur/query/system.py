@@ -45,7 +45,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Generic, Literal, TypeVar, overload
+from typing import Any, Generic, Literal, TypeVar, cast, overload
 
 from minotaur.graph_model._parsing import _jcs_serialize
 from minotaur.graph_model.document import GraphDocument
@@ -67,6 +67,9 @@ _SURFACE_KINDS = (_CALLS, _REFERENCES)
 
 #: Consumers and dependencies report both consumption layers (D-06).
 _BOUNDARY_KINDS = (_CALLS, _REFERENCES, _IMPORTS)
+
+RowKey = tuple[str, ...]
+_ResolvedRelationship = tuple[Relationship, Node, Node]
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,29 +176,8 @@ def surface(
     Rows key on the symbol, so additional outside call sites never add a
     record (AC-05, D-05).
     """
-    reached: dict[tuple[str, str], set[str]] = defaultdict(set)
-    for kind in _SURFACE_KINDS:
-        for relationship in index.relationships(kind):
-            target_node = index.nodes.get(relationship.target)
-            if target_node is None or not _in_scope(systems, target, target_node):
-                continue
-            source = index.nodes.get(relationship.source)
-            if source is None or _in_scope(systems, target, source):
-                continue
-            file = _endpoint_file(systems, target_node)
-            if file is None:  # pragma: no cover - in-scope implies a listed file.
-                continue
-            reached[(target_node.label, file)].add(kind)
-    records = [
-        SurfaceRecord(
-            category=f"system: {target.name}",
-            kinds=tuple(sorted(kinds)),
-            path=file,
-            symbol=symbol,
-        )
-        for (symbol, file), kinds in reached.items()
-    ]
-    return tuple(sorted(records, key=lambda record: (record.path, record.symbol)))
+    selection = _select_report(systems, index, target, "surface")
+    return cast(tuple[SurfaceRecord, ...], selection.records)
 
 
 def consumers(
@@ -210,50 +192,8 @@ def consumers(
     detail.  A path-less source endpoint has no file and so is not a
     consumer row (R-06, AC-06).
     """
-    kinds_by_file: dict[str, set[str]] = defaultdict(set)
-    targets_by_file: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
-    for kind in _BOUNDARY_KINDS:
-        for relationship in index.relationships(kind):
-            target_node = index.nodes.get(relationship.target)
-            if target_node is None or not _in_scope(systems, target, target_node):
-                continue
-            source = index.nodes.get(relationship.source)
-            if source is None:
-                continue
-            source_membership = classify_endpoint(systems, source)
-            if (
-                source_membership.kind is EndpointKind.SYSTEM
-                and source_membership.system is not None
-                and source_membership.system.name == target.name
-            ):
-                continue  # Both endpoints sit inside the queried system.
-            source_file = source_membership.file
-            if source_file is None:
-                continue  # Path-less upstream source: not a consumer file.
-            target_file = _endpoint_file(systems, target_node)
-            if target_file is None:  # pragma: no cover - in-scope implies a listed file.
-                continue
-            kinds_by_file[source_file].add(kind)
-            targets_by_file[source_file].add((target_node.label, target_file, kind))
-    records = []
-    for file in sorted(kinds_by_file):
-        records.append(
-            ConsumersRecord(
-                category=_file_category(systems, file),
-                file=file,
-                kinds=tuple(sorted(kinds_by_file[file])),
-                targets=tuple(
-                    sorted(
-                        (
-                            TargetDetail(label=label, path=path, kind=kind)
-                            for label, path, kind in targets_by_file[file]
-                        ),
-                        key=_target_sort_key,
-                    )
-                ),
-            )
-        )
-    return tuple(records)
+    selection = _select_report(systems, index, target, "consumers")
+    return cast(tuple[ConsumersRecord, ...], selection.records)
 
 
 def system_deps(
@@ -269,42 +209,163 @@ def system_deps(
     same-file edges are internal and never a dependency; no target is
     silently attributed to a system or dropped (R-07, D-13, AC-07).
     """
-    targets_by_category: dict[str, set[tuple[str | None, str | None, str]]] = defaultdict(set)
+    selection = _select_report(systems, index, target, "system-deps")
+    return cast(tuple[SystemDepsRecord, ...], selection.records)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportSelection:
+    """Private records and resolved edge triples grouped by semantic row."""
+
+    records_by_key: Mapping[RowKey, object]
+    relationships_by_key: Mapping[RowKey, tuple[_ResolvedRelationship, ...]]
+    resolved_relationships: tuple[_ResolvedRelationship, ...] = field(default_factory=tuple)
+
+    @property
+    def records(self) -> tuple[Any, ...]:
+        return tuple(self.records_by_key.values())
+
+
+def _resolve_supported_relationships(index: GraphIndex) -> tuple[_ResolvedRelationship, ...]:
+    """Resolve every supported edge once, independent of a report boundary."""
+    resolved: list[_ResolvedRelationship] = []
     for kind in _BOUNDARY_KINDS:
         for relationship in index.relationships(kind):
             source = index.nodes.get(relationship.source)
-            if source is None or not _in_scope(systems, target, source):
+            destination = index.nodes.get(relationship.target)
+            if source is None or destination is None:
                 continue
-            target_node = index.nodes.get(relationship.target)
-            if target_node is None:
+            resolved.append((relationship, source, destination))
+    resolved.sort(key=lambda item: item[0].tuple_key)
+    return tuple(resolved)
+
+
+def _select_report(
+    systems: Sequence[System],
+    index: GraphIndex,
+    target: System,
+    query: Literal["surface", "consumers", "system-deps"],
+) -> _ReportSelection:
+    """Select records and their exact contributing edges in one shared pass."""
+    grouped: dict[RowKey, list[_ResolvedRelationship]] = defaultdict(list)
+    resolved = _resolve_supported_relationships(index)
+    for relationship, source, destination in resolved:
+        source_in = _in_scope(systems, target, source)
+        destination_in = _in_scope(systems, target, destination)
+        row_key: RowKey
+        if query == "surface":
+            if relationship.kind not in _SURFACE_KINDS or not destination_in or source_in:
                 continue
-            membership = classify_endpoint(systems, target_node)
+            path = _endpoint_file(systems, destination)
+            if path is None:  # pragma: no cover - in-scope implies a listed file.
+                continue
+            row_key = (path, destination.label)
+        elif query == "consumers":
+            if not destination_in or source_in:
+                continue
+            path = _endpoint_file(systems, source)
+            if path is None:
+                continue
+            row_key = (path,)
+        else:
+            if not source_in or destination_in:
+                continue
+            membership = classify_endpoint(systems, destination)
             if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
-                if membership.system.name == target.name:
-                    continue  # Internal dependency, not a boundary one.
                 category = f"system: {membership.system.name}"
             elif membership.kind is EndpointKind.NO_SYSTEM:
                 category = "no_system"
             else:
                 category = "external"
-            targets_by_category[category].add((target_node.label, membership.file, kind))
-    records = []
-    for category in sorted(targets_by_category):
-        records.append(
-            SystemDepsRecord(
-                category=category,
+            if category == f"system: {target.name}":
+                continue
+            row_key = (category,)
+        grouped[row_key].append((relationship, source, destination))
+
+    ordered_relationships = {
+        row_key: tuple(sorted(edges, key=lambda item: item[0].tuple_key))
+        for row_key, edges in sorted(grouped.items())
+    }
+    records_by_key: dict[RowKey, object] = {}
+    if query == "surface":
+        for row_key, edges in ordered_relationships.items():
+            path, symbol = cast(tuple[str, str], row_key)
+            records_by_key[row_key] = SurfaceRecord(
+                category=f"system: {target.name}",
+                kinds=tuple(sorted({relationship.kind for relationship, _, _ in edges})),
+                path=path,
+                symbol=symbol,
+            )
+    elif query == "consumers":
+        for row_key, edges in ordered_relationships.items():
+            (file,) = cast(tuple[str], row_key)
+            targets = {
+                (destination.label, _endpoint_file(systems, destination), relationship.kind)
+                for relationship, _, destination in edges
+            }
+            records_by_key[row_key] = ConsumersRecord(
+                category=_file_category(systems, file),
+                file=file,
+                kinds=tuple(sorted({relationship.kind for relationship, _, _ in edges})),
                 targets=tuple(
                     sorted(
                         (
                             TargetDetail(label=label, path=path, kind=kind)
-                            for label, path, kind in targets_by_category[category]
+                            for label, path, kind in targets
                         ),
                         key=_target_sort_key,
                     )
                 ),
             )
+    else:
+        for row_key, edges in ordered_relationships.items():
+            (category,) = cast(tuple[str], row_key)
+            targets = {
+                (destination.label, classify_endpoint(systems, destination).file, relationship.kind)
+                for relationship, _, destination in edges
+            }
+            records_by_key[row_key] = SystemDepsRecord(
+                category=category,
+                targets=tuple(
+                    sorted(
+                        (
+                            TargetDetail(label=label, path=path, kind=kind)
+                            for label, path, kind in targets
+                        ),
+                        key=_target_sort_key,
+                    )
+                ),
+            )
+    return _ReportSelection(
+        records_by_key=MappingProxyType(records_by_key),
+        relationships_by_key=MappingProxyType(ordered_relationships),
+        resolved_relationships=resolved,
+    )
+
+
+def _materialize_relationships(
+    document: GraphDocument, selection: _ReportSelection
+) -> tuple[tuple[RelationshipDetail, ...], Mapping[RowKey, tuple[RelationshipDetail, ...]]]:
+    """Project selected edges once, then partition those details by result row."""
+    selected = sorted(
+        (edge for edges in selection.relationships_by_key.values() for edge in edges),
+        key=lambda item: item[0].tuple_key,
+    )
+    details_by_key: dict[tuple[str, str, str], RelationshipDetail] = {}
+    for relationship, source, destination in selected:
+        details_by_key[relationship.tuple_key] = _relationship_detail(
+            document, relationship, source, destination
         )
-    return tuple(records)
+    row_relationships = MappingProxyType(
+        {
+            row_key: tuple(details_by_key[relationship.tuple_key] for relationship, _, _ in edges)
+            for row_key, edges in selection.relationships_by_key.items()
+        }
+    )
+    return (
+        tuple(details_by_key[relationship.tuple_key] for relationship, _, _ in selected),
+        row_relationships,
+    )
 
 
 def render_surface_text(records: Sequence[SurfaceRecord]) -> str:
@@ -552,6 +613,22 @@ class QueryInvocation:
         }
 
 
+def _detail_key(detail: RelationshipDetail) -> tuple[str, str, str]:
+    """Return the structural identity represented by one projected edge."""
+    return (detail.source.id, detail.target.id, detail.kind)
+
+
+def _record_row_key(record: object) -> RowKey:
+    """Return the stable semantic key for one report record."""
+    if isinstance(record, SurfaceRecord):
+        return (record.path, record.symbol)
+    if isinstance(record, ConsumersRecord):
+        return (record.file,)
+    if isinstance(record, SystemDepsRecord):
+        return (record.category,)
+    raise ValueError("row_relationships contains an unsupported report record")
+
+
 @dataclass(frozen=True, slots=True)
 class SystemReport(Generic[RecordT]):
     """Pure report produced from one immutable prepared graph snapshot."""
@@ -561,6 +638,7 @@ class SystemReport(Generic[RecordT]):
     results: tuple[RecordT, ...]
     coverage: SystemCoverage
     relationships: tuple[RelationshipDetail, ...] | None = None
+    row_relationships: Mapping[RowKey, tuple[RelationshipDetail, ...]] | None = None
 
     def __post_init__(self) -> None:
         expected: type[object]
@@ -585,6 +663,58 @@ class SystemReport(Generic[RecordT]):
             ):
                 raise ValueError("relationships must be RelationshipDetail values")
             object.__setattr__(self, "relationships", tuple(self.relationships))
+        if self.row_relationships is not None:
+            if self.relationships is None:
+                raise ValueError("row_relationships requires detailed relationships")
+            if not isinstance(self.row_relationships, Mapping):
+                raise ValueError("row_relationships must be a mapping")
+            expected_keys = tuple(_record_row_key(record) for record in self.results)
+            expected_keys_set = set(expected_keys)
+            if len(expected_keys_set) != len(expected_keys):
+                raise ValueError("report results contain duplicate row keys")
+            normalized: dict[RowKey, tuple[RelationshipDetail, ...]] = {}
+            for key, values in self.row_relationships.items():
+                if not isinstance(key, tuple) or not all(isinstance(part, str) for part in key):
+                    raise ValueError("row_relationships keys must be tuples of strings")
+                if key not in expected_keys_set:
+                    raise ValueError("row_relationships has an unexpected row key")
+                if not isinstance(values, (list, tuple)) or any(
+                    not isinstance(item, RelationshipDetail) for item in values
+                ):
+                    raise ValueError("row_relationships values must be RelationshipDetail tuples")
+                normalized[key] = tuple(values)
+            if set(normalized) != expected_keys_set:
+                raise ValueError("row_relationships must cover every report result")
+
+            relationship_keys = tuple(_detail_key(item) for item in self.relationships)
+            if len(set(relationship_keys)) != len(relationship_keys):
+                raise ValueError("relationships contain duplicate projected edges")
+            if relationship_keys != tuple(sorted(relationship_keys)):
+                raise ValueError("relationships must follow Relationship.tuple_key order")
+            mapped_keys = tuple(
+                _detail_key(item) for key in sorted(normalized) for item in normalized[key]
+            )
+            for values in normalized.values():
+                value_keys = tuple(_detail_key(item) for item in values)
+                if value_keys != tuple(sorted(value_keys)):
+                    raise ValueError(
+                        "row_relationships values must follow Relationship.tuple_key order"
+                    )
+            if tuple(sorted(mapped_keys)) != relationship_keys:
+                raise ValueError("row_relationships partition disagrees with relationships")
+            projected = {
+                _detail_key(item): item for key in sorted(normalized) for item in normalized[key]
+            }
+            if any(
+                projected[key] != item
+                for key, item in zip(relationship_keys, self.relationships, strict=True)
+            ):
+                raise ValueError("row_relationships partition disagrees with relationships")
+            object.__setattr__(
+                self,
+                "row_relationships",
+                MappingProxyType({key: normalized[key] for key in sorted(normalized)}),
+            )
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -827,20 +957,39 @@ class ReportingSnapshot:
         if system_name is None:
             raise ValueError(f"{query} query requires a system name")
         target = resolve_system(self.systems, system_name)
-        if query == "surface":
-            records: tuple[Any, ...] = surface(self.systems, self.index, target)
-        elif query == "consumers":
-            records = consumers(self.systems, self.index, target)
-        else:
-            records = system_deps(self.systems, self.index, target)
+        selection = _select_report(
+            self.systems,
+            self.index,
+            target,
+            cast(Literal["surface", "consumers", "system-deps"], query),
+        )
+        records = selection.records
         coverage = self._coverage(target)
-        relationship_details = self._relationships(query, target) if details else None
+        relationship_details: tuple[RelationshipDetail, ...] | None = None
+        row_relationships: Mapping[RowKey, tuple[RelationshipDetail, ...]] | None = None
+        if details:
+            relationship_details, row_relationships = _materialize_relationships(
+                self.document, selection
+            )
         return SystemReport(
             query=query,
             system_name=target.name,
             results=records,
             coverage=coverage,
             relationships=relationship_details,
+            row_relationships=row_relationships,
+        )
+
+    def relationship_details(self) -> tuple[RelationshipDetail, ...]:
+        """Return every resolved supported relationship in canonical order.
+
+        This complete projection includes internal, unassigned, and pathless
+        endpoints. It deliberately bypasses report row selection and does not
+        apply boundary or comparison relevance policy.
+        """
+        return tuple(
+            _relationship_detail(self.document, relationship, source, target)
+            for relationship, source, target in _resolve_supported_relationships(self.index)
         )
 
     def all_systems_report(self, *, details: bool = False) -> SystemsReport:
@@ -1022,33 +1171,6 @@ class ReportingSnapshot:
                 "count": unresolved,
             },
             source_diagnostics={"status": "unavailable"},
-        )
-
-    def _relationships(self, query: str, target: System) -> tuple[RelationshipDetail, ...]:
-        selected: list[tuple[Relationship, Node, Node]] = []
-        kinds = _SURFACE_KINDS if query == "surface" else _BOUNDARY_KINDS
-        for kind in kinds:
-            for relationship in self.index.relationships(kind):
-                source = self.index.nodes.get(relationship.source)
-                destination = self.index.nodes.get(relationship.target)
-                if source is None or destination is None:
-                    continue
-                source_in = _in_scope(self.systems, target, source)
-                destination_in = _in_scope(self.systems, target, destination)
-                if query == "surface":
-                    qualifies = destination_in and not source_in
-                elif query == "consumers":
-                    qualifies = destination_in and not source_in
-                    if qualifies and classify_endpoint(self.systems, source).file is None:
-                        qualifies = False
-                else:
-                    qualifies = source_in and not destination_in
-                if qualifies:
-                    selected.append((relationship, source, destination))
-        selected.sort(key=lambda item: item[0].tuple_key)
-        return tuple(
-            _relationship_detail(self.document, relationship, source, destination)
-            for relationship, source, destination in selected
         )
 
 
