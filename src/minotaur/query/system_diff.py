@@ -566,7 +566,13 @@ def _boundary_changes(
 def compare_systems(
     old_snapshot: ReportingSnapshot, new_snapshot: ReportingSnapshot
 ) -> SystemDiffResult:
-    """Compare two complete reporting snapshots after canonical admission."""
+    """Compare two complete reporting snapshots after canonical graph admission.
+
+    Each snapshot must carry a complete nonoverlapping system set validated by
+    :func:`minotaur.system.load_systems` or
+    :func:`minotaur.system.load_systems_data`; this operation intentionally
+    does not validate hand-constructed :class:`minotaur.system.System` tuples.
+    """
     if not isinstance(old_snapshot, ReportingSnapshot) or not isinstance(
         new_snapshot, ReportingSnapshot
     ):
