@@ -1340,6 +1340,94 @@ def test_detailed_reports_attach_exact_row_contributors_and_preserve_order() -> 
     assert "row_relationships" not in dependencies.to_dict()
 
 
+def test_row_maps_preserve_exact_edges_and_pathless_inbound_rules() -> None:
+    document, systems = _row_reporting_fixture()
+    nodes = {node.label: node for node in document.nodes}
+    pathless = nodes["gateway.ship"]
+    target = nodes["orders.b"]
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+    document = dataclasses.replace(
+        document,
+        relationships=document.relationships
+        + (
+            Relationship(
+                source=pathless.id,
+                target=target.id,
+                kind="calls",
+                evidence=(evidence,),
+            ),
+        ),
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+
+    def identities(
+        report: system_query.SystemReport[object],
+    ) -> dict[tuple[str, ...], tuple[tuple[str, str, str], ...]]:
+        assert report.row_relationships is not None
+        return {
+            key: tuple((item.source.id, item.target.id, item.kind) for item in values)
+            for key, values in report.row_relationships.items()
+        }
+
+    surface = snapshot.report("surface", "orders", details=True)
+    surface_ids = identities(surface)
+    assert set(surface_ids) == {
+        ("orders/a.py", "orders.a"),
+        ("orders/b.py", "orders.b"),
+    }
+    assert surface_ids[("orders/a.py", "orders.a")] == (
+        (nodes["callers.a"].id, nodes["orders.a"].id, "calls"),
+    )
+    assert surface_ids[("orders/b.py", "orders.b")] == tuple(
+        sorted(
+            (
+                (nodes["callers.b"].id, nodes["orders.b"].id, "references"),
+                (nodes["callers.c"].id, nodes["orders.b"].id, "calls"),
+                (pathless.id, nodes["orders.b"].id, "calls"),
+            )
+        )
+    )
+
+    consumers = snapshot.report("consumers", "orders", details=True)
+    consumer_ids = identities(consumers)
+    assert consumer_ids[("callers/b.py",)] == tuple(
+        sorted(
+            (
+                (nodes["callers.b"].id, nodes["orders.b"].id, "imports"),
+                (nodes["callers.b"].id, nodes["orders.b"].id, "references"),
+            )
+        )
+    )
+    assert all(pathless.id not in edge for edges in consumer_ids.values() for edge in edges)
+
+
+def test_row_contributor_outputs_are_independent_of_input_order() -> None:
+    document, systems = _row_reporting_fixture()
+    permuted = dataclasses.replace(
+        document,
+        nodes=tuple(reversed(document.nodes)),
+        relationships=tuple(reversed(document.relationships)),
+    )
+    first = system_query.ReportingSnapshot.prepare(document, systems)
+    second = system_query.ReportingSnapshot.prepare(permuted, systems)
+
+    def fingerprint(report: system_query.SystemReport[object]) -> tuple[object, object]:
+        assert report.row_relationships is not None
+        row_values = tuple(
+            (
+                key,
+                tuple((item.source.id, item.target.id, item.kind) for item in values),
+            )
+            for key, values in report.row_relationships.items()
+        )
+        return report.to_dict(), row_values
+
+    for query in ("surface", "consumers", "system-deps"):
+        assert fingerprint(first.report(query, "orders", details=True)) == fingerprint(
+            second.report(query, "orders", details=True)
+        )
+
+
 def test_row_relationships_are_copied_immutable_and_constructor_validated() -> None:
     document, systems = _row_reporting_fixture()
     snapshot = system_query.ReportingSnapshot.prepare(document, systems)
@@ -1375,6 +1463,50 @@ def test_row_relationships_are_copied_immutable_and_constructor_validated() -> N
             coverage=detailed.coverage,
             relationships=detailed.relationships,
             row_relationships={("wrong.py", "wrong"): ()},
+        )
+    with pytest.raises(ValueError, match="cover every report result"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={next(iter(detailed.row_relationships)): ()},
+        )
+    with pytest.raises(ValueError, match="keys must be tuples"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={"orders/a.py": ()},  # type: ignore[dict-item]
+        )
+    with pytest.raises(ValueError, match="RelationshipDetail tuples"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={
+                key: (object(),) if key == next(iter(detailed.row_relationships)) else values
+                for key, values in detailed.row_relationships.items()
+            },
+        )
+    with pytest.raises(ValueError, match="partition"):
+        system_query.SystemReport(
+            query="surface",
+            system_name="orders",
+            results=detailed.results,
+            coverage=detailed.coverage,
+            relationships=detailed.relationships,
+            row_relationships={
+                key: detailed.row_relationships[next(iter(detailed.row_relationships))]
+                if key != next(iter(detailed.row_relationships))
+                else detailed.row_relationships[key]
+                for key in detailed.row_relationships
+            },
         )
     with pytest.raises(ValueError, match="partition"):
         system_query.SystemReport(
