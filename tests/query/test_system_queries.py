@@ -1690,6 +1690,34 @@ def test_relationship_details_exposes_complete_supported_edge_domain() -> None:
     assert all(missing_source.id != item.source.id for item in details)
 
 
+def test_relationship_details_reuses_shared_resolution_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    relationship = document.relationships[0]
+    resolved = (
+        (
+            relationship,
+            snapshot.index.nodes[relationship.source],
+            snapshot.index.nodes[relationship.target],
+        ),
+    )
+    calls: list[GraphIndex] = []
+
+    def recording_resolver(index: GraphIndex) -> tuple[tuple[Relationship, Node, Node], ...]:
+        calls.append(index)
+        return resolved
+
+    monkeypatch.setattr(system_query, "_resolve_supported_relationships", recording_resolver)
+    details = snapshot.relationship_details()
+
+    assert calls == [snapshot.index]
+    assert tuple((item.source.id, item.target.id, item.kind) for item in details) == (
+        relationship.tuple_key,
+    )
+
+
 def test_relationship_details_are_permutation_stable_with_sorted_evidence_sites() -> None:
     document, systems = _row_reporting_fixture()
     relationship = document.relationships[0]
