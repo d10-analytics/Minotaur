@@ -693,6 +693,82 @@ def test_input_permutations_and_canonical_owner_substitution_are_proven(
     assert any(change.kind == "endpoint" for change in compare_systems(old, new).boundary_changes)
 
 
+@pytest.mark.parametrize("query", ("surface", "consumers", "system-deps"))
+def test_distinctive_native_report_owner_substitution_is_consumed(
+    query: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _symbol("caller", "a.py")
+    target = _symbol("entry", "b.py")
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    edge = _call(source, target)
+    old = _snapshot((source, target), (edge,), systems)
+    new = _snapshot((source, target), (edge,), systems)
+    alternate = _snapshot(
+        (source, target),
+        (Relationship(source.id, target.id, "references", edge.evidence),),
+        systems,
+    )
+    original = ReportingSnapshot.report
+    calls: list[tuple[bool, str]] = []
+    control = compare_systems(old, new)
+    assert control.changed is False
+
+    def substituted(
+        snapshot: ReportingSnapshot,
+        selected_query: str,
+        system_name: str | None = None,
+        details: bool = False,
+    ) -> object:
+        calls.append((snapshot is new, selected_query))
+        if snapshot is new and selected_query == query:
+            return original(alternate, selected_query, system_name, details)
+        return original(snapshot, selected_query, system_name, details)
+
+    monkeypatch.setattr(ReportingSnapshot, "report", substituted)
+    result = compare_systems(old, new)
+
+    assert (True, query) in calls
+    assert result.boundary_changes == ()
+    expected_targets = (TargetDetail("entry", "b.py", "references"),)
+    if query == "surface":
+        assert result.surface_changes[0].old["record"] == SurfaceRecord(  # type: ignore[index]
+            "system: B", ("calls",), "b.py", "entry"
+        )
+        assert result.surface_changes[0].new["record"] == SurfaceRecord(  # type: ignore[index]
+            "system: B", ("references",), "b.py", "entry"
+        )
+        changed = result.surface_changes[0]
+    elif query == "consumers":
+        assert result.consumer_changes[0].old["record"] == ConsumersRecord(  # type: ignore[index]
+            "system: A", "a.py", ("calls",), (TargetDetail("entry", "b.py", "calls"),)
+        )
+        assert result.consumer_changes[0].new["record"] == ConsumersRecord(  # type: ignore[index]
+            "system: A", "a.py", ("references",), expected_targets
+        )
+        changed = result.consumer_changes[0]
+    else:
+        assert result.dependency_changes[0].old["record"] == SystemDepsRecord(  # type: ignore[index]
+            "system: B", (TargetDetail("entry", "b.py", "calls"),)
+        )
+        assert result.dependency_changes[0].new["record"] == SystemDepsRecord(  # type: ignore[index]
+            "system: B", expected_targets
+        )
+        changed = result.dependency_changes[0]
+    assert changed.old["relationships"][0].source.id == source.id  # type: ignore[index]
+    assert changed.old["relationships"][0].target.id == target.id  # type: ignore[index]
+    assert changed.old["relationships"][0].kind == "calls"  # type: ignore[index]
+    assert changed.new["relationships"][0].kind == "references"  # type: ignore[index]
+    assert changed.old["relationships"][0].evidence == old.relationship_details()[0].evidence  # type: ignore[index]
+    assert changed.new["relationships"][0].evidence == alternate.relationship_details()[0].evidence  # type: ignore[index]
+    assert changed.involved_systems == ("A", "B")
+    if query == "surface":
+        assert not result.consumer_changes and not result.dependency_changes
+    elif query == "consumers":
+        assert not result.surface_changes and not result.dependency_changes
+    else:
+        assert not result.surface_changes and not result.consumer_changes
+
+
 def test_multiple_relationships_and_evidence_sites_are_ordered_and_inputs_unchanged() -> None:
     source = _symbol("source", "a.py")
     first_target = _symbol("first", "b.py")
