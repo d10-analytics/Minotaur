@@ -980,6 +980,18 @@ class ReportingSnapshot:
             row_relationships=row_relationships,
         )
 
+    def relationship_details(self) -> tuple[RelationshipDetail, ...]:
+        """Return every resolved supported relationship in canonical order.
+
+        This complete projection includes internal, unassigned, and pathless
+        endpoints. It deliberately bypasses report row selection and does not
+        apply boundary or comparison relevance policy.
+        """
+        return tuple(
+            _relationship_detail(self.document, relationship, source, target)
+            for relationship, source, target in _resolve_supported_relationships(self.index)
+        )
+
     def all_systems_report(self, *, details: bool = False) -> SystemsReport:
         """Return one immutable inventory projection for every loaded system."""
         records: list[SystemInventoryRecord] = []
