@@ -191,8 +191,33 @@ route, while a later plain dotted import cannot preserve an earlier corrupted
 alias route. Direct function-body imports install a callable-local route;
 Class-body plain imports retain conservative behavior: they may refine an
 already-visible plain package route, while a class-only route remains syntactic
-evidence. Imports in control-flow containers remain syntactic evidence and do
-not establish a route for their contained or later uses.
+evidence. A direct `if` suite is the supported conditional container described
+below. Imports in loops, `try`, `with`, and `match` suites remain syntactic
+evidence and do not establish a route for their contained or later
+continuation uses.
+
+### Conditional binding joins
+
+Direct imports in the current `if` suite participate in a bounded structural
+join. Each explicit arm is analyzed with an isolated post-condition state; an
+omitted `else` contributes the incoming state. Return and raise arms still
+contribute their binding data, so a frozen tail cannot invent a route. If every
+continuing arm establishes the same canonical root, route category, and
+qualified prefix, the common route is available after the `if`. Missing or
+differing roots and prefixes remain uncertain, and a later direct reimport
+restores only the route it actually establishes. The import statements retain
+independent `IMPORTS` evidence. A conditional-only replacement of a module root
+also remains unresolved; it does not fall through to an outer same-module
+declaration.
+
+This behavior applies to direct named, aliased, relative-named, and plain
+dotted imports and to calls and non-call loads at their source positions. A
+direct `if` nested inside a loop can resolve an ordered pre-write use, while
+the enclosing loop's continuation remains conservative. The same limit applies
+to `try`, `with`, and `match`; this slice does not infer runtime reachability,
+simulate invocation, or provide a general control-flow graph. See the
+[conditional proof rows](../concepts/structural-analysis-contract.md#supported-behavior-and-proof)
+for the exact public assertions and query consequences.
 
 The lookup preserves distinct node IDs for same-labelled declarations. For
 the natural collision cases, a lowercase `child` selects the function at
@@ -205,9 +230,9 @@ line and column values, such as `caller.py:3:12` for the caller proof.
 
 These claims are proved by the named natural tests in the [structural
 analysis contract](../concepts/structural-analysis-contract.md#supported-behavior-and-proof).
-The slice does not provide control-flow joins, control-flow-local import
-production, invocation timing, interprocedural callable side effects, or
-runtime dispatch; unresolved cases remain explicit.
+The slice does not provide general control-flow analysis, control-flow-local
+import production in non-`if` compounds, invocation timing, interprocedural
+callable side effects, or runtime dispatch; unresolved cases remain explicit.
 
 ### Binding timing and class boundaries
 
@@ -237,14 +262,15 @@ binding state.
 
 ### Compound statements and comprehensions
 
-Imports in `if`, loop, `try`, `with`, and `match` bodies remain syntactic
-`IMPORTS` facts. They do not establish a control-flow-local route or a branch
-join. An already-established route remains available to an ordered body read
-until a direct write changes it; a possibly changed root is uncertain at
-continuation, while untouched routes retain their state. On a successful `try`
-path, `else` sees the body state, and a handler type is read before its `as`
-target. A match-guard write affects later guards and continuation. Direct
-imports in a function body outside such a container remain supported.
+Direct imports in an `if` body participate in the bounded structural join above.
+Imports in loops, `try`, `with`, and `match` bodies remain syntactic `IMPORTS`
+facts and do not establish a control-flow-local route for their continuation.
+An already-established route remains available to an ordered body read until a
+direct write changes it; a possibly changed root is uncertain at continuation,
+while untouched routes retain their state. On a successful `try` path, `else`
+sees the body state, and a handler type is read before its `as` target. A
+match-guard write affects later guards and continuation. Direct imports in a
+function body outside these containers remain supported.
 
 The first iterable of a comprehension is evaluated in the enclosing scope;
 later iterables, filters, and result expressions see comprehension-local
