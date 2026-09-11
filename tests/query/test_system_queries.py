@@ -1641,6 +1641,127 @@ def test_report_selection_and_detail_projection_are_shared_and_lazy(
         snapshot.report("surface", "orders", details=True)
 
 
+def test_relationship_details_exposes_complete_supported_edge_domain() -> None:
+    document, systems = _row_reporting_fixture()
+    nodes = {node.label: node for node in document.nodes}
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+    missing_source = _projection_symbol("missing.source", "missing.py", 0)
+    pathless_inbound = Relationship(
+        source=nodes["gateway.ship"].id,
+        target=nodes["orders.b"].id,
+        kind="calls",
+        evidence=(evidence,),
+    )
+    unsupported = Relationship(
+        source=nodes["orders.a"].id,
+        target=nodes["orders.b"].id,
+        kind="contains",
+        evidence=(evidence,),
+    )
+    missing_endpoint = Relationship(
+        source=missing_source.id,
+        target=nodes["orders.a"].id,
+        kind="references",
+        evidence=(evidence,),
+    )
+    expanded = dataclasses.replace(
+        document,
+        relationships=document.relationships + (pathless_inbound, unsupported, missing_endpoint),
+    )
+    snapshot = system_query.ReportingSnapshot.prepare(expanded, systems)
+
+    details = snapshot.relationship_details()
+    actual = tuple((item.source.id, item.target.id, item.kind) for item in details)
+    expected = tuple(
+        sorted(
+            (relationship.source, relationship.target, relationship.kind)
+            for relationship in expanded.relationships
+            if relationship.kind in {"calls", "references", "imports"}
+            and relationship.source in snapshot.index.nodes
+            and relationship.target in snapshot.index.nodes
+        )
+    )
+    assert actual == expected
+    assert len(details) == 9
+    assert any(item.source.id == nodes["gateway.ship"].id for item in details)
+    assert any(item.target.id == nodes["loose.value"].id for item in details)
+    assert any(item.target.id == nodes["gateway.ship"].id for item in details)
+    assert all(item.kind != "contains" for item in details)
+    assert all(missing_source.id != item.source.id for item in details)
+
+
+def test_relationship_details_are_permutation_stable_with_sorted_evidence_sites() -> None:
+    document, systems = _row_reporting_fixture()
+    relationship = document.relationships[0]
+    evidence = Evidence(
+        provenance=Provenance.STATIC_ANALYSIS,
+        locations=(
+            Location("z.py", Range(Position(4, 0), Position(4, 1))),
+            Location("a.py", Range(Position(2, 0), Position(2, 1))),
+        ),
+    )
+    enriched = dataclasses.replace(
+        document,
+        relationships=(
+            dataclasses.replace(relationship, evidence=(evidence,)),
+            *document.relationships[1:],
+        ),
+    )
+    permuted = dataclasses.replace(
+        enriched,
+        nodes=tuple(reversed(enriched.nodes)),
+        relationships=tuple(reversed(enriched.relationships)),
+    )
+
+    first = system_query.ReportingSnapshot.prepare(enriched, systems).relationship_details()
+    second = system_query.ReportingSnapshot.prepare(permuted, systems).relationship_details()
+    assert first == second
+    assert [(item.source.id, item.target.id, item.kind) for item in first] == sorted(
+        (item.source.id, item.target.id, item.kind) for item in first
+    )
+    enriched_detail = next(
+        item
+        for item in first
+        if (item.source.id, item.target.id, item.kind) == relationship.tuple_key
+    )
+    assert [site["path"] for site in enriched_detail.evidence[0].to_dict()["sites"]] == [
+        "a.py",
+        "z.py",
+    ]
+
+
+def test_relationship_details_uses_canonical_owner_and_stays_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    real_detail = system_query._relationship_detail
+
+    def distinctive_detail(
+        current_document: GraphDocument,
+        relationship: Relationship,
+        source: Node,
+        target: Node,
+    ) -> system_query.RelationshipDetail:
+        detail = real_detail(current_document, relationship, source, target)
+        return dataclasses.replace(
+            detail, source=dataclasses.replace(detail.source, label="canonical")
+        )
+
+    monkeypatch.setattr(system_query, "_relationship_detail", distinctive_detail)
+    details = snapshot.relationship_details()
+    assert details
+    assert all(item.source.label == "canonical" for item in details)
+
+    def fail_detail(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("compact reports must not project relationship details")
+
+    monkeypatch.setattr(system_query, "_relationship_detail", fail_detail)
+    assert snapshot.report("surface", "orders").relationships is None
+    with pytest.raises(AssertionError, match="compact reports"):
+        snapshot.relationship_details()
+
+
 def _projection_file_with_namespace(path: str, namespace: str) -> Node:
     identity = NodeIdentity(IdentityBasis.FILE_PATH, namespace)
     return Node(
