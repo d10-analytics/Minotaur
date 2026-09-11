@@ -25,9 +25,12 @@ from minotaur.query.correspondence import (
     prepare_correspondence,
 )
 from minotaur.query.system import (
+    ConsumersRecord,
     EndpointDetail,
     RelationshipDetail,
     ReportingSnapshot,
+    SurfaceRecord,
+    SystemDepsRecord,
 )
 from minotaur.system import EndpointKind, classify_endpoint
 
@@ -322,14 +325,15 @@ def _report_payload(
     result: dict[tuple[str, ...], dict[str, object]] = {}
     row_relationships = report.row_relationships or {}
     for record in report.results:
-        payload = record.to_dict()
         key: tuple[str, ...]
-        if query == "surface":
-            key = (name, str(payload["path"]), str(payload["symbol"]))
-        elif query == "consumers":
-            key = (name, str(payload["file"]))
-        else:
-            key = (name, str(payload["category"]))
+        if query == "surface" and isinstance(record, SurfaceRecord):
+            key = (name, record.path, record.symbol)
+        elif query == "consumers" and isinstance(record, ConsumersRecord):
+            key = (name, record.file)
+        elif query == "system-deps" and isinstance(record, SystemDepsRecord):
+            key = (name, record.category)
+        else:  # pragma: no cover - SystemReport validates this pairing.
+            raise TypeError(f"unexpected typed report record for {query}")
         evidence = tuple(
             row_relationships.get(key[1:] if query != "system-deps" else (key[1],), ())
         )
