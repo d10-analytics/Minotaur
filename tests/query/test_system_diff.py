@@ -20,6 +20,7 @@ from minotaur.graph_model.provenance import (
 )
 from minotaur.graph_model.relationship import Relationship
 from minotaur.query import system as system_query
+from minotaur.query.correspondence import CorrespondenceAmbiguityError, node_key
 from minotaur.query.system import (
     ConsumersRecord,
     RelationshipDetail,
@@ -121,13 +122,14 @@ def _file(label: str, path: str) -> Node:
     )
 
 
-def _resource(label: str, resource_key: str = "resource") -> Node:
+def _resource(label: str, resource_key: str = "resource", path: str | None = None) -> Node:
     identity = NodeIdentity(IdentityBasis.RESOURCE_KEY, "test", resource_key=resource_key)
     return Node(
         id=compute_node_id(identity, node_class=NodeClass.RESOURCE.value),
         identity=identity,
         node_class=NodeClass.RESOURCE,
         label=label,
+        path=path,
     )
 
 
@@ -238,8 +240,16 @@ def test_required_ambiguity_is_attributed_to_side_and_key() -> None:
     systems = _systems(("b.toml", "B", ("b.py",)))
     snapshot = _snapshot((source, first, second), (_call(source, first),), systems)
 
-    with pytest.raises(ValueError, match="ambiguous old target"):
+    expected_key = (node_key(source), node_key(first), "calls")
+    with pytest.raises(CorrespondenceAmbiguityError) as raised:
         compare_systems(snapshot, snapshot)
+    error = raised.value
+    assert error.side == "old"
+    assert error.endpoint == "target"
+    assert error.relationship_key == expected_key
+    assert error.candidate_ids == (first.id, second.id)
+    assert error.candidates == (first, second)
+    assert tuple(candidate.label for candidate in error.candidates) == ("entry", "entry")
 
 
 def test_context_and_provenance_only_changes_are_neutral() -> None:
@@ -260,6 +270,44 @@ def test_context_and_provenance_only_changes_are_neutral() -> None:
     result = compare_systems(old, new)
 
     assert not result.changed
+
+
+def test_actual_provenance_and_evidence_sites_are_observational() -> None:
+    source = _symbol("source", "a.py")
+    target = _symbol("target", "b.py")
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    old_site = Location("a.py", Range(Position(1, 0), Position(1, 1)))
+    new_site = Location("other.py", Range(Position(9, 2), Position(9, 4)))
+    old_edge = Relationship(
+        source.id,
+        target.id,
+        "calls",
+        (Evidence(Provenance.STATIC_ANALYSIS, locations=(old_site,)),),
+    )
+    new_edge = Relationship(
+        source.id,
+        target.id,
+        "calls",
+        (Evidence(Provenance.IMPORTED_GRAPH, locations=(new_site,)),),
+    )
+    old = _snapshot((source, target), (old_edge,), systems)
+    new = _snapshot((source, target), (new_edge,), systems)
+
+    result = compare_systems(old, new)
+
+    assert result.changed is False
+    assert result.membership_changes == ()
+    assert result.surface_changes == ()
+    assert result.consumer_changes == ()
+    assert result.dependency_changes == ()
+    assert result.boundary_changes == ()
+    old_detail, new_detail = old.relationship_details()[0], new.relationship_details()[0]
+    assert old_detail.evidence[0].provenance == "static-analysis"
+    assert new_detail.evidence[0].provenance == "imported-graph"
+    assert old_detail.evidence[0].sites[0]["path"] == "a.py"
+    assert new_detail.evidence[0].sites[0]["path"] == "other.py"
+    assert old_detail.evidence[0].sites[0]["range"]["start"]["line"] == 2
+    assert new_detail.evidence[0].sites[0]["range"]["start"]["line"] == 10
 
 
 def test_repeated_unresolved_occurrence_count_is_neutral_but_new_pair_changes() -> None:
@@ -338,6 +386,37 @@ def test_system_declarations_report_add_remove_rename_and_absent_files() -> None
         ("old_only.py",),
         ("present.py",),
     }
+    expected_membership = {
+        ("added.py",): (
+            {"file": "added.py", "system": None},
+            {"file": "added.py", "system": "Added"},
+            ("Added",),
+        ),
+        ("gone.py",): (
+            {"file": "gone.py", "system": "Gone"},
+            {"file": "gone.py", "system": None},
+            ("Gone",),
+        ),
+        ("new_only.py",): (
+            {"file": "new_only.py", "system": None},
+            {"file": "new_only.py", "system": "Renamed"},
+            ("Renamed",),
+        ),
+        ("old_only.py",): (
+            {"file": "old_only.py", "system": "A"},
+            {"file": "old_only.py", "system": None},
+            ("A",),
+        ),
+        ("present.py",): (
+            {"file": "present.py", "system": "A"},
+            {"file": "present.py", "system": "Renamed"},
+            ("A", "Renamed"),
+        ),
+    }
+    assert {
+        change.key: (change.old, change.new, change.involved_systems)
+        for change in result.membership_changes
+    } == expected_membership
 
 
 @pytest.mark.parametrize("kind", ("contains", "inherits", "implements", "python:decorates"))
@@ -388,6 +467,46 @@ def test_stable_upstream_key_label_change_is_endpoint_change() -> None:
     assert result.boundary_changes[0].new["target_endpoint"]["label"] == "new label"  # type: ignore[index]
     assert not result.surface_changes
     assert not result.consumer_changes
+
+
+@pytest.mark.parametrize("factory", ("upstream", "resource"))
+def test_stable_upstream_and_resource_keys_allow_path_projection_changes(factory: str) -> None:
+    source = _symbol("source", "a.py")
+    if factory == "upstream":
+        old_target = _upstream("remote", path="old.py")
+        new_target = _upstream("remote", path="new.py")
+    else:
+        old_target = _resource("remote", path="old.py")
+        new_target = _resource("remote", path="new.py")
+    systems = _systems(("a.toml", "A", ("a.py",)))
+    old = _snapshot((source, old_target), (_call(source, old_target),), systems)
+    new = _snapshot((source, new_target), (_call(source, new_target),), systems)
+
+    result = compare_systems(old, new)
+
+    assert [change.kind for change in result.boundary_changes] == ["endpoint"]
+    change = result.boundary_changes[0]
+    assert change.old["target_endpoint"]["path"]["value"] == "old.py"  # type: ignore[index]
+    assert change.new["target_endpoint"]["path"]["value"] == "new.py"  # type: ignore[index]
+    assert change.old["target_membership"] == "no_system"  # type: ignore[index]
+    assert change.new["target_membership"] == "no_system"  # type: ignore[index]
+
+
+def test_file_path_key_change_is_addition_and_removal_without_continuity() -> None:
+    source = _symbol("source", "a.py")
+    old_target, new_target = _file("remote", "old.py"), _file("remote", "new.py")
+    systems = _systems(("a.toml", "A", ("a.py",)))
+    old = _snapshot((source, old_target), (_call(source, old_target),), systems)
+    new = _snapshot((source, new_target), (_call(source, new_target),), systems)
+
+    result = compare_systems(old, new)
+
+    assert [change.kind for change in result.boundary_changes] == ["added", "removed"]
+    added, removed = result.boundary_changes
+    assert added.old is None
+    assert added.new["target_endpoint"]["path"]["value"] == "new.py"  # type: ignore[index]
+    assert removed.new is None
+    assert removed.old["target_endpoint"]["path"]["value"] == "old.py"  # type: ignore[index]
 
 
 def test_source_key_change_is_addition_and_removal_without_continuity() -> None:
@@ -572,6 +691,64 @@ def test_input_permutations_and_canonical_owner_substitution_are_proven(
 
     monkeypatch.setattr(system_query, "_endpoint_detail", substituted)
     assert any(change.kind == "endpoint" for change in compare_systems(old, new).boundary_changes)
+
+
+def test_multiple_relationships_and_evidence_sites_are_ordered_and_inputs_unchanged() -> None:
+    source = _symbol("source", "a.py")
+    first_target = _symbol("first", "b.py")
+    second_target = _symbol("second", "c.py")
+    systems = _systems(
+        ("a.toml", "A", ("a.py",)),
+        ("b.toml", "B", ("b.py",)),
+        ("c.toml", "C", ("c.py",)),
+    )
+    first_site = Location("a.py", Range(Position(1, 0), Position(1, 1)))
+    second_site = Location("a.py", Range(Position(2, 0), Position(2, 1)))
+    calls = Relationship(
+        source.id,
+        first_target.id,
+        "calls",
+        (
+            Evidence(Provenance.STATIC_ANALYSIS, locations=(second_site, first_site)),
+            Evidence(Provenance.IMPORTED_GRAPH, locations=(second_site,)),
+        ),
+    )
+    references = Relationship(
+        source.id,
+        second_target.id,
+        "references",
+        (Evidence(Provenance.STATIC_ANALYSIS, locations=(first_site, second_site)),),
+    )
+    old = _snapshot((source, first_target, second_target), (), systems)
+    new = _snapshot((source, first_target, second_target), (calls, references), systems)
+    permuted_calls = replace(calls, evidence=tuple(reversed(calls.evidence)))
+    permuted_references = replace(references, evidence=tuple(reversed(references.evidence)))
+    permuted = _snapshot(
+        (second_target, source, first_target),
+        (permuted_references, permuted_calls),
+        tuple(reversed(systems)),
+    )
+    old_values = (old.document.to_dict(), old.systems)
+    new_values = (new.document.to_dict(), new.systems)
+    permuted_values = (permuted.document.to_dict(), permuted.systems)
+
+    result = compare_systems(old, new)
+    permuted_result = compare_systems(old, permuted)
+
+    assert result.to_dict() == permuted_result.to_dict()
+    calls_change = next(
+        change
+        for change in result.boundary_changes
+        if change.new["kind"] == "calls"  # type: ignore[index]
+    )
+    evidence = calls_change.new["relationships"][0].evidence  # type: ignore[index]
+    assert [item.provenance for item in evidence] == ["static-analysis", "imported-graph"]
+    assert [
+        [(site["path"], site["range"]["start"]["line"]) for site in item.sites] for item in evidence
+    ] == [[("a.py", 2), ("a.py", 3)], [("a.py", 3)]]
+    assert old_values == (old.document.to_dict(), old.systems)
+    assert new_values == (new.document.to_dict(), new.systems)
+    assert permuted_values == (permuted.document.to_dict(), permuted.systems)
 
 
 def test_changed_dependency_row_has_exact_typed_neighbors_and_contributors() -> None:
