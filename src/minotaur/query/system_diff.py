@@ -15,10 +15,6 @@ from typing import Any, cast
 
 from minotaur.graph_model.node import Node
 from minotaur.query.correspondence import (
-    CorrespondenceAdmissionError,
-    CorrespondenceAmbiguityError,
-    CorrespondenceEligibilityError,
-    CorrespondenceError,
     CorrespondenceIndex,
     RelationshipKey,
     prepare_correspondence,
@@ -482,7 +478,7 @@ def _relation_payload(
     occurrences: tuple[Any, ...],
 ) -> Mapping[str, object]:
     grouped: list[dict[str, object]] = []
-    projections: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
+    projections: set[tuple[object, object]] = set()
     categories: tuple[str, str] | None = None
     for occurrence in occurrences:
         detail = _detail_for_occurrence(snapshot, occurrence)
@@ -490,12 +486,12 @@ def _relation_payload(
         target_category = _category(snapshot, occurrence.target)
         if categories is None:
             categories = (source_category, target_category)
-        projection = (
-            _freeze(_endpoint_structure(snapshot, detail.source)),
-            _freeze(_endpoint_structure(snapshot, detail.target)),
+        projections.add(
+            (
+                _freeze(_endpoint_structure(snapshot, detail.source)),
+                _freeze(_endpoint_structure(snapshot, detail.target)),
+            )
         )
-        if projection not in projections:
-            projections.append(cast(tuple[Mapping[str, object], Mapping[str, object]], projection))
         grouped.append(detail.to_dict())
     grouped.sort(key=repr)
     assert categories is not None
@@ -685,10 +681,6 @@ __all__ = [
     "SystemDiffResult",
     "SystemStructureChange",
     "SystemStructureDiff",
-    "CorrespondenceAdmissionError",
-    "CorrespondenceAmbiguityError",
-    "CorrespondenceEligibilityError",
-    "CorrespondenceError",
     "compare_systems",
     "compare_system_snapshots",
     "render_system_diff",
