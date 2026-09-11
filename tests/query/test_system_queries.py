@@ -1159,6 +1159,9 @@ def test_reporting_snapshot_reuses_index_and_records_unavailable_selection() -> 
     assert first.coverage.selection == {"status": "unavailable"}
     assert first.relationships is None
     assert detailed_empty.relationships == ()
+    assert detailed_empty.row_relationships == {}
+    with pytest.raises(TypeError):
+        detailed_empty.row_relationships[()] = ()  # type: ignore[index]
     assert snapshot.index is snapshot.index
     assert second.coverage.source_diagnostics == {"status": "unavailable"}
     with pytest.raises(ValueError, match="unknown system query"):
@@ -1444,6 +1447,7 @@ def test_row_relationships_are_copied_immutable_and_constructor_validated() -> N
     )
     supplied.clear()
     assert list(rebuilt.row_relationships or {}) == list(detailed.row_relationships)
+    assert all(isinstance(values, tuple) for values in rebuilt.row_relationships.values())
     with pytest.raises(TypeError):
         detailed.row_relationships[("orders/a.py", "orders.a")] = ()  # type: ignore[index]
 
