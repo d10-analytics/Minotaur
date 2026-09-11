@@ -1431,6 +1431,75 @@ def test_row_contributor_outputs_are_independent_of_input_order() -> None:
         )
 
 
+def test_shared_resolution_keeps_complete_supported_edges_before_row_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, systems = _row_reporting_fixture()
+    nodes = {node.label: node for node in document.nodes}
+    missing = _projection_symbol("missing.source", "missing.py", 0)
+    evidence = Evidence(provenance=Provenance.STATIC_ANALYSIS)
+    unsupported = Relationship(
+        source=nodes["orders.a"].id,
+        target=nodes["orders.b"].id,
+        kind="contains",
+        evidence=(evidence,),
+    )
+    missing_endpoint = Relationship(
+        source=missing.id,
+        target=nodes["orders.a"].id,
+        kind="calls",
+        evidence=(evidence,),
+    )
+    expanded = dataclasses.replace(
+        document,
+        relationships=document.relationships + (unsupported, missing_endpoint),
+    )
+    index = GraphIndex.build(expanded)
+    expected = tuple(
+        sorted(
+            (relationship.source, relationship.target, relationship.kind)
+            for relationship in expanded.relationships
+            if relationship.kind in {"calls", "references", "imports"}
+            and relationship.source in index.nodes
+            and relationship.target in index.nodes
+        )
+    )
+    resolved = system_query._resolve_supported_relationships(index)
+    assert tuple(item[0].tuple_key for item in resolved) == expected
+    assert all(item[0].kind in {"calls", "references", "imports"} for item in resolved)
+
+    calls: list[tuple[tuple[str, str, str], ...]] = []
+    real_resolver = system_query._resolve_supported_relationships
+
+    def recording_resolver(current_index: GraphIndex) -> tuple[object, ...]:
+        values = real_resolver(current_index)
+        calls.append(tuple(item[0].tuple_key for item in values))
+        return values
+
+    monkeypatch.setattr(system_query, "_resolve_supported_relationships", recording_resolver)
+    target = resolve_system(systems, "orders")
+    standalone = system_query.surface(systems, index, target)
+    detailed = system_query.ReportingSnapshot.prepare(expanded, systems).report(
+        "surface", "orders", details=True
+    )
+    assert standalone == detailed.results
+    assert calls == [expected, expected]
+    assert detailed.relationships is not None
+    surface_expected = tuple(
+        sorted(
+            item
+            for item in expected
+            if item[1] in {nodes["orders.a"].id, nodes["orders.b"].id}
+            and item[0] not in {nodes["orders.a"].id, nodes["orders.b"].id}
+            and item[2] in {"calls", "references"}
+        )
+    )
+    assert (
+        tuple((item.source.id, item.target.id, item.kind) for item in detailed.relationships)
+        == surface_expected
+    )
+
+
 def test_row_relationships_are_copied_immutable_and_constructor_validated() -> None:
     document, systems = _row_reporting_fixture()
     snapshot = system_query.ReportingSnapshot.prepare(document, systems)
