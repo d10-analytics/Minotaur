@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, cast
 
 from minotaur.graph_model.node import Node
+from minotaur.graph_model.validation import validate_document
 from minotaur.query.correspondence import (
     CorrespondenceAdmissionError,
     CorrespondenceAmbiguityError,
@@ -45,6 +46,9 @@ def _freeze(value: object) -> object:
 
 
 def _thaw(value: object) -> object:
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _thaw(to_dict())
     if isinstance(value, Mapping):
         return {key: _thaw(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
@@ -340,7 +344,6 @@ def _report_payload(
         evidence = tuple(
             row_relationships.get(key[1:] if query != "system-deps" else (key[1],), ())
         )
-        evidence_dict = tuple(item.to_dict() for item in evidence)
         involved = {name}
         for relationship in evidence:
             for detail in (relationship.source, relationship.target):
@@ -350,12 +353,10 @@ def _report_payload(
                     if endpoint_name := _named(category):
                         involved.add(endpoint_name)
         result[key] = {
-            "record": payload,
-            "relationships": evidence_dict,
+            "record": record,
+            "relationships": evidence,
             "involved_systems": tuple(sorted(involved)),
-            "structural_relationships": tuple(
-                _structural_relationship(snapshot, item) for item in evidence
-            ),
+            "structural_relationships": _structural_relationship_set(snapshot, evidence),
         }
     return result
 
@@ -374,8 +375,23 @@ def _all_reports(
     return result
 
 
+def _structural_relationship_set(
+    snapshot: ReportingSnapshot, relationships: tuple[RelationshipDetail, ...]
+) -> tuple[object, ...]:
+    """Deduplicate paired endpoint structures while retaining all evidence."""
+    structures: list[object] = []
+    for relationship in relationships:
+        structure = _structural_relationship(snapshot, relationship)
+        if structure not in structures:
+            structures.append(structure)
+    return tuple(sorted(structures, key=repr))
+
+
 def _row_changes(
-    old: ReportingSnapshot, new: ReportingSnapshot
+    old: ReportingSnapshot,
+    new: ReportingSnapshot,
+    old_index: CorrespondenceIndex,
+    new_index: CorrespondenceIndex,
 ) -> tuple[dict[str, tuple[SystemChange, ...]], set[RelationshipKey]]:
     old_reports, new_reports = _all_reports(old), _all_reports(new)
     changes: dict[str, list[SystemChange]] = {query: [] for query in _REPORT_QUERIES}
@@ -412,33 +428,24 @@ def _row_changes(
                     ),
                 )
             )
-            for snapshot, row in ((old, old_row), (new, new_row)):
+            for _snapshot, index, row in (
+                (old, old_index, old_row),
+                (new, new_index, new_row),
+            ):
                 if row is None:
                     continue
                 relationships = row.get("relationships", ())
                 for relation in relationships if isinstance(relationships, (tuple, list)) else ():
-                    if not isinstance(relation, Mapping):
+                    if not isinstance(relation, RelationshipDetail):
                         continue
-                    source = relation.get("source")
-                    target = relation.get("target")
-                    kind = relation.get("kind")
-                    if (
-                        not isinstance(source, Mapping)
-                        or not isinstance(target, Mapping)
-                        or not isinstance(kind, str)
-                    ):
-                        continue
-                    source_id, target_id = source.get("id"), target.get("id")
-                    if isinstance(source_id, str) and isinstance(target_id, str):
-                        index = prepare_correspondence(snapshot.document)
-                        for rel_key, occurrences in index.relationship_groups.items():
-                            if any(
-                                item.relationship.source == source_id
-                                and item.relationship.target == target_id
-                                and item.relationship.kind == kind
-                                for item in occurrences
-                            ):
-                                changed_keys.add(rel_key)
+                    for rel_key, occurrences in index.relationship_groups.items():
+                        if any(
+                            item.relationship.source == relation.source.id
+                            and item.relationship.target == relation.target.id
+                            and item.relationship.kind == relation.kind
+                            for item in occurrences
+                        ):
+                            changed_keys.add(rel_key)
     return {query: tuple(values) for query, values in changes.items()}, changed_keys
 
 
@@ -466,7 +473,7 @@ def _relation_payload(
     key: RelationshipKey,
     occurrences: tuple[Any, ...],
 ) -> Mapping[str, object]:
-    grouped: list[dict[str, object]] = []
+    grouped: list[RelationshipDetail] = []
     projections: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
     categories: tuple[str, str] | None = None
     for occurrence in occurrences:
@@ -481,8 +488,8 @@ def _relation_payload(
         )
         if projection not in projections:
             projections.append(cast(tuple[Mapping[str, object], Mapping[str, object]], projection))
-        grouped.append(detail.to_dict())
-    grouped.sort(key=repr)
+        grouped.append(detail)
+    grouped.sort(key=lambda item: (item.source.id, item.target.id, item.kind, repr(item.evidence)))
     assert categories is not None
     involvement = _names(*categories)
     first_projection = sorted(projections, key=repr)[0]
@@ -587,11 +594,15 @@ def compare_systems(
     ):
         raise TypeError("compare_systems requires two ReportingSnapshot values")
 
+    # Admission is a pair-wide gate: validate both complete documents before
+    # either side can raise its later unresolved-origin eligibility error.
+    _admit(old_snapshot, "old")
+    _admit(new_snapshot, "new")
     old_index = prepare_correspondence(old_snapshot.document, side="old")
     new_index = prepare_correspondence(new_snapshot.document, side="new")
     old_names = tuple(sorted(system.name for system in old_snapshot.systems))
     new_names = tuple(sorted(system.name for system in new_snapshot.systems))
-    row_changes, changed_row_keys = _row_changes(old_snapshot, new_snapshot)
+    row_changes, changed_row_keys = _row_changes(old_snapshot, new_snapshot, old_index, new_index)
     selected = _boundary_keys(old_snapshot, old_index) | _boundary_keys(new_snapshot, new_index)
     selected |= changed_row_keys
     old_index.validate_required_keys(selected, side="old")
@@ -617,52 +628,16 @@ def compare_systems(
     )
 
 
+def _admit(snapshot: ReportingSnapshot, side: str) -> None:
+    report = validate_document(snapshot.document, verify_node_ids=True)
+    if not report.is_valid:
+        raise CorrespondenceAdmissionError(report, snapshot.document, side=side)
+
+
 def compare_system_snapshots(
     old_snapshot: ReportingSnapshot, new_snapshot: ReportingSnapshot
 ) -> SystemDiffResult:
     return compare_systems(old_snapshot, new_snapshot)
-
-
-def render_system_diff_text(result: SystemDiffResult, *, details: bool = False) -> str:
-    lines = [f"+ system {name}\n" for name in result.added_systems]
-    lines.extend(f"- system {name}\n" for name in result.removed_systems)
-    for label, changes in (
-        ("membership", result.membership_changes),
-        ("surface", result.surface_changes),
-        ("consumer", result.consumer_changes),
-        ("dependency", result.dependency_changes),
-        ("boundary", result.boundary_changes),
-    ):
-        lines.extend(f"~ {label} {change.key[0]}\n" for change in changes)
-    if not lines:
-        lines.append("no system-structure differences\n")
-    if details:
-        lines.extend(
-            (
-                f"coverage old {result.old_coverage!r}\n",
-                f"coverage new {result.new_coverage!r}\n",
-                f"selection old {result.old_selection!r}\n",
-                f"selection new {result.new_selection!r}\n",
-                f"changes {[item.to_dict() for item in result.differences]!r}\n",
-            )
-        )
-    return "".join(lines)
-
-
-def render_system_diff_json(result: SystemDiffResult) -> str:
-    import json
-
-    return json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":"))
-
-
-def render_system_diff(
-    result: SystemDiffResult, *, details: bool = False, json_output: bool = False
-) -> str:
-    return (
-        render_system_diff_json(result)
-        if json_output
-        else render_system_diff_text(result, details=details)
-    )
 
 
 __all__ = [
@@ -676,7 +651,4 @@ __all__ = [
     "CorrespondenceError",
     "compare_systems",
     "compare_system_snapshots",
-    "render_system_diff",
-    "render_system_diff_json",
-    "render_system_diff_text",
 ]
