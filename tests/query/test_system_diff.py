@@ -435,6 +435,8 @@ def test_pathless_inbound_label_change_keeps_native_surface_row_equal() -> None:
     assert result.boundary_changes[0].kind == "endpoint"
     assert result.boundary_changes[0].old["source_endpoint"]["label"] == "old"  # type: ignore[index]
     assert result.boundary_changes[0].new["source_endpoint"]["label"] == "new"  # type: ignore[index]
+    assert result.boundary_changes[0].old["relationships"][0].target.label == "target"  # type: ignore[index]
+    assert result.boundary_changes[0].new["relationships"][0].target.label == "target"  # type: ignore[index]
 
 
 def test_membership_and_endpoint_aspects_are_separate() -> None:
@@ -455,6 +457,10 @@ def test_membership_and_endpoint_aspects_are_separate() -> None:
     assert result.boundary_changes[0].new["categories"] == ("system: A", "system: A")  # type: ignore[index]
     assert result.boundary_changes[1].old["target_endpoint"]["label"] == "old"  # type: ignore[index]
     assert result.boundary_changes[1].new["target_endpoint"]["label"] == "new"  # type: ignore[index]
+    for aspect in result.boundary_changes:
+        assert aspect.involved_systems == ("A", "B")
+        assert aspect.old["relationships"][0].source.label == "source"  # type: ignore[index]
+        assert aspect.new["relationships"][0].source.label == "source"  # type: ignore[index]
 
 
 @pytest.mark.parametrize("kind", ("calls", "references", "imports"))
