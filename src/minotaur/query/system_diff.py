@@ -309,29 +309,14 @@ def _endpoint_structure(
     }
 
 
-def _structural_relationship(item: Mapping[str, object]) -> object:
-    """Return the detail fields that are structural for row comparison."""
-
-    def side_payload(name: str) -> Mapping[str, object]:
-        value = item.get(name)
-        return value if isinstance(value, Mapping) else {}
-
-    source = side_payload("source")
-    target = side_payload("target")
+def _structural_relationship(
+    snapshot: ReportingSnapshot, relationship: RelationshipDetail
+) -> object:
+    """Return canonical endpoint fields that are structural for row comparison."""
     return {
-        "source": {
-            "label": source.get("label"),
-            "node_class": source.get("node_class"),
-            "path": source.get("path"),
-            "semantic_identity": source.get("semantic_identity"),
-        },
-        "target": {
-            "label": target.get("label"),
-            "node_class": target.get("node_class"),
-            "path": target.get("path"),
-            "semantic_identity": target.get("semantic_identity"),
-        },
-        "kind": item.get("kind"),
+        "source": _freeze(_endpoint_structure(snapshot, relationship.source)),
+        "target": _freeze(_endpoint_structure(snapshot, relationship.target)),
+        "kind": relationship.kind,
     }
 
 
@@ -369,7 +354,7 @@ def _report_payload(
             "relationships": evidence_dict,
             "involved_systems": tuple(sorted(involved)),
             "structural_relationships": tuple(
-                _structural_relationship(item) for item in evidence_dict
+                _structural_relationship(snapshot, item) for item in evidence
             ),
         }
     return result
