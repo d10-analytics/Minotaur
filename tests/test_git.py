@@ -196,6 +196,7 @@ def test_failed_listing_is_not_reported_as_empty_or_absent(
         pinned.entries("nested")
     assert error.value.commit == pinned.commit
     assert error.value.path == "nested"
+    assert "historical" in str(error.value)
     assert "Not a valid object name" in str(error.value)
 
 
@@ -251,6 +252,7 @@ def test_read_blob_rejects_non_regular_entries(tmp_path: Path) -> None:
             pinned.read_blob(path)
         assert error.value.commit == pinned.commit
         assert error.value.path == path
+        assert "historical" in str(error.value)
 
 
 def test_tolerant_head_probe_still_returns_none_for_absence_and_failure(
