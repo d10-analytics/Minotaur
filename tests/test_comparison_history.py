@@ -127,7 +127,8 @@ def test_missing_sidecar_fails_before_graph_loader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, _, _ = _repository(tmp_path)
-    (root / "graph.json.sha256").unlink()
+    _run(root, "rm", "--quiet", "graph.json.sha256")
+    _run(root, "commit", "--quiet", "-m", "remove graph sidecar")
     called = False
 
     def forbidden(*args: object, **kwargs: object) -> object:
