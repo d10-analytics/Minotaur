@@ -334,7 +334,9 @@ def _load_system_definitions(
         if candidate.entry is None:
             continue
         if candidate.entry.is_link:
-            raise _historical_error(pin, candidate.coordinate, "system definition is a symbolic link")
+            raise _historical_error(
+                pin, candidate.coordinate, "system definition is a symbolic link"
+            )
         if candidate.entry.is_gitlink:
             raise _historical_error(pin, candidate.coordinate, "system definition is a gitlink")
         if not candidate.entry.is_regular_file:
