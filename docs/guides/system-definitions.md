@@ -215,7 +215,10 @@ but applying it by default would hide a Notifications change after a caller had
 first viewed Checkout. If users later need an explicit intersection of several
 simultaneously selected systems, that demand is the trigger to revisit the
 selection policy. This view has no command-line grammar or visual interface;
-it is a projection over the completed typed result.
+it is a projection over the completed typed result. `filter_system_diff` always
+returns a new typed result, including when no system is selected; its compact
+view ends with the four stored coverage and selection lines, and `render_json`
+delegates to the canonical typed projection.
 
 Text begins with one deterministic `coverage ` line, then the existing summary
 record lines. With `--json`, each query returns the system envelope (`query`,

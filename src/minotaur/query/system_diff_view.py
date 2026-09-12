@@ -25,57 +25,57 @@ _CHANGE_GROUPS: tuple[tuple[str, str], ...] = (
 )
 
 
-def select_system(result: SystemDiffResult, name: str | None = None) -> SystemDiffResult:
+def filter_system_diff(
+    complete_result: SystemDiffResult, system_name: str | None = None
+) -> SystemDiffResult:
     """Select one system from a complete result, replacing the prior view.
 
-    ``result`` remains the caller-retained complete value.  Passing ``None``
-    returns every category, while a name retains every change whose stored
+    ``complete_result`` remains the caller-retained complete value.  Passing
+    ``None`` copies every category, while a name retains every change whose stored
     ``involved_systems`` contains it.  A later selection must therefore call
     this function with that same complete value; cumulative narrowing is not
     the default because it would hide a change involving the newly selected
     system.  An explicit intersection need is the point at which this policy
     should be revisited.
     """
-    if not isinstance(result, SystemDiffResult):
-        raise TypeError("select_system requires a SystemDiffResult")
-    if name is None:
-        return result
+    if not isinstance(complete_result, SystemDiffResult):
+        raise TypeError("filter_system_diff requires a SystemDiffResult")
 
-    names = tuple(sorted(set(result.old_system_names) | set(result.new_system_names)))
-    if name not in names:
-        raise UnknownSystem(name, difflib.get_close_matches(name, names, n=5))
+    names = tuple(
+        sorted(set(complete_result.old_system_names) | set(complete_result.new_system_names))
+    )
+    if system_name is not None and system_name not in names:
+        raise UnknownSystem(system_name, difflib.get_close_matches(system_name, names, n=5))
 
     def retain(change: SystemChange) -> bool:
-        return name in change.involved_systems
+        return system_name is None or system_name in change.involved_systems
 
     kwargs: dict[str, object] = {
-        "old_system_names": result.old_system_names,
-        "new_system_names": result.new_system_names,
-        "added_systems": tuple(item for item in result.added_systems if item == name),
-        "removed_systems": tuple(item for item in result.removed_systems if item == name),
-        "old_coverage": result.old_coverage,
-        "new_coverage": result.new_coverage,
-        "old_selection": result.old_selection,
-        "new_selection": result.new_selection,
+        "old_system_names": complete_result.old_system_names,
+        "new_system_names": complete_result.new_system_names,
+        "added_systems": tuple(
+            item
+            for item in complete_result.added_systems
+            if system_name is None or item == system_name
+        ),
+        "removed_systems": tuple(
+            item
+            for item in complete_result.removed_systems
+            if system_name is None or item == system_name
+        ),
+        "old_coverage": complete_result.old_coverage,
+        "new_coverage": complete_result.new_coverage,
+        "old_selection": complete_result.old_selection,
+        "new_selection": complete_result.new_selection,
     }
     for field_name, _label in _CHANGE_GROUPS:
         kwargs[field_name] = tuple(
-            change for change in getattr(result, field_name) if retain(change)
+            change for change in getattr(complete_result, field_name) if retain(change)
         )
     return SystemDiffResult(**cast(Any, kwargs))
 
 
-def filter_result(result: SystemDiffResult, name: str | None = None) -> SystemDiffResult:
-    """Compatibility spelling for :func:`select_system`."""
-    return select_system(result, name)
-
-
-def filter_system_diff(result: SystemDiffResult, name: str | None = None) -> SystemDiffResult:
-    """Select a system from a complete typed comparison result."""
-    return select_system(result, name)
-
-
-def render_context(result: SystemDiffResult) -> str:
+def render_context_text(result: SystemDiffResult) -> str:
     """Render the four stored context mappings in their fixed order."""
     lines = []
     for label, value in (
@@ -84,63 +84,66 @@ def render_context(result: SystemDiffResult) -> str:
         ("old selection", result.old_selection),
         ("new selection", result.new_selection),
     ):
-        lines.append(f"{label} {dump_json(_thaw(value)).rstrip(chr(10))}\n")
+        lines.append(f"{label}: {dump_json(_thaw(value)).rstrip(chr(10))}\n")
     return "".join(lines)
-
-
-def render_context_text(result: SystemDiffResult) -> str:
-    """Render the context-only text view through the same fixed ordering."""
-    return render_context(result)
 
 
 def render_text(result: SystemDiffResult, *, details: bool = False) -> str:
     """Render structural changes followed by stored coverage and selection."""
     lines = [
-        _change_line(label, change)
+        _change_lines(label, change, details=details)
         for field_name, label in _CHANGE_GROUPS
         for change in _ordered(getattr(result, field_name))
     ]
     if result.added_systems:
-        lines[0:0] = [f"system added: {_safe_atom(name)}\n" for name in result.added_systems]
+        lines[0:0] = [
+            _change_lines(
+                "systems",
+                SystemChange(
+                    "systems", "added", (name,), new={"name": name}, involved_systems=(name,)
+                ),
+                details=details,
+            )
+            for name in result.added_systems
+        ]
     if result.removed_systems:
         offset = len(result.added_systems)
         lines[offset:offset] = [
-            f"system removed: {_safe_atom(name)}\n" for name in result.removed_systems
+            _change_lines(
+                "systems",
+                SystemChange(
+                    "systems", "removed", (name,), old={"name": name}, involved_systems=(name,)
+                ),
+                details=details,
+            )
+            for name in result.removed_systems
         ]
     if not lines:
-        lines.append("no changes\n")
-    output = "".join(lines) + render_context(result)
-    if details:
-        output += render_details(result)
-    return output
+        lines.append("no system differences\n")
+    return "".join(lines) + render_context_text(result)
 
 
-def render_details(result: SystemDiffResult) -> str:
+def _render_details(change: SystemChange) -> str:
     """Append exact stored records, endpoint projections, and evidence.
 
     Details are a JSON projection of the typed changes.  In particular, a
     missing old or new side remains JSON ``null`` rather than being inferred
     from the opaque boundary key.
     """
-    lines: list[str] = []
-    for change in result.differences:
-        lines.append(f"details {dump_json(change.to_dict()).rstrip(chr(10))}\n")
-    return "".join(lines)
+    return "".join(
+        f"{label}: {_detail_value(value)}\n"
+        for label, value in (
+            ("old", change.old),
+            ("new", change.new),
+            ("old evidence", _side_evidence(change.old)),
+            ("new evidence", _side_evidence(change.new)),
+        )
+    )
 
 
 def render_json(result: SystemDiffResult) -> str:
     """Render the selected typed result through the canonical JSON owner."""
     return dump_json(result.to_dict())
-
-
-def render_system_diff_text(result: SystemDiffResult, *, details: bool = False) -> str:
-    """Explicit alias for callers naming the result type."""
-    return render_text(result, details=details)
-
-
-def render_system_diff_json(result: SystemDiffResult) -> str:
-    """Explicit alias for callers naming the result type."""
-    return render_json(result)
 
 
 def _ordered(changes: Sequence[SystemChange]) -> tuple[SystemChange, ...]:
@@ -157,7 +160,16 @@ def _ordered(changes: Sequence[SystemChange]) -> tuple[SystemChange, ...]:
     )
 
 
+def _change_lines(label: str, change: SystemChange, *, details: bool) -> str:
+    output = _change_line(label, change)
+    if details:
+        output += _render_details(change)
+    return output
+
+
 def _change_line(label: str, change: SystemChange) -> str:
+    if label == "systems":
+        return f"system {change.kind}: {_safe_atom(_key_part(change, 0))}\n"
     kind = _safe_atom(change.kind)
     if label == "membership":
         old = _mapping_side(change.old)
@@ -169,19 +181,20 @@ def _change_line(label: str, change: SystemChange) -> str:
         )
         return f"membership {kind}: {_safe_atom(file)} — {_safe_atom(old)} -> {_safe_atom(new)}\n"
     if label == "surface":
+        system = _display_category(_key_part(change, 0))
         path = _key_part(change, 1)
         symbol = _key_part(change, 2)
-        return f"surface {kind}: {_safe_atom(path)}  {_safe_atom(symbol)}\n"
+        return f"surface {kind}: {_safe_atom(system)} {_safe_atom(path)}.{_safe_atom(symbol)}\n"
     if label == "consumer":
+        system = _display_category(_key_part(change, 0))
         file = _key_part(change, 1)
-        category = _record_category(change.new) or _record_category(change.old)
-        suffix = f" ({_safe_atom(category)})" if category else ""
-        return f"consumer {kind}: {_safe_atom(file)}{suffix}\n"
+        return f"consumer {kind}: {_safe_atom(system)} <- {_safe_atom(file)}\n"
     if label == "dependency":
-        source = _key_part(change, 0)
+        source = _display_category(_key_part(change, 0))
         category = (
             _record_category(change.new) or _record_category(change.old) or _key_part(change, 1)
         )
+        category = _display_category(category)
         return f"dependency {kind}: {_safe_atom(source)} -> {_safe_atom(category)}\n"
     if label == "boundary":
         payload = _mapping(change.new) or _mapping(change.old)
@@ -193,6 +206,23 @@ def _change_line(label: str, change: SystemChange) -> str:
             f"({_safe_atom(relation)})\n"
         )
     raise AssertionError(f"unsupported change label: {label}")
+
+
+def _side_evidence(value: object) -> object:
+    evidence = _mapping_value(value, "relationships")
+    if evidence is None:
+        return "unavailable"
+    return evidence
+
+
+def _detail_value(value: object) -> str:
+    if value is None or value == "unavailable":
+        return "unavailable"
+    return dump_json(_thaw(value)).rstrip(chr(10))
+
+
+def _display_category(value: object) -> str:
+    return str(value).removeprefix("system: ")
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -265,15 +295,4 @@ def _thaw(value: object) -> object:
     return value
 
 
-__all__ = [
-    "filter_result",
-    "filter_system_diff",
-    "render_context",
-    "render_context_text",
-    "render_details",
-    "render_json",
-    "render_system_diff_json",
-    "render_system_diff_text",
-    "render_text",
-    "select_system",
-]
+__all__ = ["filter_system_diff", "render_context_text", "render_json", "render_text"]
