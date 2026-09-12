@@ -199,6 +199,24 @@ symbol, the consumer file, or the target category — and preserve call sites
 as payload only. Records are returned in stable sorted order, so
 the same graph and systems always produce the same bytes.
 
+## Comparing complete system results
+
+The typed system comparison is computed once from the old and new reporting
+snapshots. Its pure view can then replace the selected system without reading
+either snapshot again. For example, keep the complete result returned by the
+comparison, select `Checkout` to inspect its changes, and select
+`Notifications` from that same complete result to see the `Payments` to
+`Notifications` boundary and the new Notifications file change. A selection
+uses stored involvement, so a cross-system explanation remains visible from
+either participant.
+
+The view deliberately replaces selection. Cumulative narrowing was considered,
+but applying it by default would hide a Notifications change after a caller had
+first viewed Checkout. If users later need an explicit intersection of several
+simultaneously selected systems, that demand is the trigger to revisit the
+selection policy. This view has no command-line grammar or visual interface;
+it is a projection over the completed typed result.
+
 Text begins with one deterministic `coverage ` line, then the existing summary
 record lines. With `--json`, each query returns the system envelope (`query`,
 `refreshed`, `results`, `stale`, `coverage`) in the shared JSON envelope, whose records carry semantic
