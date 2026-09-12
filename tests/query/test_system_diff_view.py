@@ -58,6 +58,59 @@ def _ab_addition(kind: str = "calls") -> SystemDiffResult:
     return compare_systems(old, new)
 
 
+def _ab_removal() -> SystemDiffResult:
+    source = _symbol("send", "a.py")
+    target = _symbol("receive", "b.py")
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    old = _snapshot((source, target), (_call(source, target),), systems)
+    new = _snapshot((source, target), (), systems)
+    return compare_systems(old, new)
+
+
+def _ab_changed_rows() -> SystemDiffResult:
+    source = _symbol("send", "a.py")
+    target = _symbol("receive", "b.py")
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    old = _snapshot((source, target), (_call(source, target),), systems)
+    new = _snapshot((source, target), (_reference(source, target),), systems)
+    return compare_systems(old, new)
+
+
+def _membership_endpoint_result() -> SystemDiffResult:
+    source = _symbol("send", "caller.py")
+    old_target = _upstream("old_receive", identifier="target", path="b.py")
+    new_target = _upstream("new_receive", identifier="target", path="b.py")
+    old_systems = _systems(
+        ("a.toml", "A", ("a.py",)),
+        ("b.toml", "B", ("b.py",)),
+    )
+    new_systems = _systems(
+        ("a.toml", "A", ("a.py", "b.py")),
+    )
+    old = _snapshot((source, old_target), (_call(source, old_target),), old_systems)
+    new = _snapshot((source, new_target), (_call(source, new_target),), new_systems)
+    return compare_systems(old, new)
+
+
+def _context_lines(result: SystemDiffResult) -> list[str]:
+    payload = result.to_dict()
+    coverage = payload["coverage"]
+    selection = payload["selection"]
+    assert isinstance(coverage, dict)
+    assert isinstance(selection, dict)
+    return [
+        f"old coverage: {dump_json(coverage['old']).rstrip(chr(10))}",
+        f"new coverage: {dump_json(coverage['new']).rstrip(chr(10))}",
+        f"old selection: {dump_json(selection['old']).rstrip(chr(10))}",
+        f"new selection: {dump_json(selection['new']).rstrip(chr(10))}",
+    ]
+
+
+def _assert_exact_compact(result: SystemDiffResult, changed_lines: list[str]) -> None:
+    expected = "".join(f"{line}\n" for line in changed_lines + _context_lines(result))
+    assert render_text(result) == expected
+
+
 def test_replacement_selection_uses_complete_result_and_copies_none() -> None:
     complete = _checkout_notifications_result()
     original = complete.to_dict()
@@ -151,6 +204,94 @@ def test_each_involved_system_retains_every_natural_row_category_exactly() -> No
         assert getattr(selected_a, field_name) == expected
         assert getattr(selected_b, field_name) == expected
         assert all(change.involved_systems == ("A", "B") for change in expected)
+
+
+def test_added_categories_and_system_use_exact_compact_grammar_and_order() -> None:
+    _assert_exact_compact(
+        _checkout_notifications_result(),
+        [
+            "system added: Notifications",
+            "membership changed: notifications.py — unassigned -> Notifications",
+            "surface added: Notifications notifications.py.email_receipt",
+            "consumer added: Notifications <- payments.py",
+            "dependency added: Payments -> Notifications",
+            "boundary added: Payments.send_receipt -> Notifications.email_receipt (calls)",
+        ],
+    )
+    _assert_exact_compact(
+        _ab_addition(),
+        [
+            "surface added: B b.py.receive",
+            "consumer added: B <- a.py",
+            "dependency added: A -> B",
+            "boundary added: A.send -> B.receive (calls)",
+        ],
+    )
+
+
+def test_removed_and_changed_rows_and_system_use_exact_compact_grammar() -> None:
+    removed = _ab_removal()
+    _assert_exact_compact(
+        removed,
+        [
+            "surface removed: B b.py.receive",
+            "consumer removed: B <- a.py",
+            "dependency removed: A -> B",
+            "boundary removed: A.send -> B.receive (calls)",
+        ],
+    )
+
+    old_only = _symbol("legacy", "legacy.py")
+    old_systems = _systems(("legacy.toml", "Legacy", ("legacy.py",)))
+    removed_system = compare_systems(_snapshot((old_only,), (), old_systems), _snapshot((), (), ()))
+    _assert_exact_compact(
+        removed_system,
+        [
+            "system removed: Legacy",
+            "membership changed: legacy.py — Legacy -> unassigned",
+        ],
+    )
+
+    _assert_exact_compact(
+        _ab_changed_rows(),
+        [
+            "surface changed: B b.py.receive",
+            "consumer changed: B <- a.py",
+            "dependency changed: A -> B",
+            "boundary added: A.send -> B.receive (references)",
+            "boundary removed: A.send -> B.receive (calls)",
+        ],
+    )
+
+
+def test_boundary_membership_and_endpoint_lines_and_details_are_exact_and_adjacent() -> None:
+    result = _membership_endpoint_result()
+    expected_lines = [
+        "system removed: B",
+        "membership changed: b.py — B -> A",
+        "surface added: A b.py.new_receive",
+        "surface removed: B b.py.old_receive",
+        "consumer added: A <- caller.py",
+        "consumer removed: B <- caller.py",
+        "boundary endpoint: no_system.send -> A.new_receive (calls)",
+        "boundary membership: no_system.send -> A.new_receive (calls)",
+    ]
+    _assert_exact_compact(result, expected_lines)
+
+    lines = render_text(result, details=True).splitlines()
+    for changed_line in expected_lines:
+        index = lines.index(changed_line)
+        assert lines[index + 1].startswith("old: ")
+        assert lines[index + 2].startswith("new: ")
+        assert lines[index + 3].startswith("old evidence: ")
+        assert lines[index + 4].startswith("new evidence: ")
+    for changed_line in expected_lines[-2:]:
+        index = lines.index(changed_line)
+        assert lines[index + 1].startswith("old: {")
+        assert lines[index + 2].startswith("new: {")
+        assert lines[index + 3].startswith("old evidence: [")
+        assert lines[index + 4].startswith("new evidence: [")
+    assert lines[-4:] == _context_lines(result)
 
 
 def test_membership_and_endpoint_aspects_remain_separate_for_both_systems() -> None:
