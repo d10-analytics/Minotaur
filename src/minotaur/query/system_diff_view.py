@@ -88,6 +88,11 @@ def render_context(result: SystemDiffResult) -> str:
     return "".join(lines)
 
 
+def render_context_text(result: SystemDiffResult) -> str:
+    """Render the context-only text view through the same fixed ordering."""
+    return render_context(result)
+
+
 def render_text(result: SystemDiffResult, *, details: bool = False) -> str:
     """Render structural changes followed by stored coverage and selection."""
     lines = [
@@ -191,6 +196,11 @@ def _change_line(label: str, change: SystemChange) -> str:
 
 
 def _mapping(value: object) -> Mapping[str, object]:
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        converted = to_dict()
+        if isinstance(converted, Mapping):
+            return converted
     return value if isinstance(value, Mapping) else {}
 
 
@@ -259,6 +269,7 @@ __all__ = [
     "filter_result",
     "filter_system_diff",
     "render_context",
+    "render_context_text",
     "render_details",
     "render_json",
     "render_system_diff_json",
