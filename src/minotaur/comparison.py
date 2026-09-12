@@ -70,6 +70,41 @@ class HistoricalInputs:
         return self.config
 
     @property
+    def analysis_root(self) -> str:
+        """Return the normalized historical analysis-root coordinate."""
+        return self.normalized_root
+
+    @property
+    def graph_coordinate(self) -> str:
+        """Return the normalized historical graph coordinate."""
+        return self.normalized_graph
+
+    @property
+    def systems_coordinate(self) -> str:
+        """Return the normalized historical systems coordinate."""
+        return self.normalized_systems_dir
+
+    @property
+    def target_coordinates(self) -> tuple[str, ...]:
+        """Return normalized historical target coordinates."""
+        return self.normalized_targets
+
+    @property
+    def saved_selection(self) -> tuple[str, ...]:
+        """Return the strict normalized selection saved in the graph."""
+        return self.selection
+
+    @property
+    def graph_content(self) -> bytes:
+        """Return the exact historical graph bytes."""
+        return self.graph_bytes
+
+    @property
+    def sidecar_bytes(self) -> bytes:
+        """Return the exact historical graph sidecar bytes."""
+        return self.sidecar
+
+    @property
     def targets(self) -> tuple[str, ...]:
         """Return the normalized historical target set."""
         return self.normalized_targets
@@ -367,7 +402,10 @@ def load_historical_inputs(
         )
     except Exception as error:
         raise _wrap_error(
-            pin, "extensions.minotaur.selection", "invalid historical selection", error
+            pin,
+            f"{graph_coordinate}: extensions.minotaur.selection",
+            "invalid historical selection",
+            error,
         ) from error
 
     return HistoricalInputs(
