@@ -86,6 +86,10 @@ def test_replacement_selection_uses_complete_result_and_copies_none() -> None:
         change.domain == "membership" and "Notifications" in change.involved_systems
         for change in notifications.differences
     )
+    unrelated = filter_system_diff(complete, "Checkout")
+    assert unrelated.differences == ()
+    assert unrelated.changed is False
+    assert unrelated.exit_code == 0
     assert complete.to_dict() == original
 
 
