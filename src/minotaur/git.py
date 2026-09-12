@@ -117,7 +117,11 @@ class PinnedCommit:
     @classmethod
     def pin(cls, root: Path) -> PinnedCommit:
         """Resolve ``HEAD`` once, rejecting unavailable or unborn repositories."""
-        completed = run_git(root, ("rev-parse", "--verify", "HEAD^{commit}"))
+        completed = run_git(
+            root,
+            ("rev-parse", "--verify", "HEAD^{commit}"),
+            text=False,
+        )
         if completed is None:
             raise GitInputError(
                 side="historical",
