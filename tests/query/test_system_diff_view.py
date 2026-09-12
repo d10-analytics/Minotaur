@@ -1,21 +1,25 @@
-"""Behavioral proof for pure views over a complete system comparison."""
+"""Natural-trigger and edge-case proof for the pure system comparison view."""
 
 from __future__ import annotations
 
 import difflib
+from dataclasses import replace
 
 import pytest
-from test_system_diff import _call, _snapshot, _symbol, _systems
+from test_system_diff import _call, _reference, _snapshot, _symbol, _systems, _upstream
 
+from minotaur.graph_model.evidence import Evidence, Producer
+from minotaur.graph_model.provenance import Provenance
+from minotaur.graph_model.relationship import Relationship
 from minotaur.query import system_diff as system_diff_module
+from minotaur.query.render import dump_json
 from minotaur.query.system import ReportingSnapshot
-from minotaur.query.system_diff import SystemDiffResult, compare_systems
+from minotaur.query.system_diff import SystemChange, SystemDiffResult, compare_systems
 from minotaur.query.system_diff_view import (
+    filter_system_diff,
     render_context_text,
-    render_details,
     render_json,
     render_text,
-    select_system,
 )
 from minotaur.system import UnknownSystem
 
@@ -42,24 +46,38 @@ def _checkout_notifications_result() -> SystemDiffResult:
     return compare_systems(old, new)
 
 
-def test_selection_replaces_from_one_complete_result_and_never_reacquires(monkeypatch) -> None:
+def _ab_addition(kind: str = "calls") -> SystemDiffResult:
+    source = _symbol("send", "a.py")
+    target = _symbol("receive", "b.py")
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    old = _snapshot((source, target), (), systems)
+    relationship = _call(source, target) if kind == "calls" else _reference(source, target)
+    if kind == "imports":
+        relationship = replace(relationship, kind="imports")
+    new = _snapshot((source, target), (relationship,), systems)
+    return compare_systems(old, new)
+
+
+def test_replacement_selection_uses_complete_result_and_copies_none() -> None:
     complete = _checkout_notifications_result()
     original = complete.to_dict()
 
-    def fail(*_args, **_kwargs):
-        raise AssertionError("a pure view must not reacquire comparison inputs")
+    all_view = filter_system_diff(complete, None)
+    checkout = filter_system_diff(complete, "Checkout")
+    notifications = filter_system_diff(complete, "Notifications")
+    repeated = filter_system_diff(complete, "Notifications")
 
-    monkeypatch.setattr(ReportingSnapshot, "report", fail)
-    monkeypatch.setattr(system_diff_module, "compare_systems", fail)
-
-    checkout = select_system(complete, "Checkout")
-    notifications = select_system(complete, "Notifications")
-    direct_notifications = select_system(complete, "Notifications")
-    repeated = select_system(complete, "Notifications")
-
-    assert checkout is not complete
+    assert all_view is not complete
+    assert all_view == complete
+    assert all_view.to_dict() == original
+    assert all_view.changed == complete.changed
+    assert all_view.exit_code == complete.exit_code
+    assert all_view.old_coverage == complete.old_coverage
+    assert all_view.new_coverage == complete.new_coverage
+    assert all_view.old_selection == complete.old_selection
+    assert all_view.new_selection == complete.new_selection
     assert all("Notifications" not in change.involved_systems for change in checkout.differences)
-    assert notifications == direct_notifications == repeated
+    assert notifications == repeated
     assert any(
         change.domain == "boundary" and "Payments" in change.involved_systems
         for change in notifications.differences
@@ -68,21 +86,33 @@ def test_selection_replaces_from_one_complete_result_and_never_reacquires(monkey
         change.domain == "membership" and "Notifications" in change.involved_systems
         for change in notifications.differences
     )
-    assert select_system(complete) is complete
     assert complete.to_dict() == original
-    assert notifications.old_coverage == complete.old_coverage
-    assert notifications.new_coverage == complete.new_coverage
-    assert notifications.old_selection == complete.old_selection
-    assert notifications.new_selection == complete.new_selection
 
 
-def test_selection_resolves_complete_union_and_exact_unknown_suggestions() -> None:
+def test_old_only_deleted_name_resolves_and_unrelated_name_is_neutral() -> None:
+    old_only = _symbol("legacy", "legacy.py")
+    old_systems = _systems(("legacy.toml", "Legacy", ("legacy.py",)))
+    new = _snapshot((), (), ())
+    result = compare_systems(_snapshot((old_only,), (), old_systems), new)
+
+    deleted = filter_system_diff(result, "Legacy")
+    assert deleted.removed_systems == ("Legacy",)
+    assert deleted.old_system_names == ("Legacy",)
+    assert deleted.new_system_names == ()
+    assert deleted.changed is True
+    assert deleted.exit_code == 1
+
+    neutral = filter_system_diff(result, "Legacy")
+    assert neutral.to_dict() == deleted.to_dict()
+
+
+def test_unknown_suggestions_use_sorted_complete_union_and_exact_message() -> None:
     result = SystemDiffResult(
         old_system_names=("billing", "orders"),
         new_system_names=("billing", "orders", "shipping"),
     )
     with pytest.raises(UnknownSystem) as error:
-        select_system(result, "oder")
+        filter_system_diff(result, "oder")
     assert error.value.name == "oder"
     assert error.value.nearest == tuple(
         difflib.get_close_matches("oder", sorted({"billing", "orders", "shipping"}), n=5)
@@ -90,59 +120,157 @@ def test_selection_resolves_complete_union_and_exact_unknown_suggestions() -> No
     assert str(error.value) == "unknown system: oder; nearest systems: orders"
 
     with pytest.raises(UnknownSystem) as unmatched:
-        select_system(SystemDiffResult(), "missing")
+        filter_system_diff(SystemDiffResult(), "missing")
     assert unmatched.value.nearest == ()
     assert str(unmatched.value) == "unknown system: missing"
 
     names = tuple(f"billing-{index:02d}" for index in range(8))
-    capped = SystemDiffResult(old_system_names=names)
-    with pytest.raises(UnknownSystem) as capped_error:
-        select_system(capped, "billing-0")
-    assert capped_error.value.nearest == tuple(
-        difflib.get_close_matches("billing-0", sorted(names), n=5)
+    with pytest.raises(UnknownSystem) as capped:
+        filter_system_diff(SystemDiffResult(old_system_names=names), "billing-0")
+    assert capped.value.nearest == tuple(difflib.get_close_matches("billing-0", sorted(names), n=5))
+    assert len(capped.value.nearest) == 5
+
+
+def test_each_involved_system_retains_every_natural_row_category_exactly() -> None:
+    complete = _ab_addition()
+    selected_a = filter_system_diff(complete, "A")
+    selected_b = filter_system_diff(complete, "B")
+
+    for field_name in (
+        "surface_changes",
+        "consumer_changes",
+        "dependency_changes",
+        "boundary_changes",
+    ):
+        expected = getattr(complete, field_name)
+        assert expected
+        assert getattr(selected_a, field_name) == expected
+        assert getattr(selected_b, field_name) == expected
+        assert all(change.involved_systems == ("A", "B") for change in expected)
+
+
+def test_membership_and_endpoint_aspects_remain_separate_for_both_systems() -> None:
+    source = _symbol("send", "caller.py")
+    old_target = _upstream("old_receive", identifier="target", path="b.py")
+    new_target = _upstream("new_receive", identifier="target", path="b.py")
+    old_systems = _systems(
+        ("a.toml", "A", ("a.py",)),
+        ("b.toml", "B", ("b.py",)),
     )
-    assert len(capped_error.value.nearest) == 5
+    new_systems = _systems(
+        ("a.toml", "A", ("a.py", "b.py")),
+    )
+    old = _snapshot((source, old_target), (_call(source, old_target),), old_systems)
+    new = _snapshot((source, new_target), (_call(source, new_target),), new_systems)
+    complete = compare_systems(old, new)
+
+    assert [change.kind for change in complete.boundary_changes] == ["membership", "endpoint"]
+    for name in ("A", "B"):
+        selected = filter_system_diff(complete, name)
+        assert [change.kind for change in selected.boundary_changes] == ["membership", "endpoint"]
+        membership, endpoint = selected.boundary_changes
+        assert membership.old["categories"] == ("no_system", "system: B")  # type: ignore[index]
+        assert membership.new["categories"] == ("no_system", "system: A")  # type: ignore[index]
+        assert endpoint.old["target_endpoint"]["label"] == "old_receive"  # type: ignore[index]
+        assert endpoint.new["target_endpoint"]["label"] == "new_receive"  # type: ignore[index]
 
 
-def test_text_has_fixed_categories_context_and_details() -> None:
+@pytest.mark.parametrize("kind", ("calls", "references", "imports"))
+def test_all_supported_relationship_kinds_render_and_imports_stay_out_of_surface(kind: str) -> None:
+    result = _ab_addition(kind)
+    text = render_text(filter_system_diff(result, "B"))
+    assert f"({kind})" in text
+    assert result.consumer_changes
+    assert result.dependency_changes
+    if kind == "imports":
+        assert not result.surface_changes
+
+
+def test_rendering_is_pure_after_all_acquisition_seams_fail(monkeypatch) -> None:
+    complete = _checkout_notifications_result()
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("a completed-result view must not reacquire inputs")
+
+    monkeypatch.setattr(ReportingSnapshot, "report", fail)
+    monkeypatch.setattr(system_diff_module, "compare_systems", fail)
+
+    selected = filter_system_diff(complete, "Notifications")
+    assert render_context_text(selected)
+    assert render_text(selected, details=True)
+    assert render_json(selected) == dump_json(selected.to_dict())
+
+
+def test_text_grammar_context_order_details_and_escaping_are_exact() -> None:
     result = _checkout_notifications_result()
-    text = render_text(result)
-    assert render_context_text(result) == "".join(
-        line for line in text.splitlines(keepends=True) if line.startswith(("old ", "new "))
-    )
+    text = render_text(filter_system_diff(result, "Notifications"), details=True)
     lines = text.splitlines()
-    assert lines[-4:] == [
-        "old coverage " + text.split("old coverage ", 1)[1].splitlines()[0],
-        "new coverage " + text.split("new coverage ", 1)[1].splitlines()[0],
-        "old selection " + text.split("old selection ", 1)[1].splitlines()[0],
-        "new selection " + text.split("new selection ", 1)[1].splitlines()[0],
-    ]
     assert any(line.startswith("boundary added: Payments.send_receipt") for line in lines)
-    assert any(line.startswith("membership changed: notifications.py") for line in lines)
+    boundary_index = next(
+        index for index, line in enumerate(lines) if line.startswith("boundary added:")
+    )
+    assert lines[boundary_index + 1].startswith("old: unavailable")
+    assert lines[boundary_index + 2].startswith("new: {")
+    assert lines[boundary_index + 3].startswith("old evidence: unavailable")
+    assert lines[boundary_index + 4].startswith("new evidence: [")
+    assert lines[-4].startswith("old coverage: ")
+    assert lines[-3].startswith("new coverage: ")
+    assert lines[-2].startswith("old selection: ")
+    assert lines[-1].startswith("new selection: ")
 
-    details = render_details(select_system(result, "Notifications"))
-    assert '"old":null' in details
-    assert '"new":' in details
-    assert "involved_systems" in details
+    exceptional = SystemDiffResult(
+        surface_changes=(
+            SystemChange(
+                "surface",
+                "added",
+                ("A", "odd\npath", "symbol\tname"),
+                None,
+                {"record": {"path": "odd\npath", "symbol": "symbol\tname"}},
+                ("A",),
+            ),
+        )
+    )
+    escaped = render_text(exceptional)
+    assert "odd\\npath" in escaped
+    assert "symbol\\tname" in escaped
+    assert len(escaped.splitlines()) == 5
+    assert render_text(SystemDiffResult()).startswith("no system differences\nold coverage: ")
 
-    no_change = render_text(SystemDiffResult())
-    assert no_change.startswith("no changes\nold coverage ")
-    assert no_change.index("old coverage") < no_change.index("new coverage")
-    assert no_change.index("new coverage") < no_change.index("old selection")
-    assert no_change.index("old selection") < no_change.index("new selection")
+
+def test_permuted_source_and_evidence_order_has_identical_selected_views() -> None:
+    source = _symbol("send", "a.py")
+    target = _symbol("receive", "b.py")
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    first = Evidence(Provenance.STATIC_ANALYSIS, producer=Producer("one"))
+    second = Evidence(Provenance.STATIC_ANALYSIS, producer=Producer("two"))
+    relationship = Relationship(source.id, target.id, "calls", (first, second))
+    reverse = Relationship(source.id, target.id, "calls", (second, first))
+    old_first = _snapshot((source, target), (), systems)
+    new_first = _snapshot((source, target), (relationship,), systems)
+    old_second = _snapshot((target, source), (), systems)
+    new_second = _snapshot((target, source), (reverse,), systems)
+    first_result = filter_system_diff(compare_systems(old_first, new_first), "B")
+    second_result = filter_system_diff(compare_systems(old_second, new_second), "B")
+    assert render_json(first_result) == render_json(second_result)
+    assert render_text(first_result, details=True) == render_text(second_result, details=True)
 
 
-def test_json_uses_canonical_serializer_and_does_not_own_status(monkeypatch) -> None:
-    result = select_system(_checkout_notifications_result(), "Notifications")
-    expected = result.to_dict()
+def test_canonical_dumper_receives_exact_to_dict_and_status_stays_typed(monkeypatch) -> None:
+    result = filter_system_diff(_ab_addition(), "B")
+    expected_bytes = dump_json(result.to_dict())
+    assert render_json(result) == expected_bytes
+    changed, exit_code = result.changed, result.exit_code
+    sentinel = {"sentinel": True}
     observed: list[object] = []
 
-    def sentinel(payload: object) -> str:
+    monkeypatch.setattr(SystemDiffResult, "to_dict", lambda _self: sentinel)
+
+    def observe(payload: object) -> str:
         observed.append(payload)
         return "sentinel-json\n"
 
-    monkeypatch.setattr("minotaur.query.system_diff_view.dump_json", sentinel)
+    monkeypatch.setattr("minotaur.query.system_diff_view.dump_json", observe)
     assert render_json(result) == "sentinel-json\n"
-    assert observed == [expected]
-    assert result.changed is True
-    assert result.exit_code == 1
+    assert observed == [sentinel]
+    assert result.changed is changed
+    assert result.exit_code == exit_code
