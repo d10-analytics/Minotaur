@@ -507,6 +507,27 @@ def test_graph_directory_fails_before_canonical_loader(
     assert "regular file" in str(error.value)
 
 
+def test_absent_graph_fails_before_canonical_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "graph.json").unlink()
+    _commit(root, "graph is absent")
+    called = False
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("absent graph must fail before loading")
+
+    monkeypatch.setattr("minotaur.comparison.loading.load_graph_blob", forbidden)
+    with pytest.raises(HistoricalInputError) as error:
+        load_historical_inputs(root, ".minotaur.toml")
+    assert not called
+    assert error.value.path == "graph.json"
+    assert "absent" in str(error.value)
+
+
 @pytest.mark.parametrize("ordinary", [False, True])
 def test_missing_or_ordinary_systems_root_is_empty(tmp_path: Path, ordinary: bool) -> None:
     root, _, _ = _repository(tmp_path)
