@@ -97,6 +97,26 @@ def test_pin_reports_unavailable_and_unborn_repositories(
     assert unborn.value.commit is None
 
 
+def test_pin_rejects_malformed_commit_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.setattr(
+        git,
+        "run_git",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            ["git", "rev-parse"], 0, b"not-a-commit\n", b""
+        ),
+    )
+
+    with pytest.raises(git.GitInputError) as error:
+        git.PinnedCommit.pin(root)
+
+    assert error.value.commit is None
+    assert error.value.cause == "malformed commit output"
+
+
 def test_entries_classify_modes_and_preserve_names_and_bytes(tmp_path: Path) -> None:
     root, sha = _repository(tmp_path)
     pinned = git.PinnedCommit.pin(root)
