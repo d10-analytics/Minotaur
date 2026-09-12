@@ -50,6 +50,18 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     return root, _run(root, "rev-parse", "HEAD").strip()
 
 
+def _empty_repository(tmp_path: Path) -> Path:
+    root = tmp_path / "empty-repo"
+    root.mkdir()
+    _run(root, "init", "--quiet")
+    _run(root, "config", "user.email", "tests@example.invalid")
+    _run(root, "config", "user.name", "Git tests")
+    empty_tree = _run(root, "mktree", input=b"").strip()
+    empty_commit = _run(root, "commit-tree", empty_tree, "-m", "empty").strip()
+    _run(root, "update-ref", "HEAD", empty_commit)
+    return root
+
+
 def test_run_git_keeps_text_default_and_supports_bytes(tmp_path: Path) -> None:
     root, _ = _repository(tmp_path)
 
@@ -60,6 +72,30 @@ def test_run_git_keeps_text_default_and_supports_bytes(tmp_path: Path) -> None:
     assert isinstance(text_result.stdout, str)
     assert bytes_result is not None
     assert isinstance(bytes_result.stdout, bytes)
+
+
+def test_pin_delegates_to_byte_mode_while_tolerant_default_stays_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _ = _repository(tmp_path)
+    original = git.run_git
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def recording(root_arg: Path, arguments: tuple[str, ...], **kwargs: object):
+        calls.append((arguments, kwargs))
+        return original(root_arg, arguments, **kwargs)
+
+    monkeypatch.setattr(git, "run_git", recording)
+    pinned = git.PinnedCommit.pin(root)
+
+    assert pinned.commit
+    assert (
+        ("rev-parse", "--verify", "HEAD^{commit}"),
+        {"text": False},
+    ) in calls
+    tolerant = original(root, ("rev-parse", "HEAD"))
+    assert tolerant is not None
+    assert isinstance(tolerant.stdout, str)
 
 
 def test_pinned_commit_reads_old_bytes_after_head_advances(tmp_path: Path) -> None:
@@ -97,24 +133,10 @@ def test_pin_reports_unavailable_and_unborn_repositories(
     assert unborn.value.commit is None
 
 
-def test_pin_rejects_malformed_commit_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
-    monkeypatch.setattr(
-        git,
-        "run_git",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            ["git", "rev-parse"], 0, b"not-a-commit\n", b""
-        ),
-    )
+def test_empty_pinned_tree_lists_as_empty_tuple(tmp_path: Path) -> None:
+    pinned = git.PinnedCommit.pin(_empty_repository(tmp_path))
 
-    with pytest.raises(git.GitInputError) as error:
-        git.PinnedCommit.pin(root)
-
-    assert error.value.commit is None
-    assert error.value.cause == "malformed commit output"
+    assert pinned.entries() == ()
 
 
 def test_entries_classify_modes_and_preserve_names_and_bytes(tmp_path: Path) -> None:
@@ -142,6 +164,7 @@ def test_entry_returns_absence_or_typed_entry_and_rejects_blocked_ancestors(
     pinned = git.PinnedCommit.pin(root)
 
     assert pinned.entry("missing.txt") is None
+    assert pinned.entry("nested/missing.py") is None
     assert pinned.entry("nested") == git.TreeEntry("nested", "040000", "tree")
     assert pinned.entry("link").is_link  # type: ignore[union-attr]
     assert pinned.entry("vendor").is_gitlink  # type: ignore[union-attr]
@@ -176,6 +199,27 @@ def test_failed_listing_is_not_reported_as_empty_or_absent(
     assert "Not a valid object name" in str(error.value)
 
 
+def test_unavailable_listing_is_attributed_to_historical_pin_and_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _ = _repository(tmp_path)
+    pinned = git.PinnedCommit.pin(root)
+    original = git.run_git
+
+    def unavailable_listing(root_arg: Path, arguments: tuple[str, ...], **kwargs: object):
+        if arguments[:2] == ("ls-tree", "-z"):
+            return None
+        return original(root_arg, arguments, **kwargs)
+
+    monkeypatch.setattr(git, "run_git", unavailable_listing)
+    with pytest.raises(git.GitInputError) as error:
+        pinned.entries("nested")
+    assert error.value.commit == pinned.commit
+    assert error.value.path == "nested"
+    assert "historical" in str(error.value)
+    assert "unavailable" in str(error.value)
+
+
 def test_failed_blob_read_is_attributed_and_successful_sibling_remains_exact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -184,7 +228,7 @@ def test_failed_blob_read_is_attributed_and_successful_sibling_remains_exact(
     original = git.run_git
 
     def failed_read(root_arg: Path, arguments: tuple[str, ...], **kwargs: object):
-        if arguments and arguments[0] == "show":
+        if arguments == ("show", f"{pinned.commit}:plain file.txt"):
             return subprocess.CompletedProcess(["git", *arguments], 128, b"", b"blob read failed\n")
         return original(root_arg, arguments, **kwargs)
 
@@ -193,7 +237,9 @@ def test_failed_blob_read_is_attributed_and_successful_sibling_remains_exact(
         pinned.read_blob("plain file.txt")
     assert error.value.commit == pinned.commit
     assert error.value.path == "plain file.txt"
+    assert "historical" in str(error.value)
     assert "blob read failed" in str(error.value)
+    assert pinned.read_blob("nested/deep file.py") == b"print('old')\n"
 
 
 def test_read_blob_rejects_non_regular_entries(tmp_path: Path) -> None:
