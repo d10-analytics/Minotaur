@@ -333,6 +333,10 @@ def _load_system_definitions(
         candidate = _walk(pin, "system.toml", start=child_parts)
         if candidate.entry is None:
             continue
+        if candidate.entry.is_link:
+            raise _historical_error(pin, candidate.coordinate, "system definition is a symbolic link")
+        if candidate.entry.is_gitlink:
+            raise _historical_error(pin, candidate.coordinate, "system definition is a gitlink")
         if not candidate.entry.is_regular_file:
             continue
         source = _lexical_source(pin, candidate.coordinate)
