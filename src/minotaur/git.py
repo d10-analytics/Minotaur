@@ -129,8 +129,10 @@ class PinnedCommit:
         stdout = completed.stdout
         if isinstance(stdout, bytes):
             commit = stdout.decode("utf-8", errors="replace").strip()
-        else:
+        elif isinstance(stdout, str):
             commit = str(stdout).strip()
+        else:
+            commit = ""
         if completed.returncode != 0 or not commit:
             raise GitInputError(
                 side="historical",
