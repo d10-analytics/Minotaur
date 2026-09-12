@@ -200,9 +200,12 @@ def test_rendering_is_pure_after_all_acquisition_seams_fail(monkeypatch) -> None
     monkeypatch.setattr(system_diff_module, "compare_systems", fail)
 
     selected = filter_system_diff(complete, "Notifications")
+    changed, exit_code = selected.changed, selected.exit_code
     assert render_context_text(selected)
     assert render_text(selected, details=True)
     assert render_json(selected) == dump_json(selected.to_dict())
+    assert selected.changed is changed
+    assert selected.exit_code == exit_code
 
 
 def test_text_grammar_context_order_details_and_escaping_are_exact() -> None:
