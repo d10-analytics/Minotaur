@@ -120,6 +120,10 @@ class HistoricalInputs:
         """Return the complete validated historical system set."""
         return self.systems
 
+    def entry(self, relative: str) -> git.TreeEntry | None:
+        """Look up one repository-relative entry on this result's pin."""
+        return self.pin.entry(relative)
+
 
 def _historical_error(
     pin: git.PinnedCommit,
@@ -334,7 +338,10 @@ def _load_system_definitions(
     try:
         return system.load_systems_data(definitions)
     except Exception as error:
-        path = str(next(iter(definitions), Path(systems_coordinate)))
+        path = next(
+            (str(source) for source in definitions if str(source) in str(error)),
+            str(next(iter(definitions), Path(systems_coordinate))),
+        )
         raise _wrap_error(pin, path, "invalid historical system definitions", error) from error
 
 
