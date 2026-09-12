@@ -126,9 +126,9 @@ def render_text(result: SystemDiffResult, *, details: bool = False) -> str:
 def _render_details(change: SystemChange) -> str:
     """Append exact stored records, endpoint projections, and evidence.
 
-    Details are a JSON projection of the typed changes.  In particular, a
-    missing old or new side remains JSON ``null`` rather than being inferred
-    from the opaque boundary key.
+    Details expose the typed changes with explicit ``unavailable`` sides,
+    rather than inferring a missing old or new value from the opaque boundary
+    key.
     """
     return "".join(
         f"{label}: {_detail_value(value)}\n"

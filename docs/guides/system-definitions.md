@@ -199,6 +199,25 @@ symbol, the consumer file, or the target category — and preserve call sites
 as payload only. Records are returned in stable sorted order, so
 the same graph and systems always produce the same bytes.
 
+Text begins with one deterministic `coverage ` line, then the existing summary
+record lines. With `--json`, each query returns the system envelope (`query`,
+`refreshed`, `results`, `stale`, `coverage`) in the shared JSON envelope, whose records carry semantic
+endpoint labels, root-relative paths, explicit `kind` values, and the category
+spellings above — never node IDs. `--details` adds a `relationships` line or
+JSON array with endpoint IDs, locations, provenance, producer/rule tags, and
+all recorded evidence sites; default summaries remain ID-free. See
+[Output and exit status](query-reference.md#output-and-exit-status) in the
+query reference.
+
+Coverage always describes the final graph and selected declaration: saved
+selection targets, all graph file nodes, declared files represented or absent,
+recorded unresolved references in the declared scope, and current refresh
+diagnostics. Clean and stale `--no-refresh` invocations report diagnostic
+history as unavailable; a refresh records zero or more observed diagnostics.
+Coverage limits are status-neutral. Ordinary valid answers, including empty
+ones, exit `0`; a completed refresh with diagnostics exits `1`; invalid input
+or definitions exit `2` before refresh or output.
+
 ## Comparing complete system results
 
 The typed system comparison is computed once from the old and new reporting
@@ -219,25 +238,6 @@ it is a projection over the completed typed result. `filter_system_diff` always
 returns a new typed result, including when no system is selected; its compact
 view ends with the four stored coverage and selection lines, and `render_json`
 delegates to the canonical typed projection.
-
-Text begins with one deterministic `coverage ` line, then the existing summary
-record lines. With `--json`, each query returns the system envelope (`query`,
-`refreshed`, `results`, `stale`, `coverage`) in the shared JSON envelope, whose records carry semantic
-endpoint labels, root-relative paths, explicit `kind` values, and the category
-spellings above — never node IDs. `--details` adds a `relationships` line or
-JSON array with endpoint IDs, locations, provenance, producer/rule tags, and
-all recorded evidence sites; default summaries remain ID-free. See
-[Output and exit status](query-reference.md#output-and-exit-status) in the
-query reference.
-
-Coverage always describes the final graph and selected declaration: saved
-selection targets, all graph file nodes, declared files represented or absent,
-recorded unresolved references in the declared scope, and current refresh
-diagnostics. Clean and stale `--no-refresh` invocations report diagnostic
-history as unavailable; a refresh records zero or more observed diagnostics.
-Coverage limits are status-neutral. Ordinary valid answers, including empty
-ones, exit `0`; a completed refresh with diagnostics exits `1`; invalid input
-or definitions exit `2` before refresh or output.
 
 ## Strict loading and warnings
 
