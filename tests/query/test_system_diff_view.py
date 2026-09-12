@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 from dataclasses import replace
 
 import pytest
@@ -109,6 +110,40 @@ def _context_lines(result: SystemDiffResult) -> list[str]:
 def _assert_exact_compact(result: SystemDiffResult, changed_lines: list[str]) -> None:
     expected = "".join(f"{line}\n" for line in changed_lines + _context_lines(result))
     assert render_text(result) == expected
+
+
+def _detail_block(text: str, changed_line: str) -> dict[str, object]:
+    lines = text.splitlines()
+    index = lines.index(changed_line)
+    values: dict[str, object] = {}
+    for offset, label in enumerate(("old", "new", "old evidence", "new evidence"), 1):
+        prefix = f"{label}: "
+        assert lines[index + offset].startswith(prefix)
+        value = lines[index + offset][len(prefix) :]
+        values[label] = "unavailable" if value == "unavailable" else json.loads(value)
+    return values
+
+
+def _assert_relationship_evidence(
+    evidence: object, *, kind: str, source_label: str, target_label: str
+) -> None:
+    assert isinstance(evidence, list)
+    assert len(evidence) == 1
+    relationship = evidence[0]
+    assert isinstance(relationship, dict)
+    assert relationship["kind"] == kind
+    assert relationship["relationship_extensions"] == {"status": "unavailable"}
+    assert relationship["source"]["label"] == source_label
+    assert relationship["target"]["label"] == target_label
+    assert relationship["evidence"] == [
+        {
+            "evidence_extensions": {"status": "unavailable"},
+            "producer": {"status": "unavailable"},
+            "provenance": "static-analysis",
+            "rule": {"status": "unavailable"},
+            "sites": [],
+        }
+    ]
 
 
 def test_replacement_selection_uses_complete_result_and_copies_none() -> None:
@@ -262,6 +297,118 @@ def test_removed_and_changed_rows_and_system_use_exact_compact_grammar() -> None
             "boundary removed: A.send -> B.receive (calls)",
         ],
     )
+
+
+def test_details_preserve_exact_records_endpoints_memberships_and_evidence() -> None:
+    added = render_text(filter_system_diff(_ab_addition(), "B"), details=True)
+    added_expectations = {
+        "surface added: B b.py.receive": {
+            "category": "system: B",
+            "kinds": ["calls"],
+            "path": "b.py",
+            "symbol": "receive",
+        },
+        "consumer added: B <- a.py": {
+            "category": "system: A",
+            "file": "a.py",
+            "kinds": ["calls"],
+            "targets": [{"kind": "calls", "label": "receive", "path": "b.py"}],
+        },
+        "dependency added: A -> B": {
+            "category": "system: B",
+            "targets": [{"kind": "calls", "label": "receive", "path": "b.py"}],
+        },
+    }
+    for line, expected_record in added_expectations.items():
+        details = _detail_block(added, line)
+        assert details["old"] == "unavailable"
+        assert details["new"]["record"] == expected_record  # type: ignore[index]
+        assert details["new"]["involved_systems"] == ["A", "B"]  # type: ignore[index]
+        _assert_relationship_evidence(
+            details["new"]["relationships"],  # type: ignore[index]
+            kind="calls",
+            source_label="send",
+            target_label="receive",
+        )
+        assert details["old evidence"] == "unavailable"
+        _assert_relationship_evidence(
+            details["new evidence"],
+            kind="calls",
+            source_label="send",
+            target_label="receive",
+        )
+
+    boundary = _detail_block(
+        added,
+        "boundary added: A.send -> B.receive (calls)",
+    )
+    assert boundary["old"] == "unavailable"
+    new_boundary = boundary["new"]
+    assert new_boundary["categories"] == ["system: A", "system: B"]  # type: ignore[index]
+    assert new_boundary["source_category"] == "system: A"  # type: ignore[index]
+    assert new_boundary["target_category"] == "system: B"  # type: ignore[index]
+    assert new_boundary["source_membership"] == "system: A"  # type: ignore[index]
+    assert new_boundary["target_membership"] == "system: B"  # type: ignore[index]
+    assert new_boundary["source_endpoint"]["label"] == "send"  # type: ignore[index]
+    assert new_boundary["target_endpoint"]["label"] == "receive"  # type: ignore[index]
+    _assert_relationship_evidence(
+        new_boundary["relationships"],  # type: ignore[index]
+        kind="calls",
+        source_label="send",
+        target_label="receive",
+    )
+    assert boundary["old evidence"] == "unavailable"
+    _assert_relationship_evidence(
+        boundary["new evidence"],
+        kind="calls",
+        source_label="send",
+        target_label="receive",
+    )
+
+    removed = render_text(filter_system_diff(_ab_removal(), "B"), details=True)
+    for line in (
+        "surface removed: B b.py.receive",
+        "consumer removed: B <- a.py",
+        "dependency removed: A -> B",
+        "boundary removed: A.send -> B.receive (calls)",
+    ):
+        details = _detail_block(removed, line)
+        assert details["new"] == "unavailable"
+        assert details["new evidence"] == "unavailable"
+        assert isinstance(details["old"], dict)
+        _assert_relationship_evidence(
+            details["old evidence"],
+            kind="calls",
+            source_label="send",
+            target_label="receive",
+        )
+
+    changed_aspects = render_text(_membership_endpoint_result(), details=True)
+    for line in (
+        "boundary endpoint: no_system.send -> A.new_receive (calls)",
+        "boundary membership: no_system.send -> A.new_receive (calls)",
+    ):
+        details = _detail_block(changed_aspects, line)
+        old_side = details["old"]
+        new_side = details["new"]
+        assert old_side["categories"] == ["no_system", "system: B"]  # type: ignore[index]
+        assert new_side["categories"] == ["no_system", "system: A"]  # type: ignore[index]
+        assert old_side["source_membership"] == "no_system"  # type: ignore[index]
+        assert new_side["target_membership"] == "system: A"  # type: ignore[index]
+        assert old_side["target_endpoint"]["label"] == "old_receive"  # type: ignore[index]
+        assert new_side["target_endpoint"]["label"] == "new_receive"  # type: ignore[index]
+        _assert_relationship_evidence(
+            details["old evidence"],
+            kind="calls",
+            source_label="send",
+            target_label="old_receive",
+        )
+        _assert_relationship_evidence(
+            details["new evidence"],
+            kind="calls",
+            source_label="send",
+            target_label="new_receive",
+        )
 
 
 def test_boundary_membership_and_endpoint_lines_and_details_are_exact_and_adjacent() -> None:
