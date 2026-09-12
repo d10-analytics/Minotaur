@@ -158,6 +158,13 @@ def _git_coordinate(coordinate: str) -> str:
     return "" if coordinate == "." else coordinate
 
 
+def _analysis_relative_coordinate(coordinate: str, root_parts: Sequence[str]) -> str:
+    parts = _coordinate_parts(coordinate)
+    if parts[: len(root_parts)] != tuple(root_parts):
+        raise ValueError("coordinate is outside the analysis root")
+    return _public_coordinate(parts[len(root_parts) :])
+
+
 def _tree_entry(coordinate: Sequence[str]) -> git.TreeEntry:
     return git.TreeEntry(path=_tree_coordinate(coordinate), mode="040000", kind="tree")
 
@@ -405,8 +412,11 @@ def load_historical_inputs(
         normalized_targets.add(target_coordinate)
 
     try:
+        expected_selection = {
+            _analysis_relative_coordinate(target, root_parts) for target in normalized_targets
+        }
         selection = validate_saved_selection(
-            _raw_selection(loaded_graph.document), normalized_targets
+            _raw_selection(loaded_graph.document), expected_selection
         )
     except Exception as error:
         raise _wrap_error(
