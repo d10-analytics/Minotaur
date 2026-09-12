@@ -265,6 +265,33 @@ def test_absolute_declaration_is_lexical_and_rejects_an_outside_path(tmp_path: P
     assert "escapes the worktree" in str(error.value)
 
 
+def test_contained_absolute_declarations_acquire_a_pinned_snapshot(tmp_path: Path) -> None:
+    root, _, graph_bytes = _repository(tmp_path)
+    _write(
+        root,
+        ".minotaur.toml",
+        "[minotaur]\n"
+        "schema_version = 1\n"
+        f"root = {json.dumps(str(root))}\n"
+        f"graph = {json.dumps(str(root / 'graph.json'))}\n"
+        f"targets = {json.dumps([str(root / 'app.py')])}\n"
+        f"systems_dir = {json.dumps(str(root / 'docs/systems'))}\n",
+    )
+    _commit(root, "contained absolute declarations")
+
+    result = load_historical_inputs(root, ".minotaur.toml")
+
+    assert result.commit == _run(root, "rev-parse", "HEAD")
+    assert result.normalized_root == "."
+    assert result.normalized_graph == "graph.json"
+    assert result.normalized_systems_dir == "docs/systems"
+    assert result.normalized_targets == ("app.py",)
+    assert result.graph_bytes == graph_bytes
+    assert result.sidecar == (graph_digest(graph_bytes) + "\n").encode("ascii")
+    assert result.systems[0].name == "core"
+    assert result.pin.entry("app.py") is not None
+
+
 def test_spaces_and_gitlink_target_leaves_keep_typed_route_errors(tmp_path: Path) -> None:
     root, _, _ = _repository(tmp_path)
     (root / "app.py").rename(root / "space named.py")
