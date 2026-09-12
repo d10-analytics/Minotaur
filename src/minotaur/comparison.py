@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from minotaur import config, git, system
+from minotaur.config import ValidatedConfig
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import LoadedGraph
 
@@ -33,7 +34,7 @@ class HistoricalInputs:
 
     pin: git.PinnedCommit
     config_coordinate: str
-    config: config.ValidatedConfig
+    config: ValidatedConfig
     normalized_root: str
     normalized_graph: str
     normalized_systems_dir: str
@@ -65,7 +66,7 @@ class HistoricalInputs:
         return self.config_coordinate
 
     @property
-    def historical_config(self) -> config.ValidatedConfig:
+    def historical_config(self) -> ValidatedConfig:
         """Alias for the raw historical declarations."""
         return self.config
 
