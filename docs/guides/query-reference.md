@@ -376,14 +376,19 @@ system. The comparison reports accepted graph and membership facts only; it
 does not infer renames, causality, edit timing, or intent.
 
 The plain committed-reference mode remains available for comparing the current
-working tree against one committed system graph:
+working tree with either the configured repository selection or one committed
+system graph:
 
 ```bash
+minotaur query diff
 minotaur query diff --scope NAME
 ```
 
-That mode requires a located `.minotaur.toml` and is distinct from
-`--systems`; the explicit two-snapshot mode below remains configuration-free.
+That mode requires a located `.minotaur.toml`. With no `--scope`, it compares
+the configured targets in the current working tree with the configured graph at
+`HEAD`; `--scope NAME` instead compares the named system's declared files with
+that system's committed graph. It is distinct from `--systems`, and the
+explicit two-snapshot mode below remains configuration-free.
 
 Compare two analyzed graph files explicitly, without a source root or
 configuration:
