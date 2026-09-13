@@ -8,18 +8,59 @@ historical configuration and composes the existing strict loaders.
 
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from minotaur import config, git, system
 from minotaur.config import ValidatedConfig
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import LoadedGraph
+from minotaur.graph_model.validation import validate_document
+from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
+from minotaur.language_interpreter.selection import SourceSelection
+from minotaur.language_interpreter.workspace import Workspace
+from minotaur.query.system import ReportingSnapshot
 
 
 class HistoricalInputError(git.GitInputError):
     """A historical input failed after the commit had been pinned."""
+
+
+class CurrentInputError(ValueError):
+    """A current input failed during strict comparison acquisition."""
+
+    def __init__(
+        self,
+        *,
+        path: str | Path,
+        detail: str,
+        cause: str | None = None,
+        diagnostics: Sequence[Diagnostic] = (),
+    ) -> None:
+        self.side = "current"
+        self.path = str(path)
+        self.detail = detail
+        self.cause = cause
+        self.cause_type = cause
+        self.diagnostics = tuple(diagnostics)
+        self.source_diagnostics = self.diagnostics
+        identity = f" ({cause})" if cause else ""
+        super().__init__(f"current input at {self.path!r}{identity}: {detail}")
+
+
+class SelectionProducer(Protocol):
+    """The existing in-memory source producer used by comparison."""
+
+    def __call__(
+        self,
+        root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+    ) -> tuple[Workspace, SourceSelection, AnalysisResult]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,3 +487,404 @@ def load_historical_inputs(
         systems=historical_systems,
         selection=selection,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentInputs:
+    """All immutable observations acquired from the current work tree."""
+
+    config_coordinate: str
+    config: ValidatedConfig
+    normalized_root: str
+    normalized_graph: str
+    normalized_systems_dir: str
+    normalized_targets: tuple[str, ...]
+    systems: tuple[system.System, ...]
+    selection: tuple[str, ...]
+
+    @property
+    def current_config(self) -> ValidatedConfig:
+        return self.config
+
+    @property
+    def analysis_root(self) -> str:
+        return self.normalized_root
+
+    @property
+    def graph_coordinate(self) -> str:
+        return self.normalized_graph
+
+    @property
+    def systems_coordinate(self) -> str:
+        return self.normalized_systems_dir
+
+    @property
+    def target_coordinates(self) -> tuple[str, ...]:
+        return self.normalized_targets
+
+    @property
+    def definitions(self) -> tuple[system.System, ...]:
+        return self.systems
+
+    @property
+    def saved_selection(self) -> tuple[str, ...]:
+        return self.selection
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedComparison:
+    """The fully validated historical/current pair and reporting snapshots."""
+
+    historical: HistoricalInputs
+    current: CurrentInputs
+    old_snapshot: ReportingSnapshot
+    new_snapshot: ReportingSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class _CurrentRoute:
+    path: Path
+    coordinate: str
+    entry: os.stat_result | None
+
+
+def _current_error(
+    path: str | Path,
+    detail: str,
+    error: Exception | None = None,
+    *,
+    diagnostics: Sequence[Diagnostic] = (),
+) -> CurrentInputError:
+    return CurrentInputError(
+        path=path,
+        detail=detail,
+        cause=type(error).__name__ if error is not None else None,
+        diagnostics=diagnostics,
+    )
+
+
+def _route_coordinate(parts: Sequence[str]) -> str:
+    return "/".join(parts) or "."
+
+
+def _relative_parts(root: Path, path: Path, *, label: str) -> tuple[str, ...]:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise _current_error(path, f"{label} escapes the selected worktree", error) from error
+    return relative.parts
+
+
+def _inspect_current_route(
+    root: Path,
+    path: Path,
+    *,
+    label: str,
+    allow_missing: bool = True,
+) -> _CurrentRoute:
+    """Inspect a lexical route one component at a time, retaining aliases."""
+    parts = _relative_parts(root, path, label=label)
+    current = root
+    logical: list[str] = []
+    missing = False
+    for index, component in enumerate(parts):
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            if missing or not logical:
+                raise _current_error(path, f"unresolved traversal in {label}")
+            logical.pop()
+            current = current.parent
+            continue
+        if missing:
+            logical.append(component)
+            current = current / component
+            continue
+        candidate = current / component
+        try:
+            observed = os.lstat(candidate)
+        except FileNotFoundError as error:
+            if ".." in parts[index + 1 :]:
+                raise _current_error(
+                    path, f"unresolved traversal after missing prefix {component!r}", error
+                ) from error
+            missing = True
+            logical.append(component)
+            current = candidate
+            continue
+        except OSError as error:
+            raise _current_error(candidate, f"could not inspect {label}", error) from error
+        if stat.S_ISLNK(observed.st_mode):
+            raise _current_error(candidate, "path is a symbolic link")
+        if component == ".git":
+            raise _current_error(candidate, "path contains a nested repository marker")
+        if index < len(parts) - 1 and not stat.S_ISDIR(observed.st_mode):
+            raise _current_error(candidate, "path has a blocked non-directory ancestor")
+        logical.append(component)
+        current = candidate
+        if index == len(parts) - 1:
+            return _CurrentRoute(candidate, _route_coordinate(logical), observed)
+
+    if missing:
+        if not allow_missing:
+            raise _current_error(path, f"required {label} is absent")
+        return _CurrentRoute(current, _route_coordinate(logical), None)
+    try:
+        observed = os.lstat(root)
+    except OSError as error:  # pragma: no cover - root was inspected by the caller.
+        raise _current_error(root, f"could not inspect {label}", error) from error
+    return _CurrentRoute(root, ".", observed)
+
+
+def _lexical_declaration(root: Path, base: Path, raw: str, *, label: str) -> _CurrentRoute:
+    if not isinstance(raw, str):
+        raise _current_error(str(raw), f"{label} declaration must be a string")
+    path = Path(raw) if raw.startswith("/") else base / raw
+    parts = _relative_parts(root, path, label=label)
+    logical: list[str] = []
+    for component in parts:
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            if not logical:
+                raise _current_error(path, f"{label} escapes the selected worktree")
+            logical.pop()
+        else:
+            logical.append(component)
+    return _CurrentRoute(path, _route_coordinate(logical), None)
+
+
+def _select_worktree(start: Path) -> tuple[Path, Path]:
+    preserved_start = Path.cwd() / start if not start.is_absolute() else start
+    result = git.run_git(preserved_start, ("rev-parse", "--show-toplevel"))
+    if result is None:
+        error = _current_error(preserved_start, "Git worktree probe was unavailable")
+        raise error
+    value = result.stdout.strip() if isinstance(result.stdout, str) else ""
+    if result.returncode != 0 or not value:
+        raise _current_error(preserved_start, "Git did not return a worktree root")
+    root = Path(value)
+    if not root.is_absolute():
+        raise _current_error(root, "Git returned a non-absolute worktree root")
+    try:
+        os.lstat(root)
+    except OSError as error:
+        raise _current_error(root, "could not inspect the Git worktree root", error) from error
+    root_info = os.lstat(root)
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise _current_error(root, "Git worktree root is not an ordinary directory")
+    _inspect_current_route(root, preserved_start, label="start", allow_missing=False)
+    return root, preserved_start
+
+
+def _discover_current_config(root: Path, start: Path) -> _CurrentRoute:
+    current = start
+    while True:
+        candidate = current / ".minotaur.toml"
+        route = _inspect_current_route(root, candidate, label="config")
+        if route.entry is not None:
+            if not stat.S_ISREG(route.entry.st_mode):
+                raise _current_error(candidate, "selected config is not an ordinary file")
+            return route
+        if route.coordinate == "." or current == root:
+            raise _current_error(candidate, "no config was found within the selected worktree")
+        parent = current.parent
+        if parent == current:
+            raise _current_error(candidate, "no config was found within the selected worktree")
+        current = parent
+
+
+def _current_config_route(root: Path, start: Path, raw_config_path: Path | None) -> _CurrentRoute:
+    if raw_config_path is None:
+        return _discover_current_config(root, start)
+    selected = raw_config_path if raw_config_path.is_absolute() else start / raw_config_path
+    route = _inspect_current_route(root, selected, label="config", allow_missing=False)
+    if route.entry is None:
+        raise _current_error(selected, "required config is absent")
+    if not stat.S_ISREG(route.entry.st_mode):
+        raise _current_error(selected, "selected config is not an ordinary file")
+    return route
+
+
+def _current_systems(root: Path, route: _CurrentRoute) -> tuple[system.System, ...]:
+    if route.entry is None:
+        return ()
+    mode = route.entry.st_mode
+    if not stat.S_ISDIR(mode):
+        if stat.S_ISREG(mode):
+            return ()
+        raise _current_error(route.path, "systems root is not an ordinary directory")
+    definitions: dict[Path, bytes] = {}
+    try:
+        children = sorted(os.scandir(route.path), key=lambda entry: entry.name)
+    except OSError as error:
+        raise _current_error(route.path, "could not inspect systems root", error) from error
+    for child in children:
+        child_path = route.path / child.name
+        child_route = _inspect_current_route(root, child_path, label="system directory")
+        if child_route.entry is None:
+            continue
+        child_mode = child_route.entry.st_mode
+        if not stat.S_ISDIR(child_mode):
+            if stat.S_ISREG(child_mode):
+                continue
+            raise _current_error(child_path, "system directory candidate is not ordinary")
+        definition_path = child_path / "system.toml"
+        definition = _inspect_current_route(root, definition_path, label="system definition")
+        if definition.entry is None:
+            continue
+        if not stat.S_ISREG(definition.entry.st_mode):
+            if stat.S_ISDIR(definition.entry.st_mode):
+                continue
+            raise _current_error(definition_path, "system definition is not an ordinary file")
+        try:
+            definitions[definition.path] = definition.path.read_bytes()
+        except OSError as error:
+            raise _current_error(
+                definition.path, "could not read system definition", error
+            ) from error
+    try:
+        return system.load_systems_data(definitions)
+    except Exception as error:
+        path = next(
+            (str(source) for source in definitions if str(source) in str(error)), str(route.path)
+        )
+        raise _current_error(path, "invalid current system definitions", error) from error
+
+
+def _pinned_target_entry(historical: HistoricalInputs, coordinate: str) -> git.TreeEntry | None:
+    if coordinate == ".":
+        return git.TreeEntry(path="", mode="040000", kind="tree")
+    return historical.pin.entry(coordinate)
+
+
+def prepare_comparison(
+    start: Path,
+    raw_config_path: Path | None,
+    producer: SelectionProducer,
+    validate: bool = False,
+) -> PreparedComparison:
+    """Acquire, validate, and publish one complete historical/current pair."""
+    worktree, preserved_start = _select_worktree(start)
+    selected_config = _current_config_route(worktree, preserved_start, raw_config_path)
+    try:
+        raw_config_bytes = selected_config.path.read_bytes()
+        current_config = config.parse_config_bytes(raw_config_bytes, source=selected_config.path)
+    except CurrentInputError:
+        raise
+    except Exception as error:
+        raise _current_error(
+            selected_config.path, "invalid current configuration", error
+        ) from error
+
+    root_path = _declaration_path(worktree, selected_config.path.parent, current_config.root)
+    root_route = _inspect_current_route(
+        worktree, root_path, label="analysis root", allow_missing=False
+    )
+    if root_route.entry is None or not stat.S_ISDIR(root_route.entry.st_mode):
+        raise _current_error(root_path, "analysis root is not an ordinary directory")
+
+    graph_route = _lexical_declaration(
+        worktree, root_path, current_config.graph, label="configured graph"
+    )
+    systems_path = _declaration_path(worktree, root_path, current_config.systems_dir)
+    systems_route = _inspect_current_route(worktree, systems_path, label="systems root")
+    current_systems = _current_systems(worktree, systems_route)
+
+    target_routes: list[_CurrentRoute] = []
+    analyzed_targets: list[Path] = []
+    metadata_targets: list[Path] = []
+    target_coordinates: list[str] = []
+    seen_existing: set[str] = set()
+    for raw_target in current_config.targets:
+        target_path = _declaration_path(worktree, root_path, raw_target)
+        target_route = _inspect_current_route(worktree, target_path, label="target")
+        target_routes.append(target_route)
+        target_coordinates.append(target_route.coordinate)
+        metadata_targets.append(target_route.path)
+        if target_route.entry is None:
+            continue
+        else:
+            mode = target_route.entry.st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                raise _current_error(target_path, "target is not an ordinary file or directory")
+            if target_route.coordinate not in seen_existing:
+                analyzed_targets.append(target_route.path)
+                seen_existing.add(target_route.coordinate)
+
+    # Historical acquisition is deliberately after the single current config read.
+    historical = load_historical_inputs(worktree, selected_config.coordinate, validate=validate)
+    current_targets = tuple(sorted(set(target_coordinates)))
+    if root_route.coordinate != historical.normalized_root:
+        raise _current_error(
+            selected_config.path,
+            f"current analysis root {root_route.coordinate!r} does not match historical "
+            f"root {historical.normalized_root!r} at pinned commit {historical.commit}",
+        )
+    if current_targets != historical.normalized_targets:
+        raise _current_error(
+            selected_config.path,
+            f"current targets {current_targets!r} do not match historical targets "
+            f"{historical.normalized_targets!r} at pinned commit {historical.commit}",
+        )
+
+    for target_route in target_routes:
+        if target_route.entry is None:
+            pinned_entry = _pinned_target_entry(historical, target_route.coordinate)
+            if pinned_entry is None or not (
+                pinned_entry.is_regular_file or pinned_entry.kind == "tree"
+            ):
+                raise _current_error(
+                    target_route.path,
+                    f"absent current target is not proven at historical pin {historical.commit}",
+                )
+
+    try:
+        produced_workspace, produced_selection, produced = producer(
+            root_route.path,
+            tuple(analyzed_targets),
+            tuple(metadata_targets),
+        )
+    except CurrentInputError:
+        raise
+    except Exception as error:
+        raise _current_error(root_route.path, "current source production failed", error) from error
+
+    diagnostics = tuple(produced.diagnostics)
+    if diagnostics:
+        path = diagnostics[0].path if diagnostics else "<source diagnostics>"
+        raise _current_error(
+            path,
+            "current source analysis produced diagnostics",
+            diagnostics=diagnostics,
+        )
+    try:
+        expected_selection = {
+            _analysis_relative_coordinate(target, _coordinate_parts(root_route.coordinate))
+            for target in current_targets
+        }
+        selection = validate_saved_selection(_raw_selection(produced.document), expected_selection)
+    except Exception as error:
+        raise _current_error("<produced graph>", "invalid produced selection", error) from error
+    report = validate_document(produced.document, verify_node_ids=True)
+    if not report.is_valid:
+        raise _current_error("<produced graph>", f"invalid produced graph: {report.issues!r}")
+    current = CurrentInputs(
+        config_coordinate=selected_config.coordinate,
+        config=current_config,
+        normalized_root=root_route.coordinate,
+        normalized_graph=graph_route.coordinate,
+        normalized_systems_dir=systems_route.coordinate,
+        normalized_targets=current_targets,
+        systems=current_systems,
+        selection=selection,
+    )
+    old_snapshot = ReportingSnapshot.prepare(historical.graph.document, historical.systems)
+    new_snapshot = ReportingSnapshot.prepare(produced.document, current_systems)
+    return PreparedComparison(historical, current, old_snapshot, new_snapshot)
+
+
+def _declaration_path(root: Path, base: Path, raw: str) -> Path:
+    if not isinstance(raw, str):
+        raise _current_error(str(raw), "path declaration must be a string")
+    return Path(raw) if raw.startswith("/") else base / raw
