@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -183,6 +185,29 @@ def manifest(state: Path) -> dict[str, object]:
     paths = list((state / "minotaur-ci/runs").glob("*/result.json"))
     assert len(paths) == 1
     return json.loads(paths[0].read_text(encoding="utf-8"))
+
+
+def interrupt_when_ready(
+    process: subprocess.Popen[bytes], ready: Callable[[], bool], signum: int
+) -> None:
+    """Signal only an observed active payload and always reap the launcher."""
+    try:
+        deadline = time.monotonic() + 30
+        while not ready():
+            assert process.poll() is None, "CI launcher exited before payload readiness"
+            assert time.monotonic() < deadline, "CI payload did not become ready within 30 seconds"
+            time.sleep(0.02)
+        assert process.poll() is None, "CI launcher exited before signal delivery"
+        process.send_signal(signum)
+        assert process.wait(timeout=30) != 0
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        process.wait()
 
 
 def argument_records(path: Path) -> list[tuple[str, str, list[str]]]:
@@ -726,7 +751,10 @@ def test_missing_setsid_marks_all_lanes_setup_failed_without_payload(
     assert not (state / "calls.log").exists()
 
 
-def test_sigint_marks_active_and_pending_lanes(fixture: tuple[Path, Path, Path]) -> None:
+@pytest.mark.parametrize("clone_delay", [0, 1], ids=["ordinary-startup", "slow-startup"])
+def test_sigint_marks_active_and_pending_lanes(
+    fixture: tuple[Path, Path, Path], tmp_path: Path, clone_delay: int
+) -> None:
     checkout, fake_python, state = fixture
     env = os.environ.copy()
     env.update(
@@ -739,14 +767,26 @@ def test_sigint_marks_active_and_pending_lanes(fixture: tuple[Path, Path, Path])
             "MINOTAUR_CI_TERM_GRACE_SECONDS": "1",
         }
     )
+    if clone_delay:
+        git = shutil.which("git")
+        assert git is not None
+        tools = tmp_path / "slow-git"
+        tools.mkdir()
+        wrapper = tools / "git"
+        wrapper.write_text(
+            "#!/bin/bash\nif [[ ${1-} == clone ]]; then sleep 1; fi\n"
+            f'exec {shlex.quote(git)} "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        env["PATH"] = str(tools) + os.pathsep + env.get("PATH", "")
     process = subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "all"], cwd=checkout, env=env)
-    for _ in range(200):
-        calls = state / "calls.log"
-        if calls.is_file() and "-m venv" in calls.read_text(encoding="utf-8"):
-            break
-        time.sleep(0.02)
-    process.send_signal(signal.SIGINT)
-    assert process.wait(timeout=30) != 0
+    calls = state / "calls.log"
+    interrupt_when_ready(
+        process,
+        lambda: calls.is_file() and "-m pytest" in calls.read_text(encoding="utf-8"),
+        signal.SIGINT,
+    )
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == "interrupted"
     assert all(row["status"] == "not_run" for row in evidence["lanes"][1:])
@@ -762,8 +802,8 @@ def test_sigint_handles_parent_inherited_ignored_disposition(
             "PYTHON_BIN": str(fake_python),
             "XDG_STATE_HOME": str(state),
             "FAKE_LOG": str(state / "calls.log"),
-            "FAKE_PYTEST_SLEEP": "5",
-            "MINOTAUR_CI_TIMEOUT_SECONDS": "1",
+            "FAKE_PYTEST_SLEEP": "20",
+            "MINOTAUR_CI_TIMEOUT_SECONDS": "10",
             "MINOTAUR_CI_TERM_GRACE_SECONDS": "1",
         }
     )
@@ -774,13 +814,12 @@ def test_sigint_handles_parent_inherited_ignored_disposition(
         )
     finally:
         signal.signal(signal.SIGINT, previous)
-    for _ in range(200):
-        calls = state / "calls.log"
-        if calls.is_file() and "-m venv" in calls.read_text(encoding="utf-8"):
-            break
-        time.sleep(0.02)
-    process.send_signal(signal.SIGINT)
-    assert process.wait(timeout=30) != 0
+    calls = state / "calls.log"
+    interrupt_when_ready(
+        process,
+        lambda: calls.is_file() and "-m pytest" in calls.read_text(encoding="utf-8"),
+        signal.SIGINT,
+    )
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == "interrupted"
     assert all(row["status"] == "not_run" for row in evidence["lanes"][1:])
@@ -804,12 +843,7 @@ def test_sigterm_records_final_provenance_after_lane_changes_checkout(
         }
     )
     process = subprocess.Popen([str(checkout / "scripts/run_ci.sh"), "all"], cwd=checkout, env=env)
-    for _ in range(200):
-        if (state / "mutation.done").exists():
-            break
-        time.sleep(0.02)
-    process.send_signal(signal.SIGTERM)
-    assert process.wait(timeout=30) != 0
+    interrupt_when_ready(process, (state / "mutation.done").exists, signal.SIGTERM)
     evidence = manifest(state)
     assert evidence["lanes"][0]["status"] == "interrupted"
     assert all(row["status"] == "not_run" for row in evidence["lanes"][1:])
@@ -866,14 +900,15 @@ def test_browser_interrupt_removes_owned_root_and_stops_pending_lanes(
     process = subprocess.Popen(
         [str(checkout / "scripts/run_ci.sh"), "browser"], cwd=checkout, env=env
     )
-    for _ in range(500):
-        browser_log = state / "browser.log"
-        if browser_log.is_file() and len(browser_log.read_text().splitlines()) >= 2:
-            time.sleep(0.2)
-            break
-        time.sleep(0.02)
-    process.send_signal(interrupt)
-    assert process.wait(timeout=30) != 0
+    calls = state / "calls.log"
+    interrupt_when_ready(
+        process,
+        lambda: (
+            calls.is_file()
+            and "-m pytest tests/test_visualizer_browser.py" in calls.read_text(encoding="utf-8")
+        ),
+        interrupt,
+    )
     evidence = manifest(state)
     browser_row = next(row for row in evidence["lanes"] if row["name"] == "browser")
     assert browser_row["status"] == "interrupted"
