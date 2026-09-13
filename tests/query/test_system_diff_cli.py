@@ -858,11 +858,9 @@ def test_systems_public_route_composes_matched_file_endpoint_label_and_evidence(
     assert new["target_endpoint"]["label"] == "current-api.py"
     assert old["source_membership"] == new["source_membership"] == "no_system"
     assert old["target_membership"] == new["target_membership"] == "system: App"
-    assert (
-        old_evidence[0]["evidence"][0]["provenance"]
-        == new_evidence[0]["evidence"][0]["provenance"]
-        == "static-analysis"
-    )
+    assert old_evidence[0]["evidence"] == new_evidence[0]["evidence"]
+    assert old_evidence[0]["evidence"][0]["provenance"] == "static-analysis"
+    assert old_evidence[0]["evidence"][0]["sites"][0]["path"] == "consumer.py"
     _assert_state(root, before)
 
     assert cli.main(["query", "diff", "--systems", "--json", "--details"]) == 1
@@ -876,8 +874,12 @@ def test_systems_public_route_composes_matched_file_endpoint_label_and_evidence(
     assert change["new"]["target_endpoint"]["label"] == "current-api.py"
     assert change["old"]["source_membership"] == change["new"]["source_membership"] == "no_system"
     assert change["old"]["target_membership"] == change["new"]["target_membership"] == "system: App"
+    assert (
+        change["old"]["relationships"][0]["evidence"]
+        == change["new"]["relationships"][0]["evidence"]
+    )
     assert change["old"]["relationships"][0]["evidence"][0]["provenance"] == "static-analysis"
-    assert change["new"]["relationships"][0]["evidence"][0]["provenance"] == "static-analysis"
+    assert change["old"]["relationships"][0]["evidence"][0]["sites"][0]["path"] == "consumer.py"
     _assert_state(root, before)
 
 
