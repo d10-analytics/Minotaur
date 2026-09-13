@@ -105,7 +105,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Systems mode deliberately bypasses ordinary config discovery.  The
         # comparison acquisition owner must see the raw config spelling and
         # cwd so links, nested ``..`` routes, and missing inputs retain their
-        # exact route attribution (D-02).  It still uses the relaxed parser
+        # exact route attribution. It still uses the relaxed parser
         # grammar so the acquisition owner, rather than argparse, reports the
         # unusable-config case.
         located = None if systems_mode else _locate_config(raw_argv)
