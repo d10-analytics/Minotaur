@@ -338,8 +338,8 @@ that appears in JSON.
 
 ### Compare snapshots
 
-Compare the complete configured system result committed at `HEAD` with a fresh
-analysis of the current working tree:
+Compare the committed graph at `HEAD` with the current working tree through the
+complete configured system result:
 
 ```bash
 minotaur query diff --systems
