@@ -257,6 +257,127 @@ def test_prepare_comparison_attributes_special_systems_route_failure(
     assert error.value.cause_type is None
 
 
+def test_prepare_comparison_rejects_special_explicit_target_before_producer(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    special = root / "special-target"
+    os.mkfifo(special)
+    _set_config(root, targets=["special-target"])
+    called = False
+
+    def producer(*args: object, **kwargs: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("special target must stop before production")
+
+    with pytest.raises(CurrentInputError, match="ordinary file or directory") as error:
+        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+    assert error.value.path == str(special)
+    assert not called
+
+
+def test_prepare_comparison_preserves_lstat_permission_cause_and_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    target = root / "app.py"
+    import minotaur.comparison as comparison
+
+    original_lstat = comparison.os.lstat
+
+    def denied(path: object) -> os.stat_result:
+        if Path(path) == target:
+            raise PermissionError("target inspection denied")
+        return original_lstat(path)
+
+    monkeypatch.setattr(comparison.os, "lstat", denied)
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, _produce_selection)
+    assert error.value.side == "current"
+    assert error.value.path == str(target)
+    assert error.value.cause_type == "PermissionError"
+    assert isinstance(error.value.__cause__, PermissionError)
+    assert str(error.value.__cause__) == "target inspection denied"
+
+
+def test_prepare_comparison_preserves_system_read_permission_cause_and_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    definition = root / "docs/systems/core/system.toml"
+    original_read_bytes = Path.read_bytes
+
+    def denied(path: Path) -> bytes:
+        if path == definition:
+            raise PermissionError("system definition read denied")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", denied)
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, _produce_selection)
+    assert error.value.side == "current"
+    assert error.value.path == str(definition)
+    assert error.value.cause_type == "PermissionError"
+    assert isinstance(error.value.__cause__, PermissionError)
+    assert str(error.value.__cause__) == "system definition read denied"
+
+
+def test_prepare_comparison_retains_every_captured_config_coordinate_after_live_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    original_parse = config.parse_config_bytes
+    calls = 0
+    observed: list[tuple[Path, tuple[Path, ...], tuple[Path, ...] | None]] = []
+
+    def parse_once(data: bytes, *, source: Path | str):
+        nonlocal calls
+        parsed = original_parse(data, source=source)
+        calls += 1
+        if calls == 1:
+            _write(root, "changed-root/changed.py", "def changed():\n    return 5\n")
+            _write(
+                root,
+                "changed-systems/core/system.toml",
+                'schema_version = 1\nname = "changed"\nfiles = ["changed.py"]\n',
+            )
+            _write(root, "changed-graph.json", b"unreadable current graph\n")
+            _set_config(root, targets=["changed-root/changed.py"], root_value="changed-root")
+            _write(
+                root,
+                ".minotaur.toml",
+                '[minotaur]\nschema_version = 1\nroot = "changed-root"\n'
+                'graph = "changed-graph.json"\ntargets = ["changed.py"]\n'
+                'systems_dir = "changed-systems"\n',
+            )
+        return parsed
+
+    def producer(
+        workspace_root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+    ) -> object:
+        observed.append((workspace_root, targets, metadata_targets))
+        return _produce_selection(workspace_root, targets, metadata_targets)
+
+    monkeypatch.setattr(config, "parse_config_bytes", parse_once)
+    prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+
+    assert calls == 2
+    assert prepared.current.config_coordinate == ".minotaur.toml"
+    assert prepared.current.config.root == "."
+    assert prepared.current.config.graph == "graph.json"
+    assert prepared.current.config.systems_dir == "docs/systems"
+    assert prepared.current.config.targets == ("app.py",)
+    assert prepared.current.normalized_root == "."
+    assert prepared.current.normalized_graph == "graph.json"
+    assert prepared.current.normalized_systems_dir == "docs/systems"
+    assert prepared.current.normalized_targets == ("app.py",)
+    assert observed == [(root, (root / "app.py",), (root / "app.py",))]
+    assert prepared.new_snapshot.document.nodes
+
+
 @pytest.mark.parametrize("systems_value", ["missing-systems", "systems-file"])
 def test_prepare_comparison_treats_missing_or_nondirectory_systems_root_as_empty(
     tmp_path: Path, systems_value: str
