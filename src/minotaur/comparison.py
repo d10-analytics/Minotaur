@@ -21,6 +21,7 @@ from minotaur.graph_model import loading
 from minotaur.graph_model.loading import LoadedGraph
 from minotaur.graph_model.validation import validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
+from minotaur.language_interpreter.registry import default_registry
 from minotaur.language_interpreter.selection import SourceSelection
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.system import ReportingSnapshot
@@ -586,6 +587,7 @@ def _inspect_current_route(
     parts = _relative_parts(root, path, label=label)
     current = root
     logical: list[str] = []
+    observed_directories: list[tuple[Path, os.stat_result]] = []
     missing = False
     for index, component in enumerate(parts):
         if component in {"", "."}:
@@ -595,6 +597,7 @@ def _inspect_current_route(
                 raise _current_error(path, f"unresolved traversal in {label}")
             logical.pop()
             current = current.parent
+            observed_directories.pop()
             continue
         if missing:
             logical.append(component)
@@ -620,6 +623,23 @@ def _inspect_current_route(
             raise _current_error(candidate, "path contains a nested repository marker")
         if index < len(parts) - 1 and not stat.S_ISDIR(observed.st_mode):
             raise _current_error(candidate, "path has a blocked non-directory ancestor")
+        if stat.S_ISDIR(observed.st_mode):
+            marker = candidate / ".git"
+            try:
+                marker_info = os.lstat(marker)
+            except FileNotFoundError:
+                marker_info = None
+            except OSError as error:
+                raise _current_error(
+                    marker, "could not inspect nested repository marker", error
+                ) from error
+            if marker_info is not None:
+                if stat.S_ISLNK(marker_info.st_mode):
+                    raise _current_error(marker, "nested repository marker is a symbolic link")
+                if stat.S_ISDIR(marker_info.st_mode) or stat.S_ISREG(marker_info.st_mode):
+                    raise _current_error(candidate, "path contains a nested repository")
+                raise _current_error(marker, "nested repository marker is not an ordinary entry")
+            observed_directories.append((candidate, observed))
         logical.append(component)
         current = candidate
         if index == len(parts) - 1:
@@ -629,6 +649,9 @@ def _inspect_current_route(
         if not allow_missing:
             raise _current_error(path, f"required {label} is absent")
         return _CurrentRoute(current, _route_coordinate(logical), None)
+    if observed_directories:
+        candidate, observed = observed_directories[-1]
+        return _CurrentRoute(candidate, _route_coordinate(logical), observed)
     try:
         observed = os.lstat(root)
     except OSError as error:  # pragma: no cover - root was inspected by the caller.
@@ -820,6 +843,8 @@ def prepare_comparison(
             continue
         else:
             mode = target_route.entry.st_mode
+            if stat.S_ISREG(mode) and not default_registry().supports(target_route.path):
+                raise _current_error(target_path, "target is an unsupported source file")
             if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
                 raise _current_error(target_path, "target is not an ordinary file or directory")
             if target_route.coordinate not in seen_existing:
