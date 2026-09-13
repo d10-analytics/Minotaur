@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
-from minotaur.graph_model.loading import stamp_path
+from minotaur.graph_model.loading import graph_digest, load_graph_bytes, stamp_path
 
 ROOT = Path(__file__).parents[2]
 EXAMPLE = ROOT / "examples" / "system-walkthrough"
@@ -324,10 +324,26 @@ def test_public_systems_membership_change_keeps_graph_bytes_identical(
     graph = root / "graph.json"
     sidecar = stamp_path(graph)
     before_graph, before_sidecar = graph.read_bytes(), sidecar.read_bytes()
-    (root / "docs/systems/a/system.toml").write_text(
+    config = root / ".minotaur.toml"
+    definition_a = root / "docs/systems/a/system.toml"
+    definition_b = root / "docs/systems/b/system.toml"
+    before_config = config.read_bytes()
+    before_definition_b = definition_b.read_bytes()
+    definition_a.write_text(
         'schema_version = 1\nname = "A"\nfiles = ["a.py", "outside.py"]\n',
         encoding="utf-8",
     )
+    before_definition_a = definition_a.read_bytes()
+    before_status = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    before_index = subprocess.run(
+        ["git", "ls-files", "--stage"], cwd=root, text=True, capture_output=True, check=True
+    ).stdout
 
     status = cli.main(["query", "diff", "--systems", "--system", "A"])
     captured = capsys.readouterr()
@@ -387,6 +403,25 @@ def test_public_systems_membership_change_keeps_graph_bytes_identical(
     ]
     assert graph.read_bytes() == before_graph
     assert sidecar.read_bytes() == before_sidecar
+    assert config.read_bytes() == before_config
+    assert definition_a.read_bytes() == before_definition_a
+    assert definition_b.read_bytes() == before_definition_b
+    assert (
+        subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        == before_status
+    )
+    assert (
+        subprocess.run(
+            ["git", "ls-files", "--stage"], cwd=root, text=True, capture_output=True, check=True
+        ).stdout
+        == before_index
+    )
 
 
 def test_public_systems_outside_consumer_is_visible_from_both_involved_systems(
@@ -428,7 +463,23 @@ def test_public_systems_outside_consumer_is_visible_from_both_involved_systems(
     graph = root / "graph.json"
     sidecar = stamp_path(graph)
     before_graph, before_sidecar = graph.read_bytes(), sidecar.read_bytes()
+    config = root / ".minotaur.toml"
+    definition_a = root / "docs/systems/a/system.toml"
+    definition_b = root / "docs/systems/b/system.toml"
+    before_config = config.read_bytes()
+    before_definition_a = definition_a.read_bytes()
+    before_definition_b = definition_b.read_bytes()
     write("b.py", "from a import receive\n\ndef consume():\n    return receive()\n")
+    before_status = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    before_index = subprocess.run(
+        ["git", "ls-files", "--stage"], cwd=root, text=True, capture_output=True, check=True
+    ).stdout
 
     status_a = cli.main(["query", "diff", "--systems", "--system", "A"])
     output_a = capsys.readouterr()
@@ -493,3 +544,119 @@ def test_public_systems_outside_consumer_is_visible_from_both_involved_systems(
 
     assert graph.read_bytes() == before_graph
     assert sidecar.read_bytes() == before_sidecar
+    assert config.read_bytes() == before_config
+    assert definition_a.read_bytes() == before_definition_a
+    assert definition_b.read_bytes() == before_definition_b
+    assert (
+        subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        == before_status
+    )
+    assert (
+        subprocess.run(
+            ["git", "ls-files", "--stage"], cwd=root, text=True, capture_output=True, check=True
+        ).stdout
+        == before_index
+    )
+
+
+def test_public_systems_ambiguity_is_attributed_before_unrelated_filter_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A valid historical graph still rejects an ambiguous current identity."""
+    root = tmp_path / "repository"
+    root.mkdir()
+
+    def write(relative: str, content: str) -> None:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def git(*args: str) -> None:
+        completed = subprocess.run(
+            ["git", *args], cwd=root, text=True, capture_output=True, check=False
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    write("a.py", "def receive():\n    return 1\n")
+    write("b.py", "from a import receive\n\ndef consume():\n    return receive()\n")
+    write(
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["a.py", "b.py"]\n',
+    )
+    write("docs/systems/a/system.toml", 'schema_version = 1\nname = "A"\nfiles = ["a.py"]\n')
+    write(
+        "docs/systems/other/system.toml", 'schema_version = 1\nname = "Other"\nfiles = ["b.py"]\n'
+    )
+
+    monkeypatch.chdir(root)
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Minotaur Tests")
+    assert cli.main(["analyze"]) == 0
+    capsys.readouterr()
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    graph = root / "graph.json"
+    sidecar = stamp_path(graph)
+    historical = graph.read_bytes()
+    assert load_graph_bytes(historical).document.nodes
+    assert sidecar.read_text(encoding="ascii").strip() == graph_digest(historical)
+    before_graph, before_sidecar = historical, sidecar.read_bytes()
+    config = root / ".minotaur.toml"
+    definition_a = root / "docs/systems/a/system.toml"
+    definition_other = root / "docs/systems/other/system.toml"
+    before_config = config.read_bytes()
+    before_definition_a = definition_a.read_bytes()
+    before_definition_other = definition_other.read_bytes()
+
+    write(
+        "a.py",
+        "def receive():\n    return 1\n\ndef receive():\n    return 2\n",
+    )
+    before_status = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    before_index = subprocess.run(
+        ["git", "ls-files", "--stage"], cwd=root, text=True, capture_output=True, check=True
+    ).stdout
+
+    status = cli.main(["query", "diff", "--systems", "--system", "Other"])
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err.startswith("minotaur: error: ambiguous new target")
+    assert "a.py:0" in captured.err
+    assert "a.py:3" in captured.err
+    assert "system: Other" not in captured.out
+    assert graph.read_bytes() == before_graph
+    assert sidecar.read_bytes() == before_sidecar
+    assert config.read_bytes() == before_config
+    assert definition_a.read_bytes() == before_definition_a
+    assert definition_other.read_bytes() == before_definition_other
+    assert (
+        subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        == before_status
+    )
+    assert (
+        subprocess.run(
+            ["git", "ls-files", "--stage"], cwd=root, text=True, capture_output=True, check=True
+        ).stdout
+        == before_index
+    )

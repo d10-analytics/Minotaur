@@ -184,8 +184,10 @@ def test_public_systems_source_change_walkthrough_has_exact_status_evidence_and_
     git("commit", "-qm", "baseline")
     graph = root / "graph.json"
     sidecar = stamp_path(graph)
+    definition = root / "docs/systems/app/system.toml"
     before_graph, before_sidecar = graph.read_bytes(), sidecar.read_bytes()
     before_config = (root / ".minotaur.toml").read_bytes()
+    before_definition = definition.read_bytes()
 
     write(
         "app/api.py",
@@ -195,6 +197,16 @@ def test_public_systems_source_change_walkthrough_has_exact_status_evidence_and_
         "consumer.py",
         "from app.api import receive, send\n\ndef consume():\n    receive()\n    return send()\n",
     )
+    before_status = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    before_index = subprocess.run(
+        ["git", "ls-files", "--stage"], cwd=root, text=True, capture_output=True, check=True
+    ).stdout
 
     status = cli.main(["query", "diff", "--systems", "--system", "App"])
     captured = capsys.readouterr()
@@ -270,3 +282,20 @@ def test_public_systems_source_change_walkthrough_has_exact_status_evidence_and_
     assert graph.read_bytes() == before_graph
     assert sidecar.read_bytes() == before_sidecar
     assert (root / ".minotaur.toml").read_bytes() == before_config
+    assert definition.read_bytes() == before_definition
+    assert (
+        subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        == before_status
+    )
+    assert (
+        subprocess.run(
+            ["git", "ls-files", "--stage"], cwd=root, text=True, capture_output=True, check=True
+        ).stdout
+        == before_index
+    )
