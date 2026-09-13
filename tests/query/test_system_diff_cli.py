@@ -856,6 +856,15 @@ def test_systems_public_route_composes_matched_file_endpoint_label_and_evidence(
     new_evidence = json.loads(lines[index + 4].removeprefix("new evidence: "))
     assert old["target_endpoint"]["label"] == "legacy-api.py"
     assert new["target_endpoint"]["label"] == "current-api.py"
+    assert old["target_endpoint"]["node_class"] == new["target_endpoint"]["node_class"] == "file"
+    assert (
+        old["target_endpoint"]["path"]
+        == new["target_endpoint"]["path"]
+        == {
+            "status": "recorded",
+            "value": "app/api.py",
+        }
+    )
     assert old["source_membership"] == new["source_membership"] == "no_system"
     assert old["target_membership"] == new["target_membership"] == "system: App"
     assert old_evidence[0]["evidence"] == new_evidence[0]["evidence"]
@@ -867,11 +876,26 @@ def test_systems_public_route_composes_matched_file_endpoint_label_and_evidence(
     json_output = capsys.readouterr()
     payload = json.loads(json_output.out)
     assert payload["changed"] is True
+    assert payload["exit_code"] == 1
     assert payload["boundary_changes"]
     assert [change["kind"] for change in payload["boundary_changes"]] == ["endpoint"]
     change = payload["boundary_changes"][0]
     assert change["old"]["target_endpoint"]["label"] == "legacy-api.py"
     assert change["new"]["target_endpoint"]["label"] == "current-api.py"
+    assert (
+        change["old"]["target_endpoint"]["node_class"]
+        == change["new"]["target_endpoint"]["node_class"]
+        == "file"
+    )
+    assert (
+        change["old"]["target_endpoint"]["path"]
+        == change["new"]["target_endpoint"]["path"]
+        == {"status": "recorded", "value": "app/api.py"}
+    )
+    assert (
+        change["old"]["relationships"][0]["target"]["id"]
+        == change["new"]["relationships"][0]["target"]["id"]
+    )
     assert change["old"]["source_membership"] == change["new"]["source_membership"] == "no_system"
     assert change["old"]["target_membership"] == change["new"]["target_membership"] == "system: App"
     assert (
@@ -909,6 +933,7 @@ def test_systems_public_route_composes_file_endpoint_evidence_only_as_status_zer
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["changed"] is False
+    assert payload["exit_code"] == 0
     assert payload["boundary_changes"] == []
     assert payload["surface_changes"] == []
     assert payload["consumer_changes"] == []
