@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.evidence import Evidence, Rule
 from minotaur.graph_model.loading import graph_digest, stamp_path
+from minotaur.graph_model.provenance import NodeClass, Provenance
+from minotaur.language_interpreter.contract import AnalysisResult
 
 
 def _git(root: Path, *args: str) -> None:
@@ -86,6 +90,93 @@ def _state(root: Path) -> dict[str, object]:
 
 def _assert_state(root: Path, before: dict[str, object]) -> None:
     assert _state(root) == before
+
+
+def _serialized_file_boundary_fixture(payload: dict[str, object], label: str) -> dict[str, object]:
+    """Keep one valid source-to-file boundary while changing its file label."""
+    nodes = payload["nodes"]
+    relationships = payload["relationships"]
+    assert isinstance(nodes, list)
+    assert isinstance(relationships, list)
+    file_node = next(
+        node
+        for node in nodes
+        if isinstance(node, dict)
+        and node.get("node_class") == NodeClass.FILE.value
+        and node.get("path") == "app/api.py"
+    )
+    source_id = next(
+        node["id"]
+        for node in nodes
+        if isinstance(node, dict) and node.get("label") == "consumer.consume"
+    )
+    target_id = next(
+        node["id"]
+        for node in nodes
+        if isinstance(node, dict) and node.get("label") == "app.api.receive"
+    )
+    assert isinstance(file_node, dict)
+    file_id = file_node["id"]
+    relation = next(
+        relationship
+        for relationship in relationships
+        if isinstance(relationship, dict)
+        and relationship.get("kind") == "calls"
+        and relationship.get("source") == source_id
+        and relationship.get("target") == target_id
+    )
+    assert isinstance(relation, dict)
+    result = dict(payload)
+    result["nodes"] = [
+        {**node, "label": label} if node.get("id") == file_id else node for node in nodes
+    ]
+    result["relationships"] = [{**relation, "target": file_id}]
+    return result
+
+
+def _controlled_file_boundary_result(
+    result: AnalysisResult, *, label: str, evidence_only: bool = False
+) -> AnalysisResult:
+    """Supply one valid current graph for the approved FILE_PATH proof row."""
+    nodes = result.document.nodes
+    file_node = next(
+        node for node in nodes if node.node_class is NodeClass.FILE and node.path == "app/api.py"
+    )
+    source_id = next(node.id for node in nodes if node.label == "consumer.consume")
+    target_id = next(node.id for node in nodes if node.label == "app.api.receive")
+    relationship = next(
+        relationship
+        for relationship in result.document.relationships
+        if relationship.kind == "calls"
+        and relationship.source == source_id
+        and relationship.target == target_id
+    )
+    if evidence_only:
+        evidence = relationship.evidence + (
+            Evidence(Provenance.CURATED_RULE, rule=Rule("controlled-proof")),
+        )
+        relationship = replace(relationship, evidence=evidence)
+    file_node = replace(file_node, label=label)
+    updated_nodes = tuple(
+        replace(node, label=label) if node.id == file_node.id else node for node in nodes
+    )
+    document = replace(
+        result.document,
+        nodes=updated_nodes,
+        relationships=(replace(relationship, target=file_node.id),),
+    )
+    return replace(result, document=document)
+
+
+def _commit_file_boundary_graph(root: Path, *, label: str) -> None:
+    graph = root / "graph.json"
+    payload = json.loads(graph.read_text(encoding="utf-8"))
+    transformed = _serialized_file_boundary_fixture(payload, label)
+    content = json.dumps(transformed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    graph.write_bytes(content)
+    stamp_path(graph).write_bytes((graph_digest(content) + "\n").encode("ascii"))
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "file boundary fixture")
 
 
 def test_systems_help_does_not_parse_malformed_config(
@@ -727,6 +818,101 @@ def test_systems_added_and_deleted_systems_are_public_structural_changes(
     assert deleted_payload["removed_systems"] == ["App"]
     assert deleted_payload["changed"] is True
     _assert_state(deleted_root, before_deleted)
+
+
+def test_systems_public_route_composes_matched_file_endpoint_label_and_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Use the approved supplied graph only for the unreachable FILE_PATH row."""
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _commit_file_boundary_graph(root, label="legacy-api.py")
+
+    original_producer = cli._produce_selection
+
+    def controlled_producer(*args: object, **kwargs: object) -> object:
+        workspace, selection, result = original_producer(*args, **kwargs)  # type: ignore[arg-type]
+        return (
+            workspace,
+            selection,
+            _controlled_file_boundary_result(result, label="current-api.py"),
+        )
+
+    monkeypatch.setattr(cli, "_produce_selection", controlled_producer)
+    before = _state(root)
+
+    assert cli.main(["query", "diff", "--systems", "--details"]) == 1
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    boundary = "boundary endpoint: no_system.consumer.consume -> App.current-api.py (calls)"
+    assert lines.count(boundary) == 1
+    assert "boundary added:" not in captured.out
+    assert "boundary removed:" not in captured.out
+    index = lines.index(boundary)
+    old = json.loads(lines[index + 1].removeprefix("old: "))
+    new = json.loads(lines[index + 2].removeprefix("new: "))
+    old_evidence = json.loads(lines[index + 3].removeprefix("old evidence: "))
+    new_evidence = json.loads(lines[index + 4].removeprefix("new evidence: "))
+    assert old["target_endpoint"]["label"] == "legacy-api.py"
+    assert new["target_endpoint"]["label"] == "current-api.py"
+    assert old["source_membership"] == new["source_membership"] == "no_system"
+    assert old["target_membership"] == new["target_membership"] == "system: App"
+    assert (
+        old_evidence[0]["evidence"][0]["provenance"]
+        == new_evidence[0]["evidence"][0]["provenance"]
+        == "static-analysis"
+    )
+    _assert_state(root, before)
+
+    assert cli.main(["query", "diff", "--systems", "--json", "--details"]) == 1
+    json_output = capsys.readouterr()
+    payload = json.loads(json_output.out)
+    assert payload["changed"] is True
+    assert payload["boundary_changes"]
+    assert [change["kind"] for change in payload["boundary_changes"]] == ["endpoint"]
+    change = payload["boundary_changes"][0]
+    assert change["old"]["target_endpoint"]["label"] == "legacy-api.py"
+    assert change["new"]["target_endpoint"]["label"] == "current-api.py"
+    assert change["old"]["source_membership"] == change["new"]["source_membership"] == "no_system"
+    assert change["old"]["target_membership"] == change["new"]["target_membership"] == "system: App"
+    assert change["old"]["relationships"][0]["evidence"][0]["provenance"] == "static-analysis"
+    assert change["new"]["relationships"][0]["evidence"][0]["provenance"] == "static-analysis"
+    _assert_state(root, before)
+
+
+def test_systems_public_route_composes_file_endpoint_evidence_only_as_status_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The supplied graph keeps the matched endpoint while adding evidence only."""
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _commit_file_boundary_graph(root, label="legacy-api.py")
+
+    original_producer = cli._produce_selection
+
+    def controlled_producer(*args: object, **kwargs: object) -> object:
+        workspace, selection, result = original_producer(*args, **kwargs)  # type: ignore[arg-type]
+        return (
+            workspace,
+            selection,
+            _controlled_file_boundary_result(result, label="legacy-api.py", evidence_only=True),
+        )
+
+    monkeypatch.setattr(cli, "_produce_selection", controlled_producer)
+    before = _state(root)
+
+    assert cli.main(["query", "diff", "--systems", "--json", "--details"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["changed"] is False
+    assert payload["boundary_changes"] == []
+    assert payload["surface_changes"] == []
+    assert payload["consumer_changes"] == []
+    assert payload["dependency_changes"] == []
+    assert captured.err == ""
+    _assert_state(root, before)
 
 
 def test_systems_coverage_only_change_is_status_zero_with_old_new_context(
