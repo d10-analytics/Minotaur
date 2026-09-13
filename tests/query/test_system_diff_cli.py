@@ -352,3 +352,56 @@ def test_systems_unborn_git_fails_as_historical_input_without_fallback(
     assert captured.out == ""
     assert "historical Git input" in captured.err
     assert "HEAD" in captured.err
+
+
+def test_invalid_unselected_current_definition_fails_before_filtering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    (root / "other.py").write_text("def other():\n    return 1\n", encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app", "consumer.py", "other.py"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "other"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "Other"\nfiles = ["other.py"]\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    graph = root / "graph.json"
+    before = (graph.read_bytes(), stamp_path(graph).read_bytes())
+    (definition / "system.toml").write_text(
+        "schema_version = 1\nname = [invalid\n", encoding="utf-8"
+    )
+
+    assert cli.main(["query", "diff", "--systems", "--system", "App"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "other/system.toml" in captured.err
+    assert "invalid current system definitions" in captured.err
+    assert (graph.read_bytes(), stamp_path(graph).read_bytes()) == before
+
+
+def test_current_source_diagnostic_outside_selected_system_is_global_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    graph = root / "graph.json"
+    before = (graph.read_bytes(), stamp_path(graph).read_bytes())
+    (root / "consumer.py").write_text("def broken(:\n", encoding="utf-8")
+
+    assert cli.main(["query", "diff", "--systems", "--system", "App"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "consumer.py" in captured.err
+    assert "current source analysis produced diagnostics" in captured.err
+    assert (graph.read_bytes(), stamp_path(graph).read_bytes()) == before
