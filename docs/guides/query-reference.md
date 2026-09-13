@@ -375,6 +375,16 @@ and empty standard output even if the requested filter names an unrelated
 system. The comparison reports accepted graph and membership facts only; it
 does not infer renames, causality, edit timing, or intent.
 
+The plain committed-reference mode remains available for comparing the current
+working tree against one committed system graph:
+
+```bash
+minotaur query diff --scope NAME
+```
+
+That mode requires a located `.minotaur.toml` and is distinct from
+`--systems`; the explicit two-snapshot mode below remains configuration-free.
+
 Compare two analyzed graph files explicitly, without a source root or
 configuration:
 
