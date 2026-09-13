@@ -338,19 +338,42 @@ that appears in JSON.
 
 ### Compare snapshots
 
-Compare the committed graph at `HEAD` with the current working tree from a
-configured project:
+Compare the complete configured system result committed at `HEAD` with a fresh
+analysis of the current working tree:
 
 ```bash
-minotaur query diff
-minotaur query diff --scope NAME
+minotaur query diff --systems
+minotaur query diff --systems --system NAME
+minotaur query diff --systems --system NAME --details
+minotaur query diff --systems --system NAME --json
 ```
 
-The committed-reference mode requires a located `.minotaur.toml`; the whole
-repository is the default scope, and `--scope NAME` selects one committed
-system. The graph and sidecar are read from `HEAD`, while the current selection
-is analyzed in memory. This mode never rewrites the committed graph, sidecar,
-or any other file.
+Systems mode requires a located `.minotaur.toml`. It reads the historical graph,
+configuration, and system definitions from `HEAD`, analyzes the current
+configured selection in memory, and compares the complete pair before applying
+the optional `--system NAME` output selection. A change involving both `A` and
+`B` remains visible when selecting either `A` or `B`; selection is replacement,
+not cumulative narrowing. `OLD NEW` and `--scope` cannot be combined with
+`--systems` and are rejected before either snapshot is read.
+
+The command is read-only: it does not rewrite the committed graph, graph
+sidecar, configuration, or definitions. A source-only change produces the
+actual added/removed/relocated symbol and relationship rows. A membership-only
+change can produce a `membership changed` row while the old and new graph bytes
+remain identical. The compact output ends with the old/new coverage and
+selection lines. With `--details`, each changed row is followed by its `old`,
+`new`, `old evidence`, and `new evidence` values; an absent side is explicitly
+`unavailable`, while an observed side includes the stored relationship and
+source evidence. JSON contains the same typed categories and context with
+deterministic key ordering.
+
+Status is `0` when the complete selected result is identical and `1` when it
+contains a structural, relationship, membership, or boundary change. Both
+snapshots must pass admission before filtering. Invalid graph serialization and
+ambiguous semantic identity are errors with attributed diagnostics, status `2`,
+and empty standard output even if the requested filter names an unrelated
+system. The comparison reports accepted graph and membership facts only; it
+does not infer renames, causality, edit timing, or intent.
 
 Compare two analyzed graph files explicitly, without a source root or
 configuration:

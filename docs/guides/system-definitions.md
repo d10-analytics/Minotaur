@@ -218,26 +218,60 @@ Coverage limits are status-neutral. Ordinary valid answers, including empty
 ones, exit `0`; a completed refresh with diagnostics exits `1`; invalid input
 or definitions exit `2` before refresh or output.
 
-## Comparing complete system results
+## Compare configured system snapshots
 
-The typed system comparison is computed once from the old and new reporting
-snapshots. Its pure view can then replace the selected system without reading
-either snapshot again. For example, keep the complete result returned by the
-comparison, select `Checkout` to inspect its changes, and select
-`Notifications` from that same complete result to see the `Payments` to
-`Notifications` boundary and the new Notifications file change. A selection
-uses stored involvement, so a cross-system explanation remains visible from
-either participant.
+Use the public systems mode to compare the graph and definitions committed at
+`HEAD` with a fresh analysis of the current working tree:
 
-The view deliberately replaces selection. Cumulative narrowing was considered,
-but applying it by default would hide a Notifications change after a caller had
-first viewed Checkout. If users later need an explicit intersection of several
-simultaneously selected systems, that demand is the trigger to revisit the
-selection policy. This view has no command-line grammar or visual interface;
-it is a projection over the completed typed result. `filter_system_diff` always
-returns a new typed result, including when no system is selected; its compact
-view ends with the four stored coverage and selection lines, and `render_json`
-delegates to the canonical typed projection.
+```bash
+minotaur query diff --systems
+minotaur query diff --systems --system SYSTEM_NAME
+minotaur query diff --systems --system SYSTEM_NAME --details
+minotaur query diff --systems --system SYSTEM_NAME --json
+```
+
+The command locates `.minotaur.toml`, reads the configured graph and systems
+definitions from `HEAD`, analyzes the current configured selection in memory,
+then compares the complete pair. `--system` replaces the output view: every
+change whose stored involvement contains that system remains visible, so a
+boundary change involving systems `A` and `B` is reported when selecting either
+`A` or `B`. There is no `OLD NEW` or `--scope` form in systems mode; those
+arguments are rejected before either snapshot is read.
+
+The command is read-only. It never rewrites the committed graph, its sidecar,
+the configuration, or system definitions. A source-only edit produces a
+`surface`, `consumer`, or `dependency` row while the graph bytes remain equal;
+an identical graph with changed system membership produces a `membership` row.
+For example, adding `send` to `app/api.py` and calling it from `consumer.py`
+can produce:
+
+```text
+surface added: App app/api.py.app.api.send
+consumer changed: App <- consumer.py
+old evidence: unavailable
+new evidence: [...]
+old coverage: {...}
+new coverage: {...}
+old selection: {...}
+new selection: {...}
+```
+
+The source-change command exits `1`; an identical comparison exits `0`.
+Membership-only changes also exit `1`, even when the serialized graph bytes are
+identical. `--details` adds `old`, `new`, `old evidence`, and `new evidence`
+after each changed row. The old side is `unavailable` when the relationship did
+not exist there; the new side contains the recorded endpoint and evidence
+projection. `--json` preserves the same typed categories, status-neutral
+coverage, and old/new selection context in deterministic JSON.
+
+Both complete snapshots must pass graph admission, and all committed/current
+system definitions are loaded before filtering. Invalid serialized input or a
+semantically ambiguous identity exits `2`, prints an attributed diagnostic to
+standard error, and prints no report, even when an unrelated `--system` filter
+was requested. The comparison reports observed graph facts and membership; it
+does not infer renames, edit timing, causality, or intent. Coverage retains the
+available selection and diagnostic context on each side, including unavailable
+history where the source was not refreshed.
 
 ## Strict loading and warnings
 
