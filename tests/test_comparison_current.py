@@ -70,6 +70,28 @@ def test_prepare_comparison_passes_existing_targets_and_full_metadata_to_produce
     assert metadata_targets == (root / "app.py",)
 
 
+def test_prepare_comparison_proves_deleted_current_target_from_head_pin(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "app.py").unlink()
+    observed: list[tuple[tuple[Path, ...], tuple[Path, ...] | None]] = []
+
+    def producer(
+        workspace_root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+    ) -> object:
+        observed.append((targets, metadata_targets))
+        return _produce_selection(workspace_root, targets, metadata_targets)
+
+    prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+
+    assert prepared.current.selection == ("app.py",)
+    assert observed == [((), (root / "app.py",))]
+    assert prepared.new_snapshot.document.nodes == ()
+
+
 def test_prepare_comparison_reports_complete_source_diagnostics_before_metadata(
     tmp_path: Path,
 ) -> None:
