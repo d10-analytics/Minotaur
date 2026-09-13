@@ -752,6 +752,29 @@ def test_systems_coverage_only_change_is_status_zero_with_old_new_context(
     _assert_state(root, before)
 
 
+def test_systems_keeps_absent_current_graph_and_sidecar_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    graph = root / "graph.json"
+    graph.unlink()
+    stamp_path(graph).unlink()
+    before = _state(root)
+
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["changed"] is False
+    assert captured.err == ""
+    assert before["files"]["graph.json"] is None  # type: ignore[index]
+    assert before["files"]["graph.json.sha256"] is None  # type: ignore[index]
+    _assert_state(root, before)
+
+
 def test_systems_evidence_only_graph_change_is_status_zero_without_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
