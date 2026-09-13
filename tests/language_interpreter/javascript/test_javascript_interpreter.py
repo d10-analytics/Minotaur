@@ -1170,12 +1170,8 @@ def test_large_javascript_conversion_uses_linear_line_index(tmp_path, monkeypatc
     assert sum(node.symbol_kind == "function" for node in result.document.nodes) == 12_000
     assert sum(node.reference_text == "missing" for node in result.document.nodes) == 12_000
     relationships = result.document.relationships
-    assert (
-        sum(edge.kind == RelationshipKind.CONTAINS.value for edge in relationships) == 12_001
-    )
-    assert (
-        sum(edge.kind == RelationshipKind.REFERENCES.value for edge in relationships) == 12_000
-    )
+    assert sum(edge.kind == RelationshipKind.CONTAINS.value for edge in relationships) == 12_001
+    assert sum(edge.kind == RelationshipKind.REFERENCES.value for edge in relationships) == 12_000
 
 
 def test_raw_javascript_digest_matches_python_for_identical_bytes(tmp_path):
