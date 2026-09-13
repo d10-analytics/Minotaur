@@ -310,6 +310,20 @@ def test_prepare_comparison_rejects_current_graph_escape_before_producer(
     assert not called
 
 
+def test_prepare_comparison_preserves_current_parse_cause_and_path(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    config_path = _write(root, ".minotaur.toml", b"[minotaur\n")
+
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, _produce_selection)
+
+    assert error.value.path == str(config_path)
+    assert error.value.cause_type == "ConfigError"
+    assert isinstance(error.value.__cause__, config.ConfigError)
+
+
 def test_prepare_comparison_rejects_unproven_untracked_deleted_target(
     tmp_path: Path,
 ) -> None:
