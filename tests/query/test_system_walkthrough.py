@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.loading import stamp_path
 
 ROOT = Path(__file__).parents[2]
 EXAMPLE = ROOT / "examples" / "system-walkthrough"
@@ -281,3 +282,214 @@ def test_documented_command_still_prints_its_pasted_output(
     assert completed.returncode == 0, f"{command}\n{completed.stderr}"
     assert completed.stdout == expected, command
     assert _committed_bytes() == before, f"{command} rewrote a checked-in example artifact"
+
+
+def test_public_systems_membership_change_keeps_graph_bytes_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A definition-only change is reported while the analyzed graph is unchanged."""
+    root = tmp_path / "repository"
+    root.mkdir()
+
+    def write(relative: str, content: str) -> None:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def git(*args: str) -> None:
+        completed = subprocess.run(
+            ["git", *args], cwd=root, text=True, capture_output=True, check=False
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    write("a.py", "def a():\n    return 1\n")
+    write("b.py", "def b():\n    return 1\n")
+    write("outside.py", "def outside():\n    return 1\n")
+    write(
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["a.py", "b.py", "outside.py"]\n',
+    )
+    write("docs/systems/a/system.toml", 'schema_version = 1\nname = "A"\nfiles = ["a.py"]\n')
+    write("docs/systems/b/system.toml", 'schema_version = 1\nname = "B"\nfiles = ["b.py"]\n')
+
+    monkeypatch.chdir(root)
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Minotaur Tests")
+    assert cli.main(["analyze"]) == 0
+    capsys.readouterr()
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    graph = root / "graph.json"
+    sidecar = stamp_path(graph)
+    before_graph, before_sidecar = graph.read_bytes(), sidecar.read_bytes()
+    (root / "docs/systems/a/system.toml").write_text(
+        'schema_version = 1\nname = "A"\nfiles = ["a.py", "outside.py"]\n',
+        encoding="utf-8",
+    )
+
+    status = cli.main(["query", "diff", "--systems", "--system", "A"])
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.err == ""
+    lines = captured.out.splitlines()
+    assert lines[0] == "membership changed: outside.py — unassigned -> A"
+    assert len(lines) == 5
+    expected_old_coverage = {
+        "declared_files": {
+            "absent": 0,
+            "represented": 2,
+            "scope": "all_declared_system_files",
+            "total": 2,
+        },
+        "graph_files": {"count": 3, "scope": "final_graph_file_nodes"},
+        "recorded_unresolved_references": {
+            "count": 0,
+            "scope": "all_declared_system_files",
+        },
+        "selection": {
+            "status": "recorded",
+            "targets": ["a.py", "b.py", "outside.py"],
+        },
+        "source_diagnostics": {"status": "unavailable"},
+        "unassigned_files": {
+            "count": 1,
+            "paths": ["outside.py"],
+            "scope": "final_graph_file_node_derived_paths",
+        },
+    }
+    expected_new_coverage = {
+        "declared_files": {
+            "absent": 0,
+            "represented": 3,
+            "scope": "all_declared_system_files",
+            "total": 3,
+        },
+        "graph_files": {"count": 3, "scope": "final_graph_file_nodes"},
+        "recorded_unresolved_references": {
+            "count": 0,
+            "scope": "all_declared_system_files",
+        },
+        "selection": expected_old_coverage["selection"],
+        "source_diagnostics": {"status": "unavailable"},
+        "unassigned_files": {
+            "count": 0,
+            "paths": [],
+            "scope": "final_graph_file_node_derived_paths",
+        },
+    }
+    assert json.loads(lines[1].removeprefix("old coverage: ")) == expected_old_coverage
+    assert json.loads(lines[2].removeprefix("new coverage: ")) == expected_new_coverage
+    assert lines[3:] == [
+        'old selection: {"status":"recorded","targets":["a.py","b.py","outside.py"]}',
+        'new selection: {"status":"recorded","targets":["a.py","b.py","outside.py"]}',
+    ]
+    assert graph.read_bytes() == before_graph
+    assert sidecar.read_bytes() == before_sidecar
+
+
+def test_public_systems_outside_consumer_is_visible_from_both_involved_systems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A cross-system consumer remains visible from either selected system."""
+    root = tmp_path / "repository"
+    root.mkdir()
+
+    def write(relative: str, content: str) -> None:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def git(*args: str) -> None:
+        completed = subprocess.run(
+            ["git", *args], cwd=root, text=True, capture_output=True, check=False
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    write("a.py", "def receive():\n    return 1\n")
+    write("b.py", "def consume():\n    return 0\n")
+    write(
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["a.py", "b.py"]\n',
+    )
+    write("docs/systems/a/system.toml", 'schema_version = 1\nname = "A"\nfiles = ["a.py"]\n')
+    write("docs/systems/b/system.toml", 'schema_version = 1\nname = "B"\nfiles = ["b.py"]\n')
+
+    monkeypatch.chdir(root)
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Minotaur Tests")
+    assert cli.main(["analyze"]) == 0
+    capsys.readouterr()
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    graph = root / "graph.json"
+    sidecar = stamp_path(graph)
+    before_graph, before_sidecar = graph.read_bytes(), sidecar.read_bytes()
+    write("b.py", "from a import receive\n\ndef consume():\n    return receive()\n")
+
+    status_a = cli.main(["query", "diff", "--systems", "--system", "A"])
+    output_a = capsys.readouterr()
+    assert status_a == 1
+    assert output_a.err == ""
+    expected_lines = [
+        "surface added: A a.py.a.receive",
+        "consumer added: A <- b.py",
+        "dependency added: B -> A",
+        "boundary added: B.b -> A.a.receive (imports)",
+        "boundary added: B.b.consume -> A.a.receive (calls)",
+    ]
+    expected_coverage = {
+        "declared_files": {
+            "absent": 0,
+            "represented": 2,
+            "scope": "all_declared_system_files",
+            "total": 2,
+        },
+        "graph_files": {"count": 2, "scope": "final_graph_file_nodes"},
+        "recorded_unresolved_references": {
+            "count": 0,
+            "scope": "all_declared_system_files",
+        },
+        "selection": {"status": "recorded", "targets": ["a.py", "b.py"]},
+        "source_diagnostics": {"status": "unavailable"},
+        "unassigned_files": {
+            "count": 0,
+            "paths": [],
+            "scope": "final_graph_file_node_derived_paths",
+        },
+    }
+    output_lines_a = output_a.out.splitlines()
+    assert output_lines_a[:5] == expected_lines
+    assert json.loads(output_lines_a[5].removeprefix("old coverage: ")) == expected_coverage
+    assert json.loads(output_lines_a[6].removeprefix("new coverage: ")) == expected_coverage
+    assert output_lines_a[7:] == [
+        'old selection: {"status":"recorded","targets":["a.py","b.py"]}',
+        'new selection: {"status":"recorded","targets":["a.py","b.py"]}',
+    ]
+
+    status_b = cli.main(["query", "diff", "--systems", "--system", "B"])
+    output_b = capsys.readouterr()
+    assert status_b == 1
+    assert output_b.err == ""
+    assert output_b.out.splitlines() == output_lines_a
+
+    status_details = cli.main(["query", "diff", "--systems", "--system", "A", "--details"])
+    details = capsys.readouterr()
+    assert status_details == 1
+    assert details.err == ""
+    call_evidence = []
+    for line in details.out.splitlines():
+        if line.startswith("new evidence: "):
+            record = json.loads(line.removeprefix("new evidence: "))
+            if any(item["kind"] == "calls" for item in record):
+                call_evidence.extend(record)
+    call_record = next(item for item in call_evidence if item["kind"] == "calls")
+    assert call_record["source"]["path"] == {"status": "recorded", "value": "b.py"}
+    assert call_record["target"]["path"] == {"status": "recorded", "value": "a.py"}
+    assert call_record["evidence"][0]["sites"][0]["path"] == "b.py"
+
+    assert graph.read_bytes() == before_graph
+    assert sidecar.read_bytes() == before_sidecar
