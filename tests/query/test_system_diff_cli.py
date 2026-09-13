@@ -249,3 +249,106 @@ def test_unaffected_system_filter_returns_zero_when_complete_result_changes(
     assert "old coverage:" in captured.out
     assert "new coverage:" in captured.out
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "config_args",
+    [
+        ("--config", ".minotaur.toml"),
+        ("--config=.minotaur.toml",),
+        ("--config", "missing.toml", "--config", ".minotaur.toml"),
+    ],
+)
+def test_systems_config_forms_preserve_last_value_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    config_args: tuple[str, ...],
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / "app" / "api.py").write_text(
+        "def receive():\n    return 1\n\ndef send():\n    return 2\n", encoding="utf-8"
+    )
+    (root / "consumer.py").write_text(
+        "from app.api import receive, send\n\ndef consume():\n    receive()\n    return send()\n",
+        encoding="utf-8",
+    )
+
+    assert cli.main(["query", "diff", "--systems", *config_args]) == 1
+    captured = capsys.readouterr()
+    assert captured.out.startswith("surface added: App")
+    assert captured.err == ""
+
+
+def test_systems_nested_dotdot_config_route_normalizes_before_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / "nested").mkdir()
+
+    assert cli.main(["query", "diff", "--systems", "--config", "nested/../.minotaur.toml"]) == 0
+    captured = capsys.readouterr()
+    assert "no system differences" in captured.out
+    assert captured.err == ""
+
+
+def test_plain_diff_accepts_linked_explicit_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    alias = root / "config-alias.toml"
+    alias.symlink_to(root / ".minotaur.toml")
+
+    assert cli.main(["query", "diff", "--config", str(alias)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "no changes\n"
+    assert captured.err == ""
+
+
+def test_systems_without_git_fails_as_current_input_without_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "nongit"
+    root.mkdir()
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["app.py"]\n',
+        encoding="utf-8",
+    )
+    (root / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "current input" in captured.err
+    assert "Git" in captured.err
+
+
+def test_systems_unborn_git_fails_as_historical_input_without_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path)
+    (root / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["app.py"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "historical Git input" in captured.err
+    assert "HEAD" in captured.err
