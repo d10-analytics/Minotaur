@@ -673,7 +673,9 @@ def _select_worktree(start: Path) -> tuple[Path, Path]:
     root_info = os.lstat(root)
     if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
         raise _current_error(root, "Git worktree root is not an ordinary directory")
-    _inspect_current_route(root, preserved_start, label="start", allow_missing=False)
+    start_route = _inspect_current_route(root, preserved_start, label="start", allow_missing=False)
+    if start_route.entry is None or not stat.S_ISDIR(start_route.entry.st_mode):
+        raise _current_error(preserved_start, "start must be an ordinary directory")
     return root, preserved_start
 
 
