@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
@@ -96,6 +97,164 @@ def test_prepare_comparison_uses_raw_worktree_for_nested_start_and_discovery(
     assert prepared.historical.worktree_root == root
     assert prepared.current.config_coordinate == ".minotaur.toml"
     assert prepared.current.normalized_root == "."
+
+
+def test_prepare_comparison_rejects_nested_repository_crossed_by_dotdot_routes(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    nested = root / "nested"
+    nested.mkdir()
+    _run(nested, "init", "--quiet")
+    start = root / "nested/../work"
+    start.mkdir()
+    called = False
+
+    def producer(*args: object, **kwargs: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("producer must not run")
+
+    with pytest.raises(CurrentInputError, match="nested repository"):
+        prepare_comparison(start, None, producer)  # type: ignore[arg-type]
+    with pytest.raises(CurrentInputError, match="nested repository"):
+        prepare_comparison(start, Path("nested/../.minotaur.toml"), producer)  # type: ignore[arg-type]
+    assert not called
+
+
+def test_prepare_comparison_preserves_terminal_dotdot_route_coordinate(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "a/b").mkdir(parents=True)
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "a/b/.."\n'
+        'graph = "graph.json"\ntargets = ["app.py"]\n'
+        'systems_dir = "docs/systems"\n',
+    )
+
+    with pytest.raises(CurrentInputError, match="current analysis root 'a'"):
+        prepare_comparison(root, None, _produce_selection)
+
+
+def test_prepare_comparison_rejects_unsupported_regular_target_before_producer(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(root, "README.md", "narrative\n")
+    _set_config(root, targets=["README.md"])
+    _set_selection(root, ["README.md"])
+    _commit(root, "configure unsupported target")
+    called = False
+
+    def producer(*args: object, **kwargs: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("unsupported target must stop before production")
+
+    with pytest.raises(CurrentInputError, match="unsupported source file"):
+        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+    assert not called
+
+
+def test_prepare_comparison_all_deleted_targets_keep_complete_metadata(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(root, "other.py", "def other():\n    return 2\n")
+    _set_config(root, targets=["app.py", "other.py"])
+    _set_selection(root, ["app.py", "other.py"])
+    _commit(root, "configure two targets")
+    (root / "app.py").unlink()
+    (root / "other.py").unlink()
+    observed: list[tuple[tuple[Path, ...], tuple[Path, ...] | None]] = []
+
+    def producer(
+        workspace_root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+    ) -> object:
+        observed.append((targets, metadata_targets))
+        return _produce_selection(workspace_root, targets, metadata_targets)
+
+    prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+
+    assert observed == [((), (root / "app.py", root / "other.py"))]
+    assert prepared.current.selection == ("app.py", "other.py")
+    assert prepared.new_snapshot.document.nodes == ()
+
+
+def test_prepare_comparison_rejects_malformed_selection_without_diagnostics(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+
+    def producer(
+        workspace_root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+    ) -> object:
+        workspace, selection, result = _produce_selection(workspace_root, targets, metadata_targets)
+        return (
+            workspace,
+            selection,
+            replace(result, document=replace(result.document, extensions={})),
+        )
+
+    with pytest.raises(CurrentInputError, match="invalid produced selection") as error:
+        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+    assert error.value.diagnostics == ()
+
+
+def test_prepare_comparison_rejects_systems_root_link_and_blocked_routes(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    systems = root / "systems-link"
+    systems.symlink_to(root / "docs/systems", target_is_directory=True)
+    _set_config(root, targets=["app.py"])
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\n'
+        'graph = "graph.json"\ntargets = ["app.py"]\n'
+        'systems_dir = "systems-link"\n',
+    )
+    with pytest.raises(CurrentInputError, match="symbolic link"):
+        prepare_comparison(root, None, _produce_selection)
+
+    blocked = _write(root, "systems-blocked", "file")
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\n'
+        'graph = "graph.json"\ntargets = ["app.py"]\n'
+        'systems_dir = "systems-blocked/child"\n',
+    )
+    assert blocked.is_file()
+    with pytest.raises(CurrentInputError, match="blocked"):
+        prepare_comparison(root, None, _produce_selection)
+
+
+def test_prepare_comparison_attributes_special_systems_route_failure(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    special = root / "systems-special"
+    os.mkfifo(special)
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\n'
+        'graph = "graph.json"\ntargets = ["app.py"]\n'
+        'systems_dir = "systems-special"\n',
+    )
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, _produce_selection)
+    assert error.value.path == str(special)
+    assert error.value.cause_type is None
 
 
 @pytest.mark.parametrize("systems_value", ["missing-systems", "systems-file"])
