@@ -12,7 +12,9 @@ from minotaur.graph_model.serialization import serialize
 from minotaur.graph_model.validation import validate_document
 from minotaur.language_interpreter.contract import DiagnosticCode
 from minotaur.language_interpreter.javascript import analyze_javascript_files
+from minotaur.language_interpreter.javascript import interpreter as javascript_interpreter
 from minotaur.language_interpreter.python import analyze_python_files
+from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 
 
@@ -1137,20 +1139,39 @@ def test_cr_only_parse_error_uses_shared_line_index(tmp_path):
     assert diagnostic.location.range.start.line == 1
 
 
-@pytest.mark.slow
-def test_line_index_keeps_large_javascript_conversion_linear(tmp_path):
-    """A 350 KB file converts in <=3 seconds (observed 1.54s on this runner)."""
-    import time
-
+def test_large_javascript_conversion_uses_linear_line_index(tmp_path, monkeypatch):
+    """Large conversion retains every fact without source-prefix rescanning."""
     source = "".join(f"function f{i}() {{ missing(); }}\n" for i in range(12_000))
     assert len(source) > 350_000
     path = tmp_path / "large.js"
     path.write_text(source, encoding="utf-8")
-    start = time.perf_counter()
+
+    class SliceTrackingSource(str):
+        slices = 0
+
+        def __getitem__(self, key):
+            if isinstance(key, slice):
+                type(self).slices += 1
+            return super().__getitem__(key)
+
+    class TrackingLineIndex(LineIndex):
+        instances = 0
+
+        def __init__(self, text):
+            type(self).instances += 1
+            super().__init__(SliceTrackingSource(text))
+
+    monkeypatch.setattr(javascript_interpreter, "LineIndex", TrackingLineIndex)
     result = analyze_javascript_files(Workspace(tmp_path), (path,))
-    elapsed = time.perf_counter() - start
+
     assert result.diagnostics == ()
-    assert elapsed <= 3.0, f"analyze took {elapsed:.2f}s, expected <= 3.0s"
+    assert TrackingLineIndex.instances >= 1
+    assert SliceTrackingSource.slices == 0
+    assert sum(node.symbol_kind == "function" for node in result.document.nodes) == 12_000
+    assert sum(node.reference_text == "missing" for node in result.document.nodes) == 12_000
+    relationships = result.document.relationships
+    assert sum(edge.kind == RelationshipKind.CONTAINS.value for edge in relationships) == 12_001
+    assert sum(edge.kind == RelationshipKind.REFERENCES.value for edge in relationships) == 12_000
 
 
 def test_raw_javascript_digest_matches_python_for_identical_bytes(tmp_path):

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from minotaur import git
+from minotaur.comparison import prepare_comparison
 from minotaur.config import ConfigError, find_config, resolve_config
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import (
@@ -43,6 +44,8 @@ from minotaur.query import diff as diff_query
 from minotaur.query import impact as impact_query
 from minotaur.query import symbols as symbols_query
 from minotaur.query import system as system_query
+from minotaur.query import system_diff as system_diff_query
+from minotaur.query import system_diff_view
 from minotaur.query import unreferenced as unreferenced_query
 from minotaur.query.freshness import Drift, drift, recorded_selection
 from minotaur.query.index import GraphIndex
@@ -97,12 +100,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     config-free.
     """
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    systems_mode = _is_systems_mode(raw_argv)
     try:
-        located = _locate_config(raw_argv)
+        # Systems mode deliberately bypasses ordinary config discovery.  The
+        # comparison acquisition owner must see the raw config spelling and
+        # cwd so links, nested ``..`` routes, and missing inputs retain their
+        # exact route attribution. It still uses the relaxed parser
+        # grammar so the acquisition owner, rather than argparse, reports the
+        # unusable-config case.
+        located = None if systems_mode else _locate_config(raw_argv)
     except ConfigError as error:
         _error(str(error))
         return 2
-    parser = _parser(config_located=located is not None)
+    parser = _parser(config_located=located is not None or systems_mode, systems_mode=systems_mode)
     arguments = parser.parse_args(raw_argv)
     if arguments.command == "visualize":
         return _visualize(arguments, located)
@@ -155,6 +165,34 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
     if any(token in ("-h", "--help") for token in raw_argv):
         return None
     return find_config(Path.cwd(), config=_explicit_config(option_tokens))
+
+
+def _is_systems_mode(raw_argv: Sequence[str]) -> bool:
+    """Classify the systems diff from raw tokens before config resolution.
+
+    This scanner intentionally understands only options that consume values;
+    a value such as ``--config --systems`` is not mistaken for a mode flag.
+    It lets systems acquisition retain the caller's lexical config route while
+    ordinary diff keeps its existing config-free/config-located grammar.
+    """
+    command_index = _first_bare_token(raw_argv, 0)
+    if command_index is None or raw_argv[command_index] != "query":
+        return False
+    subcommand_index = _first_bare_token(raw_argv, command_index + 1)
+    if subcommand_index is None or raw_argv[subcommand_index] != "diff":
+        return False
+    expects_value = False
+    for token in raw_argv[subcommand_index + 1 :]:
+        if expects_value:
+            expects_value = False
+            continue
+        if token in ("--config", "--scope", "--system"):
+            expects_value = True
+        elif token.startswith(("--config=", "--scope=", "--system=")):
+            continue
+        elif token == "--systems":
+            return True
+    return False
 
 
 def _diff_positional_tokens(tokens: Sequence[str]) -> tuple[str, ...]:
@@ -796,6 +834,10 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
     """
     try:
         if arguments.name == "diff":
+            if getattr(arguments, "systems", False):
+                if arguments.old is not None or arguments.new is not None:
+                    raise ValueError("--systems cannot be combined with OLD NEW")
+                return _run_systems_diff(arguments)
             if arguments.old is None and located is not None:
                 return _run_committed_diff(arguments, located)
             if arguments.old is None or arguments.new is None:
@@ -830,6 +872,24 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
     except (GraphLoadError, OSError, ValueError) as error:
         _error(str(error))
         return 2
+
+
+def _run_systems_diff(query: argparse.Namespace) -> int:
+    """Acquire and compare one complete configured historical/current pair."""
+    raw_config = getattr(query, "config", None)
+    config_path = Path(raw_config) if raw_config is not None else None
+    prepared = prepare_comparison(
+        Path.cwd(), config_path, _produce_selection, validate=query.validate
+    )
+    complete = system_diff_query.compare_systems(prepared.old_snapshot, prepared.new_snapshot)
+    selected = system_diff_view.filter_system_diff(complete, query.system)
+    output = (
+        system_diff_view.render_json(selected)
+        if query.json
+        else system_diff_view.render_text(selected, details=query.details)
+    )
+    print(output, end="")
+    return selected.exit_code
 
 
 def _run_graph_query(query: argparse.Namespace) -> int:
@@ -889,7 +949,12 @@ def _run_graph_query(query: argparse.Namespace) -> int:
     return 1 if graph.diagnostics else 0
 
 
-def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: bool = False) -> None:
+def _add_query_subparsers(
+    query: argparse.ArgumentParser,
+    *,
+    config_located: bool = False,
+    systems_mode: bool = False,
+) -> None:
     """Register the query subcommands directly on the ``query`` subparser.
 
     Nesting these on the main parser (instead of parsing a captured
@@ -955,7 +1020,7 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
     systems_parser.add_argument(
         "--details", action="store_true", help="include declared paths and connections"
     )
-    if config_located:
+    if config_located or systems_mode:
         diff_description = (
             "Compare the current working tree with the committed graph at HEAD "
             "(or compare two explicit graph snapshots)."
@@ -980,11 +1045,24 @@ def _add_query_subparsers(query: argparse.ArgumentParser, *, config_located: boo
         description=diff_description,
         epilog=diff_epilog,
     )
-    diff_parser.add_argument("old", nargs="?" if config_located else None, metavar="OLD")
-    diff_parser.add_argument("new", nargs="?" if config_located else None, metavar="NEW")
+    diff_parser.add_argument(
+        "old", nargs="?" if (config_located or systems_mode) else None, metavar="OLD"
+    )
+    diff_parser.add_argument(
+        "new", nargs="?" if (config_located or systems_mode) else None, metavar="NEW"
+    )
     diff_parser.add_argument("--json", action="store_true", help="emit stable JSON records")
-    if config_located:
+    if config_located and not systems_mode:
         diff_parser.add_argument("--scope", metavar="NAME", help="compare one committed system")
+        diff_parser.add_argument("--config", metavar="CONFIG", help="explicit project config file")
+    if systems_mode:
+        diff_parser.add_argument(
+            "--systems", action="store_true", help="compare configured system snapshots"
+        )
+        diff_parser.add_argument("--system", metavar="NAME", help="limit changes to one system")
+        diff_parser.add_argument(
+            "--details", action="store_true", help="include change records and evidence"
+        )
         diff_parser.add_argument("--config", metavar="CONFIG", help="explicit project config file")
     context_parser = commands.add_parser("context", help="show source context around a line")
     context_parser.add_argument("--site", required=True, metavar="PATH:LINE")
@@ -1083,7 +1161,7 @@ def _add_validate_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _parser(config_located: bool = False) -> argparse.ArgumentParser:
+def _parser(config_located: bool = False, *, systems_mode: bool = False) -> argparse.ArgumentParser:
     """Build the CLI parser, toggling config-defaultable declarations (D-05).
 
     With ``config_located`` false the parser is today's strict grammar:
@@ -1136,7 +1214,7 @@ def _parser(config_located: bool = False) -> argparse.ArgumentParser:
     if config_located:
         visualize.add_argument("--config", metavar="CONFIG", help="explicit project config file")
     query = commands.add_parser("query", help="query an analyzed graph")
-    _add_query_subparsers(query, config_located=config_located)
+    _add_query_subparsers(query, config_located=config_located, systems_mode=systems_mode)
     return parser
 
 
