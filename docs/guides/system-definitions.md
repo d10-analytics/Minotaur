@@ -243,17 +243,13 @@ the configuration, or system definitions. A source-only edit produces a
 `surface`, `consumer`, or `dependency` row while the graph bytes remain equal;
 an identical graph with changed system membership produces a `membership` row.
 For example, adding `send` to `app/api.py` and calling it from `consumer.py`
-can produce:
+produces these compact rows (followed by the four context lines):
 
 ```text
 surface added: App app/api.py.app.api.send
 consumer changed: App <- consumer.py
-old evidence: unavailable
-new evidence: [...]
-old coverage: {...}
-new coverage: {...}
-old selection: {...}
-new selection: {...}
+boundary added: no_system.consumer -> App.app.api.send (imports)
+boundary added: no_system.consumer.consume -> App.app.api.send (calls)
 ```
 
 The source-change command exits `1`; an identical comparison exits `0`.
