@@ -917,13 +917,23 @@ def test_systems_public_route_composes_file_endpoint_evidence_only_as_status_zer
     _commit_file_boundary_graph(root, label="legacy-api.py")
 
     original_producer = cli._produce_selection
+    observed_evidence: list[tuple[str, ...]] = []
 
     def controlled_producer(*args: object, **kwargs: object) -> object:
         workspace, selection, result = original_producer(*args, **kwargs)  # type: ignore[arg-type]
+        controlled = _controlled_file_boundary_result(
+            result, label="legacy-api.py", evidence_only=True
+        )
+        observed_evidence.append(
+            tuple(
+                evidence.provenance.value
+                for evidence in controlled.document.relationships[0].evidence
+            )
+        )
         return (
             workspace,
             selection,
-            _controlled_file_boundary_result(result, label="legacy-api.py", evidence_only=True),
+            controlled,
         )
 
     monkeypatch.setattr(cli, "_produce_selection", controlled_producer)
@@ -939,6 +949,8 @@ def test_systems_public_route_composes_file_endpoint_evidence_only_as_status_zer
     assert payload["consumer_changes"] == []
     assert payload["dependency_changes"] == []
     assert captured.err == ""
+    assert len(observed_evidence) == 1
+    assert observed_evidence == [("static-analysis", "curated-rule")]
     _assert_state(root, before)
 
 
