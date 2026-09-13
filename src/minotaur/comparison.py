@@ -660,7 +660,12 @@ def _select_worktree(start: Path) -> tuple[Path, Path]:
     if result is None:
         error = _current_error(preserved_start, "Git worktree probe was unavailable")
         raise error
-    value = result.stdout.strip() if isinstance(result.stdout, str) else ""
+    if isinstance(result.stdout, bytes):
+        value = result.stdout.decode("utf-8", errors="replace").strip()
+    elif isinstance(result.stdout, str):
+        value = result.stdout.strip()
+    else:
+        value = ""
     if result.returncode != 0 or not value:
         raise _current_error(preserved_start, "Git did not return a worktree root")
     root = Path(value)
@@ -731,6 +736,10 @@ def _current_systems(root: Path, route: _CurrentRoute) -> tuple[system.System, .
             if stat.S_ISREG(child_mode):
                 continue
             raise _current_error(child_path, "system directory candidate is not ordinary")
+        # A system directory is an authoritative route boundary.  Check only
+        # its own repository marker; valid source targets retain ordinary
+        # selector behavior without a recursive nested-repository scan.
+        _inspect_current_route(root, child_path / ".git", label="nested repository marker")
         definition_path = child_path / "system.toml"
         definition = _inspect_current_route(root, definition_path, label="system definition")
         if definition.entry is None:
@@ -791,7 +800,6 @@ def prepare_comparison(
     )
     systems_path = _declaration_path(worktree, root_path, current_config.systems_dir)
     systems_route = _inspect_current_route(worktree, systems_path, label="systems root")
-    current_systems = _current_systems(worktree, systems_route)
 
     target_routes: list[_CurrentRoute] = []
     analyzed_targets: list[Path] = []
@@ -801,6 +809,10 @@ def prepare_comparison(
     for raw_target in current_config.targets:
         target_path = _declaration_path(worktree, root_path, raw_target)
         target_route = _inspect_current_route(worktree, target_path, label="target")
+        root_parts = _coordinate_parts(root_route.coordinate)
+        target_parts = _coordinate_parts(target_route.coordinate)
+        if target_parts[: len(root_parts)] != root_parts:
+            raise _current_error(target_path, "configured target escapes the current analysis root")
         target_routes.append(target_route)
         target_coordinates.append(target_route.coordinate)
         metadata_targets.append(target_route.path)
@@ -841,6 +853,7 @@ def prepare_comparison(
                     f"absent current target is not proven at historical pin {historical.commit}",
                 )
 
+    current_systems = _current_systems(worktree, systems_route)
     try:
         produced_workspace, produced_selection, produced = producer(
             root_route.path,
