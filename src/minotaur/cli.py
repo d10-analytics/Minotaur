@@ -188,6 +188,8 @@ def _is_systems_mode(raw_argv: Sequence[str]) -> bool:
             continue
         if token in ("--config", "--scope", "--system"):
             expects_value = True
+        elif token.startswith(("--config=", "--scope=", "--system=")):
+            continue
         elif token == "--systems":
             return True
     return False
