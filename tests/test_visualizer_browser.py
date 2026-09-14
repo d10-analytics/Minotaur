@@ -334,3 +334,168 @@ def test_call_site_context_is_unavailable_without_a_root_and_has_no_caller_mode(
         ]
         assert "no source root was provided" in page.locator("#call-site-detail").inner_text()
         browser.close()
+
+
+def _assert_visible_layout(page: object, direction: str) -> None:
+    page.wait_for_timeout(450)
+    result = page.evaluate(
+        """async direction => {
+            const cy = window.minotaurVisualizer.cy;
+            const enabled = new Set(Array.from(document.querySelectorAll(
+                '#kind-filters input:checked'), cb => cb.dataset.kind));
+            const edges = new Set(Array.from(document.querySelectorAll(
+                '#edge-filters input:checked'), cb => cb.dataset.edgekind));
+            const original = window.originalElements;
+            const ids = new Set(original.filter(e => e.group === 'nodes' &&
+                enabled.has(e.data.node_class)).map(e => e.data.id));
+            const eligible = original.filter(e => e.group === 'nodes' ? ids.has(e.data.id) :
+                edges.has(e.data.kind) && ids.has(e.data.source) && ids.has(e.data.target));
+            const host = document.createElement('div');
+            host.style.cssText = `position:absolute;left:-10000px;width:${cy.width()}px;` +
+                `height:${cy.height()}px`;
+            document.body.appendChild(host);
+            const reference = cytoscape({container: host, elements: eligible.map(e => ({
+                group: e.group, data: e.data,
+                selected: cy.getElementById(e.data.id).selected(),
+                classes: cy.getElementById(e.data.id).classes().join(' ')
+            })), style: cy.style().json(), layout: {name:'grid', fit:false},
+                minZoom:0.1, maxZoom:4});
+            await new Promise(requestAnimationFrame);
+            if (ids.size) reference.layout({name:'dagre', rankDir:direction,
+                nodeSep:40, rankSep:60, edgeSep:15, animate:false, padding:30}).run();
+            const errors = reference.nodes().map(n => {
+                const actual = cy.getElementById(n.id()).position();
+                return Math.hypot(actual.x - n.position('x'), actual.y - n.position('y'));
+            });
+            const camera = [cy.zoom(), cy.pan('x'), cy.pan('y')];
+            const expectedCamera = [reference.zoom(), reference.pan('x'), reference.pan('y')];
+            const result = {
+                error: Math.max(0, ...errors),
+                finite: cy.nodes().every(n => Number.isFinite(n.position('x')) &&
+                    Number.isFinite(n.position('y'))) && camera.every(Number.isFinite),
+                visible: cy.elements(':visible').map(e => e.id()).sort(),
+                expected: eligible.map(e => e.data.id).sort(),
+                cameraError: ids.size ? Math.max(...camera.map((v,i) =>
+                    Math.abs(v - expectedCamera[i]))) : 0,
+                preserved: cy.elements().every((e,i) => e === window.originalIdentities[i] &&
+                    JSON.stringify(e.data()) === JSON.stringify(original[i].data))
+            };
+            reference.destroy(); host.remove(); return result;
+        }""",
+        direction,
+    )
+    assert result["visible"] == result["expected"]
+    assert result["finite"]
+    assert result["preserved"]
+    assert result["error"] < 0.01, result
+    assert result["cameraError"] < 0.1, result
+
+
+@pytest.mark.parametrize("bundled", [False, True], ids=["generated", "bundled"])
+def test_layout_uses_only_filter_eligible_elements(tmp_path: Path, bundled: bool) -> None:
+    artifact = ROOT / "examples/python-workflow/minotaur-graph.html"
+    if not bundled:
+        artifact = tmp_path / "viewer.html"
+        assert (
+            cli.main(
+                [
+                    "visualize",
+                    "--input",
+                    str(ROOT / "examples/python-workflow/minotaur-graph.json"),
+                    "--output",
+                    str(artifact),
+                    "--source-root",
+                    str(ROOT / "src"),
+                ]
+            )
+            == 0
+        )
+    errors: list[str] = []
+    requests: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.on("request", lambda request: requests.append(request.url))
+        page.goto(artifact.as_uri())
+        page.evaluate("""() => {
+            const cy = window.minotaurVisualizer.cy;
+            window.originalElements = cy.elements().map(e => ({group:e.group(), data:e.data()}));
+            window.originalElements = JSON.parse(JSON.stringify(window.originalElements));
+            window.originalIdentities = cy.elements().toArray();
+        }""")
+        _assert_visible_layout(page, "TB")
+        classes = ["file", "symbol", "unresolved-reference"]
+        for direction in ["TB", "LR", "BT", "RL"]:
+            if direction != "TB":
+                page.locator("#btn-direction").click()
+            for mask in [7, 6, 5, 4, 3, 2, 1, 0, 7]:
+                for index, kind in enumerate(classes):
+                    page.locator(f'input[data-kind="{kind}"]').set_checked(
+                        bool(mask & (1 << index))
+                    )
+                empty_camera = (
+                    page.evaluate(
+                        "({zoom:window.minotaurVisualizer.cy.zoom(), "
+                        "pan:window.minotaurVisualizer.cy.pan()})"
+                    )
+                    if mask == 0
+                    else None
+                )
+                _assert_visible_layout(page, direction)
+                if mask == 0:
+                    camera = page.evaluate(
+                        "({zoom:window.minotaurVisualizer.cy.zoom(), "
+                        "pan:window.minotaurVisualizer.cy.pan()})"
+                    )
+                    assert camera == empty_camera
+                    page.locator("#btn-fit").click()
+                    page.keyboard.press("f")
+                    page.wait_for_timeout(350)
+                    assert (
+                        page.evaluate(
+                            "({zoom:window.minotaurVisualizer.cy.zoom(), "
+                            "pan:window.minotaurVisualizer.cy.pan()})"
+                        )
+                        == camera
+                    )
+        for checkbox in page.locator("#edge-filters input").all():
+            checkbox.uncheck()
+            _assert_visible_layout(page, "RL")
+            page.locator('input[data-kind="symbol"]').uncheck()
+            page.locator('input[data-kind="symbol"]').check()
+            _assert_visible_layout(page, "RL")
+            checkbox.check()
+        page.locator('input[data-kind="unresolved-reference"]').uncheck()
+        _assert_visible_layout(page, "RL")
+        for reset in ["button", "shortcut"]:
+            page.evaluate("window.minotaurVisualizer.cy.pan({x:0,y:0})")
+            if reset == "button":
+                page.locator("#btn-fit").click()
+            else:
+                page.keyboard.press("f")
+            _assert_visible_layout(page, "RL")
+        page.locator("#search").fill("no matching label anywhere")
+        page.wait_for_timeout(200)
+        assert page.evaluate("window.minotaurVisualizer.cy.nodes('.dimmed').length") > 0
+        page.locator("#btn-direction").click()
+        _assert_visible_layout(page, "TB")
+        page.locator("#search").fill("")
+        page.wait_for_timeout(200)
+        _click_connected_node_and_show_details(page)
+        page.locator('input[data-kind="file"]').uncheck()
+        page.locator('input[data-kind="symbol"]').uncheck()
+        assert (
+            "Select a node or edge to inspect it." in page.locator("#detail-content").inner_text()
+        )
+        page.locator('input[data-kind="file"]').check()
+        page.locator('input[data-kind="symbol"]').check()
+        page.locator("#btn-direction").click()
+        assert page.evaluate("window.minotaurVisualizer.cy.nodes().some(n => n.animated())")
+        page.locator('input[data-kind="unresolved-reference"]').check()
+        page.locator('input[data-kind="unresolved-reference"]').uncheck()
+        page.locator("#btn-direction").click()
+        _assert_visible_layout(page, "BT")
+        browser.close()
+    assert not errors
+    assert all(url.startswith("file:") for url in requests)
