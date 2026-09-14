@@ -714,6 +714,56 @@ def test_later_binding_wins_and_lexical_shadow_suppresses_use(tmp_path):
     assert not any(node.reference_text == "target" for node in result.document.nodes)
 
 
+def test_conditional_function_redefinitions_remain_unemitted_and_unresolved(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "if (flag) {\n"
+                "  function choose() {}\n"
+                "} else {\n"
+                "  function choose() {}\n"
+                "}\n"
+                "function caller() { choose(); }\n"
+            )
+        },
+    )
+    assert not any(
+        diagnostic.code is DiagnosticCode.PARSE_ERROR and diagnostic.path == "app.js"
+        for diagnostic in result.diagnostics
+    )
+
+    choose_symbols = {
+        node.id
+        for node in result.document.nodes
+        if node.label == "app.choose" and node.symbol_kind == "function"
+    }
+    assert not choose_symbols
+    assert not any(
+        edge.kind == RelationshipKind.CONTAINS.value and edge.target in choose_symbols
+        for edge in result.document.relationships
+    )
+
+    caller = _node(result, "app.caller")
+    unresolved_choose = [
+        node for node in result.document.nodes if node.reference_text == "choose"
+    ]
+    assert len(unresolved_choose) == 1
+    unresolved = unresolved_choose[0]
+    assert sum(
+        edge.source == caller.id
+        and edge.target == unresolved.id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in result.document.relationships
+    ) == 1
+    assert not any(
+        edge.source == caller.id
+        and edge.target == unresolved.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in result.document.relationships
+    )
+
+
 def test_nested_class_methods_keep_enclosing_owner_and_fields_are_excluded(tmp_path):
     result = _analyze(
         tmp_path,
