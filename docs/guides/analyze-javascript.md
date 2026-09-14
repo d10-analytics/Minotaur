@@ -14,6 +14,9 @@ the registry-aware refresh, no-refresh, clean-skip, and graph-integrity
 contract. The shared command and selected-file API are described in [Create a
 language interpreter](create-a-language-interpreter.md).
 
+For the cross-language case matrix and exact source/proof links, see the
+[interpreter edge-case catalog](../concepts/interpreter-edge-cases.md).
+
 ## Analyze selected paths
 
 Use the language-neutral command with a root, output graph, and one or more
