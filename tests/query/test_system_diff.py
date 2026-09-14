@@ -948,3 +948,103 @@ def test_node_and_relationship_observation_changes_remain_neutral() -> None:
     assert not result.changed
     assert result.old_coverage == result.new_coverage
     assert result.old_selection == result.new_selection
+
+
+@pytest.mark.parametrize("count", (8, 32, 128))
+@pytest.mark.parametrize("mode", ("unchanged", "changed", "internal"))
+def test_comparison_local_index_work_is_linear(count, mode, monkeypatch):
+    from collections.abc import Mapping
+
+    from minotaur.query.correspondence import CorrespondenceIndex
+
+    source = _symbol("source", "a.py")
+    targets = tuple(_symbol(f"target{i}", "b.py", i) for i in range(count))
+    systems = _systems(
+        ("a.toml", "A", ("a.py", "b.py") if mode == "internal" else ("a.py",)),
+        ("b.toml", "B", ("unused.py",) if mode == "internal" else ("b.py",)),
+    )
+    edges = tuple(_call(source, target) for target in targets)
+    old = _snapshot((source, *targets), edges, systems)
+    new = _snapshot((source, *targets), edges[:-1] if mode == "changed" else edges, systems)
+    projections = []
+    traversed = 0
+    original_details = ReportingSnapshot.relationship_details
+
+    def details(snapshot):
+        projections.append(snapshot)
+        return original_details(snapshot)
+
+    class CountedGroups(Mapping):
+        def __init__(self, values):
+            self.values = values
+
+        def __len__(self):
+            return len(self.values)
+
+        def __getitem__(self, key):
+            return self.values[key]
+
+        def __iter__(self):
+            nonlocal traversed
+            for key in self.values:
+                traversed += 1
+                yield key
+
+    monkeypatch.setattr(ReportingSnapshot, "relationship_details", details)
+    monkeypatch.setattr(
+        CorrespondenceIndex,
+        "relationship_groups",
+        property(lambda index: CountedGroups(index.relationships_by_key)),
+    )
+    result = compare_systems(old, new)
+    assert result.changed is (mode == "changed")
+    assert sum(item is old for item in projections) == (0 if mode == "internal" else 1)
+    assert sum(item is new for item in projections) == (0 if mode == "internal" else 1)
+    assert traversed <= 6 * (len(old.document.relationships) + len(new.document.relationships))
+
+
+def test_repeated_unresolved_details_remain_side_local_after_id_regeneration():
+    systems = _systems(("a.toml", "A", ("a.py",)))
+
+    def side(offset, label):
+        origin = _symbol("caller", "a.py", offset)
+        targets = tuple(_unresolved(origin, "b.py", offset + i, label=label) for i in (1, 2))
+        edges = tuple(
+            replace(
+                _reference(origin, target),
+                extensions={"example": {"occurrence": i, "side": offset}},
+                evidence=(
+                    Evidence(
+                        Provenance.STATIC_ANALYSIS,
+                        locations=(target.location,),
+                        extensions={"example": {"site": i, "side": offset}},
+                    ),
+                ),
+            )
+            for i, target in enumerate(targets)
+        )
+        return _snapshot((origin, *targets), edges, systems)
+
+    old, new = side(0, "old"), side(10, "new")
+    result = compare_systems(old, new)
+    assert len(result.boundary_changes) == 1
+    change = result.boundary_changes[0]
+    assert change.kind == "endpoint"
+    for snapshot, payload, offset in ((old, change.old, 0), (new, change.new, 10)):
+        expected = sorted(snapshot.relationship_details(), key=lambda item: item.target.id)
+        actual = payload["relationships"]
+        assert [item.to_dict() for item in actual] == [item.to_dict() for item in expected]
+        assert len(actual) == 2
+        assert {item.evidence[0].sites[0]["range"]["start"]["line"] for item in actual} == {
+            offset + 2,
+            offset + 3,
+        }
+    assert {item.target.id for item in change.old["relationships"]}.isdisjoint(
+        item.target.id for item in change.new["relationships"]
+    )
+    permuted = _snapshot(
+        tuple(reversed(new.document.nodes)),
+        tuple(reversed(new.document.relationships)),
+        systems,
+    )
+    assert compare_systems(old, permuted).to_dict() == result.to_dict()

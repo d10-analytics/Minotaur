@@ -569,3 +569,60 @@ def test_canonical_dumper_receives_exact_to_dict_and_status_stays_typed(monkeypa
     assert observed == [sentinel]
     assert result.changed is changed
     assert result.exit_code == exit_code
+
+
+@pytest.mark.parametrize("name", ("system: A", "system: system: A", "external", "no_system"))
+def test_literal_names_render_once_by_field_semantics(name):
+    def atom(value):
+        return json.dumps(value) if " " in value else value
+
+    category = f"system: {name}"
+    result = SystemDiffResult(
+        old_system_names=(name,),
+        new_system_names=(name,),
+        membership_changes=(
+            SystemChange(
+                "membership",
+                "changed",
+                ("absent.py",),
+                {"file": "absent.py", "system": None},
+                {"file": "absent.py", "system": name},
+            ),
+        ),
+        surface_changes=(SystemChange("surface", "added", (name, "a.py", "entry")),),
+        consumer_changes=(SystemChange("consumers", "added", (name, "a.py")),),
+        dependency_changes=(
+            SystemChange(
+                "system-deps",
+                "added",
+                (name, category),
+                new={"category": category},
+            ),
+        ),
+        boundary_changes=(
+            SystemChange(
+                "boundary",
+                "added",
+                ("opaque",),
+                new={
+                    "source_category": category,
+                    "target_category": category,
+                    "kind": "calls",
+                    "source_endpoint": {"label": "source"},
+                    "target_endpoint": {"label": "target"},
+                },
+            ),
+        ),
+    )
+    expected = (
+        f"membership changed: absent.py — unassigned -> {atom(name)}\n"
+        f"surface added: {atom(name)} a.py.entry\n"
+        f"consumer added: {atom(name)} <- a.py\n"
+        f"dependency added: {atom(name)} -> {atom(name)}\n"
+        f"boundary added: {atom(name + '.source')} -> {atom(name + '.target')} (calls)\n"
+    )
+    assert render_text(result) == expected + render_context_text(result)
+    assert json.loads(render_json(result))["membership_changes"][0]["new"]["system"] == name
+    assert result.exit_code == 1
+    detailed = render_text(result, details=True)
+    assert all(line in detailed.splitlines() for line in expected.splitlines())

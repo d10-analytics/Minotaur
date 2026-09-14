@@ -1079,3 +1079,63 @@ def test_systems_public_route_accepts_supported_unresolved_origin_chain(
     captured = capsys.readouterr()
     assert captured.out.startswith("no system differences\n")
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    (
+        (None, "system: App"),
+        ("system: App", None),
+        ("system: App", "Ordinary"),
+        ("Ordinary", "system: App"),
+    ),
+)
+def test_literal_owner_graph_absent_membership(tmp_path, monkeypatch, capsys, before, after):
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    names = ("system: App", "Ordinary", "Unrelated")
+
+    def definitions(owner):
+        for index, name in enumerate(names):
+            directory = root / "docs" / "systems" / ("app" if index == 0 else str(index))
+            directory.mkdir(exist_ok=True)
+            files = ["app/api.py"] if index == 0 else [f"placeholder{index}.py"]
+            if name == owner:
+                files.append("absent.py")
+            (directory / "system.toml").write_text(
+                f"schema_version = 1\nname = {json.dumps(name)}\nfiles = {json.dumps(files)}\n"
+            )
+
+    definitions(before)
+    assert cli.main(["analyze"]) == 0
+    capsys.readouterr()
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    definitions(after)
+    for selected in (None, *names):
+        arguments = ["query", "diff", "--systems"]
+        if selected is not None:
+            arguments += ["--system", selected]
+        expected = int(selected is None or selected in (before, after))
+        assert cli.main([*arguments, "--json"]) == expected
+        payload = json.loads(capsys.readouterr().out)
+        changes = payload["membership_changes"]
+        assert changes == (
+            [
+                {
+                    "domain": "membership",
+                    "kind": "changed",
+                    "key": ["absent.py"],
+                    "old": {"file": "absent.py", "system": before},
+                    "new": {"file": "absent.py", "system": after},
+                    "involved_systems": sorted(
+                        {name for name in (before, after) if name is not None}
+                    ),
+                }
+            ]
+            if expected
+            else []
+        )
+        for flags in ([], ["--details"]):
+            assert cli.main([*arguments, *flags]) == expected
+            capsys.readouterr()
