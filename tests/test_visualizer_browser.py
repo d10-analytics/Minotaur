@@ -350,16 +350,22 @@ def _assert_visible_layout(page: object, direction: str) -> None:
                 enabled.has(e.data.node_class)).map(e => e.data.id));
             const eligible = original.filter(e => e.group === 'nodes' ? ids.has(e.data.id) :
                 edges.has(e.data.kind) && ids.has(e.data.source) && ids.has(e.data.target));
-            const host = document.createElement('div');
-            host.style.cssText = `position:absolute;left:-10000px;width:${cy.width()}px;` +
-                `height:${cy.height()}px`;
-            document.body.appendChild(host);
-            const reference = cytoscape({container: host, elements: eligible.map(e => ({
+            if (!window.layoutReference) {
+                const host = document.createElement('div');
+                host.style.cssText = `position:absolute;left:-10000px;width:${cy.width()}px;` +
+                    `height:${cy.height()}px`;
+                document.body.appendChild(host);
+                window.layoutReference = cytoscape({container:host, elements:[],
+                    style:cy.style().json(), layout:{name:'preset'}, minZoom:0.1, maxZoom:4});
+            }
+            const reference = window.layoutReference;
+            reference.elements().remove();
+            reference.add(eligible.map(e => ({
                 group: e.group, data: e.data,
                 selected: cy.getElementById(e.data.id).selected(),
                 classes: cy.getElementById(e.data.id).classes().join(' ')
-            })), style: cy.style().json(), layout: {name:'grid', fit:false},
-                minZoom:0.1, maxZoom:4});
+            })));
+            reference.layout({name:'grid', fit:false}).run();
             await new Promise(requestAnimationFrame);
             if (ids.size) reference.layout({name:'dagre', rankDir:direction,
                 nodeSep:40, rankSep:60, edgeSep:15, animate:false, padding:30}).run();
@@ -380,7 +386,7 @@ def _assert_visible_layout(page: object, direction: str) -> None:
                 preserved: cy.elements().every((e,i) => e === window.originalIdentities[i] &&
                     JSON.stringify(e.data()) === JSON.stringify(original[i].data))
             };
-            reference.destroy(); host.remove(); return result;
+            return result;
         }""",
         direction,
     )
