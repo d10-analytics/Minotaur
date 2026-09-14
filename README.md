@@ -1,6 +1,6 @@
 # Minotaur
 
-Minotaur reads Python or JavaScript source without running it, so you can inspect
+Minotaur reads source code locally without running it, so you can inspect
 who calls a function, which files depend on a subsystem, and what connections
 change as you edit code. Use it when you are learning a codebase or deciding
 where to look before making a change.
