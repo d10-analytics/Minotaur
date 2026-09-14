@@ -22,6 +22,7 @@ from minotaur.query.correspondence import (
     CorrespondenceError,
     CorrespondenceIndex,
     RelationshipKey,
+    RelationshipOccurrence,
     prepare_correspondence,
 )
 from minotaur.query.system import (
@@ -273,6 +274,11 @@ def _context(snapshot: ReportingSnapshot) -> tuple[Mapping[str, object], Mapping
 
 
 def _membership_changes(old: ReportingSnapshot, new: ReportingSnapshot) -> tuple[SystemChange, ...]:
+    """Compare declared file owners, including files absent from either graph.
+
+    Owner names are literal strings, not endpoint categories; exclude only None
+    when recording involvement for subsequent filtering.
+    """
     before = {path: system.name for system in old.systems for path in system.files}
     after = {path: system.name for system in new.systems for path in system.files}
     result: list[SystemChange] = []
@@ -284,13 +290,19 @@ def _membership_changes(old: ReportingSnapshot, new: ReportingSnapshot) -> tuple
         new_payload = {"file": path, "system": right}
         result.append(
             SystemChange(
-                "membership", "changed", (path,), old_payload, new_payload, _names(left, right)
+                "membership",
+                "changed",
+                (path,),
+                old_payload,
+                new_payload,
+                tuple(sorted({name for name in (left, right) if name is not None})),
             )
         )
     return tuple(result)
 
 
-def _names(*categories: str | None) -> tuple[str, ...]:
+def _category_names(*categories: str | None) -> tuple[str, ...]:
+    """Extract literal owner names from categories, removing one prefix only."""
     return tuple(
         sorted({name for category in categories if category and (name := _named(category))})
     )
@@ -367,12 +379,32 @@ def _all_reports(
     return result
 
 
+# Original tuples identify occurrences within one snapshot; semantic keys alone
+# match across snapshots. These indexes live for one comparison, never on a
+# ReportingSnapshot, so regenerated IDs cannot leak across sides or invocations.
+_OriginalRelationship = tuple[str, str, str]
+
+
+def _semantic_keys(index: CorrespondenceIndex) -> dict[_OriginalRelationship, RelationshipKey]:
+    """Index each admitted occurrence's original tuple by its semantic key.
+
+    Several unresolved occurrences can share a semantic key. Retain all their
+    original tuples so each row contributor still selects that key directly.
+    """
+    return {
+        (item.relationship.source, item.relationship.target, item.relationship.kind): key
+        for key, occurrences in index.relationship_groups.items()
+        for item in occurrences
+    }
+
+
 def _row_changes(
     old: ReportingSnapshot,
     new: ReportingSnapshot,
-    old_index: CorrespondenceIndex,
-    new_index: CorrespondenceIndex,
+    old_keys: Mapping[_OriginalRelationship, RelationshipKey],
+    new_keys: Mapping[_OriginalRelationship, RelationshipKey],
 ) -> tuple[dict[str, tuple[SystemChange, ...]], set[RelationshipKey]]:
+    """Compare complete report rows and collect semantic keys of their contributors."""
     old_reports, new_reports = _all_reports(old), _all_reports(new)
     changes: dict[str, list[SystemChange]] = {query: [] for query in _REPORT_QUERIES}
     changed_keys: set[RelationshipKey] = set()
@@ -406,9 +438,9 @@ def _row_changes(
                     ),
                 )
             )
-            for _snapshot, index, row in (
-                (old, old_index, old_row),
-                (new, new_index, new_row),
+            for keys, row in (
+                (old_keys, old_row),
+                (new_keys, new_row),
             ):
                 if row is None:
                     continue
@@ -416,14 +448,9 @@ def _row_changes(
                 for relation in relationships if isinstance(relationships, (tuple, list)) else ():
                     if not isinstance(relation, RelationshipDetail):
                         continue
-                    for rel_key, occurrences in index.relationship_groups.items():
-                        if any(
-                            item.relationship.source == relation.source.id
-                            and item.relationship.target == relation.target.id
-                            and item.relationship.kind == relation.kind
-                            for item in occurrences
-                        ):
-                            changed_keys.add(rel_key)
+                    original = (relation.source.id, relation.target.id, relation.kind)
+                    if original in keys:
+                        changed_keys.add(keys[original])
     return {query: tuple(values) for query, values in changes.items()}, changed_keys
 
 
@@ -447,15 +474,20 @@ def _boundary_keys(snapshot: ReportingSnapshot, index: CorrespondenceIndex) -> s
 
 def _relation_payload(
     snapshot: ReportingSnapshot,
-    index: CorrespondenceIndex,
+    details: Mapping[_OriginalRelationship, RelationshipDetail],
     key: RelationshipKey,
-    occurrences: tuple[Any, ...],
+    occurrences: tuple[RelationshipOccurrence, ...],
 ) -> Mapping[str, object]:
+    """Project a nonempty semantic group with every side-local canonical detail.
+
+    Structural projections may coincide, but occurrence evidence must not be
+    collapsed: unresolved endpoints can share semantics and differ in sites.
+    """
     grouped: list[RelationshipDetail] = []
     projections: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
     categories: tuple[str, str] | None = None
     for occurrence in occurrences:
-        detail = _detail_for_occurrence(snapshot, occurrence)
+        detail = _detail_for_occurrence(details, occurrence)
         source_category = _category(snapshot, occurrence.source)
         target_category = _category(snapshot, occurrence.target)
         if categories is None:
@@ -469,7 +501,7 @@ def _relation_payload(
         grouped.append(detail)
     grouped.sort(key=lambda item: (item.source.id, item.target.id, item.kind, repr(item.evidence)))
     assert categories is not None
-    involvement = _names(*categories)
+    involvement = _category_names(*categories)
     first_projection = sorted(projections, key=repr)[0]
     return {
         "categories": categories,
@@ -486,15 +518,16 @@ def _relation_payload(
     }
 
 
-def _detail_for_occurrence(snapshot: ReportingSnapshot, occurrence: Any) -> RelationshipDetail:
-    for detail in snapshot.relationship_details():
-        if (
-            detail.source.id == occurrence.source.id
-            and detail.target.id == occurrence.target.id
-            and detail.kind == occurrence.relationship.kind
-        ):
-            return detail
-    raise AssertionError("correspondence occurrence has no reporting detail")
+def _detail_for_occurrence(
+    details: Mapping[_OriginalRelationship, RelationshipDetail],
+    occurrence: RelationshipOccurrence,
+) -> RelationshipDetail:
+    """Retrieve canonical evidence by original tuple; missing detail is an invariant failure."""
+    relationship = occurrence.relationship
+    try:
+        return details[(relationship.source, relationship.target, relationship.kind)]
+    except KeyError as error:
+        raise AssertionError("correspondence occurrence has no reporting detail") from error
 
 
 def _boundary_map(
@@ -502,12 +535,23 @@ def _boundary_map(
     index: CorrespondenceIndex,
     selected: set[RelationshipKey],
 ) -> dict[RelationshipKey, Mapping[str, object]]:
+    """Build selected payloads, projecting canonical details once if this side needs any.
+
+    Delay projection until selection and required-key ambiguity validation have
+    completed. An empty local selection needs no full reporting-detail pass.
+    """
+    details = None
     result: dict[RelationshipKey, Mapping[str, object]] = {}
     for key in sorted(selected, key=_key_token):
         occurrences = index.relationship_groups.get(key)
         if not occurrences:
             continue
-        result[key] = _relation_payload(snapshot, index, key, occurrences)
+        if details is None:
+            details = {
+                (detail.source.id, detail.target.id, detail.kind): detail
+                for detail in snapshot.relationship_details()
+            }
+        result[key] = _relation_payload(snapshot, details, key, occurrences)
     return result
 
 
@@ -586,7 +630,9 @@ def compare_systems(
     new_index = prepare_correspondence(new_snapshot.document, side="new")
     old_names = tuple(sorted(system.name for system in old_snapshot.systems))
     new_names = tuple(sorted(system.name for system in new_snapshot.systems))
-    row_changes, changed_row_keys = _row_changes(old_snapshot, new_snapshot, old_index, new_index)
+    row_changes, changed_row_keys = _row_changes(
+        old_snapshot, new_snapshot, _semantic_keys(old_index), _semantic_keys(new_index)
+    )
     selected = _boundary_keys(old_snapshot, old_index) | _boundary_keys(new_snapshot, new_index)
     selected |= changed_row_keys
     old_index.validate_required_keys(selected, side="old")

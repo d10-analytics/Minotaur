@@ -168,6 +168,11 @@ def _change_lines(label: str, change: SystemChange, *, details: bool) -> str:
 
 
 def _change_line(label: str, change: SystemChange) -> str:
+    """Render one typed change, preserving literal owners and report subjects.
+
+    Only category-valued destinations/endpoints carry a removable prefix. A
+    literal name may itself begin with that prefix or equal a sentinel label.
+    """
     if label == "systems":
         return f"system {change.kind}: {_safe_atom(_key_part(change, 0))}\n"
     kind = _safe_atom(change.kind)
@@ -181,16 +186,16 @@ def _change_line(label: str, change: SystemChange) -> str:
         )
         return f"membership {kind}: {_safe_atom(file)} — {_safe_atom(old)} -> {_safe_atom(new)}\n"
     if label == "surface":
-        system = _display_category(_key_part(change, 0))
+        system = _key_part(change, 0)
         path = _key_part(change, 1)
         symbol = _key_part(change, 2)
         return f"surface {kind}: {_safe_atom(system)} {_safe_atom(path)}.{_safe_atom(symbol)}\n"
     if label == "consumer":
-        system = _display_category(_key_part(change, 0))
+        system = _key_part(change, 0)
         file = _key_part(change, 1)
         return f"consumer {kind}: {_safe_atom(system)} <- {_safe_atom(file)}\n"
     if label == "dependency":
-        source = _display_category(_key_part(change, 0))
+        source = _key_part(change, 0)
         category = (
             _record_category(change.new) or _record_category(change.old) or _key_part(change, 1)
         )
@@ -239,21 +244,22 @@ def _mapping_value(value: object, key: str) -> object | None:
 
 
 def _mapping_side(value: object) -> str:
+    """Read a literal membership owner; only a missing owner is unassigned."""
     side = _mapping_value(value, "system")
     if side is None:
         return "unassigned"
-    text = str(side)
-    return text.removeprefix("system: ")
+    return str(side)
 
 
 def _record_category(value: object) -> str | None:
+    """Read the stored destination category without decoding its prefix yet."""
     record = _mapping_value(value, "record")
     category = _mapping_value(record, "category")
     if category is None:
         category = _mapping_value(value, "category")
     if category is None:
         return None
-    return str(category).removeprefix("system: ")
+    return str(category)
 
 
 def _endpoint_display(payload: Mapping[str, object], endpoint_key: str, category_key: str) -> str:

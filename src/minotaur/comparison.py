@@ -1,9 +1,9 @@
-"""Read one complete historical Minotaur snapshot from a pinned commit.
+"""Acquire complete historical and current inputs for a no-write comparison.
 
-Historical acquisition is intentionally independent from current workspace
-discovery.  A single :class:`~minotaur.git.PinnedCommit` supplies every tree
-listing and blob, while this module interprets the declarations in the
-historical configuration and composes the existing strict loaders.
+Historical declarations and blobs use one pinned Git commit, independently of
+current filesystem discovery. Current routes are anchored and inspected before
+source production; shared loaders validate definitions and graphs on both sides.
+Only a comparable, fully validated pair is published to reporting consumers.
 """
 
 from __future__ import annotations
@@ -798,7 +798,24 @@ def prepare_comparison(
     producer: SelectionProducer,
     validate: bool = False,
 ) -> PreparedComparison:
-    """Acquire, validate, and publish one complete historical/current pair."""
+    """Acquire a complete pair without writing graphs, stamps, definitions, or Git state.
+
+    Discover the worktree from ``start`` and preserve ``raw_config_path`` spelling
+    for route inspection. Anchor the analysis root at the config directory and
+    targets, graph, and systems declarations at that root. Historical paths are
+    interpreted within the pinned commit, never resolved through current files.
+
+    Inspect current routes and parse config before historical acquisition; then
+    require matching root/target coordinates and load current definitions. Call
+    the no-write ``producer`` with the absolute root, deduplicated existing
+    analysis targets, and all metadata targets (including proven deletions).
+    Reject producer diagnostics, invalid saved selection, and invalid graph/IDs
+    before constructing either reporting snapshot. ``validate`` forces full
+    historical graph validation; current produced graphs always receive it.
+
+    Route, definition, production, and pair failures raise ``CurrentInputError``;
+    historical acquisition retains its ``HistoricalInputError`` failures.
+    """
     worktree, preserved_start = _select_worktree(start)
     selected_config = _current_config_route(worktree, preserved_start, raw_config_path)
     try:
