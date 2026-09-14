@@ -745,7 +745,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        # EDGE-BIND-001: supports direct function-body named imports with source-position resolution.
+        # EDGE-BIND-001: supports direct function-body named-import source-position resolution.
         state = self._flow_state()
         if state is None or state.flow_frozen:
             return
@@ -2021,7 +2021,7 @@ def _module_flow_states(
 
 def _join_flow_states(states: tuple[_ImportFlowState, ...]) -> _ImportFlowState:
     # EDGE-BIND-002: supports agreeing conditional import routes after a flow join.
-    # EDGE-BIND-003: supports conservative unresolved divergent or omitted conditional import routes.
+    # EDGE-BIND-003: supports conservative unresolved divergent or omitted conditional routes.
     """Join conditional arms while retaining only agreeing import routes.
 
     Plain dotted imports need component-level agreement. The package root and
