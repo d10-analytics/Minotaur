@@ -205,7 +205,9 @@ def _collect_declarations(
     method_containments: list[tuple[str, str]],
     line_index: LineIndex,
 ) -> None:
+    # EDGE-DECL-001: supports repeated direct functions; last binding wins; lexical shadowing.
     typ = getattr(statement, "type", None)
+    # EDGE-DECL-002: excludes conditional function identity; later uses remain unresolved.
     if (
         typ in {"FunctionDeclaration", "ClassDeclaration"}
         and getattr(statement, "id", None) is not None
