@@ -7,7 +7,12 @@ import esprima
 import pytest
 
 from minotaur.graph_model.location import encoded_length, split_lines
-from minotaur.graph_model.provenance import CoordinateEncoding, NodeClass, RelationshipKind
+from minotaur.graph_model.provenance import (
+    CoordinateEncoding,
+    IdentityBasis,
+    NodeClass,
+    RelationshipKind,
+)
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_model.validation import validate_document
 from minotaur.language_interpreter.contract import DiagnosticCode
@@ -739,23 +744,32 @@ def test_conditional_function_redefinitions_remain_unemitted_and_unresolved(tmp_
         if node.label == "app.choose" and node.symbol_kind == "function"
     }
     assert not choose_symbols
-    assert not any(
-        edge.kind == RelationshipKind.CONTAINS.value and edge.target in choose_symbols
+    contains_target_identities = {
+        (node.label, node.node_class, node.symbol_kind)
+        for node in result.document.nodes
         for edge in result.document.relationships
-    )
+        if edge.kind == RelationshipKind.CONTAINS.value and edge.target == node.id
+    }
+    assert ("app.choose", NodeClass.SYMBOL, "function") not in contains_target_identities
 
     caller = _node(result, "app.caller")
-    unresolved_choose = [
-        node for node in result.document.nodes if node.reference_text == "choose"
-    ]
+    unresolved_choose = [node for node in result.document.nodes if node.reference_text == "choose"]
     assert len(unresolved_choose) == 1
     unresolved = unresolved_choose[0]
-    assert sum(
-        edge.source == caller.id
-        and edge.target == unresolved.id
-        and edge.kind == RelationshipKind.REFERENCES.value
-        for edge in result.document.relationships
-    ) == 1
+    assert unresolved.node_class is NodeClass.UNRESOLVED_REFERENCE
+    assert unresolved.identity.basis is IdentityBasis.UNRESOLVED_REFERENCE
+    assert unresolved.identity.namespace == "minotaur-javascript"
+    assert unresolved.identity.originating_node == caller.id
+    assert unresolved.reference_text == "choose"
+    assert (
+        sum(
+            edge.source == caller.id
+            and edge.target == unresolved.id
+            and edge.kind == RelationshipKind.REFERENCES.value
+            for edge in result.document.relationships
+        )
+        == 1
+    )
     assert not any(
         edge.source == caller.id
         and edge.target == unresolved.id
