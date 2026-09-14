@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACT = ROOT / "examples" / "python-workflow" / "minotaur-graph.html"
 DEFAULT_OUTPUT = ROOT / "docs" / "assets" / "python-workflow-demo.png"
 VIEWPORT = {"width": 1440, "height": 900}
-DETAIL_WIDTH = VIEWPORT["width"] // 4
+DETAIL_WIDTH = VIEWPORT["width"] // 3
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -57,7 +57,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         page.evaluate(
             """() => {
                 const selected = window.minotaurVisualizer.cy.edges().filter(
-                    (edge) => edge.data('kind') === 'calls'
+                    (edge) => edge.data('kind') === 'calls' &&
+                        edge.source().data('label').endsWith('.select_sources') &&
+                        edge.target().data('label').endsWith('._resolve_target')
                 )[0];
                 if (!selected) throw new Error('expected a calls edge');
                 selected.emit('tap');
@@ -79,17 +81,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             "(width) => document.querySelector('#detail').getBoundingClientRect().width === width",
             arg=DETAIL_WIDTH,
         )
+        # Initial layout animates its viewport. Let that finish before setting
+        # the camera, otherwise its final fit can overwrite the requested zoom.
+        page.wait_for_function(
+            "() => !window.minotaurVisualizer.cy.animated() && "
+            "window.minotaurVisualizer.cy.elements(':animated').empty()"
+        )
         # The complete graph's fit-to-window scale suppresses Cytoscape labels.
         # A selected call can span distant layout ranks, so anchor a closer view
         # on its caller rather than centering both endpoints off-screen.
         page.evaluate(
             """() => {
                 const cy = window.minotaurVisualizer.cy;
-                const selected = cy.edges().filter((edge) => edge.data('kind') === 'calls')[0];
-                cy.zoom({
-                    level: 2.5,
-                    position: selected.source().position(),
-                    renderedPosition: { x: cy.width() * 0.42, y: cy.height() * 0.56 },
+                const selected = cy.edges().filter((edge) => edge.data('kind') === 'calls' &&
+                        edge.source().data('label').endsWith('.select_sources') &&
+                        edge.target().data('label').endsWith('._resolve_target'))[0];
+                cy.zoom(1.3);
+                const position = selected.source().position();
+                cy.pan({
+                    x: cy.width() * 0.42 - position.x * cy.zoom(),
+                    y: cy.height() * 0.45 - position.y * cy.zoom()
                 });
             }"""
         )

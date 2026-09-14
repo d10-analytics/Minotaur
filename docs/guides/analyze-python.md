@@ -341,3 +341,7 @@ Its relationships are not runtime-dispatch claims, and it makes no support
 claim for relationships beyond this current subset. In particular, dynamic or
 otherwise unresolvable calls remain unresolved rather than being inferred from
 runtime behavior.
+
+Start with [small binding examples](python-binding-examples.md) for branch imports,
+callbacks, and member resolution, or [source-error recovery](source-error-recovery.md)
+to follow a partial graph through repair.

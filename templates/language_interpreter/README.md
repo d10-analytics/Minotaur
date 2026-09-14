@@ -55,3 +55,12 @@ language-specific discovery. Do not create language-specific parser, resolver,
 symbol, or fixture layers until tested semantics require them, and do not
 reimplement the shared `accumulation`, `emission`, `reading`, or `paths`
 mechanisms.
+
+## Freshness checklist
+
+Emit a file node with the SHA-256 of each `ParsedSource.content` under the
+registered namespace's `content_sha256` key. Follow the complete construction
+example in [the interpreter guide](../../docs/guides/create-a-language-interpreter.md#record-source-freshness).
+Before registration, test unchanged-source cleanliness and drift after a real
+byte edit, including original-byte hashing for BOM and CRLF input. Leave
+selection recording, serialization, and sidecar writes to the shared CLI.

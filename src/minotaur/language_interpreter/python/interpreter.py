@@ -85,6 +85,14 @@ class _ModuleResolution:
 
 @dataclass(frozen=True, slots=True)
 class _ScopeContext:
+    """Inputs used to resolve an expression at its lexical source position.
+
+    Declarations name emitted symbols; import tables describe visible routes
+    to those symbols. Bound and uncertain names prevent a local assignment or
+    ambiguous import from accidentally resolving through an outer scope.
+    Derived contexts share the graph collectors while replacing scope facts.
+    """
+
     declarations: Mapping[str, str]
     aliases: Mapping[str, str]
     module_name: str

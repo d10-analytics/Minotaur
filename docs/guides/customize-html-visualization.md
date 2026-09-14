@@ -42,6 +42,8 @@ When a source root is available, the artifact embeds only the merged evidence
 spans plus up to 50 lines of surrounding context; `calls` edges also retain
 their call-site associations and, when known, the caller start for the
 viewer’s two context modes. Omit `--source-root` when
-the downloaded file must contain no source text. Missing, unreadable,
+the downloaded file must contain no source text, and ensure no project
+configuration supplies a source root (run from outside that configured tree
+with explicit graph/output paths if necessary). Missing, unreadable,
 non-UTF-8, and escaping-symlink paths are not embedded. The command warns,
 while still writing successfully, when the artifact exceeds 10 MiB.

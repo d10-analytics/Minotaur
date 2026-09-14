@@ -217,3 +217,6 @@ exposed symbols`, `no consumers`, or `no dependencies` — and still exits `0`.
 Declared files that the analyzed graph does not contain are reported as
 `minotaur: warning:` lines on standard error, never silently dropped; an
 unknown system name exits `2` with the nearest declared systems.
+
+Next, [compare the committed baseline with source and membership edits](comparison.md)
+in an isolated temporary repository.

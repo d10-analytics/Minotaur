@@ -17,3 +17,16 @@ retains that metadata in its normal output.
 Open `minotaur-graph.html` directly in a browser using its local `file://`
 path. It is a self-contained offline artifact, not a hosted page, and it does
 not need a server or network connection.
+
+To refresh the README screenshot after regenerating the artifacts, install
+the browser dependencies and capture the selected helper call:
+
+```bash
+python -m pip install -e ".[visualizer]"
+python -m playwright install chromium
+python scripts/capture_python_workflow_demo.py
+```
+
+The capture waits for the initial layout animation before positioning the
+camera and writes `docs/assets/python-workflow-demo.png`. Inspect the resulting
+image for readable source evidence before committing it.

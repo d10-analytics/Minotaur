@@ -122,3 +122,6 @@ graph was last actually generated. That stamp is provenance, never a
 freshness gate or substitute for content digests, and may lag `HEAD`. These
 values are metadata, not node-identity inputs; use the freshness guide for the
 complete observable refresh contract.
+
+Run the [two-file JavaScript walkthrough](../../examples/javascript-workflow/README.md)
+for complete setup and real query output.

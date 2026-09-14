@@ -1,12 +1,14 @@
-"""Immutable state used by the Python binding-flow analysis.
+"""Immutable binding state, control-flow blocks, and deterministic solvers.
 
-This module deliberately contains no syntax, graph, or control-flow code.  A
-``BindingSlot`` identifies one statically allocated lexical location.  The
-state associated with that location is a small, immutable lattice that keeps
-an import's qualified target separate from the fact that a location was
-bound.  ``BindingEnvironment`` combines those slots with qualified-prefix
-state; both are persistent values, so a caller can safely retain a snapshot
-while constructing the next one.
+A BindingSlot names a variable location in a lexical scope. BindingEnvironment
+records what each location can refer to; changes return new values so earlier
+snapshots remain available. Blocks and edges describe possible transitions,
+and completion channels distinguish normal flow, returns, and exceptions.
+The solvers revisit blocks until their incoming information stops changing.
+
+These primitives currently have standalone tests but are not imported by the
+production Python interpreter. Its active source-order analysis lives in
+interpreter.py. This module neither parses Python syntax nor emits graph facts.
 """
 
 from __future__ import annotations

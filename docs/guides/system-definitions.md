@@ -51,7 +51,9 @@ minotaur query systems [--details] [--json] \
 ```
 
 The shared graph-query options may also discover the graph, root, systems
-directory, and refresh policy from project configuration. The compact text
+directory from project configuration. Refresh policy is chosen on the command
+line: pass `--no-refresh` to retain the existing snapshot, or omit it to allow
+automatic refresh when source content has drifted. The compact text
 answer starts with one canonical `coverage ` JSON line and then one inventory
 line per system. A valid system name is a non-empty string with no Unicode
 General Category `Cc` control characters, including line breaks, tabs, Escape,

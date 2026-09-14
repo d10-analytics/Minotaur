@@ -63,6 +63,11 @@ def analyze_example_language_files(
     before registering `.example` in ``default_registry()``.
     """
     # This is the intended shared-mechanism wiring for a copied interpreter.
+    # Emit a FILE node for each parsed source with the lowercase SHA-256 of
+    # parsed.content at extensions[NAMESPACE]["content_sha256"]. The registered
+    # namespace must match NAMESPACE; hash bytes, not decoded source text.
+    # See the source_file_node example in the interpreter creation guide.
+    # The CLI owns selection metadata and graph/sidecar writes.
     # Replace the parser and emitter scaffold, then return an AnalysisResult.
     sources, diagnostics = read_and_parse(workspace, files, _parse_example_language)
     nodes: list[Any] = []

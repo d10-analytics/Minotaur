@@ -4,7 +4,7 @@ A Minotaur project can pin the inputs of its source-analysis commands in a
 versioned `.minotaur.toml` file instead of repeating them on every command
 line. When such a file governs your invocation, `analyze`, `visualize`, and
 the config-consuming `query` subcommands (`callers`, `consumers`, `context`,
-`definitions`, `impact`, `surface`, `system-deps`, and `unreferenced`) fill
+`definitions`, `impact`, `surface`, `system-deps`, `systems`, and `unreferenced`) fill
 their defaults from it, and you can run them from anywhere inside the project
 without spelling out the graph path and source root again.
 

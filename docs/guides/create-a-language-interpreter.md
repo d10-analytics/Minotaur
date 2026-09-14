@@ -89,6 +89,49 @@ choose an interpreter. Registering the extension is all that is needed for the
 existing CLI to discover and dispatch explicitly selected `.example` files;
 do not add a language-specific subcommand or language flag.
 
+## Record source freshness
+
+The registration's `namespace` must match the extension key on every emitted
+file node. Store the lowercase SHA-256 digest of `ParsedSource.content`, the
+original bytes retained by `read_and_parse()`. Hashing decoded text can lose a
+byte-order mark or change line endings. Without a matching hash, a query treats
+an existing file as changed even when nobody edited it.
+
+For example, this function uses the shared graph constructors (the caller
+supplies its registered namespace and language):
+
+```python
+import hashlib
+
+from minotaur.graph_model.identity import NodeIdentity, compute_node_id
+from minotaur.graph_model.node import Node
+from minotaur.graph_model.provenance import IdentityBasis, NodeClass
+from minotaur.language_interpreter.reading import ParsedSource
+
+
+def source_file_node(parsed: ParsedSource, namespace: str, language: str) -> Node:
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, namespace)
+    return Node(
+        id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=parsed.relative),
+        identity=identity,
+        node_class=NodeClass.FILE,
+        label=parsed.relative,
+        path=parsed.relative,
+        language=language,
+        extensions={namespace: {"content_sha256": hashlib.sha256(parsed.content).hexdigest()}},
+    )
+```
+
+The digest describes content, not node identity: changing source bytes does not
+change a file-path node's identity. The CLI owns saved selection metadata,
+serialization, and sidecar writing; an interpreter must not duplicate those
+operations. See [freshness](../concepts/freshness.md) for the reader contract.
+
+Test both halves of the integration: a newly generated graph is clean against
+unchanged source, and editing source bytes naturally triggers drift. Use the
+registered extension and namespace together. Also verify that original bytes,
+including a byte-order mark and line endings, are what the producer hashes.
+
 ## Mixed-language analysis is a separate design decision
 
 The registry and CLI selection boundary are intentionally ready for multiple

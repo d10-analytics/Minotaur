@@ -20,8 +20,8 @@ and what remains unresolved.
 [download and open the offline HTML](examples/python-workflow/minotaur-graph.html).
 To intentionally refresh the preview, install the `visualizer` extra and
 Chromium, then run `python3 scripts/capture_python_workflow_demo.py`.
-The embedded preview predates the bundled example's `--root src` re-rooting;
-it remains a visual placeholder until that browser-backed capture is refreshed.
+The preview selects the call from `select_sources` to `_resolve_target` in
+the bundled graph, with its source evidence visible.
 
 ## Current capabilities
 
@@ -176,21 +176,57 @@ labeled human-authored annotations.
 
 ## Quick start
 
-If you have an existing editable install (`pip install -e ".[dev]"`) from
-before `orjson` became a required dependency, re-run that same install
-command so `orjson` is pulled in; otherwise `minotaur` commands fail with
-`ModuleNotFoundError: No module named 'orjson'`.
+Start with Python **3.10 or newer** and a local checkout of this repository.
+Open a terminal in the repository directory (the directory containing
+`pyproject.toml`). Check your interpreter with `python3 --version` on Linux
+or macOS, or `py -3 --version` on Windows.
 
-Render an existing canonical graph locally with:
+Create and activate a virtual environment, which keeps this project's Python
+dependencies separate from other projects:
 
 ```bash
-minotaur visualize --input graph.json --output graph.html --source-root .
+# Linux/macOS (bash or zsh)
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-`--source-root` is optional. When supplied, the artifact embeds only the source
-spans needed for relationship evidence and never follows an escaping symlink;
-omit it when the portable artifact should contain no source text. See the
-[HTML visualization guide](docs/guides/customize-html-visualization.md).
+```powershell
+# Windows PowerShell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+If PowerShell blocks activation, use `.\.venv\Scripts\python.exe` instead
+of `python` in the commands below; changing your execution policy is unnecessary.
+Once activated, `python` refers to the environment's interpreter. Install Minotaur:
+
+```bash
+python -m pip install -e .
+python -m minotaur --help
+```
+
+An editable install makes commands use the source in this checkout, so edits
+are available without reinstalling. `python -m` runs a Python module; the
+installed `minotaur` command runs the same CLI.
+
+Follow the [first Python walkthrough](examples/getting-started/README.md)
+to analyze a tiny program, find its helper and caller, and open an HTML graph.
+It creates its output in a new temporary directory, leaving bundled files intact.
+Analysis reads source; it does not run the example program.
+
+For development checks and optional browser dependencies, see the
+[contributor reading guide](docs/guides/contributing.md).
+
+### Troubleshooting
+
+If an older editable install reports `ModuleNotFoundError` for `orjson`,
+repeat your installation command with the activated interpreter. Development
+installs use `python -m pip install -e ".[dev]"`.
+
+For an existing graph, see the [HTML visualization guide](docs/guides/customize-html-visualization.md).
+Omit `--source-root` when the portable artifact should contain no source text;
+in a configured project the configuration can supply that root, as explained
+in the [configuration guide](docs/guides/project-configuration.md).
 
 ## End-to-end example
 
@@ -222,6 +258,10 @@ with third-party graph formats.
 
 ```text
 src/minotaur/
+  cli.py                   # Command parsing and orchestration
+  config.py                # Project defaults and path resolution
+  comparison.py            # Historical/current snapshot acquisition
+  query/                   # Graph navigation and comparison results
   graph_model/             # Canonical graph contract and graph operations
   language_interpreter/    # Native source-language analysis; Python and JavaScript
   graph_visualizer/        # Interactive HTML and future static views
@@ -233,6 +273,9 @@ tests/                     # Behavioral tests and public fixtures
 ```
 
 ## Contributing
+
+Start with the [contributor reading guide](docs/guides/contributing.md) for
+installation, a trace through the implementation, and local checks.
 
 Before adding a language interpreter or visualization feature, specify its
 behavior and evidence model and test it against synthetic public fixtures.

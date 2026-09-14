@@ -357,8 +357,10 @@ not cumulative narrowing. `OLD NEW` and `--scope` cannot be combined with
 `--systems` and are rejected before either snapshot is read.
 
 The command is read-only: it does not rewrite the committed graph, graph
-sidecar, configuration, or definitions. A source-only change produces the
-actual added/removed/relocated symbol and relationship rows. A membership-only
+sidecar, configuration, or definitions. A source-only change that affects system reports produces the corresponding
+surface, consumer, dependency, or boundary rows. Internal symbol changes that
+do not affect those reports need not appear; use ordinary graph diff for
+symbol-level additions, removals, and relocations. A membership-only
 change can produce a `membership changed` row while the old and new graph bytes
 remain identical. The compact output ends with the old/new coverage and
 selection lines. With `--details`, each changed row is followed by its `old`,
@@ -499,3 +501,6 @@ attribution, hashes, and reference limits, see
 [`analyze-python.md`](analyze-python.md).
 For the corresponding JavaScript selection boundary and static facts, see
 [`analyze-javascript.md`](analyze-javascript.md).
+
+For complete setup, edits, output, and exit handling, run the
+[system comparison walkthrough](../../examples/system-walkthrough/comparison.md).
