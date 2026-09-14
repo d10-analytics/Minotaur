@@ -354,37 +354,30 @@ def test_query_reference_documents_both_diff_modes_and_deliberate_exit_semantics
     )
 
 
-def test_readme_documents_committed_graph_provenance_and_both_diff_modes() -> None:
+def test_readme_documents_optional_graph_workflow_and_system_comparison() -> None:
     text = _collapsed(README)
-    assert (
-        "committed graph artifacts with per-file content digests and last-generation Git "
-        "provenance" in text
-    )
-    assert "content stays byte-stable across commit and branch changes" in text
-    assert "committed-reference mode" in text
-    assert "explicit two-snapshot mode" in text
-    assert "which is configuration-free" in text
-    assert (
-        "review the graph and its sidecar alongside the source change, and commit them together"
-        in text
-    )
+    assert "optional repository workflow" in text
+    assert "configuration does not commit files for you" in text
+    assert "last-generation Git provenance" in text
+    assert "Ordinary `query diff` compares symbols and relationships in graph snapshots" in text
+    assert "`query diff --systems` compares subsystem connections" in text
+    assert "examples/system-walkthrough/comparison.md" in text
+    assert "docs/concepts/freshness.md" in text
 
 
 def test_readme_names_the_system_queries_in_prose() -> None:
     text = _collapsed(README)
-    assert "committed system definitions that name subsystem boundaries" in text
-    assert "with `systems` reporting inventory and graph coverage" in text
-    assert "the `surface`, `consumers`, and `system-deps` queries" in text
-    assert (
-        "Declared system boundaries add a repository overview and three named-boundary queries"
-        in text
-    )
-    assert "`surface` lists the in-scope symbols that files outside a system reach" in text
-    assert "`consumers` lists the outside files that use it" in text
-    assert "`system-deps` lists the other systems and unlisted targets it depends on" in text
+    assert "Declare which files belong to each system" in text
+    assert "`consumers` shows outside files that use it" in text
+    assert "`surface` shows symbols they reach" in text
+    assert "`system-deps` shows its outgoing dependencies" in text
+    assert "`systems` summarizes the declarations" in text
+    assert "docs/guides/system-definitions.md" in text
 
 
-def test_readme_adds_no_console_transcript() -> None:
+def test_readme_uses_the_greeting_walkthrough_transcript() -> None:
     text = README.read_text(encoding="utf-8")
-    assert text.count("```console") == 1
+    assert text.count("```text") == 1
+    assert "app.py:11:12  app.welcome" in text
+    assert "python examples/run_walkthrough.py python" in text
     assert "examples/system-walkthrough/minotaur-graph.json" not in text
