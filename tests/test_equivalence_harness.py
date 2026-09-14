@@ -20,10 +20,10 @@ from minotaur.language_interpreter.workspace import Workspace
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
-# Keep comparisons anchored to the reviewed behavior/test head.  This full
-# commit ID must advance whenever an intentional graph-fact change becomes
-# part of the branch under test.
-BASELINE_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
+# Byte comparisons include generated HTML as well as graph facts.
+BASELINE_COMMIT = "c0568506e4d46011a73fdcefc353ed94de2b5006"
+# Preserve the historical fixture provenance independently of output revisions.
+FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
 
 
 @pytest.fixture(scope="session")
@@ -389,7 +389,22 @@ def test_fixture_pin_is_a_full_sha_and_fixture_commit_is_its_immediate_child() -
         check=False,
     )
     assert parent.returncode == 0
-    assert parent.stdout.strip() == BASELINE_COMMIT
+    assert parent.stdout.strip() == FIXTURE_PARENT_COMMIT
+    ancestor = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "merge-base",
+            "--is-ancestor",
+            FIXTURE_PARENT_COMMIT,
+            BASELINE_COMMIT,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ancestor.returncode == 0
 
 
 def test_every_non_control_query_answers_on_the_committed_fixture_root(
