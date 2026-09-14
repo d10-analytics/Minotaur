@@ -2965,8 +2965,7 @@ def test_conditional_function_redefinitions_remain_unemitted_and_unresolved(
     unresolved = [
         node
         for node in result.document.nodes
-        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
-        and node.reference_text == "choose"
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "choose"
     ]
     assert len(unresolved) == 1
     assert unresolved[0].identity.originating_node == caller
