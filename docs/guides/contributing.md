@@ -15,6 +15,10 @@ python -m playwright install chromium
 python -m pytest tests/query/test_query_walkthrough.py -q
 ```
 
+If an older editable install reports `ModuleNotFoundError` for `orjson`,
+repeat the installation command above with the activated interpreter to update
+its dependencies.
+
 The `dev` extra installs pytest, Ruff, and mypy. The `visualizer` extra installs
 Playwright for browser tests and screenshot capture; Chromium is a separate
 browser download. Linux browser execution may also require system libraries;

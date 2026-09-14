@@ -1,178 +1,75 @@
 # Minotaur
 
-> A local-first toolkit for turning source code into
-> evidence-backed software architecture maps.
+Minotaur reads Python or JavaScript source without running it, so you can inspect
+who calls a function, which files depend on a subsystem, and what connections
+change as you edit code. Use it when you are learning a codebase or deciding
+where to look before making a change.
 
-Minotaur helps engineers explore how software is structured and which
-relationships can be established from source code. Its purpose and the
-boundary that follows from it are stated in
-[Purpose and boundary](docs/concepts/purpose.md). It interprets supported
-languages, normalizes those facts into one canonical graph, and creates
-portable interactive visualizations.
-
-The project is intentionally designed around traceability: a graph should make
-clear what was established by static analysis, what was supplied as a rule,
-and what remains unresolved.
+Analyze selected files into a JSON graph, then ask focused questions from the
+command line or explore the connections in an interactive HTML page. Results
+include source locations you can check, and targets the analyzer cannot resolve
+are marked explicitly.
 
 [![Python workflow explorer preview](docs/assets/python-workflow-demo.png)](https://d10-analytics.github.io/Minotaur/)
 
 [Try the live demo](https://d10-analytics.github.io/Minotaur/) or
 [download and open the offline HTML](examples/python-workflow/minotaur-graph.html).
-To intentionally refresh the preview, install the `visualizer` extra and
-Chromium, then run `python3 scripts/capture_python_workflow_demo.py`.
-The preview selects the call from `select_sources` to `_resolve_target` in
-the bundled graph, with its source evidence visible.
+The preview selects the call from `select_sources` to `_resolve_target`, with
+its supporting source visible in the details panel.
 
-## Current capabilities
+## What you can do
 
-Minotaur is in early development. Its current implementation includes:
+- **Find callers.** Use `callers` to locate calls to a function, `definitions`
+  to find a declaration, and `context` to read source around a reported location.
+- **Investigate change impact.** `impact` traces incoming calls and imports,
+  showing dependencies by distance so you can decide which code to inspect next.
+- **Inspect subsystem consumers.** Declare which files belong to each system.
+  `consumers` shows outside files that use it, `surface` shows symbols they reach,
+  and `system-deps` shows its outgoing dependencies. `systems` summarizes the
+  declarations and how much of their source is represented in the graph.
+- **Compare structural changes.** Ordinary `query diff` compares symbols and
+  relationships in graph snapshots. In a configured Git repository with a
+  committed baseline, `query diff --systems` compares subsystem connections,
+  consumers, and exposed symbols, including changes caused by moving files
+  between system definitions. See the [shop comparison walkthrough](examples/system-walkthrough/comparison.md).
+- **Find potentially unused symbols.** `unreferenced` gives you candidates to
+  investigate. An absent reference does not prove that code is safe to delete.
+- **Explore visually.** Search, filter, zoom, and select nodes or connections to
+  inspect their details and source evidence. The self-contained HTML explorer
+  opens locally without a server or network requests.
 
-- a versioned canonical graph schema, tested graph model, and semantic validator;
-- bounded native Python and JavaScript analyzers behind the selected-path CLI
-  (each invocation selects one language: `.py` or `.js`);
-- fixed agent-facing graph queries for callers, definitions, impact,
-  unreferenced symbols, system inventory, snapshot diffs, and source context;
-- committed graph artifacts with per-file content digests and last-generation
-  Git provenance, so reviewed graphs remain reproducible while unchanged
-  content stays byte-stable across commit and branch changes;
-- committed system definitions that name subsystem boundaries, with `systems`
-  reporting inventory and graph coverage and the `surface`, `consumers`, and
-  `system-deps` queries reporting who reaches across a declared boundary;
-- a self-contained HTML explorer with filters, themes, source excerpts, and
-  call-site inspection.
+## A small example
 
-## Query workflow
+In the bundled [greeting program](examples/getting-started/app.py), `greeting`
+returns a message and `welcome` calls it with `"Ada"`. After completing
+[Quick start](#quick-start), the walkthrough runs this sequence inside its
+new temporary directory containing a copy of `app.py`:
 
-The query workflow has two steps: analyze supported source to build a graph,
-then ask focused questions against that snapshot. In a configured repository,
-the analyzed whole-repository graph and per-system graphs are committed
-artifacts; their per-file content digests decide freshness, while
-`source_control` records the commit and branch of their last real generation
-as provenance. For example,
-`minotaur analyze --root src --output graph.json src` records the structure and
-source evidence that later queries can navigate without importing or executing
-the project.
-
-For committed graphs, regenerate the whole-repository or selected system
-snapshot when analyzed content or selection changes, review the graph and its
-sidecar alongside the source change, and commit them together. When content is
-unchanged, analysis keeps the existing bytes and last-generation provenance;
-the recorded stamp may therefore lag the current `HEAD`.
-
-The query family turns that graph into practical navigation and review tools:
-`definitions` finds where a name is defined, `callers` traces who calls it,
-`impact` shows what depends on it if it changes, and `unreferenced` produces a
-candidate list for a dead-code audit. `context` reads the surrounding source
-at a reported location, while `diff` compares two graph snapshots so changes
-in the analyzed structure are easy to review. `diff` supports committed-reference
-mode (`minotaur query diff` or `minotaur query diff --scope NAME`, which
-requires the located project configuration) and explicit two-snapshot mode
-(`minotaur query diff OLD NEW`, which is configuration-free).
-
-Declared system boundaries add a repository overview and three named-boundary
-queries. `systems` lists every declaration with represented and absent file
-coverage and can show observed boundary connections. `surface` lists the
-in-scope symbols that files outside a system reach, `consumers` lists the
-outside files that use it, and `system-deps` lists the other systems and
-unlisted targets it depends on. See the
-[system definitions guide](docs/guides/system-definitions.md) for the
-membership model, the [system walkthrough](examples/system-walkthrough/) for
-executed output, and the [system definition format](docs/formats/system-definition-v1.md)
-for the committed `system.toml` contract.
-
-Queries run against any analyzed graph, including the checked-in example:
-
-```console
-$ minotaur query callers minotaur.language_interpreter.selection._resolve_target \
-    --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
-minotaur/language_interpreter/selection.py:46:20  minotaur.language_interpreter.selection.select_sources
+```text
+$ minotaur analyze --root . --output graph.json --force app.py
+exit: 0
+$ minotaur query definitions greeting --graph graph.json --root . --no-refresh
+app.py:4  app.greeting  function
+exit: 0
+$ minotaur query callers app.greeting --graph graph.json --root . --no-refresh
+app.py:11:12  app.welcome
+exit: 0
+$ minotaur visualize --input graph.json --output graph.html --source-root .
+exit: 0
 ```
 
-`--no-refresh` answers from the graph as checked in instead of re-analyzing
-drifted files and rewriting it. See the [query walkthrough](examples/query-walkthrough/)
-for a step-by-step tour with executed output, and the [query reference](docs/guides/query-reference.md)
-for command options. The [freshness concept](docs/concepts/freshness.md) owns
-the complete order-of-operations contract, including what queries detect and
-what remains intentionally outside the freshness boundary.
+`app.py:11:12` means file `app.py`, line 11, column 12 (both counted from one).
+`app.welcome` is the caller: function `welcome` in module `app`. The definition
+is on line 4. The runner prints `exit: 0` for a successful command; analysis
+and visualization themselves are silent on success. `--no-refresh` reads the
+saved graph without regenerating it.
 
-Current Python-analysis behavior and limits are described in the
-[Python analysis guide](docs/guides/analyze-python.md).
-JavaScript selection and analysis boundaries are described in the
-[JavaScript analysis guide](docs/guides/analyze-javascript.md).
-
-## Local-first and privacy-conscious
-
-Minotaur creates portable artifacts for local analysis. Its HTML explorer is
-self-contained, opens directly from `file://`, and never requests a network
-resource. The GitHub Pages link above is a static preview of that same
-downloadable artifact.
-
-## Architecture and extension boundaries
-
-Minotaur interprets supported source files into its canonical graph, then
-renders that graph through independent visualization formats. The language
-interpreter and visualizer are the two primary extension boundaries.
-
-### `language_interpreter/`
-
-Language interpreters examine source workspaces directly and produce graph
-facts from the language they understand. Each interpreter owns its language
-semantics, resolution limits, source locations, and evidence.
-
-Python and JavaScript are the implemented interpreters. C# and other languages
-are future extensions, not current compatibility claims. See
-[Create a language interpreter](docs/guides/create-a-language-interpreter.md)
-for the selected-file API and registration convention for new languages.
-
-### `graph_visualizer/`
-
-The visualizer turns a canonical graph into an understandable exploration
-experience. Its implemented self-contained HTML explorer opens locally without
-a server and supports:
-
-- zooming and panning;
-- node-class and relationship-kind filters;
-- symbol and label search;
-- persistent node and edge details, source locations, call-site inspection,
-  source excerpts, and connected relationships;
-- visual distinction between relationship kinds; and
-- switchable graph layout direction.
-
-Static formats such as DOT and SVG are planned alongside the interactive view.
-
-## Evidence is part of the graph
-
-Minotaur represents more than nodes and lines. Nodes and relationships retain
-their source location, identity, relationship type, provenance, supporting
-evidence, and unresolved state. There is deliberately no canonical confidence
-score: how a relationship was established is stated explicitly rather than
-summarized as a cross-tool probability.
-
-This distinction matters. A static source reference and a relationship supplied
-by a declared rule are useful—but they do not mean the same thing. Minotaur
-keeps those differences visible instead of blending them into an apparently
-certain diagram. Runtime observation and human assertion are planned as future,
-separately labeled evidence types, not current ones.
-
-## What a graph does not prove
-
-Minotaur is a structural analysis tool, not a complete behavioral model. A
-relationship in a graph is evidence that a connection exists or was observed;
-it is not, by itself, proof that the connection executes in every run or in a
-particular scenario.
-
-In particular, a graph does not automatically explain:
-
-- whether a call is reached through a particular conditional branch;
-- whether dynamic dispatch, reflection, generated code, or configuration
-  changes its runtime target;
-- whether an observed relationship succeeds, fails, or produces a given
-  outcome; or
-- the product or business rationale behind a relationship.
-
-Where available, Minotaur may retain directly observable context. Interpretation
-beyond that evidence belongs in documentation or, in the future, explicitly
-labeled human-authored annotations.
+For a larger example, the bundled [shop](examples/system-walkthrough/README.md)
+defines orders and billing as separate systems. `complete_order` in
+`shop/orders.py` calls `charge` in `shop/billing.py`. That makes orders a
+consumer of billing and billing a dependency of orders. The walkthrough shows
+those connections; its [comparison example](examples/system-walkthrough/comparison.md)
+then adds a refund call and shows how the boundary report changes.
 
 ## Quick start
 
@@ -209,74 +106,58 @@ An editable install makes commands use the source in this checkout, so edits
 are available without reinstalling. `python -m` runs a Python module; the
 installed `minotaur` command runs the same CLI.
 
-Follow the [first Python walkthrough](examples/getting-started/README.md)
-to analyze a tiny program, find its helper and caller, and open an HTML graph.
-It creates its output in a new temporary directory, leaving bundled files intact.
-Analysis reads source; it does not run the example program.
-
-For development checks and optional browser dependencies, see the
-[contributor reading guide](docs/guides/contributing.md).
-
-### Troubleshooting
-
-If an older editable install reports `ModuleNotFoundError` for `orjson`,
-repeat your installation command with the activated interpreter. Development
-installs use `python -m pip install -e ".[dev]"`.
-
-For an existing graph, see the [HTML visualization guide](docs/guides/customize-html-visualization.md).
-Omit `--source-root` when the portable artifact should contain no source text;
-in a configured project the configuration can supply that root, as explained
-in the [configuration guide](docs/guides/project-configuration.md).
-
-## End-to-end example
-
-The checked-in [Python workflow example](examples/python-workflow/README.md)
-analyzes the `selection` module, writes a canonical JSON graph, and renders it
-into a standalone HTML explorer. Browse its
-[canonical JSON graph](examples/python-workflow/minotaur-graph.json) and the
-[graph format reference](docs/formats/minotaur-graph-v1.md) for the complete
-structure and evidence model.
-
-Regenerate the checked-in example from the repository root:
+From the same repository directory, run the first walkthrough:
 
 ```bash
-python3 scripts/generate_example_output.py
+python examples/run_walkthrough.py python
 ```
 
-The generator uses the public `analyze` and `visualize` commands and removes
-only volatile Git snapshot metadata from the distributable graph, so the
-checked-in JSON and HTML remain reproducible across commits. Direct CLI
-invocations retain the current Git metadata in normal analysis output.
+It copies the greeting program into a new temporary directory, analyzes it into
+`graph.json` and a digest sidecar, runs the queries shown above, and creates
+`graph.html` with source excerpts. It prints commands, results, exit statuses,
+and a local URL to open in your browser. Press Enter when you finish viewing;
+the runner removes its temporary directory and leaves bundled files untouched.
+The [first Python graph guide](examples/getting-started/README.md) explains each
+step and how to keep a scratch copy for experiments.
 
-Open the generated [standalone HTML explorer](examples/python-workflow/minotaur-graph.html)
-locally with `file://`; it does not require a server or network connection.
+## Supported behavior and limitations
 
-It does not yet include C#, automatic runtime tracing, or broad compatibility
-with third-party graph formats.
+Minotaur analyzes Python (`.py`) or JavaScript (`.js`), one language per
+invocation. Answers depend on the files you select and the relationships the
+analyzer can establish. See the [Python analysis guide](docs/guides/analyze-python.md)
+and [JavaScript analysis guide](docs/guides/analyze-javascript.md) for supported
+constructs and resolution limits.
 
-## Repository layout
+A source connection does not prove that a call runs in a particular scenario,
+what target dynamic dispatch chooses, or whether an operation succeeds.
+Minotaur does not execute the project or observe runtime behavior. Unresolved
+references remain visible; `callers` also includes explicitly marked unresolved
+name matches as leads to inspect, not confirmed calls to the requested target.
 
-```text
-src/minotaur/
-  cli.py                   # Command parsing and orchestration
-  config.py                # Project defaults and path resolution
-  comparison.py            # Historical/current snapshot acquisition
-  query/                   # Graph navigation and comparison results
-  graph_model/             # Canonical graph contract and graph operations
-  language_interpreter/    # Native source-language analysis; Python and JavaScript
-  graph_visualizer/        # Interactive HTML and future static views
+Queries use graph snapshots. By default, queries that support refresh check
+for source drift and can regenerate the graph; `--no-refresh` keeps the saved
+snapshot. Read the [freshness guide](docs/concepts/freshness.md) for what is
+checked and what falls outside that boundary.
 
-schemas/minotaur-graph/    # Versioned public graph schema
-examples/                  # Synthetic, public-safe inputs and workspaces
-docs/                      # Architecture, concepts, guides, and formats
-tests/                     # Behavioral tests and public fixtures
-```
+[Project configuration](docs/guides/project-configuration.md) saves defaults
+such as source paths and graph location. Committing a graph and its digest
+sidecar alongside source is an optional repository workflow; configuration
+does not commit files for you. For that workflow, review regenerated artifacts
+with source changes. Unchanged analyzed content keeps existing artifact bytes
+and last-generation Git provenance.
+
+## Further reading
+
+- [Query walkthrough](examples/query-walkthrough/) and [command reference](docs/guides/query-reference.md): navigate source and compare snapshots.
+- [System definitions](docs/guides/system-definitions.md): group files and inspect their boundaries.
+- [HTML visualization guide](docs/guides/customize-html-visualization.md): create an explorer and control embedded source excerpts.
+- [Python workflow example](examples/python-workflow/README.md): reproduce the bundled graph, HTML, and screenshot.
+- [Purpose and boundary](docs/concepts/purpose.md) and [graph format reference](docs/formats/minotaur-graph-v1.md): understand the structural model and evidence categories.
 
 ## Contributing
 
 Start with the [contributor reading guide](docs/guides/contributing.md) for
-installation, a trace through the implementation, and local checks.
-
+development installation, a trace through the implementation, and local checks.
 Before adding a language interpreter or visualization feature, specify its
 behavior and evidence model and test it against synthetic public fixtures.
 
