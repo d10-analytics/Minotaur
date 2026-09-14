@@ -8,6 +8,7 @@
   var callSiteAssociations = (payload.excerpts && payload.excerpts.call_sites) || {};
   var byId = new Map(graph.nodes.map(function (n) { return [n.id, n]; }));
   var layoutDir = "TB";
+  var activeLayout = null;
   var themeModeEl = document.getElementById("theme-mode");
   var systemColorScheme = window.matchMedia("(prefers-color-scheme: dark)");
   // One shared value prevents node and edge labels from drifting apart as the
@@ -166,7 +167,7 @@
     container: document.getElementById("cy"),
     elements: elements,
     style: graphStyle(activeTheme),
-    layout: { name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15 },
+    layout: { name: "preset", fit: false },
     wheelSensitivity: 1,
     minZoom: 0.1,
     maxZoom: 4
@@ -265,9 +266,9 @@
     if (themeModeEl.value === "system") applyTheme();
   });
 
-  applyFilters();
+  applyFilters(false);
 
-  function applyFilters() {
+  function applyFilters(animate) {
     var hiddenKinds = [];
     kindsEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
       if (!cb.checked) hiddenKinds.push(cb.dataset.kind);
@@ -295,7 +296,7 @@
     if (selectedElement && !selectedElement.visible()) {
       closeAll();
     }
-    runLayout();
+    runLayout(animate !== false);
   }
 
   // --- Search ---
@@ -732,7 +733,7 @@
   });
 
   document.getElementById("btn-fit").addEventListener("click", function () {
-    cy.fit(undefined, 30);
+    fitVisible();
   });
 
   var zoomSlider = document.getElementById("zoom-speed");
@@ -741,10 +742,29 @@
     if (renderer) renderer.wheelSensitivity = Number(zoomSlider.value) / 5;
   });
 
-  function runLayout() {
-    // Layout is rerun after visibility and direction changes because Dagre
-    // cannot infer that hidden elements should stop consuming rank space.
-    cy.layout({ name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15, animate: true, animationDuration: 300 }).run();
+  function stopLayout() {
+    if (activeLayout) activeLayout.stop();
+    cy.elements().stop(true, false);
+    cy.stop(true, false);
+  }
+
+  function fitVisible() {
+    stopLayout();
+    var visible = cy.elements(":visible");
+    if (visible.nodes().length) cy.fit(visible, 30);
+  }
+
+  function runLayout(animate) {
+    stopLayout();
+    var visible = cy.elements(":visible");
+    if (!visible.nodes().length) return;
+    // Passing the collection keeps hidden nodes and edges out of Dagre's ranks
+    // while preserving their identities and evidence for later restoration.
+    activeLayout = visible.layout({
+      name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15,
+      padding: 30, animate: animate !== false, animationDuration: 300
+    });
+    activeLayout.run();
   }
 
   // --- Keyboard shortcuts ---
@@ -756,7 +776,7 @@
     if (evt.key === "Escape") {
       closeAll();
     } else if (evt.key === "f") {
-      cy.fit(undefined, 30);
+      fitVisible();
     }
   });
 
