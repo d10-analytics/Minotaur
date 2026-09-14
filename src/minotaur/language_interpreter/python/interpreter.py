@@ -745,6 +745,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        # EDGE-BIND-001: supports direct function-body named imports with source-position resolution.
         state = self._flow_state()
         if state is None or state.flow_frozen:
             return
@@ -2019,6 +2020,8 @@ def _module_flow_states(
 
 
 def _join_flow_states(states: tuple[_ImportFlowState, ...]) -> _ImportFlowState:
+    # EDGE-BIND-002: supports agreeing conditional import routes after a flow join.
+    # EDGE-BIND-003: supports conservative unresolved divergent or omitted conditional import routes.
     """Join conditional arms while retaining only agreeing import routes.
 
     Plain dotted imports need component-level agreement. The package root and
@@ -2470,6 +2473,8 @@ def _module_node(module: _Module) -> Node:
 def _declarations(
     module: _Module,
 ) -> tuple[dict[str, str], dict[ast.stmt, _DeclaredSymbol], list[Node]]:
+    # EDGE-DECL-001: supports repeated direct declarations with last-binding bare-use resolution.
+    # EDGE-DECL-002: excludes conditional function declarations from emitted identity.
     declarations: dict[str, str] = {module.name: module.module_id}
     symbols: dict[ast.stmt, _DeclaredSymbol] = {}
     nodes: list[Node] = []
@@ -3399,6 +3404,7 @@ def _resolve_call(
     context: _ScopeContext,
     class_declarations: Mapping[str, str] | None,
 ) -> str | None:
+    # EDGE-BIND-004: supports eligible plain-dotted imports resolving to exact declaration targets.
     head = text.partition(".")[0]
     local_target = context.import_targets.get(head)
     if any(text == name or text.startswith(f"{name}.") for name in context.uncertain_import_names):
