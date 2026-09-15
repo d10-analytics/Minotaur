@@ -180,15 +180,59 @@ def _has_named_definition(path: Path, name: str) -> bool:
 
 
 def _named_definition_count(path: Path, name: str) -> int:
+    """Count definitions at a dotted owner path such as ``Class.method``."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (OSError, SyntaxError) as error:
         raise CatalogError(f"cannot parse linked source: {path}") from error
-    return sum(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        and node.name == name
-        for node in ast.walk(tree)
-    )
+    current: list[ast.AST] = [tree]
+    for part in name.split("."):
+        next_nodes: list[ast.AST] = []
+        for container in current:
+            body = getattr(container, "body", ())
+            next_nodes.extend(
+                node
+                for node in body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and node.name == part
+            )
+        current = next_nodes
+    return len(current)
+
+
+def _owner_node(path: Path, name: str) -> ast.AST:
+    count = _named_definition_count(path, name)
+    if count != 1:
+        raise CatalogError(f"owner path is not unique: {name} ({count} definitions)")
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError) as error:
+        raise CatalogError(f"cannot parse linked source: {path}") from error
+    current: list[ast.AST] = [tree]
+    for part in name.split("."):
+        current = [
+            node
+            for container in current
+            for node in getattr(container, "body", ())
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == part
+        ]
+    return current[0]
+
+
+def _validate_owner_marker(path: Path, owner_symbol: str, marker: str) -> None:
+    """Require one exact marker globally and within its qualified AST owner."""
+    owner_node = _owner_node(path, owner_symbol)
+    source_bytes = path.read_bytes()
+    marker_bytes = marker.encode("utf-8")
+    if source_bytes.count(marker_bytes) != 1:
+        raise CatalogError(f"marker must occur exactly once at owner: {owner_symbol}")
+    source_lines = source_bytes.splitlines(keepends=True)
+    scope_start = owner_node.lineno - 1
+    scope_end = owner_node.end_lineno or owner_node.lineno
+    scope_bytes = b"".join(source_lines[scope_start:scope_end])
+    if scope_bytes.count(marker_bytes) != 1:
+        raise CatalogError(f"marker is outside canonical owner scope: {owner_symbol}")
 
 
 def _validate_catalog(text: str) -> list[dict[str, object]]:
@@ -217,8 +261,9 @@ def _validate_catalog(text: str) -> list[dict[str, object]]:
                 continue
             owner_symbol, owner_path = _linked_field(str(fields["Owner"]), "Owner", CATALOG)
             proof_symbol, proof_path = _linked_field(str(fields["Proof"]), "Proof", CATALOG)
-            if owner_path.suffix != ".py" or not _has_named_definition(owner_path, owner_symbol):
-                raise CatalogError(f"owner symbol is not defined: {case_id}/{namespace}")
+            if owner_path.suffix != ".py":
+                raise CatalogError(f"owner source is not Python: {case_id}/{namespace}")
+            _owner_node(owner_path, owner_symbol)
             if (
                 proof_path.suffix != ".py"
                 or not proof_symbol.startswith("test_")
@@ -233,13 +278,9 @@ def _validate_catalog(text: str) -> list[dict[str, object]]:
             ):
                 raise CatalogError(f"marker lacks exact ID or status clause: {case_id}/{namespace}")
             try:
-                source_bytes = owner_path.read_bytes()
+                _validate_owner_marker(owner_path, owner_symbol, marker)
             except OSError as error:
                 raise CatalogError(f"cannot read owner source: {owner_path}") from error
-            if source_bytes.count(marker.encode("utf-8")) != 1:
-                raise CatalogError(
-                    f"marker must occur exactly once at owner: {case_id}/{namespace}"
-                )
     return cases
 
 
@@ -269,6 +310,19 @@ def test_catalog_owner_symbols_are_unambiguous() -> None:
                 continue
             owner_symbol, owner_path = _linked_field(str(fields["Owner"]), "Owner", CATALOG)
             assert _named_definition_count(owner_path, owner_symbol) == 1
+
+
+def test_catalog_rejects_marker_outside_qualified_owner_scope(tmp_path: Path) -> None:
+    marker = (
+        "# EDGE-BIND-001: supports direct function-body named-import source-position resolution."
+    )
+    source = tmp_path / "owner.py"
+    source.write_text(
+        f"{marker}\n\nclass _ScopeCallVisitor:\n    def visit_ImportFrom(self):\n        pass\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CatalogError, match="outside canonical owner scope"):
+        _validate_owner_marker(source, "_ScopeCallVisitor.visit_ImportFrom", marker)
 
 
 def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
