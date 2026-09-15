@@ -247,6 +247,25 @@ def test_shipped_catalog_has_settled_matrix_and_traceability() -> None:
         assert not re.search(r"EDGE-(?:BIND|DECL)-\d{3}", text)
 
 
+def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
+    text = re.sub(
+        r"\s+",
+        " ",
+        (ROOT / "docs/guides/create-a-language-interpreter.md").read_text(encoding="utf-8"),
+    )
+    ordered_steps = (
+        "After registering a new interpreter, maintain the [interpreter edge-case catalog]",
+        "add one status row for every existing case",
+        "for each applicable row add a minimal example, expected graph facts, "
+        "one owner marker, and one natural behavioral proof",
+        "add a new append-only case only when a source-proven invariant is genuinely new",
+        "then run the catalog integrity test followed by all six CI lanes",
+    )
+    positions = tuple(text.find(step) for step in ordered_steps)
+    assert all(position >= 0 for position in positions)
+    assert positions == tuple(sorted(positions))
+
+
 @pytest.mark.parametrize(
     ("label", "mutate"),
     [
