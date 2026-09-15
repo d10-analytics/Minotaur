@@ -46,7 +46,7 @@ Question: When every direct `if` arm establishes the same import route, is that 
 #### Python — minotaur-python
 
 Status: SUPPORTED
-Example: `if flag: from library import helper; else: from library import helper; helper()`
+Example: `if flag:\n    from library import helper\nelse:\n    from library import helper\nhelper()`
 Expected graph facts: The post-join `helper()` resolves to one exact `library.helper` target, while each import statement contributes its own `IMPORTS` evidence.
 Owner: [`_join_flow_states`](../../src/minotaur/language_interpreter/python/interpreter.py); the structural join retains only agreeing routes.
 Marker: # EDGE-BIND-002: supports agreeing conditional import routes after a flow join.
@@ -64,7 +64,7 @@ Question: When conditional import arms disagree or an arm omits the import, does
 #### Python — minotaur-python
 
 Status: SUPPORTED
-Example: `if flag: from library import helper; else: from other import helper; helper()`
+Example: `if flag:\n    from library import helper\nelse:\n    from other import helper\nhelper()`
 Expected graph facts: The focal `helper` use is one `UNRESOLVED_REFERENCE` with its source text and no stale `CALLS` or `REFERENCES` edge to either candidate target.
 Owner: [`_join_flow_states`](../../src/minotaur/language_interpreter/python/interpreter.py); the structural join conservatively excludes divergent or omitted routes.
 Marker: # EDGE-BIND-003: supports conservative unresolved divergent or omitted conditional routes.
@@ -100,7 +100,7 @@ Question: When a language has repeated direct function declarations, does a late
 #### Python — minotaur-python
 
 Status: SUPPORTED
-Example: `def helper(): return 1; def helper(): return 2; helper()`
+Example: `def helper():\n    return 1\n\ndef helper():\n    return 2\n\nhelper()`
 Expected graph facts: Both declaration nodes remain distinct, and the bare `helper()` call targets only the later declaration.
 Owner: [`_declarations`](../../src/minotaur/language_interpreter/python/interpreter.py); direct declaration collection preserves identity while updating the final binding.
 Marker: # EDGE-DECL-001: supports repeated direct declarations with last-binding bare-use resolution.
@@ -122,7 +122,7 @@ Question: When a function declaration is conditional, does the analyzer exclude 
 #### Python — minotaur-python
 
 Status: UNSUPPORTED
-Example: `if flag: def choose(): return 1; else: def choose(): return 2; choose()`
+Example: `if flag:\n    def choose():\n        return 1\nelse:\n    def choose():\n        return 2\nchoose()`
 Expected graph facts: No `app.choose` declaration or containment is emitted, and the later `choose` use is one unresolved reference owned by the caller.
 Owner: [`_declarations`](../../src/minotaur/language_interpreter/python/interpreter.py); conditional function declarations are excluded from emitted identity.
 Marker: # EDGE-DECL-002: excludes conditional function declarations from emitted identity.
