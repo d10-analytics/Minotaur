@@ -399,11 +399,11 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
         (
             "missing proof",
             lambda text: text.replace(
-                "Proof: [`test_function_local_import_routes_bind_calls_and_loads_"
-                "at_source_positions`]"
+                "Proof: [`test_source_position_routes_prove_owner_location_and_syntactic_imports`]"
                 "(../../tests/language_interpreter/python/test_interpreter.py); "
                 "the natural fixture reaches the public Python analyzer and asserts "
-                "both edge kinds and no unresolved use.\n",
+                "each resolved call/load source position, exact target, and syntactic "
+                "import evidence.\n",
                 "",
                 1,
             ),
@@ -438,7 +438,7 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
         (
             "absent test function",
             lambda text: text.replace(
-                "[`test_function_local_import_routes_bind_calls_and_loads_at_source_positions`]",
+                "[`test_source_position_routes_prove_owner_location_and_syntactic_imports`]",
                 "[`test_missing_catalog_proof_function`]",
                 1,
             ),
