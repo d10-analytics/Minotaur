@@ -89,6 +89,16 @@ choose an interpreter. Registering the extension is all that is needed for the
 existing CLI to discover and dispatch explicitly selected `.example` files;
 do not add a language-specific subcommand or language flag.
 
+After registering a new interpreter, maintain the [interpreter edge-case
+catalog](../concepts/interpreter-edge-cases.md) in this order: add one status
+row for every existing case; for each applicable row add a minimal example,
+expected graph facts, one owner marker, and one natural behavioral proof; add a
+new append-only case only when a source-proven invariant is genuinely new; then
+run the catalog integrity test followed by all six CI lanes. Keep language
+semantics owned by the interpreter: this process does not promise mixed-
+language graph composition or require separate interpreters to share internal
+algorithms.
+
 ## Record source freshness
 
 The registration's `namespace` must match the extension key on every emitted

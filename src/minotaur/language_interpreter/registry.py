@@ -43,12 +43,21 @@ class InterpreterRegistry:
 
     def __init__(self, registrations: tuple[InterpreterRegistration, ...]) -> None:
         by_extension: dict[str, InterpreterRegistration] = {}
+        normalized_registrations: list[InterpreterRegistration] = []
         for registration in registrations:
             extension = _normalize_extension(registration.extension)
             if extension in by_extension:
                 raise ValueError(f"duplicate interpreter registration for {extension}")
-            by_extension[extension] = replace(registration, extension=extension)
+            normalized = replace(registration, extension=extension)
+            by_extension[extension] = normalized
+            normalized_registrations.append(normalized)
         self._by_extension = by_extension
+        self._registrations = tuple(normalized_registrations)
+
+    @property
+    def registrations(self) -> tuple[InterpreterRegistration, ...]:
+        """Return normalized registrations in their construction order."""
+        return self._registrations
 
     def registration_for(self, path: Path) -> InterpreterRegistration | None:
         """Return the owner of ``path`` without making unsupported files errors.

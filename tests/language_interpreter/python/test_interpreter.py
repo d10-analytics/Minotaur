@@ -2907,7 +2907,8 @@ def test_plain_shadowed_definition_body_and_containment_use_statement_identity(
         "def f():\n"
         "    return first()\n\n"
         "def f():\n"
-        "    return second()\n",
+        "    return second()\n\n"
+        "f()\n",
     )
 
     result = analyze_python_workspace(tmp_path)
@@ -2927,6 +2928,49 @@ def test_plain_shadowed_definition_body_and_containment_use_statement_identity(
     assert (second_f.id, second, RelationshipKind.CALLS.value) in relationships
     assert (first_f.id, second, RelationshipKind.CALLS.value) not in relationships
     assert (second_f.id, first, RelationshipKind.CALLS.value) not in relationships
+    assert (module, second_f.id, RelationshipKind.CALLS.value) in relationships
+    assert (module, first_f.id, RelationshipKind.CALLS.value) not in relationships
+
+
+def test_conditional_function_redefinitions_remain_unemitted_and_unresolved(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "if True:\n"
+        "    def choose():\n"
+        "        return 1\n"
+        "else:\n"
+        "    def choose():\n"
+        "        return 2\n\n"
+        "def caller():\n"
+        "    return choose()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    assert result.diagnostics == ()
+    assert _nodes(result, "app.choose") == []
+
+    labels = {node.id: node.label for node in result.document.nodes}
+    assert all(
+        not (
+            relationship.kind == RelationshipKind.CONTAINS.value
+            and labels.get(relationship.target) == "app.choose"
+        )
+        for relationship in result.document.relationships
+    )
+
+    caller = _node_id(result, "app.caller")
+    unresolved = [
+        node
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "choose"
+    ]
+    assert len(unresolved) == 1
+    assert unresolved[0].identity.originating_node == caller
+    assert _unresolved_by_source(result)["app.caller"] == {"choose"}
+    assert _unresolved_sites(result) == {("app.caller", "choose", 9)}
 
 
 def test_shadowed_definitions_keep_header_and_unresolved_call_attribution(

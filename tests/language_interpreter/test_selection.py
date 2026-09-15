@@ -141,12 +141,20 @@ def test_registry_normalization_preserves_namespace_and_defaults() -> None:
     normalized = registry.registration_for(Path("source.js"))
 
     assert normalized is not None
+    assert isinstance(registry.registrations, tuple)
+    assert registry.registrations == (normalized,)
+    assert registry.registrations[0] is normalized
     assert normalized.extension == ".js"
     assert normalized.namespace == "custom-js"
     assert normalized.analyze_files is analyze
 
-    python = default_registry().registration_for(Path("source.py"))
-    javascript = default_registry().registration_for(Path("source.js"))
+    defaults = default_registry()
+    assert tuple(registration.namespace for registration in defaults.registrations) == (
+        "minotaur-python",
+        "minotaur-javascript",
+    )
+    python = defaults.registration_for(Path("source.py"))
+    javascript = defaults.registration_for(Path("source.js"))
     assert python is not None and python.namespace == "minotaur-python"
     assert javascript is not None and javascript.namespace == "minotaur-javascript"
 

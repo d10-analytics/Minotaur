@@ -11,6 +11,9 @@ Use that contract when interpreting an import, call, reference, or unresolved
 relationship; this guide focuses on running the analysis and the Python
 module and callable binding behavior.
 
+For the cross-language case matrix and exact source/proof links, see the
+[interpreter edge-case catalog](../concepts/interpreter-edge-cases.md).
+
 Analysis records source bytes and the selected targets for later freshness
 checks. See [Graph freshness and snapshot order](../concepts/freshness.md) for
 the exact refresh, no-refresh, clean-skip, and graph-integrity contract.

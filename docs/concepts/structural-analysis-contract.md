@@ -11,6 +11,11 @@ references below name natural public tests; each test builds a temporary
 workspace, analyzes it through the normal public path, and asserts the graph
 relationship or query result that would fail if the behavior were removed.
 
+The cross-language lookup and maintenance authority is the
+[interpreter edge-case catalog](interpreter-edge-cases.md). This contract
+keeps the detailed graph meanings and natural proof context; it does not
+duplicate the catalog's language matrix.
+
 ## Shared graph meanings
 
 An `IMPORTS` relationship records a syntactic import statement. A `CALLS`
