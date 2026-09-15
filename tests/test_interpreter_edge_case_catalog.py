@@ -179,6 +179,18 @@ def _has_named_definition(path: Path, name: str) -> bool:
     )
 
 
+def _named_definition_count(path: Path, name: str) -> int:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError) as error:
+        raise CatalogError(f"cannot parse linked source: {path}") from error
+    return sum(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.name == name
+        for node in ast.walk(tree)
+    )
+
+
 def _validate_catalog(text: str) -> list[dict[str, object]]:
     cases = _parse_catalog(text)
     ids = tuple(case["id"] for case in cases)
@@ -245,6 +257,18 @@ def test_shipped_catalog_has_settled_matrix_and_traceability() -> None:
         text = document.read_text(encoding="utf-8")
         _validate_navigation(text, document, target)
         assert not re.search(r"EDGE-(?:BIND|DECL)-\d{3}", text)
+
+
+def test_catalog_owner_symbols_are_unambiguous() -> None:
+    cases = _parse_catalog(CATALOG.read_text(encoding="utf-8"))
+    for case in cases:
+        for row in case["rows"]:
+            fields = row["fields"]
+            assert isinstance(fields, dict)
+            if fields["Status"] == "NOT_APPLICABLE":
+                continue
+            owner_symbol, owner_path = _linked_field(str(fields["Owner"]), "Owner", CATALOG)
+            assert _named_definition_count(owner_path, owner_symbol) == 1
 
 
 def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
