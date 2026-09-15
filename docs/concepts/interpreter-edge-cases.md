@@ -30,7 +30,7 @@ Question: When a direct named import appears in a function body, do calls and no
 Status: SUPPORTED
 Example: `def caller(): from library import helper; helper(); value = helper`
 Expected graph facts: Owner `app.caller` has `CALLS` and `REFERENCES` edges to `library.helper`; each edge keeps the expression source position, and the import statement remains an `IMPORTS` fact.
-Owner: [`visit_ImportFrom`](../../src/minotaur/language_interpreter/python/interpreter.py); the direct import visitor installs the function-body route.
+Owner: [`_ScopeCallVisitor.visit_ImportFrom`](../../src/minotaur/language_interpreter/python/interpreter.py); the direct import visitor installs the function-body route.
 Marker: # EDGE-BIND-001: supports direct function-body named-import source-position resolution.
 Proof: [`test_function_local_import_routes_bind_calls_and_loads_at_source_positions`](../../tests/language_interpreter/python/test_interpreter.py); the natural fixture reaches the public Python analyzer and asserts both edge kinds and no unresolved use.
 
