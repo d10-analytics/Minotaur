@@ -256,6 +256,25 @@ def test_shipped_catalog_has_settled_matrix_and_traceability() -> None:
             lambda text: text.replace("### EDGE-BIND-002 —", "### EDGE-BIND-001 —", 1),
         ),
         (
+            "category outside grammar",
+            lambda text: text.replace("### EDGE-BIND-001 —", "### EDGE-bind-001 —", 1),
+        ),
+        (
+            "duplicate language row",
+            lambda text: text.replace(
+                "#### JavaScript — minotaur-javascript", "#### Python — minotaur-python", 1
+            ),
+        ),
+        (
+            "missing question",
+            lambda text: text.replace(
+                "Question: When a direct named import appears in a function body, do calls and "
+                "non-call loads after the import resolve at their own source positions?\n",
+                "",
+                1,
+            ),
+        ),
+        (
             "malformed status",
             lambda text: text.replace("Status: SUPPORTED", "Status: MAYBE", 1),
         ),
