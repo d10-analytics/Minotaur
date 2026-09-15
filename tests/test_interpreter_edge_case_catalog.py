@@ -43,7 +43,6 @@ STATUS_MATRIX = {
 }
 CLOSED_STATUSES = {"SUPPORTED", "PARTIAL", "UNSUPPORTED", "NOT_APPLICABLE"}
 CASE_HEADING = re.compile(r"^###\s+(EDGE-[A-Z]+-\d{3})\s+—\s+(.+)$")
-ANY_CASE_HEADING = re.compile(r"^###\s+(\S+)")
 LANGUAGE_HEADING = re.compile(r"^####\s+(.+?)\s+—\s+([a-z0-9-]+)$")
 FIELD = re.compile(
     r"^(Question|Status|Example|Expected graph facts|Owner|Marker|Proof|Reason):\s*(.+)$"
