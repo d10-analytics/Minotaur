@@ -32,7 +32,7 @@ Example: `def caller(): from library import helper; helper(); value = helper`
 Expected graph facts: Owner `app.caller` has `CALLS` and `REFERENCES` edges to `library.helper`; each edge keeps the expression source position, and the import statement remains an `IMPORTS` fact.
 Owner: [`_ScopeCallVisitor.visit_ImportFrom`](../../src/minotaur/language_interpreter/python/interpreter.py); the direct import visitor installs the function-body route.
 Marker: # EDGE-BIND-001: supports direct function-body named-import source-position resolution.
-Proof: [`test_function_local_import_routes_bind_calls_and_loads_at_source_positions`](../../tests/language_interpreter/python/test_interpreter.py); the natural fixture reaches the public Python analyzer and asserts both edge kinds and no unresolved use.
+Proof: [`test_source_position_routes_prove_owner_location_and_syntactic_imports`](../../tests/language_interpreter/python/test_interpreter.py); the natural fixture reaches the public Python analyzer and asserts each resolved call/load source position, exact target, and syntactic import evidence.
 
 #### JavaScript — minotaur-javascript
 
@@ -104,7 +104,7 @@ Example: `def helper():\n    return 1\n\ndef helper():\n    return 2\n\nhelper()
 Expected graph facts: Both declaration nodes remain distinct, and the bare `helper()` call targets only the later declaration.
 Owner: [`_declarations`](../../src/minotaur/language_interpreter/python/interpreter.py); direct declaration collection preserves identity while updating the final binding.
 Marker: # EDGE-DECL-001: supports repeated direct declarations with last-binding bare-use resolution.
-Proof: [`test_from_import_targets_last_same_named_definition`](../../tests/language_interpreter/python/test_interpreter.py); the natural fixture asserts distinct declarations and final-only import/call targets.
+Proof: [`test_plain_shadowed_definition_body_and_containment_use_statement_identity`](../../tests/language_interpreter/python/test_interpreter.py); the natural fixture asserts repeated direct declarations retain distinct containment/body identities and that each bare use targets only its final binding.
 
 #### JavaScript — minotaur-javascript
 
