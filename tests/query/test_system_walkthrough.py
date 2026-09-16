@@ -244,6 +244,9 @@ def test_documented_command_still_prints_its_pasted_output(
 ) -> None:
     """Re-run one documented transcript and compare stdout byte-for-byte."""
     before = _committed_bytes()
+    sandbox = tmp_path / "config-free-sandbox"
+    sandbox.mkdir()
+    (sandbox / "examples").symlink_to(ROOT / "examples", target_is_directory=True)
     arguments = shlex.split(command)
     assert arguments[0] == "minotaur"
     scratch = str(tmp_path / "system-walkthrough-graph.json")
@@ -266,7 +269,7 @@ def test_documented_command_still_prints_its_pasted_output(
         ]
         completed = subprocess.run(
             prerequisite,
-            cwd=ROOT,
+            cwd=sandbox,
             text=True,
             capture_output=True,
             check=False,
@@ -274,7 +277,7 @@ def test_documented_command_still_prints_its_pasted_output(
         assert completed.returncode == 0, f"{command}\n{completed.stderr}"
     completed = subprocess.run(
         [sys.executable, "-m", "minotaur", *arguments],
-        cwd=ROOT,
+        cwd=sandbox,
         text=True,
         capture_output=True,
         check=False,
