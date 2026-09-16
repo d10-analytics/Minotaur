@@ -12,13 +12,17 @@ templates and vendor assets, query policy, and graph production.
 
 ## Expected interactions
 
-The following directions are expected/observed, non-enforced, and
-selection-bounded structural interactions:
+The following directions are expected/observed ownership or data-flow
+interactions. They are non-enforced and selection-bounded; a direction carried
+through composition need not appear as a direct static connection in the
+selected graph.
 
 - `command-interface` points to source presentation for presentation dispatch;
   source presentation receives that request.
-- Source presentation points to `graph-contract` for graph-backed source
-  locations and payload contracts.
+- Source presentation consumes `graph-contract`'s canonical graph payload and
+  source-location contract through command-interface composition. This is not
+  a direct static `source-presentation` to `graph-contract` connection in the
+  selected graph.
 
 These directions describe the selected proof universe, not required runtime
 dependencies or architectural policy; an observed edge is not asserted as
