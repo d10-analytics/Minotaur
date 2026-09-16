@@ -213,17 +213,13 @@ def _write_config(
     return destination
 
 
-def _query_systems(
-    capsys: pytest.CaptureFixture[str], *arguments: str
-) -> tuple[int, str, str]:
+def _query_systems(capsys: pytest.CaptureFixture[str], *arguments: str) -> tuple[int, str, str]:
     status = cli.main(["query", "systems", *arguments])
     captured = capsys.readouterr()
     return status, captured.out, captured.err
 
 
-def _analyze_real_source_to(
-    graph: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _analyze_real_source_to(graph: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Create a disposable graph from the checkout's configured source set."""
     monkeypatch.chdir(ROOT)
     assert cli.main(["analyze", "--output", str(graph)]) == 0
@@ -298,8 +294,7 @@ def test_configured_analysis_without_output_writes_only_isolated_root_artifacts(
     checkout_graph = ROOT / "minotaur-system-definitions.json"
     checkout_sidecar = stamp_path(checkout_graph)
     checkout_before = tuple(
-        path.read_bytes() if path.exists() else None
-        for path in (checkout_graph, checkout_sidecar)
+        path.read_bytes() if path.exists() else None for path in (checkout_graph, checkout_sidecar)
     )
     monkeypatch.chdir(project)
     assert cli.main(["analyze"]) == 0
@@ -312,8 +307,7 @@ def test_configured_analysis_without_output_writes_only_isolated_root_artifacts(
     assert sum(node.node_class is NodeClass.FILE for node in loaded.document.nodes) == 57
     assert sidecar.read_text(encoding="ascii").strip() == graph_digest(graph_bytes)
     checkout_after = tuple(
-        path.read_bytes() if path.exists() else None
-        for path in (checkout_graph, checkout_sidecar)
+        path.read_bytes() if path.exists() else None for path in (checkout_graph, checkout_sidecar)
     )
     assert checkout_after == checkout_before
 
