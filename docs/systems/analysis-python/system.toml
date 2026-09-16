@@ -1,0 +1,9 @@
+schema_version = 1
+name = "analysis-python"
+files = [
+  "minotaur/language_interpreter/python/__init__.py",
+  "minotaur/language_interpreter/python/binding_flow.py",
+  "minotaur/language_interpreter/python/discovery.py",
+  "minotaur/language_interpreter/python/interpreter.py",
+  "minotaur/language_interpreter/python/parsing.py",
+]

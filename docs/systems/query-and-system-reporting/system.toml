@@ -1,0 +1,18 @@
+schema_version = 1
+name = "query-and-system-reporting"
+files = [
+  "minotaur/query/__init__.py",
+  "minotaur/query/context.py",
+  "minotaur/query/correspondence.py",
+  "minotaur/query/diff.py",
+  "minotaur/query/freshness.py",
+  "minotaur/query/impact.py",
+  "minotaur/query/index.py",
+  "minotaur/query/render.py",
+  "minotaur/query/symbols.py",
+  "minotaur/query/system.py",
+  "minotaur/query/system_diff.py",
+  "minotaur/query/system_diff_view.py",
+  "minotaur/query/unreferenced.py",
+  "minotaur/system.py",
+]

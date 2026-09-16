@@ -1,0 +1,17 @@
+schema_version = 1
+name = "graph-contract"
+files = [
+  "minotaur/graph_model/__init__.py",
+  "minotaur/graph_model/_parsing.py",
+  "minotaur/graph_model/document.py",
+  "minotaur/graph_model/evidence.py",
+  "minotaur/graph_model/identity.py",
+  "minotaur/graph_model/loading.py",
+  "minotaur/graph_model/location.py",
+  "minotaur/graph_model/node.py",
+  "minotaur/graph_model/provenance.py",
+  "minotaur/graph_model/relationship.py",
+  "minotaur/graph_model/serialization.py",
+  "minotaur/graph_model/slicing.py",
+  "minotaur/graph_model/validation.py",
+]

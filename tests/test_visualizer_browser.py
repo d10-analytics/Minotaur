@@ -314,6 +314,7 @@ def test_python_workflow_preview_generator_captures_selected_call_site(tmp_path:
 
 def test_call_site_context_is_unavailable_without_a_root_and_has_no_caller_mode(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
     # A file caller has no known function/method boundary, so the alternate
@@ -322,6 +323,7 @@ def test_call_site_context_is_unavailable_without_a_root_and_has_no_caller_mode(
     graph_path = tmp_path / "graph.json"
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
     output = tmp_path / "view.html"
+    monkeypatch.chdir(tmp_path)
     assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
 
     with sync_playwright() as runner:
