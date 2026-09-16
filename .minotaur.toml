@@ -1,0 +1,23 @@
+[minotaur]
+schema_version = 1
+root = "src"
+graph = "../minotaur-system-definitions.json"
+systems_dir = "../docs/systems"
+targets = [
+  "minotaur/__init__.py",
+  "minotaur/__main__.py",
+  "minotaur/cli.py",
+  "minotaur/comparison.py",
+  "minotaur/config.py",
+  "minotaur/git.py",
+  "minotaur/graph_model",
+  "minotaur/graph_visualizer/__init__.py",
+  "minotaur/graph_visualizer/contract.py",
+  "minotaur/graph_visualizer/html/render.py",
+  "minotaur/graph_visualizer/presentation.py",
+  "minotaur/graph_visualizer/source.py",
+  "minotaur/language_interpreter",
+  "minotaur/query",
+  "minotaur/source.py",
+  "minotaur/system.py",
+]

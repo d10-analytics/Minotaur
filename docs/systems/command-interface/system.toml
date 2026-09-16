@@ -1,0 +1,7 @@
+schema_version = 1
+name = "command-interface"
+files = [
+  "minotaur/__init__.py",
+  "minotaur/__main__.py",
+  "minotaur/cli.py",
+]

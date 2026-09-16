@@ -7,6 +7,9 @@ build/
 .eggs/
 *.so
 
+/minotaur-system-definitions.json
+/minotaur-system-definitions.json.sha256
+
 .venv*/
 venv/
 

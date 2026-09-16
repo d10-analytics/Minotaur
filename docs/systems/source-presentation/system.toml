@@ -1,0 +1,10 @@
+schema_version = 1
+name = "source-presentation"
+files = [
+  "minotaur/graph_visualizer/__init__.py",
+  "minotaur/graph_visualizer/contract.py",
+  "minotaur/graph_visualizer/html/render.py",
+  "minotaur/graph_visualizer/presentation.py",
+  "minotaur/graph_visualizer/source.py",
+  "minotaur/source.py",
+]

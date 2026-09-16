@@ -1,0 +1,7 @@
+schema_version = 1
+name = "project-acquisition"
+files = [
+  "minotaur/comparison.py",
+  "minotaur/config.py",
+  "minotaur/git.py",
+]
