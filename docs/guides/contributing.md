@@ -125,15 +125,6 @@ to see why source changes and membership changes are distinct.
 - **Underscore names** conventionally mark implementation details. A public CLI
   example should call the CLI, not depend on private helpers remaining stable.
 
-In binding analysis, a **lattice** is a model for combining what is known about
-a name: unbound, a definite import, an ordinary value, or uncertain. A **join**
-combines branch information conservatively. A **tombstone** explicitly records
-that a route was removed, preventing a broader imported prefix from reviving
-it during lookup. A **worklist** revisits blocks when incoming facts change.
-Read the [binding examples](python-binding-examples.md) before the solver tests;
-those examples explain current public behavior, while standalone solver tests
-explain the separate primitives.
-
 Comments should explain ownership, ordering, and reasons for conservative
 choices. Prefer a small before/after example to a restatement of a loop. Keep
 user-visible contracts in guides and test them through real entry points.
