@@ -171,15 +171,6 @@ class _ScopeFrame:
 
 
 @dataclass(frozen=True, slots=True)
-class _RemovedScope:
-    """Retain one aggregate frame and its temporary marker, if any."""
-
-    index: int
-    frame: _ScopeFrame
-    marker: _ScopeFrame | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class _ExpressionSnapshot:
     """Complete lexical state captured at one expression source position."""
 
@@ -434,13 +425,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # module) frames remain visible for the method body. Restore the frames
         # after the walk so later class statements see the namespace built by
         # earlier statements in source order.
-        class_scopes = []
+        class_scopes = None
         if nested_class_method:
             # A method body cannot close over any class namespace, including
             # classes that contain the class declaring the method. Function
             # frames remain in place because they are legitimate lexical
-            # scopes. Keep the removed frames indexed so they can be restored
-            # before the enclosing class continues in source order.
+            # scopes. Save the original list so the enclosing class resumes
+            # with the same frames in the same order.
             class_scopes = self._remove_class_scopes()
         if deferred_type_param_names:
             self._push_scope(
@@ -490,7 +481,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._pop_scope()
         if deferred_type_param_names:
             self._pop_scope()
-        self._restore_class_scopes(class_scopes)
+        if class_scopes is not None:
+            self._restore_class_scopes(class_scopes)
 
     def visit_function_body(
         self,
@@ -1158,12 +1150,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
 
     def _remove_class_scopes(
         self,
-    ) -> list[_RemovedScope]:
+    ) -> list[_ScopeFrame]:
         """Temporarily hide every class namespace from a nested scope."""
-        removed: list[_RemovedScope] = []
-        for index in reversed(range(len(self._scope_frames))):
-            frame = self._scope_frames[index]
+        original = self._scope_frames
+        active: list[_ScopeFrame] = []
+        for frame in original:
             if not frame.is_class:
+                active.append(frame)
                 continue
             type_param_names = frame.type_param_names
             if type_param_names:
@@ -1182,27 +1175,16 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     type_param_names=type_param_names,
                     propagate_mutations=False,
                 )
-                self._scope_frames[index] = marker
-                removed.append(_RemovedScope(index, frame, marker))
-            else:
-                removed.append(_RemovedScope(index, frame))
-                del self._scope_frames[index]
-        return removed
+                active.append(marker)
+        self._scope_frames = active
+        return original
 
     def _restore_class_scopes(
         self,
-        removed: list[_RemovedScope],
+        original: list[_ScopeFrame],
     ) -> None:
-        for entry in sorted(removed, key=lambda entry: entry.index, reverse=True):
-            if entry.marker is not None:
-                marker_index = next(
-                    index
-                    for index, active_frame in enumerate(self._scope_frames)
-                    if active_frame is entry.marker
-                )
-                self._scope_frames[marker_index] = entry.frame
-            else:
-                self._scope_frames.insert(entry.index, entry.frame)
+        """Resume the saved scope order after balanced nested traversal."""
+        self._scope_frames = original
 
     def _scope_receivers(self) -> tuple[str | None, str | None]:
         for frame in reversed(self._scope_frames):
