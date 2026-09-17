@@ -10,15 +10,18 @@ import hashlib
 import json
 import sys
 import time
+from dataclasses import replace
+from itertools import product
 from pathlib import Path
 
 import pytest
 
 from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file
+from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipKind
 from minotaur.graph_model.validation import IssueCode, validate_document
-from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
+from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
 from minotaur.language_interpreter.python.interpreter import _ScopeCallVisitor
 from minotaur.language_interpreter.source_text import LineIndex
@@ -130,6 +133,23 @@ def test_python_interpreter_establishes_containment_imports_and_direct_calls(
     assert call.evidence[0].locations[0].range.start.line == 7
 
 
+def test_public_python_analysis_runs_without_retired_kernel(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "def main():\n    return 1\n")
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    function = _node_id(result, "app.main")
+
+    assert result.diagnostics == ()
+    assert validate_document(result.document).is_valid
+    assert (module, function, RelationshipKind.CONTAINS.value) in {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+
 def test_cli_records_file_content_hashes_and_root_relative_selection(tmp_path: Path) -> None:
     root = tmp_path / "source"
     _write(root, "z.py", "z = 1\n")
@@ -197,9 +217,14 @@ def test_syntax_error_is_reported_without_erasing_other_workspace_facts(tmp_path
 
     result = analyze_python_workspace(tmp_path)
 
-    assert [(diagnostic.code, diagnostic.path) for diagnostic in result.diagnostics] == [
-        (DiagnosticCode.PARSE_ERROR, "broken.py")
-    ]
+    assert result.diagnostics == (
+        Diagnostic(
+            DiagnosticCode.PARSE_ERROR,
+            "broken.py",
+            "invalid syntax",
+            Location("broken.py", Range(Position(0, 15), Position(0, 15))),
+        ),
+    )
     assert {node.label for node in result.document.nodes} >= {"valid", "valid.working"}
     assert "broken" not in {node.label for node in result.document.nodes}
     assert validate_document(result.document).is_valid
@@ -4148,14 +4173,7 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
 
     visitor = _ScopeCallVisitor("app")
     visitor.visit(ast.parse(source))
-    assert visitor._scope_bound_names == []
-    assert visitor._scope_global_names == []
-    assert visitor._scope_shadow_names == []
-    assert visitor._scope_import_targets == []
-    assert visitor._scope_receiver_overrides == []
-    assert visitor._scope_excludes_enclosing_class == []
-    assert visitor._scope_is_class == []
-    assert visitor._scope_type_param_names == []
+    assert visitor._scope_frames == []
 
     result = analyze_python_workspace(tmp_path)
     outer = _node_id(result, "app.outer")
@@ -4169,6 +4187,173 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
         and relationship.kind == RelationshipKind.CALLS.value
         for relationship in result.document.relationships
     )
+
+
+def test_class_scope_restoration_inserts_before_surviving_lexical_frame() -> None:
+    visitor = _ScopeCallVisitor("app")
+    visitor._push_scope(
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        class_scope=True,
+    )
+    class_frame = visitor._scope_frames[0]
+    visitor._push_scope(frozenset({"surviving"}), frozenset(), frozenset())
+    surviving_frame = visitor._scope_frames[1]
+
+    removed = visitor._remove_class_scopes()
+    visitor._restore_class_scopes(removed)
+
+    assert visitor._scope_frames == [class_frame, surviving_frame]
+    assert visitor._scope_frames[0] is class_frame
+    assert visitor._scope_frames[1] is surviving_frame
+
+
+@pytest.mark.parametrize(
+    "kinds",
+    [kinds for size in range(5) for kinds in product(("class", "generic", "lexical"), repeat=size)],
+    ids=lambda kinds: "-".join(kinds) or "empty",
+)
+def test_class_scope_restoration_preserves_order_identity_and_mutations(
+    kinds: tuple[str, ...],
+) -> None:
+    visitor = _ScopeCallVisitor("app")
+    for index, kind in enumerate(kinds):
+        name = f"name{index}"
+        params = frozenset({f"T{index}"}) if kind == "generic" else frozenset()
+        visitor._push_scope(
+            frozenset({name}) | params,
+            frozenset(),
+            frozenset({name}) | params,
+            import_targets={name: f"library.{name}"},
+            class_scope=kind != "lexical",
+            type_param_names=params,
+        )
+    original_frames = tuple(visitor._scope_frames)
+
+    saved = visitor._remove_class_scopes()
+
+    assert [frame.bound_names for frame in visitor._scope_frames] == [
+        frozenset({f"T{index}"}) if kind == "generic" else frozenset({f"name{index}"})
+        for index, kind in enumerate(kinds)
+        if kind != "class"
+    ]
+    assert visitor._scope_imports() == {
+        f"name{index}": f"library.name{index}"
+        for index, kind in enumerate(kinds)
+        if kind == "lexical"
+    }
+    for active in visitor._scope_frames:
+        assert not active.is_class
+        active.mutated_names.add("changed")
+        active.import_state = replace(active.import_state, targets={"updated": "library.updated"})
+
+    visitor._restore_class_scopes(saved)
+
+    assert len(visitor._scope_frames) == len(original_frames)
+    assert all(
+        restored is original
+        for restored, original in zip(visitor._scope_frames, original_frames, strict=True)
+    )
+    for index, frame in enumerate(visitor._scope_frames):
+        if kinds[index] == "lexical":
+            assert frame.mutated_names == {"changed"}
+            assert frame.import_state.targets == {"updated": "library.updated"}
+        else:
+            assert frame.mutated_names == set()
+            assert frame.import_state.targets == {f"name{index}": f"library.name{index}"}
+
+
+def test_nested_class_scope_filtering_restores_each_enclosing_view() -> None:
+    visitor = _ScopeCallVisitor("app")
+    visitor._push_scope(
+        frozenset({"class_local", "T"}),
+        frozenset(),
+        frozenset({"class_local", "T"}),
+        class_scope=True,
+        type_param_names=frozenset({"T"}),
+    )
+    outer_frames = tuple(visitor._scope_frames)
+    outer_saved = visitor._remove_class_scopes()
+    visitor._push_scope(frozenset({"function_local"}), frozenset(), frozenset())
+    visitor._push_scope(frozenset({"inner_local"}), frozenset(), frozenset(), class_scope=True)
+    inner_frames = tuple(visitor._scope_frames)
+    inner_saved = visitor._remove_class_scopes()
+
+    assert [frame.bound_names for frame in visitor._scope_frames] == [
+        frozenset({"T"}),
+        frozenset({"function_local"}),
+    ]
+    visitor._scope_frames[1].mutated_names.add("changed")
+    visitor._push_scope(frozenset({"temporary"}), frozenset(), frozenset())
+    visitor._pop_scope()
+    visitor._restore_class_scopes(inner_saved)
+    assert len(visitor._scope_frames) == len(inner_frames)
+    assert all(
+        restored is original
+        for restored, original in zip(visitor._scope_frames, inner_frames, strict=True)
+    )
+    visitor._pop_scope()
+    assert visitor._pop_scope() == frozenset({"changed"})
+    visitor._restore_class_scopes(outer_saved)
+    assert len(visitor._scope_frames) == 1
+    assert visitor._scope_frames[0] is outer_frames[0]
+    assert visitor._scope_frames[0].bound_names == frozenset({"class_local", "T"})
+
+
+@pytest.mark.parametrize("generic", [False, True], ids=["ordinary", "generic"])
+def test_nested_class_traversal_restores_imports_for_following_statements(
+    tmp_path: Path, generic: bool
+) -> None:
+    if generic and sys.version_info < (3, 12):
+        pytest.skip("PEP 695 syntax requires Python 3.12")
+    for module in ("outerlib", "classlib", "innerlib"):
+        _write(tmp_path, f"{module}.py", "def helper():\n    return 1\n")
+    outer_params = "[T]" if generic else ""
+    inner_params = "[U]" if generic else ""
+    annotation = ": T" if generic else ""
+    inner_annotation = ": U" if generic else ""
+    source = (
+        "def outer():\n"
+        "    from outerlib import helper\n"
+        f"    class Outer{outer_params}:\n"
+        "        from classlib import helper\n"
+        "        def first(self):\n"
+        f"            class Inner{inner_params}:\n"
+        "                from innerlib import helper\n"
+        f"                def run(self, value{annotation}, other{inner_annotation}=helper()):\n"
+        "                    return helper()\n"
+        "            after_inner = helper()\n"
+        "            return Inner\n"
+        "        after_method = helper()\n"
+        "        def second(self, value=helper()):\n"
+        "            return helper()\n"
+        "    after_class = helper()\n"
+    )
+    _write(tmp_path, "app.py", source)
+
+    visitor = _ScopeCallVisitor("app")
+    visitor.visit(ast.parse(source))
+    assert visitor._scope_frames == []
+    result = analyze_python_workspace(tmp_path)
+    owner = _node_id(result, "app.outer")
+    for module, expected_lines in (
+        ("outerlib", {9, 10, 14, 15}),
+        ("classlib", {12, 13}),
+        ("innerlib", {8}),
+    ):
+        target = _node_id(result, f"{module}.helper")
+        assert {
+            location.range.start.line + 1
+            for relationship in result.document.relationships
+            if relationship.source == owner
+            and relationship.target == target
+            and relationship.kind == RelationshipKind.CALLS.value
+            for evidence in relationship.evidence
+            for location in evidence.locations
+        } == expected_lines
+    assert _unresolved_by_source(result) == {}
+    assert result.diagnostics == ()
 
 
 def test_function_signature_defaults_and_annotations_are_attributed_to_the_function(
@@ -6349,6 +6534,47 @@ def test_nested_class_method_keeps_own_import_and_outer_sibling_route(
         for location in evidence.locations
     }
     assert references == {("other.helper", 10)}
+    assert _unresolved_sites(result) == set()
+
+
+def test_nested_class_body_and_method_imported_attributes_coalesce_evidence(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/module.py", "def attr():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    class C:\n"
+        "        from pkg import module\n"
+        "        body_value = module.attr\n"
+        "\n"
+        "        def run(self):\n"
+        "            from pkg import module\n"
+        "            return module.attr\n"
+        "\n"
+        "    return C\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    matching_relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.outer")
+        and relationship.target == _node_id(result, "pkg.module.attr")
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    ]
+    assert len(matching_relationships) == 1
+    relationship = matching_relationships[0]
+    evidence_lines = {
+        location.range.start.line + 1
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+    assert result.diagnostics == ()
+    assert evidence_lines == {4, 8}
     assert _unresolved_sites(result) == set()
 
 

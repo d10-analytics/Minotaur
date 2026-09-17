@@ -1,7 +1,6 @@
 # Python analysis
 
-Python analysis owns Python source discovery and interpretation, including
-dormant Python modules and binding-flow behavior. The TOML declaration in
+Python analysis owns Python source discovery and interpretation. The TOML declaration in
 `system.toml` is the exact membership authority for this boundary; this README
 is narrative only and does not add fields or relationship declarations. The
 exact membership authority is the TOML declaration in `system.toml`.

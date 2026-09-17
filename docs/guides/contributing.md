@@ -77,8 +77,7 @@ source; it does not call either function.
    calls relationship from the latter to the former. That edge retains the
    source location that supports it. A **provenance** value explains how a fact
    was established; it is not a probability that the program will execute it.
-   The active binding logic is in this file. The separate `binding_flow.py`
-   primitives have standalone tests but are not currently imported here.
+   The active binding logic is in this file.
 5. [document.py](../../src/minotaur/graph_model/document.py) and
    [serialization.py](../../src/minotaur/graph_model/serialization.py):
    `GraphDocument` collects nodes and relationships. The CLI attaches selection
@@ -125,15 +124,6 @@ to see why source changes and membership changes are distinct.
   and does not imply all items were created in advance.
 - **Underscore names** conventionally mark implementation details. A public CLI
   example should call the CLI, not depend on private helpers remaining stable.
-
-In binding analysis, a **lattice** is a model for combining what is known about
-a name: unbound, a definite import, an ordinary value, or uncertain. A **join**
-combines branch information conservatively. A **tombstone** explicitly records
-that a route was removed, preventing a broader imported prefix from reviving
-it during lookup. A **worklist** revisits blocks when incoming facts change.
-Read the [binding examples](python-binding-examples.md) before the solver tests;
-those examples explain current public behavior, while standalone solver tests
-explain the separate primitives.
 
 Comments should explain ownership, ordering, and reasons for conservative
 choices. Prefer a small before/after example to a restatement of a loop. Keep
