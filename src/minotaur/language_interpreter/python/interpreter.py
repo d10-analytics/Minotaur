@@ -1303,11 +1303,6 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 return frame.receiver_override
         return self._receiver_name, self._receiver_parameter
 
-    @property
-    def _scope_import_targets(self) -> list[Mapping[str, str]]:
-        """Compatibility view of the import-state stack used by diagnostics tests."""
-        return [frame.import_state.targets for frame in self._scope_frames]
-
     def _scope_imports(self) -> Mapping[str, str]:
         """Return the import binding each visible name resolves to.
 
