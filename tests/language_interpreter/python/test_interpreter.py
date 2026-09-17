@@ -16,9 +16,10 @@ import pytest
 
 from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file
+from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipKind
 from minotaur.graph_model.validation import IssueCode, validate_document
-from minotaur.language_interpreter.contract import AnalysisResult, DiagnosticCode
+from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
 from minotaur.language_interpreter.python.interpreter import _ScopeCallVisitor
 from minotaur.language_interpreter.source_text import LineIndex
@@ -197,9 +198,14 @@ def test_syntax_error_is_reported_without_erasing_other_workspace_facts(tmp_path
 
     result = analyze_python_workspace(tmp_path)
 
-    assert [(diagnostic.code, diagnostic.path) for diagnostic in result.diagnostics] == [
-        (DiagnosticCode.PARSE_ERROR, "broken.py")
-    ]
+    assert result.diagnostics == (
+        Diagnostic(
+            DiagnosticCode.PARSE_ERROR,
+            "broken.py",
+            "invalid syntax",
+            Location("broken.py", Range(Position(0, 15), Position(0, 15))),
+        ),
+    )
     assert {node.label for node in result.document.nodes} >= {"valid", "valid.working"}
     assert "broken" not in {node.label for node in result.document.nodes}
     assert validate_document(result.document).is_valid

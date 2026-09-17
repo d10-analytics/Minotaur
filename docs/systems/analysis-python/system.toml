@@ -5,5 +5,4 @@ files = [
   "minotaur/language_interpreter/python/binding_flow.py",
   "minotaur/language_interpreter/python/discovery.py",
   "minotaur/language_interpreter/python/interpreter.py",
-  "minotaur/language_interpreter/python/parsing.py",
 ]
