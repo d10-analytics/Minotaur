@@ -56,7 +56,6 @@ _SYSTEM_FILES = {
     ],
     "analysis-python": [
         "minotaur/language_interpreter/python/__init__.py",
-        "minotaur/language_interpreter/python/binding_flow.py",
         "minotaur/language_interpreter/python/discovery.py",
         "minotaur/language_interpreter/python/interpreter.py",
     ],
@@ -259,11 +258,11 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
         "status": "recorded",
         "targets": sorted(_TARGETS),
     }
-    assert coverage["graph_files"] == {"scope": "final_graph_file_nodes", "count": 56}
+    assert coverage["graph_files"] == {"scope": "final_graph_file_nodes", "count": 55}
     assert coverage["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 56,
-        "represented": 56,
+        "total": 55,
+        "represented": 55,
         "absent": 0,
     }
     assert coverage["unassigned_files"] == {
@@ -303,7 +302,7 @@ def test_configured_analysis_without_output_writes_only_isolated_root_artifacts(
     assert sidecar.is_file()
     graph_bytes = graph.read_bytes()
     loaded = load_graph_file(graph)
-    assert sum(node.node_class is NodeClass.FILE for node in loaded.document.nodes) == 56
+    assert sum(node.node_class is NodeClass.FILE for node in loaded.document.nodes) == 55
     assert sidecar.read_text(encoding="ascii").strip() == graph_digest(graph_bytes)
     checkout_after = tuple(
         path.read_bytes() if path.exists() else None for path in (checkout_graph, checkout_sidecar)
@@ -375,11 +374,11 @@ def test_declaration_omission_reports_the_graph_file_as_unassigned(
     assert status == 0
     assert error == ""
     payload = json.loads(output)
-    assert payload["coverage"]["graph_files"]["count"] == 56
+    assert payload["coverage"]["graph_files"]["count"] == 55
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 55,
-        "represented": 55,
+        "total": 54,
+        "represented": 54,
         "absent": 0,
     }
     assert payload["coverage"]["unassigned_files"] == {
@@ -423,12 +422,12 @@ def test_target_omission_reports_one_declared_file_absent(
     payload = json.loads(output)
     assert payload["coverage"]["graph_files"] == {
         "scope": "final_graph_file_nodes",
-        "count": 55,
+        "count": 54,
     }
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 56,
-        "represented": 55,
+        "total": 55,
+        "represented": 54,
         "absent": 1,
     }
     assert payload["coverage"]["unassigned_files"] == {

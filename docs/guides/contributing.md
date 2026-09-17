@@ -77,8 +77,7 @@ source; it does not call either function.
    calls relationship from the latter to the former. That edge retains the
    source location that supports it. A **provenance** value explains how a fact
    was established; it is not a probability that the program will execute it.
-   The active binding logic is in this file. The separate `binding_flow.py`
-   primitives have standalone tests but are not currently imported here.
+   The active binding logic is in this file.
 5. [document.py](../../src/minotaur/graph_model/document.py) and
    [serialization.py](../../src/minotaur/graph_model/serialization.py):
    `GraphDocument` collects nodes and relationships. The CLI attaches selection

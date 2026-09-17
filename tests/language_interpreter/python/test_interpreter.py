@@ -131,6 +131,23 @@ def test_python_interpreter_establishes_containment_imports_and_direct_calls(
     assert call.evidence[0].locations[0].range.start.line == 7
 
 
+def test_public_python_analysis_runs_without_retired_kernel(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "def main():\n    return 1\n")
+
+    result = analyze_python_workspace(tmp_path)
+    module = _node_id(result, "app")
+    function = _node_id(result, "app.main")
+
+    assert result.diagnostics == ()
+    assert validate_document(result.document).is_valid
+    assert (module, function, RelationshipKind.CONTAINS.value) in {
+        (relationship.source, relationship.target, relationship.kind)
+        for relationship in result.document.relationships
+    }
+
+
 def test_cli_records_file_content_hashes_and_root_relative_selection(tmp_path: Path) -> None:
     root = tmp_path / "source"
     _write(root, "z.py", "z = 1\n")
