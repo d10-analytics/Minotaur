@@ -1149,146 +1149,44 @@ class _ScopeCallVisitor(ast.NodeVisitor):
 
     def _remove_class_scopes(
         self,
-    ) -> list[
-        tuple[
-            int,
-            tuple[
-                frozenset[str],
-                frozenset[str],
-                frozenset[str],
-                frozenset[str],
-                _ImportFlowState,
-                tuple[str | None, str | None] | None,
-                bool,
-                bool,
-                frozenset[str],
-                bool,
-                frozenset[str],
-            ],
-        ]
-    ]:
+    ) -> list[tuple[int, _ScopeFrame]]:
         """Temporarily hide every class namespace from a nested scope."""
-        removed: list[
-            tuple[
-                int,
-                tuple[
-                    frozenset[str],
-                    frozenset[str],
-                    frozenset[str],
-                    frozenset[str],
-                    _ImportFlowState,
-                    tuple[str | None, str | None] | None,
-                    bool,
-                    bool,
-                    frozenset[str],
-                    bool,
-                    frozenset[str],
-                ],
-            ]
-        ] = []
+        removed: list[tuple[int, _ScopeFrame]] = []
         for index in reversed(range(len(self._scope_frames))):
             frame = self._scope_frames[index]
             if not frame.is_class:
                 continue
-            removed.append(
-                (
-                    index,
-                    (
-                        frame.bound_names,
-                        frame.global_names,
-                        frame.nonlocal_names,
-                        frame.shadow_names,
-                        frame.import_state,
-                        frame.receiver_override,
-                        frame.excludes_enclosing_class,
-                        frame.is_class,
-                        frame.type_param_names,
-                        frame.propagate_mutations,
-                        frozenset(frame.mutated_names),
-                    ),
-                )
-            )
+            removed.append((index, frame))
             type_param_names = frame.type_param_names
             if type_param_names:
                 # A class namespace is not lexical, but PEP 695 type
                 # parameters are. Keep only those bindings visible while a
                 # nested method body is analyzed.
-                frame.bound_names = type_param_names
-                frame.global_names = frozenset()
-                frame.nonlocal_names = frozenset()
-                frame.shadow_names = type_param_names
-                frame.import_state = _ImportFlowState()
-                frame.receiver_override = None
-                frame.excludes_enclosing_class = False
-                frame.is_class = False
-                frame.propagate_mutations = False
-                frame.mutated_names = set()
+                self._scope_frames[index] = _ScopeFrame(
+                    bound_names=type_param_names,
+                    global_names=frozenset(),
+                    nonlocal_names=frozenset(),
+                    shadow_names=type_param_names,
+                    import_state=_ImportFlowState(),
+                    receiver_override=None,
+                    excludes_enclosing_class=False,
+                    is_class=False,
+                    type_param_names=type_param_names,
+                    propagate_mutations=False,
+                )
             else:
                 del self._scope_frames[index]
         return removed
 
     def _restore_class_scopes(
         self,
-        removed: list[
-            tuple[
-                int,
-                tuple[
-                    frozenset[str],
-                    frozenset[str],
-                    frozenset[str],
-                    frozenset[str],
-                    _ImportFlowState,
-                    tuple[str | None, str | None] | None,
-                    bool,
-                    bool,
-                    frozenset[str],
-                    bool,
-                    frozenset[str],
-                ],
-            ]
-        ],
+        removed: list[tuple[int, _ScopeFrame]],
     ) -> None:
-        for _, frame in sorted(removed, reverse=True):
-            if not frame[8]:
-                continue
-            marker_index = next(
-                index
-                for index in reversed(range(len(self._scope_frames)))
-                if self._scope_frames[index].type_param_names
-                and not self._scope_frames[index].is_class
-            )
-            del self._scope_frames[marker_index]
-
         for index, frame in sorted(removed):
-            (
-                restored_bound_names,
-                restored_global_names,
-                restored_nonlocal_names,
-                restored_shadow_names,
-                restored_import_state,
-                restored_receiver_override,
-                restored_excludes_enclosing_class,
-                restored_is_class,
-                restored_type_param_names,
-                restored_propagate_mutations,
-                restored_mutated_names,
-            ) = frame
-            self._scope_frames.insert(
-                index,
-                _ScopeFrame(
-                    restored_bound_names,
-                    restored_global_names,
-                    restored_nonlocal_names,
-                    restored_shadow_names,
-                    restored_import_state,
-                    restored_receiver_override,
-                    restored_excludes_enclosing_class,
-                    restored_is_class,
-                    restored_type_param_names,
-                    restored_propagate_mutations,
-                    set(restored_mutated_names),
-                ),
-            )
+            if index < len(self._scope_frames):
+                self._scope_frames[index] = frame
+            else:
+                self._scope_frames.insert(index, frame)
 
     def _scope_receivers(self) -> tuple[str | None, str | None]:
         for frame in reversed(self._scope_frames):
