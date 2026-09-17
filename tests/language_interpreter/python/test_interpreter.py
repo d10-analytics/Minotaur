@@ -4171,14 +4171,8 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
 
     visitor = _ScopeCallVisitor("app")
     visitor.visit(ast.parse(source))
-    assert visitor._scope_bound_names == []
-    assert visitor._scope_global_names == []
-    assert visitor._scope_shadow_names == []
+    assert visitor._scope_frames == []
     assert visitor._scope_import_targets == []
-    assert visitor._scope_receiver_overrides == []
-    assert visitor._scope_excludes_enclosing_class == []
-    assert visitor._scope_is_class == []
-    assert visitor._scope_type_param_names == []
 
     result = analyze_python_workspace(tmp_path)
     outer = _node_id(result, "app.outer")
@@ -6372,6 +6366,47 @@ def test_nested_class_method_keeps_own_import_and_outer_sibling_route(
         for location in evidence.locations
     }
     assert references == {("other.helper", 10)}
+    assert _unresolved_sites(result) == set()
+
+
+def test_nested_class_body_and_method_imported_attributes_coalesce_evidence(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/module.py", "def attr():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def outer():\n"
+        "    class C:\n"
+        "        from pkg import module\n"
+        "        body_value = module.attr\n"
+        "\n"
+        "        def run(self):\n"
+        "            from pkg import module\n"
+        "            return module.attr\n"
+        "\n"
+        "    return C\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    matching_relationships = [
+        relationship
+        for relationship in result.document.relationships
+        if relationship.source == _node_id(result, "app.outer")
+        and relationship.target == _node_id(result, "pkg.module.attr")
+        and relationship.kind == RelationshipKind.REFERENCES.value
+    ]
+    assert len(matching_relationships) == 1
+    relationship = matching_relationships[0]
+    evidence_lines = {
+        location.range.start.line + 1
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+    assert result.diagnostics == ()
+    assert evidence_lines == {4, 8}
     assert _unresolved_sites(result) == set()
 
 
