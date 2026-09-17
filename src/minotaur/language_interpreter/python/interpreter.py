@@ -399,11 +399,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         if defer_body:
             self._deferred_callables.append((node, nested_class_method))
             self._deferred_type_param_names[node] = frozenset().union(
-                *(
-                    frame.type_param_names
-                    for frame in self._scope_frames
-                    if frame.is_class
-                )
+                *(frame.type_param_names for frame in self._scope_frames if frame.is_class)
             )
             return
         bound_names, local_import_names, uncertain_import_names = _scope_binders(
@@ -642,10 +638,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         """Apply immediate class global/nonlocal writes to the enclosing overlay."""
         if not self._scope_frames or not self._scope_frames[-1].is_class:
             return
-        names &= (
-            self._scope_frames[-1].global_names
-            | self._scope_frames[-1].nonlocal_names
-        )
+        names &= self._scope_frames[-1].global_names | self._scope_frames[-1].nonlocal_names
         if not names:
             return
         for frame in reversed(self._scope_frames[:-1]):
@@ -2951,8 +2944,7 @@ def _calls(
         if (
             call_snapshot.excludes_enclosing_class
             and (
-                context.class_scope_outer_import_targets is not None
-                or call_snapshot.in_class_body
+                context.class_scope_outer_import_targets is not None or call_snapshot.in_class_body
             )
             and candidate.func not in definition_header_nodes
         ):
@@ -2961,8 +2953,7 @@ def _calls(
         if (
             call_snapshot.excludes_enclosing_class
             and (
-                context.class_scope_outer_import_targets is not None
-                or call_snapshot.in_class_body
+                context.class_scope_outer_import_targets is not None or call_snapshot.in_class_body
             )
             and candidate.func not in definition_header_nodes
         ):
@@ -2977,14 +2968,11 @@ def _calls(
                 }
             )
             call_import_targets = stripped_call_import_targets
-        call_import_bound = (
-            call_snapshot.import_bound - call_snapshot.bound_names
-        )
+        call_import_bound = call_snapshot.import_bound - call_snapshot.bound_names
         if (
             call_snapshot.excludes_enclosing_class
             and (
-                context.class_scope_outer_import_targets is not None
-                or call_snapshot.in_class_body
+                context.class_scope_outer_import_targets is not None or call_snapshot.in_class_body
             )
             and candidate.func not in definition_header_nodes
         ):
@@ -2993,8 +2981,7 @@ def _calls(
         if (
             call_snapshot.excludes_enclosing_class
             and (
-                context.class_scope_outer_import_targets is not None
-                or call_snapshot.in_class_body
+                context.class_scope_outer_import_targets is not None or call_snapshot.in_class_body
             )
             and candidate.func not in definition_header_nodes
         ):
@@ -3072,9 +3059,7 @@ def _calls(
                 }
             )
             reference_import_targets = stripped_reference_import_targets
-        reference_import_bound = (
-            reference_snapshot.import_bound - reference_snapshot.bound_names
-        )
+        reference_import_bound = reference_snapshot.import_bound - reference_snapshot.bound_names
         if (
             reference_snapshot.excludes_enclosing_class
             and (
@@ -3097,10 +3082,7 @@ def _calls(
             reference_uncertain_names -= context.uncertain_import_names - (
                 context.class_scope_outer_uncertain_import_names or frozenset()
             )
-        if (
-            reference_snapshot.excludes_enclosing_class
-            and reference not in definition_header_nodes
-        ):
+        if reference_snapshot.excludes_enclosing_class and reference not in definition_header_nodes:
             reference_uncertain_names -= context.uncertain_import_names - (
                 context.class_scope_outer_uncertain_import_names or frozenset()
             )
@@ -3144,9 +3126,7 @@ def _calls(
                 ),
                 frozenset(reference_uncertain_names),
                 reference_snapshot.authoritative_import_names,
-                reference_snapshot.bound_names
-                | reference_import_bound
-                | blocked_plain_names,
+                reference_snapshot.bound_names | reference_import_bound | blocked_plain_names,
             ),
             caller,
             reference,
