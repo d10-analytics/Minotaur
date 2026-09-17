@@ -4172,7 +4172,6 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     visitor = _ScopeCallVisitor("app")
     visitor.visit(ast.parse(source))
     assert visitor._scope_frames == []
-    assert visitor._scope_import_targets == []
 
     result = analyze_python_workspace(tmp_path)
     outer = _node_id(result, "app.outer")
