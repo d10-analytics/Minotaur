@@ -171,6 +171,15 @@ class _ScopeFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class _RemovedScope:
+    """Retain one aggregate frame and its temporary marker, if any."""
+
+    index: int
+    frame: _ScopeFrame
+    marker: _ScopeFrame | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _ExpressionSnapshot:
     """Complete lexical state captured at one expression source position."""
 
@@ -1149,20 +1158,19 @@ class _ScopeCallVisitor(ast.NodeVisitor):
 
     def _remove_class_scopes(
         self,
-    ) -> list[tuple[int, _ScopeFrame]]:
+    ) -> list[_RemovedScope]:
         """Temporarily hide every class namespace from a nested scope."""
-        removed: list[tuple[int, _ScopeFrame]] = []
+        removed: list[_RemovedScope] = []
         for index in reversed(range(len(self._scope_frames))):
             frame = self._scope_frames[index]
             if not frame.is_class:
                 continue
-            removed.append((index, frame))
             type_param_names = frame.type_param_names
             if type_param_names:
                 # A class namespace is not lexical, but PEP 695 type
                 # parameters are. Keep only those bindings visible while a
                 # nested method body is analyzed.
-                self._scope_frames[index] = _ScopeFrame(
+                marker = _ScopeFrame(
                     bound_names=type_param_names,
                     global_names=frozenset(),
                     nonlocal_names=frozenset(),
@@ -1174,19 +1182,27 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                     type_param_names=type_param_names,
                     propagate_mutations=False,
                 )
+                self._scope_frames[index] = marker
+                removed.append(_RemovedScope(index, frame, marker))
             else:
+                removed.append(_RemovedScope(index, frame))
                 del self._scope_frames[index]
         return removed
 
     def _restore_class_scopes(
         self,
-        removed: list[tuple[int, _ScopeFrame]],
+        removed: list[_RemovedScope],
     ) -> None:
-        for index, frame in sorted(removed):
-            if index < len(self._scope_frames):
-                self._scope_frames[index] = frame
+        for entry in sorted(removed, key=lambda entry: entry.index, reverse=True):
+            if entry.marker is not None:
+                marker_index = next(
+                    index
+                    for index, active_frame in enumerate(self._scope_frames)
+                    if active_frame is entry.marker
+                )
+                self._scope_frames[marker_index] = entry.frame
             else:
-                self._scope_frames.insert(index, frame)
+                self._scope_frames.insert(entry.index, entry.frame)
 
     def _scope_receivers(self) -> tuple[str | None, str | None]:
         for frame in reversed(self._scope_frames):
