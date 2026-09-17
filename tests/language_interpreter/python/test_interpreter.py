@@ -4187,6 +4187,26 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     )
 
 
+def test_class_scope_restoration_inserts_before_surviving_lexical_frame() -> None:
+    visitor = _ScopeCallVisitor("app")
+    visitor._push_scope(
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        class_scope=True,
+    )
+    class_frame = visitor._scope_frames[0]
+    visitor._push_scope(frozenset({"surviving"}), frozenset(), frozenset())
+    surviving_frame = visitor._scope_frames[1]
+
+    removed = visitor._remove_class_scopes()
+    visitor._restore_class_scopes(removed)
+
+    assert visitor._scope_frames == [class_frame, surviving_frame]
+    assert visitor._scope_frames[0] is class_frame
+    assert visitor._scope_frames[1] is surviving_frame
+
+
 def test_function_signature_defaults_and_annotations_are_attributed_to_the_function(
     tmp_path: Path,
 ) -> None:
