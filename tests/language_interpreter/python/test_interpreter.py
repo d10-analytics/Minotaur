@@ -4688,7 +4688,12 @@ def test_dotted_import_final_binding_orders_preserve_real_routes(tmp_path: Path)
         "with open('unused') as (pkg, other):\n    pass",
         "try:\n    pass\nexcept* Exception as pkg:\n    pass",
         "match {'key': 1}:\n    case {'key': pkg}:\n        pass",
-        "type pkg = int",
+        pytest.param(
+            "type pkg = int",
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12"
+            ),
+        ),
         "for value in ():\n    pass\nelse:\n    pkg = 1",
         "while False:\n    pass\nelse:\n    pkg = 1",
         "try:\n    pass\nexcept Exception:\n    pass\nelse:\n    pkg = 1\nfinally:\n    pkg = 2",

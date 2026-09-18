@@ -27,28 +27,34 @@ command installs those dependencies as well. Rendering HTML itself does not
 require Playwright or a running browser.
 
 The first test command is a focused feedback loop. Before submitting changes,
-run the repository's complete GitHub Actions parity checks from bash on Linux:
+run the repository's direct checks from the activated environment:
 
 ```bash
-scripts/run_ci.sh all
+python3 -m pytest tests/ -v || test $? -eq 5
+pip install ruff==0.16.3
+ruff check .
+ruff format --check .
+python3 -m pip install --upgrade pip
+pip install -e ".[dev]"
+mypy
+pip install .
+python3 -c "from minotaur.graph_model.loading import schema; assert schema()['\$id'] == 'urn:minotaur:schemas:minotaur-graph:0.1.0'"
+pip install build
+python3 -m build
+python3 -m playwright install --with-deps chromium
+python3 -m pytest tests/test_visualizer_browser.py -v
 ```
 
-The runner requires Git, Python with venv support, network access for dependency
-installation, and a browser-capable Linux environment. It creates fresh
-environments and source copies; it does not reuse your activated environment.
-Windows users can use a Linux checkout in WSL for these bash-based checks.
-Run `scripts/run_ci.sh --help` for the supported switches. Individual lanes are
-`test`, `lint`, `typecheck`, `package`, `browser`, and `build`; `all` runs them
-in that order and continues after ordinary lane failures. Logs and results
-live below `${XDG_STATE_HOME:-$HOME/.local/state}/minotaur-ci/runs`.
+The package command checks the installed schema identity, and the browser
+commands install Chromium and exercise the real browser test. Network access is
+needed for dependency and browser installation; Linux browser execution may
+also require system libraries. Windows users can use a Linux checkout in WSL
+for these bash-based checks.
 
-Dirty input is accepted for diagnosis. The runner treats only an unchanged,
-clean revision with default time limits as eligible final acceptance evidence.
-For a quick local lint pass, use `python -m ruff check .` and
-`python -m ruff format --check .`; type checking is `python -m mypy`.
-Record failures and their cause instead of assuming a small passing test means
-the complete checks passed. Browser launch restrictions are missing evidence,
-not successful browser verification.
+For a quick local lint pass, use `ruff check .` and `ruff format --check .`;
+type checking is `mypy`. Record failures and their cause instead of assuming a
+small passing test means the complete checks passed. Browser launch
+restrictions are missing evidence, not successful browser verification.
 
 ## Trace the first example
 
