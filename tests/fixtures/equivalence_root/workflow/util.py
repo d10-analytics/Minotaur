@@ -50,11 +50,16 @@ class FixtureScopes:
             return fixture_helper()
 
 
-def generic_scope_probe[T]():
-    """Exercise lexical PEP 695 parameters inside a nested class method."""
+def generic_scope_probe():
+    """Exercise lexical parameters inside a nested class method."""
 
-    class Box[U]:
-        def values(self) -> tuple[T, U, int]:
+    # Keep this fixture valid on the minimum supported interpreter.  The
+    # dedicated interpreter tests own coverage of Python 3.12-only syntax.
+    T = object()
+    U = object()
+
+    class Box:
+        def values(self) -> tuple[object, object, int]:
             return T, U, fixture_helper()
 
     return Box
