@@ -476,6 +476,8 @@ def _query_reads(
                 query.right, frozenset(local)
             )
         if isinstance(query, exp.Select):
+            if query.args.get("into") is not None:
+                return False
             sources: list[exp.Expression] = []
             from_clause = query.args.get("from_")
             if isinstance(from_clause, exp.From) and from_clause.this is not None:
@@ -545,7 +547,13 @@ def _neutral_statement(tree: exp.Expression) -> bool:
         )
     if isinstance(tree, exp.Alter):
         actions = tree.args.get("actions") or []
-        return bool(actions) and all(isinstance(action, exp.ColumnDef) for action in actions)
+        return bool(actions) and all(
+            isinstance(action, exp.ColumnDef)
+            and not any(
+                isinstance(child, (exp.Reference, exp.ForeignKey)) for child in action.walk()
+            )
+            for action in actions
+        )
     return False
 
 
