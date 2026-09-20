@@ -88,7 +88,7 @@ class _Observation:
 
 
 def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
-    """Analyze selected SQL files; SQL is intentionally not registry-owned."""
+    """Analyze selected SQL files through the shared final registry entry."""
     sources, diagnostics = read_sources(workspace, files)
     file_data = tuple(_make_file(source) for source in sources)
     nodes: list[Node] = [item.node for item in file_data]

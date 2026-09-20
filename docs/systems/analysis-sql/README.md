@@ -7,7 +7,7 @@ relationship declarations.
 
 This boundary includes exactly the two SQL interpreter files listed in
 `system.toml`. It excludes generic SQL support, dialect autodetection, mixed
-language composition, registry activation, and query-specific SQL policy.
+language composition, and query-specific SQL policy.
 
 ## Expected interactions
 
@@ -19,6 +19,7 @@ selection-bounded structural interactions:
 - It points to `graph-contract` for graph entities, identities, and
   relationships.
 
-SQL remains absent from `default_registry()` until the shared freshness and
-integration foundations are complete. These directions describe the selected
-proof universe, not required runtime dependencies or architectural policy.
+The SQL analyzer is the final `.sql` entry in `default_registry()`, so the
+shared selection and freshness workflows can activate this bounded language.
+These directions describe the selected proof universe, not required runtime
+dependencies or architectural policy.
