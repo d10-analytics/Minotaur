@@ -457,7 +457,10 @@ def test_selection_and_discovery_import_in_either_order(first_import: str) -> No
     )
     source_root = Path(__file__).parents[2] / "src"
     environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(source_root)
+    inherited_pythonpath = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value for value in (str(source_root), inherited_pythonpath) if value
+    )
     environment["PYTHONSAFEPATH"] = "1"
     result = subprocess.run(
         [sys.executable, "-c", f"import {first_import}; import {second_import}"],
