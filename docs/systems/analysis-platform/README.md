@@ -21,6 +21,7 @@ selection-bounded structural interactions:
   composition; the platform receives that composition request.
 - `project-acquisition` points to the analysis platform for source preparation;
   the platform receives those inputs.
+- The platform points to `analysis-sql` for the bounded T-SQL interpreter.
 - The platform points to `analysis-python` for Python interpretation.
 - It points to `analysis-javascript` for the Python JavaScript interpreter.
 - It points to `graph-contract` for graph emission and shared contracts.

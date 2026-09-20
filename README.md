@@ -122,11 +122,12 @@ step and how to keep a scratch copy for experiments.
 
 ## Supported behavior and limitations
 
-Minotaur analyzes Python (`.py`) or JavaScript (`.js`), one language per
-invocation. Answers depend on the files you select and the relationships the
-analyzer can establish. See the [Python analysis guide](docs/guides/analyze-python.md)
-and [JavaScript analysis guide](docs/guides/analyze-javascript.md) for supported
-constructs and resolution limits.
+Minotaur analyzes Python (`.py`), JavaScript (`.js`), or the bounded T-SQL
+subset (`.sql`), one language per invocation. Answers depend on the files you
+select and the relationships the analyzer can establish. See the [Python
+analysis guide](docs/guides/analyze-python.md), [JavaScript analysis guide](docs/guides/analyze-javascript.md),
+and [T-SQL analysis guide](docs/guides/analyze-sql.md) for supported constructs
+and resolution limits.
 
 A source connection does not prove that a call runs in a particular scenario,
 what target dynamic dispatch chooses, or whether an operation succeeds.

@@ -39,6 +39,11 @@ Proof: [`test_source_position_routes_prove_owner_location_and_syntactic_imports`
 Status: NOT_APPLICABLE
 Reason: JavaScript ESM imports are module-level syntax and have no equivalent conditional function-body import operation.
 
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no corresponding function-body import operation.
+
 ### EDGE-BIND-002 — Agreeing direct conditional import joins
 
 Question: When every direct `if` arm establishes the same import route, is that route available after the structural join?
@@ -56,6 +61,11 @@ Proof: [`test_conditional_named_alias_and_relative_imports_join_exact_routes`](.
 
 Status: NOT_APPLICABLE
 Reason: JavaScript ESM imports are module-level syntax and have no equivalent conditional import join operation.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no corresponding conditional import join operation.
 
 ### EDGE-BIND-003 — Divergent or omitted conditional import routes
 
@@ -75,6 +85,11 @@ Proof: [`test_conditional_divergent_and_omitted_routes_are_one_unresolved_focal_
 Status: NOT_APPLICABLE
 Reason: JavaScript ESM imports are module-level syntax and have no equivalent conditional binding operation.
 
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no corresponding conditional binding operation.
+
 ### EDGE-BIND-004 — Eligible plain-dotted parent resolution
 
 Question: Does an eligible plain-dotted import parent resolve a later call or load to the exact declaration without textual-prefix decoys?
@@ -92,6 +107,11 @@ Proof: [`test_plain_dotted_imports_resolve_exact_call_and_load_without_decoys`](
 
 Status: NOT_APPLICABLE
 Reason: JavaScript uses relative named ESM imports rather than Python's plain-dotted parent import operation.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no corresponding plain-dotted import operation.
 
 ### EDGE-DECL-001 — Repeated direct function declarations
 
@@ -115,6 +135,11 @@ Owner: [`_collect_declarations`](../../src/minotaur/language_interpreter/javascr
 Marker: # EDGE-DECL-001: supports repeated direct functions; last binding wins; lexical shadowing.
 Proof: [`test_later_binding_wins_and_lexical_shadow_suppresses_use`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts declaration count, final target identity, and lexical suppression.
 
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no corresponding direct function declaration operation.
+
 ### EDGE-DECL-002 — Conditional function declaration identity
 
 Question: When a function declaration is conditional, does the analyzer exclude uncertain declaration identity and keep later use unresolved?
@@ -136,3 +161,8 @@ Expected graph facts: No `app.choose` declaration or containment is emitted, and
 Owner: [`_collect_declarations`](../../src/minotaur/language_interpreter/javascript/interpreter.py); conditional function identity is deliberately excluded.
 Marker: # EDGE-DECL-002: excludes conditional function identity; later uses remain unresolved.
 Proof: [`test_conditional_function_redefinitions_remain_unemitted_and_unresolved`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts parser acceptance, declaration absence, unresolved identity, and caller ownership.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no corresponding conditional function declaration operation.

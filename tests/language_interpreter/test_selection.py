@@ -152,11 +152,14 @@ def test_registry_normalization_preserves_namespace_and_defaults() -> None:
     assert tuple(registration.namespace for registration in defaults.registrations) == (
         "minotaur-python",
         "minotaur-javascript",
+        "minotaur-sql",
     )
     python = defaults.registration_for(Path("source.py"))
     javascript = defaults.registration_for(Path("source.js"))
+    sql = defaults.registration_for(Path("source.sql"))
     assert python is not None and python.namespace == "minotaur-python"
     assert javascript is not None and javascript.namespace == "minotaur-javascript"
+    assert sql is not None and sql.namespace == "minotaur-sql"
 
 
 def test_selection_discovers_javascript_files(tmp_path: Path) -> None:

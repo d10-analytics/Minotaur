@@ -128,6 +128,11 @@ _CONNECTIONS = [
     ),
     (
         "system: analysis-platform",
+        "system: analysis-sql",
+        ("imports", "references"),
+    ),
+    (
+        "system: analysis-platform",
         "system: graph-contract",
         ("calls", "imports", "references"),
     ),
@@ -285,20 +290,21 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
         "count": 0,
         "paths": [],
     }
-    assert len(payload["connections"]) == 19
+    assert len(payload["connections"]) == 20
     assert [
         (item["source_category"], item["target_category"], tuple(item["kinds"]))
         for item in payload["connections"]
     ] == _CONNECTIONS
     assert all(item["relationships"] for item in payload["connections"])
-    assert not any(
+    assert any(
         item["source_category"] == "system: analysis-platform"
         and item["target_category"] == "system: analysis-sql"
         for item in payload["connections"]
     )
-    assert all(
-        registration.namespace != "minotaur-sql"
-        for registration in default_registry().registrations
+    assert tuple(registration.namespace for registration in default_registry().registrations) == (
+        "minotaur-python",
+        "minotaur-javascript",
+        "minotaur-sql",
     )
 
 
