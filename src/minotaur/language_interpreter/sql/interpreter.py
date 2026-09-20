@@ -309,7 +309,7 @@ def _interpret_create(
     if parts is None or len(parts) not in ({1} if kind == "SCHEMA" else {1, 2}):
         _unsupported(tree, item, batch, diagnostics)
         return None
-    if any(_temporary(part) for part in parts):
+    if _temporary_table(table) or any(_temporary(part) for part in parts):
         _unsupported(tree, item, batch, diagnostics)
         return None
     location = _table_location(table, item, batch)
@@ -370,6 +370,11 @@ def _parts(table: exp.Expression) -> tuple[str, ...] | None:
 
 def _temporary(part: str) -> bool:
     return part.startswith(("#", "@"))
+
+
+def _temporary_table(table: exp.Table) -> bool:
+    name = table.args.get("this")
+    return isinstance(name, exp.Identifier) and bool(name.args.get("temporary"))
 
 
 def _identifier_location(
@@ -434,6 +439,7 @@ def _foreign_keys(
         if (
             parts is None
             or len(parts) not in {1, 2}
+            or _temporary_table(referenced)
             or any(_temporary(part) for part in parts)
             or location is None
         ):
@@ -493,6 +499,7 @@ def _query_reads(
                     if (
                         parts is None
                         or len(parts) not in {1, 2}
+                        or _temporary_table(source)
                         or any(_temporary(part) for part in parts)
                     ):
                         return False
@@ -529,6 +536,8 @@ def _valid_index(tree: Any) -> bool:
     return bool(
         parts
         and len(parts) in {1, 2}
+        and isinstance(target, exp.Table)
+        and not _temporary_table(target)
         and not any(_temporary(part) for part in parts)
         and isinstance(params, exp.IndexParameters)
         and params.args.get("columns")
