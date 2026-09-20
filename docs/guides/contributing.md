@@ -10,8 +10,7 @@ additional Python and analysis vocabulary as it becomes relevant.
 From the checkout, with the environment activated:
 
 ```bash
-python -m pip install -e ".[dev,visualizer]"
-python -m playwright install chromium
+python -m pip install -e ".[dev]"
 python -m pytest tests/query/test_query_walkthrough.py -q
 ```
 
@@ -19,42 +18,48 @@ If an older editable install reports `ModuleNotFoundError` for `orjson`,
 repeat the installation command above with the activated interpreter to update
 its dependencies.
 
-The `dev` extra installs pytest, Ruff, and mypy. The `visualizer` extra installs
-Playwright for browser tests and screenshot capture; Chromium is a separate
-browser download. Linux browser execution may also require system libraries;
-on a machine you administer, Playwright's `install --with-deps chromium`
-command installs those dependencies as well. Rendering HTML itself does not
-require Playwright or a running browser.
+The `dev` extra installs pytest, Ruff, and mypy. When visualizer work needs a
+focused browser check, the `visualizer` extra installs Playwright and
+`python -m playwright install chromium` installs its browser. Rendering HTML
+itself does not require Playwright or a running browser. Complete browser and
+system-dependency verification remains on GitHub-hosted runners.
 
-The first test command is a focused feedback loop. Before submitting changes,
-run the repository's direct checks from the activated environment:
+The first test command is a focused local feedback loop. Keep local verification
+scoped to the behavior being changed; the complete verification groups run on
+GitHub-hosted runners rather than on developer machines.
+
+For additional fast feedback, run the checks relevant to the change from the
+activated environment:
 
 ```bash
-python3 -m pytest tests/ -v || test $? -eq 5
-pip install ruff==0.16.3
 ruff check .
 ruff format --check .
-python3 -m pip install --upgrade pip
-pip install -e ".[dev]"
 mypy
-pip install .
-python3 -c "from minotaur.graph_model.loading import schema; assert schema()['\$id'] == 'urn:minotaur:schemas:minotaur-graph:0.1.0'"
-pip install build
-python3 -m build
-python3 -m playwright install --with-deps chromium
-python3 -m pytest tests/test_visualizer_browser.py -v
 ```
 
-The package command checks the installed schema identity, and the browser
-commands install Chromium and exercise the real browser test. Network access is
-needed for dependency and browser installation; Linux browser execution may
-also require system libraries. Windows users can use a Linux checkout in WSL
-for these bash-based checks.
+The optional pre-commit hooks use the same Ruff version and may rewrite files;
+they are a convenience, not verification evidence. Record focused-test failures
+and their cause instead of assuming a small passing test means the hosted checks
+passed.
 
-For a quick local lint pass, use `ruff check .` and `ruff format --check .`;
-type checking is `mypy`. Record failures and their cause instead of assuming a
-small passing test means the complete checks passed. Browser launch
-restrictions are missing evidence, not successful browser verification.
+Feature-branch pushes and pull requests run the quick hosted group: Ruff, mypy,
+source-package installation, and ordinary tests excluding the equivalence
+harness, the wall-clock performance gate, and real-browser tests. Duplicate
+push and pull-request runs for the same commit share a concurrency group, so
+only one completes. Pull requests from forks use the pull-request route.
+
+Pushes to `main`, merge-queue commits, and manually dispatched feature-branch
+runs execute the full hosted group. Full verification includes the equivalence
+harness, the performance gate, installation and resource checks from the built
+wheel, and the Chromium tests. Run the full group manually before merge when a
+change affects language interpretation, graph or query output, schemas or
+serialization, visualizer assets or behavior, packaging or dependencies, CI
+routing, or several subsystems whose behavior cannot be isolated confidently.
+
+A successful hosted run may be reused while its commit and verification inputs
+remain unchanged. When full verification is deferred to the `main` push, record
+that as pending post-merge coverage rather than as pre-merge proof. Missing or
+cancelled hosted evidence is not a pass.
 
 ## Trace the first example
 

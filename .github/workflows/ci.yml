@@ -1,0 +1,220 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    ci-${{ github.event.pull_request.head.sha || github.sha }}-${{
+    (github.event_name == 'workflow_dispatch' ||
+    github.event_name == 'merge_group' ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/main')) &&
+    'full' || 'quick' }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality and types
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install development dependencies
+        run: python3 -m pip install -e ".[dev]"
+      - name: Check lint
+        run: ruff check .
+      - name: Check format
+        run: ruff format --check .
+      - name: Check types
+        run: mypy
+
+  quick-tests:
+    name: Quick tests
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref != 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install test dependencies
+        run: python3 -m pip install -e ".[dev]"
+      - name: Run quick tests
+        run: >-
+          python3 -m pytest tests/ -v -m "not slow"
+          --ignore=tests/test_equivalence_harness.py
+          --ignore=tests/test_visualizer_browser.py
+
+  quick-package:
+    name: Source package
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref != 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install source package
+        run: python3 -m pip install .
+      - name: Verify installed schema
+        run: >-
+          python3 -c "from minotaur.graph_model.loading import schema;
+          assert schema()['\$id'] == 'urn:minotaur:schemas:minotaur-graph:0.1.0'"
+
+  full-tests:
+    name: Full tests
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install test dependencies
+        run: python3 -m pip install -e ".[dev]"
+      - name: Run full non-browser suite
+        run: >-
+          python3 -m pytest tests/ -v
+          --ignore=tests/test_visualizer_browser.py
+
+  full-package:
+    name: Built wheel
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Build wheel
+        run: |
+          python3 -m pip install build
+          python3 -m build --wheel
+      - name: Install wheel in a clean environment
+        run: |
+          python3 -m venv .package-venv
+          .package-venv/bin/python -m pip install dist/*.whl
+      - name: Verify installed CLI, schema, and visualizer assets
+        run: |
+          .package-venv/bin/minotaur --help >/dev/null
+          .package-venv/bin/python - <<'PY'
+          from pathlib import Path
+
+          from minotaur.graph_model.loading import schema
+          from minotaur.graph_visualizer.html import render
+
+          assert schema()["$id"] == "urn:minotaur:schemas:minotaur-graph:0.1.0"
+          asset_root = Path(render.__file__).parent
+          for relative_path in (
+              "template.html",
+              "viewer.css",
+              "viewer.js",
+              "vendor/LICENSES.md",
+              "vendor/cytoscape-3.34.0.min.js",
+              "vendor/cytoscape-dagre-4.0.0.js",
+          ):
+              assert (asset_root / relative_path).is_file(), relative_path
+          PY
+
+  browser:
+    name: Chromium browser
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install visualizer test dependencies
+        run: |
+          python3 -m pip install -e ".[dev,visualizer]"
+          python3 -m playwright install --with-deps chromium
+      - name: Exercise generated file artifact
+        run: python3 -m pytest tests/test_visualizer_browser.py -v
+
+  gate:
+    name: gate
+    if: always()
+    needs:
+      - quality
+      - quick-tests
+      - quick-package
+      - full-tests
+      - full-package
+      - browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the selected verification group
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          QUICK_TESTS: ${{ needs.quick-tests.result }}
+          QUICK_PACKAGE: ${{ needs.quick-package.result }}
+          FULL_TESTS: ${{ needs.full-tests.result }}
+          FULL_PACKAGE: ${{ needs.full-package.result }}
+          BROWSER: ${{ needs.browser.result }}
+        run: |
+          test "$QUALITY" = success
+          if test "$QUICK_TESTS" = success && test "$QUICK_PACKAGE" = success; then
+            test "$FULL_TESTS" = skipped
+            test "$FULL_PACKAGE" = skipped
+            test "$BROWSER" = skipped
+          else
+            test "$QUICK_TESTS" = skipped
+            test "$QUICK_PACKAGE" = skipped
+            test "$FULL_TESTS" = success
+            test "$FULL_PACKAGE" = success
+            test "$BROWSER" = success
+          fi
