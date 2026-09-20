@@ -19,6 +19,9 @@ class DiagnosticCode(str, Enum):
 
     PARSE_ERROR = "parse-error"
     SOURCE_READ_ERROR = "source-read-error"
+    UNSUPPORTED_SYNTAX = "unsupported-syntax"
+    DUPLICATE_DECLARATION = "duplicate-declaration"
+    AMBIGUOUS_REFERENCE = "ambiguous-reference"
 
 
 @dataclass(frozen=True, slots=True)
