@@ -26,13 +26,14 @@ selected graph.
 - `analysis-javascript` points to graph contract for JavaScript graph facts.
 - `query-and-system-reporting` points to graph contract for graph indexing and
   queries.
+- `analysis-sql` points to graph contract for SQL graph facts.
 - `source-presentation` consumes the canonical graph payload and source
   locations through command-interface composition. This owner/data-flow
   direction is not a direct static `source-presentation` to `graph-contract`
   connection in the selected graph.
 
 Graph contract therefore has a documented ownership or data-flow relationship
-with the other seven systems. These directions describe the selected proof
+with the other eight systems. These directions describe the selected proof
 universe, not required runtime dependencies or architectural policy; an
 observed edge is not asserted as required, and an absent edge does not prove
 independence.
