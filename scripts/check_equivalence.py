@@ -948,8 +948,8 @@ def _run_scenarios(
                         (before_sha[1], right_sha),
                     )
             if letter in "fg" and (
-                "minotaur: refreshed graph" in left.stderr_text
-                or "minotaur: refreshed graph" in right.stderr_text
+                "minotaur: refreshing graph" in left.stderr_text
+                or "minotaur: refreshing graph" in right.stderr_text
             ):
                 print(f"scenario root={root} step={letter}: unexpected refresh", file=sys.stderr)
                 ok = False
