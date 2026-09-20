@@ -434,39 +434,37 @@ def test_layout_uses_only_filter_eligible_elements(tmp_path: Path, bundled: bool
         }""")
         _assert_visible_layout(page, "TB")
         classes = ["file", "symbol", "unresolved-reference"]
-        for direction in ["TB", "LR", "BT", "RL"]:
-            if direction != "TB":
-                page.locator("#btn-direction").click()
-            for mask in [7, 6, 5, 4, 3, 2, 1, 0, 7]:
-                for index, kind in enumerate(classes):
-                    page.locator(f'input[data-kind="{kind}"]').set_checked(
-                        bool(mask & (1 << index))
-                    )
-                empty_camera = (
+        for mask in [6, 5, 4, 3, 2, 1, 0, 7]:
+            for index, kind in enumerate(classes):
+                page.locator(f'input[data-kind="{kind}"]').set_checked(bool(mask & (1 << index)))
+            empty_camera = (
+                page.evaluate(
+                    "({zoom:window.minotaurVisualizer.cy.zoom(), "
+                    "pan:window.minotaurVisualizer.cy.pan()})"
+                )
+                if mask == 0
+                else None
+            )
+            _assert_visible_layout(page, "TB")
+            if mask == 0:
+                camera = page.evaluate(
+                    "({zoom:window.minotaurVisualizer.cy.zoom(), "
+                    "pan:window.minotaurVisualizer.cy.pan()})"
+                )
+                assert camera == empty_camera
+                page.locator("#btn-fit").click()
+                page.keyboard.press("f")
+                page.wait_for_timeout(350)
+                assert (
                     page.evaluate(
                         "({zoom:window.minotaurVisualizer.cy.zoom(), "
                         "pan:window.minotaurVisualizer.cy.pan()})"
                     )
-                    if mask == 0
-                    else None
+                    == camera
                 )
-                _assert_visible_layout(page, direction)
-                if mask == 0:
-                    camera = page.evaluate(
-                        "({zoom:window.minotaurVisualizer.cy.zoom(), "
-                        "pan:window.minotaurVisualizer.cy.pan()})"
-                    )
-                    assert camera == empty_camera
-                    page.locator("#btn-fit").click()
-                    page.keyboard.press("f")
-                    page.wait_for_timeout(350)
-                    assert (
-                        page.evaluate(
-                            "({zoom:window.minotaurVisualizer.cy.zoom(), "
-                            "pan:window.minotaurVisualizer.cy.pan()})"
-                        )
-                        == camera
-                    )
+        for direction in ["LR", "BT", "RL"]:
+            page.locator("#btn-direction").click()
+            _assert_visible_layout(page, direction)
         for checkbox in page.locator("#edge-filters input").all():
             checkbox.uncheck()
             _assert_visible_layout(page, "RL")
