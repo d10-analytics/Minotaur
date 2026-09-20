@@ -94,4 +94,5 @@ def read_and_parse(
             )
             continue
         sources.append(ParsedSource(raw.relative, raw.content, raw.source, tree))
+    diagnostics.sort(key=lambda diagnostic: diagnostic.path)
     return sources, diagnostics
