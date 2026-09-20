@@ -179,6 +179,41 @@ SELECT * FROM (SELECT * FROM OuterTable) AS nested
     assert _edges(result, "sql:reads-from") == {("V", "InnerTable")}
 
 
+def test_nested_cte_shadowing_is_scope_local_and_preserves_cte_fences(tmp_path: Path) -> None:
+    sql = """
+CREATE TABLE T (id int)
+GO
+CREATE VIEW V AS
+WITH a AS (
+  SELECT * FROM (
+    WITH a AS (SELECT * FROM T)
+    SELECT * FROM a
+  ) AS q
+)
+SELECT * FROM a
+GO
+CREATE VIEW direct_v AS
+WITH chain AS (SELECT id FROM T UNION ALL SELECT id FROM chain)
+SELECT * FROM chain
+GO
+CREATE VIEW indirect_v AS
+WITH first AS (SELECT * FROM second), second AS (SELECT * FROM first)
+SELECT * FROM first
+GO
+CREATE VIEW temporary_v AS SELECT * FROM #scratch
+GO
+CREATE VIEW modifying_v AS
+WITH changed AS (DELETE FROM T OUTPUT DELETED.id)
+SELECT * FROM changed
+"""
+    result = _analyze(tmp_path, **{"nested.sql": sql})
+
+    assert set(_symbols(result)) == {"T", "V"}
+    assert _edges(result, "sql:reads-from") == {("V", "T")}
+    assert len(result.diagnostics) == 4
+    assert all(item.code == DiagnosticCode.UNSUPPORTED_SYNTAX for item in result.diagnostics)
+
+
 def test_unsupported_query_and_near_miss_do_not_emit_partial_facts(tmp_path: Path) -> None:
     result = _analyze(
         tmp_path,
