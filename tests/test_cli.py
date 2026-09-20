@@ -202,6 +202,9 @@ def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
         "broken.sql",
         "schema.SQL",
     }
+    assert any(
+        node.label == "T" and node.symbol_kind == "sql:table" for node in partial_graph.nodes
+    )
 
 
 @pytest.mark.parametrize(
