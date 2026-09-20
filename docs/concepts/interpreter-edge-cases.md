@@ -6,6 +6,8 @@ their natural public tests. Case identifiers are stable, category-local, and
 append-only. A new invariant receives a new identifier; existing identifiers
 are never renamed or reused.
 
+For the bounded SQL language boundary, see the [T-SQL analysis guide](../guides/analyze-sql.md).
+
 ## Status vocabulary
 
 Every registered language has exactly one status for every case. The closed

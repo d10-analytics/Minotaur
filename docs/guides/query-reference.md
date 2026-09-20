@@ -59,6 +59,14 @@ full validation once, on the first graph-reading command that touches it; see
 ["First-read validation cost"](../concepts/freshness.md#first-read-validation-cost)
 for the exact command list and the sidecar it writes.
 
+SQL symbols are visible to generic `definitions` and structural `diff` under
+the `sql:schema`, `sql:table`, and `sql:view` kinds. Their resolved
+`sql:reads-from` and `sql:foreign-key-to` relationships remain namespaced
+facts: they do not become inputs to `callers`, `impact`, `unreferenced`,
+`surface`, `consumers`, or `system-deps`. Unresolved core references retain
+the generic unresolved-reference behavior. See the [bounded T-SQL guide](analyze-sql.md)
+for the language boundary and examples.
+
 ## Query commands
 
 ### Find callers
@@ -501,6 +509,8 @@ attribution, hashes, and reference limits, see
 [`analyze-python.md`](analyze-python.md).
 For the corresponding JavaScript selection boundary and static facts, see
 [`analyze-javascript.md`](analyze-javascript.md).
+For the bounded T-SQL selection boundary and namespaced SQL facts, see
+[`analyze-sql.md`](analyze-sql.md).
 
 For complete setup, edits, output, and exit handling, run the
 [system comparison walkthrough](../../examples/system-walkthrough/comparison.md).

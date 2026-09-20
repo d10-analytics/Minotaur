@@ -175,6 +175,13 @@ selected root-relative targets for either language in the existing
 `extensions["minotaur"]["selection"]` array, with `.` representing the root.
 These values are freshness and diagnostic metadata, not identity inputs or
 core graph facts.
+The bounded SQL analyzer emits
+`extensions["minotaur-sql"]["content_sha256"]` on each SQL `file` node; the
+digest covers the original bytes, including a BOM and line endings. SQL
+symbols use the payload-free namespaced kinds `sql:schema`, `sql:table`, and
+`sql:view`, while SQL relationships use `sql:reads-from` and
+`sql:foreign-key-to`. These namespaced extensions remain ordinary graph facts
+and do not alter the core query vocabularies.
 Extension values use a recursive grammar: an extension object maps non-empty
 BMP keys to strings, integers, booleans, null, arrays of extension values, or
 nested extension objects. Fractional values are not part of the v1 format; use

@@ -24,6 +24,7 @@ NAVIGATION = {
     ROOT / "docs/guides/analyze-python.md": "../concepts/interpreter-edge-cases.md",
     ROOT / "docs/guides/analyze-javascript.md": "../concepts/interpreter-edge-cases.md",
     ROOT / "docs/guides/create-a-language-interpreter.md": "../concepts/interpreter-edge-cases.md",
+    ROOT / "docs/guides/analyze-sql.md": "../concepts/interpreter-edge-cases.md",
 }
 CASE_IDS = (
     "EDGE-BIND-001",

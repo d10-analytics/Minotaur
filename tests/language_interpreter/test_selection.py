@@ -173,6 +173,50 @@ def test_selection_discovers_javascript_files(tmp_path: Path) -> None:
     assert selected.files == (root / "app.js",)
 
 
+def test_selection_discovers_sql_case_insensitively_and_deduplicates_overlaps(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write(root, "schema.SQL", "CREATE TABLE T (id int)\n")
+    _write(root, "notes.txt", "not source\n")
+
+    _, selected = select_sources(
+        root,
+        (root, root / "schema.SQL", root),
+        default_registry(),
+    )
+
+    assert selected.files == (root / "schema.SQL",)
+    registration = default_registry().registration_for(root / "schema.sql")
+    assert registration is not None
+    assert registration.namespace == "minotaur-sql"
+
+
+def test_python_and_sql_interpreter_modules_collect_under_distinct_identities() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "tests/language_interpreter/python/test_interpreter.py",
+            "tests/language_interpreter/sql/test_sql_interpreter.py",
+        ],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "tests/language_interpreter/python/test_interpreter.py::" in completed.stdout
+    assert "tests/language_interpreter/sql/test_sql_interpreter.py::" in completed.stdout
+    assert "import file mismatch" not in completed.stdout + completed.stderr
+
+
 _SHAPES: tuple[tuple[str, Callable[[Path], None], str, bool], ...] = (
     ("nested excluded directory", _make_nested_excluded, ".", False),
     ("nested excluded directory from a target", _make_nested_excluded, "a", False),

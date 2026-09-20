@@ -12,10 +12,11 @@ literal because agents commonly parse these messages and JSON fields.
 
 | Sequence | Detected? | Mechanism (function and file) | Observable (stderr / JSON field / exit code) | Guard or escape hatch |
 | --- | --- | --- | --- | --- |
-| `analyze`, edit a tracked supported source (`.py` or `.js`), then query | yes | `drift.changed` in `minotaur/query/freshness.py` (AC-03 scenario (a)) | `minotaur: refreshing graph (N drifted paths)` is the pre-analysis attempt line; then `minotaur: stale: <path>`; JSON `refreshed: true`, `stale: [<path>]`; exit `0` when no diagnostics | Re-run `analyze --force` when the intended selection also changed |
+| `analyze`, edit a tracked supported source (`.py`, `.js`, or `.sql`), then query | yes | `drift.changed` in `minotaur/query/freshness.py` (AC-03 scenario (a)) | `minotaur: refreshing graph (N drifted paths)` is the pre-analysis attempt line; then `minotaur: stale: <path>`; JSON `refreshed: true`, `stale: [<path>]`; exit `0` when no diagnostics | Re-run `analyze --force` when the intended selection also changed |
 | `analyze`, delete a tracked file, then query | yes | `drift.missing` in `minotaur/query/freshness.py` (AC-03 scenario (d)) | The same attempt and stale lines; JSON `stale`; exit `0` when the replacement analysis is clean | Recreate the file or analyze the desired targets again |
-| `analyze` a directory, add a supported source (`.py` or `.js`) below that recorded directory, then query | yes | `_added_files` and `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (c)) | `minotaur: refreshing graph (N drifted paths)` is the pre-analysis attempt line; then `minotaur: stale: <path>`; JSON `refreshed: true`; exit `0` when clean | Analyze a different target set if the new file is intentionally out of scope |
+| `analyze` a directory, add a supported source (`.py`, `.js`, or `.sql`) below that recorded directory, then query | yes | `_added_files` and `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (c)) | `minotaur: refreshing graph (N drifted paths)` is the pre-analysis attempt line; then `minotaur: stale: <path>`; JSON `refreshed: true`; exit `0` when clean | Analyze a different target set if the new file is intentionally out of scope |
 | `analyze` a Python directory, add JavaScript below that recorded directory, then query | detected, but refused | `drift.added` followed by `_dispatch` in `minotaur/cli.py` (AC-07) | The attempt and stale lines print before the mixed-language error; no completion line or query JSON is printed; exit `2`; graph and sidecar bytes remain unchanged | Select one language per graph until composition is explicitly supported |
+| `analyze` a Python directory, add SQL below that recorded directory, then query | detected, but refused | `drift.added` followed by `_dispatch` in `minotaur/cli.py` (AC-06) | The exact attempt and stale lines print before the mixed-language error; no completion line or query JSON is printed; exit `2`; graph and sidecar bytes remain unchanged | Select one language per graph until composition is explicitly supported |
 | `analyze`, rename a tracked file, then query | yes | `drift.missing` plus `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (e)) | Both root-relative paths are reported as `minotaur: stale: <path>`; JSON `stale` contains both; exit `0` when clean | Analyze the renamed target explicitly if it is now outside the recorded directory |
 | `analyze`, switch branches so selected bytes differ, then query | yes | `drift.changed` in `minotaur/query/freshness.py` (same changed-byte observable as AC-03 scenario (a)) | Refresh and stale diagnostics name the changed paths; JSON has `refreshed: true`; exit `0` when clean | Treat the resulting graph as the new branch snapshot |
 | `analyze`, edit a tracked `.py`, then query with `--no-refresh` | yes, without refreshing | `drift.changed` in `minotaur/query/freshness.py` and the `no_refresh` branch of `_load_and_refresh_graph` in `minotaur/cli.py` (AC-03 scenario (b)) | `minotaur: stale: <path>` with no refreshed line; JSON `refreshed: false`, `stale: [<path>]`; exit `0` — a saved graph carries no diagnostics, so `--no-refresh` never exits `1`; only a refresh whose re-analysis emitted diagnostics does | Omit `--no-refresh` when current facts are required |
@@ -107,9 +108,21 @@ it happens to share the same root directory.
 
 ### Unsupported extension edit
 
-The registry owns `.py` and `.js` files. An unsupported file has no file node
+The registry owns `.py`, `.js`, and `.sql` files. An unsupported file has no file node
 and cannot become a source-freshness finding until a registered interpreter
 owns its extension.
+
+### SQL registration and mixed refresh
+
+SQL is registered last so a pure SQL file or directory follows the same
+selection and graph-then-sidecar write order as the existing languages. A
+saved Python or JavaScript graph does not silently broaden into SQL: when SQL
+appears below a recorded directory, `--no-refresh` reports stale SQL while
+preserving bytes, and an automatic refresh prints
+`minotaur: refreshing graph (N drifted paths)` before refusing the mixed
+selection with exit `2`. A pure-SQL edit or addition can refresh successfully;
+the graph is replaced before its matching sidecar, and a sidecar failure keeps
+the newly written graph while leaving the sidecar absent or stale.
 
 ### Excluded or hidden directory
 
