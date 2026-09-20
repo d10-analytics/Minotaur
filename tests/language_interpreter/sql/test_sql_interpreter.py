@@ -239,6 +239,7 @@ def test_global_temporary_and_nonpersistent_alter_targets_are_rejected(tmp_path:
         tmp_path,
         **{
             "near_misses.sql": (
+                "CREATE TABLE ##declared(id int)\nGO\n"
                 "CREATE VIEW V AS SELECT * FROM ##scratch\nGO\n"
                 "CREATE INDEX ix ON ##scratch(id)\nGO\n"
                 "ALTER VIEW V ADD c int\nGO\n"
@@ -249,7 +250,7 @@ def test_global_temporary_and_nonpersistent_alter_targets_are_rejected(tmp_path:
         },
     )
     assert [node.label for node in result.document.nodes] == ["near_misses.sql"]
-    assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 5
+    assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 6
 
 
 def test_parser_fallback_is_exposed_only_as_sanitized_diagnostic(tmp_path: Path, caplog) -> None:
