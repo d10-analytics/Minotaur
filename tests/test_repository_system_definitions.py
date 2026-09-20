@@ -11,6 +11,7 @@ import pytest
 from minotaur import cli
 from minotaur.graph_model.loading import graph_digest, load_graph_file, stamp_path
 from minotaur.graph_model.node import NodeClass
+from minotaur.language_interpreter.registry import default_registry
 
 ROOT = Path(__file__).parents[1]
 SOURCE_ROOT = ROOT / "src"
@@ -58,6 +59,10 @@ _SYSTEM_FILES = {
         "minotaur/language_interpreter/python/__init__.py",
         "minotaur/language_interpreter/python/discovery.py",
         "minotaur/language_interpreter/python/interpreter.py",
+    ],
+    "analysis-sql": [
+        "minotaur/language_interpreter/sql/__init__.py",
+        "minotaur/language_interpreter/sql/interpreter.py",
     ],
     "command-interface": [
         "minotaur/__init__.py",
@@ -133,6 +138,16 @@ _CONNECTIONS = [
     ),
     (
         "system: analysis-python",
+        "system: graph-contract",
+        ("calls", "imports", "references"),
+    ),
+    (
+        "system: analysis-sql",
+        "system: analysis-platform",
+        ("calls", "imports", "references"),
+    ),
+    (
+        "system: analysis-sql",
         "system: graph-contract",
         ("calls", "imports", "references"),
     ),
@@ -258,11 +273,11 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
         "status": "recorded",
         "targets": sorted(_TARGETS),
     }
-    assert coverage["graph_files"] == {"scope": "final_graph_file_nodes", "count": 55}
+    assert coverage["graph_files"] == {"scope": "final_graph_file_nodes", "count": 57}
     assert coverage["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 55,
-        "represented": 55,
+        "total": 57,
+        "represented": 57,
         "absent": 0,
     }
     assert coverage["unassigned_files"] == {
@@ -270,12 +285,21 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
         "count": 0,
         "paths": [],
     }
-    assert len(payload["connections"]) == 17
+    assert len(payload["connections"]) == 19
     assert [
         (item["source_category"], item["target_category"], tuple(item["kinds"]))
         for item in payload["connections"]
     ] == _CONNECTIONS
     assert all(item["relationships"] for item in payload["connections"])
+    assert not any(
+        item["source_category"] == "system: analysis-platform"
+        and item["target_category"] == "system: analysis-sql"
+        for item in payload["connections"]
+    )
+    assert all(
+        registration.namespace != "minotaur-sql"
+        for registration in default_registry().registrations
+    )
 
 
 def test_configured_analysis_without_output_writes_only_isolated_root_artifacts(
@@ -302,7 +326,7 @@ def test_configured_analysis_without_output_writes_only_isolated_root_artifacts(
     assert sidecar.is_file()
     graph_bytes = graph.read_bytes()
     loaded = load_graph_file(graph)
-    assert sum(node.node_class is NodeClass.FILE for node in loaded.document.nodes) == 55
+    assert sum(node.node_class is NodeClass.FILE for node in loaded.document.nodes) == 57
     assert sidecar.read_text(encoding="ascii").strip() == graph_digest(graph_bytes)
     checkout_after = tuple(
         path.read_bytes() if path.exists() else None for path in (checkout_graph, checkout_sidecar)
@@ -374,11 +398,11 @@ def test_declaration_omission_reports_the_graph_file_as_unassigned(
     assert status == 0
     assert error == ""
     payload = json.loads(output)
-    assert payload["coverage"]["graph_files"]["count"] == 55
+    assert payload["coverage"]["graph_files"]["count"] == 57
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 54,
-        "represented": 54,
+        "total": 56,
+        "represented": 56,
         "absent": 0,
     }
     assert payload["coverage"]["unassigned_files"] == {
@@ -422,12 +446,12 @@ def test_target_omission_reports_one_declared_file_absent(
     payload = json.loads(output)
     assert payload["coverage"]["graph_files"] == {
         "scope": "final_graph_file_nodes",
-        "count": 54,
+        "count": 56,
     }
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 55,
-        "represented": 54,
+        "total": 57,
+        "represented": 56,
         "absent": 1,
     }
     assert payload["coverage"]["unassigned_files"] == {
