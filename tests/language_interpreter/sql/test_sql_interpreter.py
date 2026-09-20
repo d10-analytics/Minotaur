@@ -138,6 +138,21 @@ def test_unsupported_query_and_near_miss_do_not_emit_partial_facts(tmp_path: Pat
     assert all(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics)
 
 
+def test_recursive_and_temporary_ctes_are_rejected_whole(tmp_path: Path) -> None:
+    result = _analyze(
+        tmp_path,
+        **{
+            "views.sql": (
+                "CREATE VIEW recursive_v AS WITH chain AS ("
+                "SELECT id FROM Base UNION ALL SELECT id FROM chain) SELECT * FROM chain\nGO\n"
+                "CREATE VIEW temporary_v AS SELECT * FROM #scratch"
+            )
+        },
+    )
+    assert not _symbols(result)
+    assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 2
+
+
 def test_exact_neutral_families_do_not_resolve_declarations(tmp_path: Path) -> None:
     result = _analyze(
         tmp_path,
