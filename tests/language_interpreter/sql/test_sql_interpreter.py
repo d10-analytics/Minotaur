@@ -263,3 +263,12 @@ def test_parser_fallback_is_exposed_only_as_sanitized_diagnostic(tmp_path: Path,
     assert result.diagnostics[0].code == DiagnosticCode.UNSUPPORTED_SYNTAX
     assert result.diagnostics[0].message == "unsupported T-SQL syntax"
     assert not any(record.name == "sqlglot" for record in caplog.records)
+
+
+def test_quoted_at_identifier_uses_parser_marker_not_text_prefix(tmp_path: Path) -> None:
+    result = _analyze(
+        tmp_path,
+        **{"quoted.sql": "CREATE TABLE [@Persistent] (id int)"},
+    )
+    assert "@Persistent" in _symbols(result)
+    assert not result.diagnostics
