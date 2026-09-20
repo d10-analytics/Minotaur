@@ -195,16 +195,16 @@ def test_cli_records_file_content_hashes_and_root_relative_selection(tmp_path: P
 def test_public_python_analysis_observes_shared_file_constructor_without_output_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write(tmp_path, "z.py", "value = 'café'\n")
+    (tmp_path / "z.py").write_bytes(b"\xef\xbb\xbfvalue = 'caf\xc3\xa9'\r\n")
     _write(tmp_path, "a.py", "def helper():\n    return 1\n")
     paths = (tmp_path / "z.py", tmp_path / "a.py")
     before = analyze_python_files(Workspace(tmp_path), paths)
     before_bytes = serialize(before.document)
-    observed: list[tuple[str, bytes, str, str]] = []
+    observed: list[tuple[str, str, str, str]] = []
     original = shared_emission.file_node
 
     def observe(path: str, content: bytes, namespace: str, language: str):
-        observed.append((path, content, namespace, language))
+        observed.append((path, hashlib.sha256(content).hexdigest(), namespace, language))
         return original(path, content, namespace, language)
 
     monkeypatch.setattr(python_interpreter, "file_node", observe)
@@ -212,8 +212,18 @@ def test_public_python_analysis_observes_shared_file_constructor_without_output_
 
     assert serialize(after.document) == before_bytes
     assert observed == [
-        ("a.py", b"def helper():\n    return 1\n", "minotaur-python", "python"),
-        ("z.py", b"value = 'caf\xc3\xa9'\n", "minotaur-python", "python"),
+        (
+            "a.py",
+            "b6631639de17fb869c43278f858c465cc5b71c8ec51c8c25d803905361f8a544",
+            "minotaur-python",
+            "python",
+        ),
+        (
+            "z.py",
+            "7eb8830831eea3dc479e1346e57f3e43d3879b34ef4593a5e9e348d25b2d220d",
+            "minotaur-python",
+            "python",
+        ),
     ]
 
 

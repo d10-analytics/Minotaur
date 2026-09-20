@@ -55,7 +55,7 @@ def test_public_javascript_analysis_observes_shared_file_constructor_without_out
     tmp_path, monkeypatch
 ):
     files = {
-        "z.js": "const value = 'café';\n",
+        "z.js": "\ufeffconst value = 'café';\r\n",
         "a.js": "export function helper() {}\n",
     }
     baseline = _analyze(tmp_path, files)
@@ -64,7 +64,7 @@ def test_public_javascript_analysis_observes_shared_file_constructor_without_out
     original = javascript_interpreter.file_node
 
     def observe(path, content, namespace, language):
-        observed.append((path, content, namespace, language))
+        observed.append((path, hashlib.sha256(content).hexdigest(), namespace, language))
         return original(path, content, namespace, language)
 
     monkeypatch.setattr(javascript_interpreter, "file_node", observe)
@@ -73,8 +73,18 @@ def test_public_javascript_analysis_observes_shared_file_constructor_without_out
 
     assert serialize(result.document) == baseline_bytes
     assert observed == [
-        ("a.js", b"export function helper() {}\n", "minotaur-javascript", "javascript"),
-        ("z.js", b"const value = 'caf\xc3\xa9';\n", "minotaur-javascript", "javascript"),
+        (
+            "a.js",
+            "d2ab462fc7f45c3fb7dc5dfacee8897a7e1cbb555c84b2a5a32c06df211ba161",
+            "minotaur-javascript",
+            "javascript",
+        ),
+        (
+            "z.js",
+            "a82af4bf89524cba1e756bab179e6be46ebda02393d6eaf4d408f006a95d2d27",
+            "minotaur-javascript",
+            "javascript",
+        ),
     ]
 
 
