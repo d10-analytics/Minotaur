@@ -131,6 +131,25 @@ def test_read_and_parse_calls_parser_once_for_each_surviving_raw_source(tmp_path
     assert [diagnostic.path for diagnostic in diagnostics] == ["invalid.py", "missing.py"]
 
 
+def test_read_and_parse_keeps_mixed_failure_diagnostics_in_path_order(tmp_path: Path) -> None:
+    first = tmp_path / "a-parse.py"
+    missing = tmp_path / "b-missing.py"
+    last = tmp_path / "c-parse.py"
+    first.write_text("bad\n", encoding="utf-8")
+    last.write_text("bad\n", encoding="utf-8")
+
+    def parse(source: str, relative: str) -> str:
+        raise ParseFailure("unexpected token")
+
+    _, diagnostics = read_and_parse(Workspace(tmp_path), [last, missing, first], parse)
+
+    assert [(diagnostic.code, diagnostic.path) for diagnostic in diagnostics] == [
+        (DiagnosticCode.PARSE_ERROR, "a-parse.py"),
+        (DiagnosticCode.SOURCE_READ_ERROR, "b-missing.py"),
+        (DiagnosticCode.PARSE_ERROR, "c-parse.py"),
+    ]
+
+
 def test_parsed_source_is_frozen() -> None:
     source = ParsedSource("file.py", b"pass", "pass", object())
 
