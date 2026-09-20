@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import ast
 import builtins
-import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -35,7 +34,7 @@ from minotaur.language_interpreter.contract import (
     IMPORTS_UNRESOLVED,
     AnalysisResult,
 )
-from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
+from minotaur.language_interpreter.emission import NodeEmitter, file_node, symbol_node
 from minotaur.language_interpreter.paths import resolve_relative
 from minotaur.language_interpreter.python.discovery import discover_python_files
 from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
@@ -2189,7 +2188,7 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
         modules.append(module)
         nodes.extend(
             (
-                _file_node(parsed.relative, hashlib.sha256(parsed.content).hexdigest()),
+                file_node(parsed.relative, parsed.content, NAMESPACE, "python"),
                 _module_node(module),
             )
         )
@@ -2266,19 +2265,6 @@ def _make_module(path: str, tree: ast.Module, source: str, line_index: LineIndex
         location,
         file_id,
         module_id,
-    )
-
-
-def _file_node(path: str, content_sha256: str) -> Node:
-    identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
-    return Node(
-        id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=path),
-        identity=identity,
-        node_class=NodeClass.FILE,
-        label=path,
-        path=path,
-        language="python",
-        extensions={NAMESPACE: {"content_sha256": content_sha256}},
     )
 
 
