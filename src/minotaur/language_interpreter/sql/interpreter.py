@@ -7,7 +7,9 @@ refer to the original source; it does not classify SQL statements.
 
 from __future__ import annotations
 
+import logging
 import re
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,17 @@ _GO_RE = re.compile(r"[ \t]*GO(?:[ \t]+([0-9]+))?[ \t]*(?:--[^\r\n]*)?\Z", re.IG
 _PROPERTY_PROCEDURES = frozenset(
     {"sp_addextendedproperty", "sp_updateextendedproperty", "sp_dropextendedproperty"}
 )
+
+
+class _SqlglotWarningFilter(logging.Filter):
+    """Suppress parser fallback warnings produced by this analysis call."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._thread = threading.get_ident()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.thread != self._thread or record.levelno < logging.WARNING
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +109,7 @@ def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> Analysis
             if not batch.text.strip():
                 continue
             try:
-                trees = parse(batch.text, read="tsql")
+                trees = _parse_batch(batch.text)
             except Exception:
                 diagnostics.append(
                     Diagnostic(
@@ -218,6 +231,16 @@ def _make_file(source: RawSource) -> _File:
     )
 
 
+def _parse_batch(source: str) -> list[exp.Expr | None]:
+    logger = logging.getLogger("sqlglot")
+    warning_filter = _SqlglotWarningFilter()
+    logger.addFilter(warning_filter)
+    try:
+        return parse(source, read="tsql")
+    finally:
+        logger.removeFilter(warning_filter)
+
+
 def _typed_index(
     declarations: Iterable[_Declaration], kind: str
 ) -> dict[tuple[str, ...], list[_Declaration]]:
@@ -309,7 +332,7 @@ def _interpret_create(
     if parts is None or len(parts) not in ({1} if kind == "SCHEMA" else {1, 2}):
         _unsupported(tree, item, batch, diagnostics)
         return None
-    if _temporary_table(table) or any(_temporary(part) for part in parts):
+    if _nonpersistent_table(table):
         _unsupported(tree, item, batch, diagnostics)
         return None
     location = _table_location(table, item, batch)
@@ -370,13 +393,17 @@ def _parts(table: exp.Expression) -> tuple[str, ...] | None:
     return tuple(str(identifier.this) for identifier in identifiers)
 
 
-def _temporary(part: str) -> bool:
-    return part.startswith(("#", "@"))
-
-
-def _temporary_table(table: exp.Table) -> bool:
-    name = table.args.get("this")
-    return isinstance(name, exp.Identifier) and bool(name.args.get("temporary"))
+def _nonpersistent_table(table: exp.Table) -> bool:
+    identifiers = (
+        table.args.get("catalog"),
+        table.args.get("db"),
+        table.args.get("this"),
+    )
+    return any(
+        isinstance(identifier, exp.Identifier)
+        and bool(identifier.args.get("temporary") or identifier.args.get("global_"))
+        for identifier in identifiers
+    )
 
 
 def _identifier_location(
@@ -441,8 +468,7 @@ def _foreign_keys(
         if (
             parts is None
             or len(parts) not in {1, 2}
-            or _temporary_table(referenced)
-            or any(_temporary(part) for part in parts)
+            or _nonpersistent_table(referenced)
             or location is None
         ):
             return None
@@ -514,12 +540,7 @@ def _query_reads(
                 if isinstance(source, exp.Table):
                     parts = _parts(source)
                     location = _table_location(source, item, batch)
-                    if (
-                        parts is None
-                        or len(parts) not in {1, 2}
-                        or _temporary_table(source)
-                        or any(_temporary(part) for part in parts)
-                    ):
+                    if parts is None or len(parts) not in {1, 2} or _nonpersistent_table(source):
                         return False
                     if len(parts) == 1 and parts[0].casefold() in local:
                         continue
@@ -555,8 +576,7 @@ def _valid_index(tree: Any) -> bool:
         parts
         and len(parts) in {1, 2}
         and isinstance(target, exp.Table)
-        and not _temporary_table(target)
-        and not any(_temporary(part) for part in parts)
+        and not _nonpersistent_table(target)
         and isinstance(params, exp.IndexParameters)
         and params.args.get("columns")
     )
@@ -573,8 +593,17 @@ def _neutral_statement(tree: exp.Expression) -> bool:
             and parts[1].casefold() in _PROPERTY_PROCEDURES
         )
     if isinstance(tree, exp.Alter):
+        target = tree.this
+        parts = _parts(target) if isinstance(target, exp.Table) else None
         actions = tree.args.get("actions") or []
-        return bool(actions) and all(
+        return bool(
+            str(tree.args.get("kind") or "").upper() == "TABLE"
+            and parts
+            and len(parts) in {1, 2}
+            and isinstance(target, exp.Table)
+            and not _nonpersistent_table(target)
+            and actions
+        ) and all(
             isinstance(action, exp.ColumnDef)
             and not any(
                 isinstance(child, (exp.Reference, exp.ForeignKey)) for child in action.walk()
