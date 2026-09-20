@@ -567,7 +567,7 @@ def _query_reads(
 
 def _tables_outside_nested_with(expression: Any) -> Iterable[exp.Table]:
     """Yield table references in one CTE scope without entering nested scopes."""
-    if isinstance(expression, exp.With):
+    if isinstance(expression, exp.Query) and expression.args.get("with_") is not None:
         return
     if isinstance(expression, exp.Table):
         yield expression
