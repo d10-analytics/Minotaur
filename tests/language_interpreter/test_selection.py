@@ -193,6 +193,26 @@ def test_selection_discovers_sql_case_insensitively_and_deduplicates_overlaps(
     assert registration.namespace == "minotaur-sql"
 
 
+def test_activated_sql_owner_claims_match_registry_truth() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    system_readme = (repository / "docs/systems/analysis-sql/README.md").read_text(encoding="utf-8")
+    package_source = (repository / "src/minotaur/language_interpreter/sql/__init__.py").read_text(
+        encoding="utf-8"
+    )
+    interpreter_source = (
+        repository / "src/minotaur/language_interpreter/sql/interpreter.py"
+    ).read_text(encoding="utf-8")
+
+    assert "The SQL analyzer is the final `.sql` entry in `default_registry()`" in system_readme
+    assert "SQL remains absent from `default_registry()`" not in system_readme
+    assert '"""Bounded, AST-authoritative T-SQL interpretation."""' in package_source
+    assert "Unregistered, source-only" not in package_source
+    assert '"""Analyze selected SQL files through the shared final registry entry."""' in (
+        interpreter_source
+    )
+    assert "SQL is intentionally not registry-owned" not in interpreter_source
+
+
 def test_python_and_sql_interpreter_modules_collect_under_distinct_identities() -> None:
     repository = Path(__file__).resolve().parents[2]
     completed = subprocess.run(
