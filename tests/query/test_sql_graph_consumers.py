@@ -11,7 +11,7 @@ from minotaur.language_interpreter.sql import analyze_sql_files
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query import system as system_query
 from minotaur.query.diff import diff
-from minotaur.query.impact import impact
+from minotaur.query.impact import ImpactRecord, impact
 from minotaur.query.index import GraphIndex
 from minotaur.query.symbols import callers, definitions
 from minotaur.query.unreferenced import unreferenced
@@ -115,9 +115,9 @@ def test_sql_relationships_are_fenced_from_generic_consumers_but_core_recall_rem
     index = _persisted_index(tmp_path / "current")
 
     assert callers(index, "S.Parent") == ()
-    assert impact(index, "S.Parent", max_depth=1)[0].symbol == "S.Parent"
-    assert impact(index, "S.Parent", max_depth=1)[0].kind == "sql:table"
-    assert impact(index, "S.Parent", max_depth=1)[0].depth == 0
+    assert impact(index, "S.Parent", max_depth=1) == (
+        ImpactRecord(depth=0, symbol="S.Parent", kind="sql:table"),
+    )
     assert unreferenced(index, tmp_path, ("catalog.sql",)) == ()
 
     systems = load_systems_data(
