@@ -55,6 +55,8 @@ from typing import Any
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "equivalence_root"
 SCRATCH_PLACEHOLDER = "<scratch>"
+BASELINE_REFRESH_PREFIX = b"minotaur: refreshed graph ("
+BRANCH_REFRESH_PREFIX = b"minotaur: refreshing graph ("
 
 
 @dataclass(frozen=True)
@@ -326,6 +328,31 @@ def _normalise_stderr(value: bytes, *scratches: Path) -> bytes:
     return value
 
 
+def _normalise_refresh_attempt_delta(baseline: bytes, branch: bytes) -> tuple[bytes, bytes]:
+    """Admit only the authorized old-to-new refresh-attempt prefix change.
+
+    The branch spelling is rewritten only at the start of a stderr line and
+    only when the baseline has the corresponding historical spelling.  The
+    subsequent drift count, stale-path lines, and every other stderr byte still
+    have to compare exactly.
+    """
+
+    baseline_lines = baseline.splitlines(keepends=True)
+    branch_lines = branch.splitlines(keepends=True)
+    if len(baseline_lines) != len(branch_lines):
+        return baseline, branch
+    normalised_branch: list[bytes] = []
+    changed = False
+    for baseline_line, branch_line in zip(baseline_lines, branch_lines, strict=True):
+        if baseline_line.startswith(BASELINE_REFRESH_PREFIX) and branch_line.startswith(
+            BRANCH_REFRESH_PREFIX
+        ):
+            branch_line = BASELINE_REFRESH_PREFIX + branch_line[len(BRANCH_REFRESH_PREFIX) :]
+            changed = True
+        normalised_branch.append(branch_line)
+    return baseline, b"".join(normalised_branch) if changed else branch
+
+
 def _row(
     label: str,
     baseline: Any,
@@ -345,6 +372,7 @@ def _compare_processes(
     baseline: Completed,
     branch: Completed,
     *scratches: Path,
+    allow_refresh_attempt_delta: bool = False,
 ) -> bool:
     if baseline.timed_out or branch.timed_out:
         print(
@@ -353,16 +381,14 @@ def _compare_processes(
             f" ({baseline.stderr_text.strip() or branch.stderr_text.strip()})"
         )
         return False
-    left = (
-        baseline.returncode,
-        baseline.stdout,
-        _normalise_stderr(baseline.stderr, *scratches),
-    )
-    right = (
-        branch.returncode,
-        branch.stdout,
-        _normalise_stderr(branch.stderr, *scratches),
-    )
+    baseline_stderr = _normalise_stderr(baseline.stderr, *scratches)
+    branch_stderr = _normalise_stderr(branch.stderr, *scratches)
+    if allow_refresh_attempt_delta:
+        baseline_stderr, branch_stderr = _normalise_refresh_attempt_delta(
+            baseline_stderr, branch_stderr
+        )
+    left = (baseline.returncode, baseline.stdout, baseline_stderr)
+    right = (branch.returncode, branch.stdout, branch_stderr)
     return _row(label, left, right)
 
 
@@ -909,7 +935,12 @@ def _run_scenarios(
                 validate=letter == "k",
             )
             if not _compare_processes(
-                f"scenario root={root} step={letter}", left, right, copies[0], copies[1]
+                f"scenario root={root} step={letter}",
+                left,
+                right,
+                copies[0],
+                copies[1],
+                allow_refresh_attempt_delta=letter in "acde",
             ):
                 ok = False
             if left.returncode not in (0, 1) or right.returncode not in (0, 1):
