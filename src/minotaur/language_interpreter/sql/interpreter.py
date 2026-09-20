@@ -500,7 +500,7 @@ def _query_reads(
             dependencies: dict[str, set[str]] = {alias: set() for alias in aliases}
             for cte in with_expr.expressions:
                 alias = cte.alias_or_name.casefold()
-                for table in cte.this.find_all(exp.Table):
+                for table in _tables_outside_nested_with(cte.this):
                     parts = _parts(table)
                     if parts is not None and len(parts) == 1 and parts[0].casefold() in aliases:
                         dependencies[alias].add(parts[0].casefold())
@@ -563,6 +563,19 @@ def _query_reads(
     if not visit_query(expression, frozenset()):
         return None
     return result
+
+
+def _tables_outside_nested_with(expression: Any) -> Iterable[exp.Table]:
+    """Yield table references in one CTE scope without entering nested scopes."""
+    if isinstance(expression, exp.With):
+        return
+    if isinstance(expression, exp.Table):
+        yield expression
+        return
+    if not isinstance(expression, exp.Expression):
+        return
+    for child in expression.iter_expressions():
+        yield from _tables_outside_nested_with(child)
 
 
 def _valid_index(tree: Any) -> bool:
