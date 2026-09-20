@@ -11,6 +11,8 @@ from minotaur.language_interpreter.javascript import NAMESPACE as JAVASCRIPT_NAM
 from minotaur.language_interpreter.javascript import analyze_javascript_files
 from minotaur.language_interpreter.python import NAMESPACE as PYTHON_NAMESPACE
 from minotaur.language_interpreter.python import analyze_python_files
+from minotaur.language_interpreter.sql.interpreter import NAMESPACE as SQL_NAMESPACE
+from minotaur.language_interpreter.sql.interpreter import analyze_sql_files
 from minotaur.language_interpreter.workspace import Workspace
 
 # Interpreters receive files after shared selection has established containment
@@ -85,6 +87,7 @@ def default_registry() -> InterpreterRegistry:
             InterpreterRegistration(
                 ".js", analyze_javascript_files, namespace=JAVASCRIPT_NAMESPACE
             ),
+            InterpreterRegistration(".sql", analyze_sql_files, namespace=SQL_NAMESPACE),
         )
     )
 

@@ -1033,6 +1033,74 @@ def test_both_scratch_roots_normalise_to_one_placeholder(harness: types.ModuleTy
     assert harness._compare_processes("row", left, right, baseline_scratch, branch_scratch)
 
 
+def test_expected_refresh_scenario_admits_only_the_attempt_prefix_delta(
+    harness: types.ModuleType,
+) -> None:
+    stale_lines = b"minotaur: stale: app.py (content changed)\n"
+    baseline = harness.Completed(
+        0,
+        b'{"refreshed": true}\n',
+        b"minotaur: refreshed graph (1 drifted paths)\n" + stale_lines,
+    )
+    branch = harness.Completed(
+        0,
+        b'{"refreshed": true}\n',
+        b"minotaur: refreshing graph (1 drifted paths)\n" + stale_lines,
+    )
+
+    assert harness._compare_processes(
+        "expected refresh", baseline, branch, allow_refresh_attempt_delta=True
+    )
+    assert not harness._compare_processes("ordinary comparison", baseline, branch)
+
+
+@pytest.mark.parametrize(
+    "branch_stderr",
+    [
+        b"minotaur: refreshing graph (2 drifted paths)\n"
+        b"minotaur: stale: app.py (content changed)\n",
+        b"minotaur: refreshing graph (1 drifted paths)\n"
+        b"minotaur: stale: other.py (content changed)\n",
+        b"prefix minotaur: refreshing graph (1 drifted paths)\n"
+        b"minotaur: stale: app.py (content changed)\n",
+        b"minotaur: refreshed graph (1 drifted paths)\n"
+        b"minotaur: stale: app.py (content changed)\nextra\n",
+    ],
+)
+def test_expected_refresh_scenario_rejects_every_other_stderr_difference(
+    harness: types.ModuleType, branch_stderr: bytes
+) -> None:
+    baseline = harness.Completed(
+        0,
+        b"answer\n",
+        b"minotaur: refreshed graph (1 drifted paths)\nminotaur: stale: app.py (content changed)\n",
+    )
+    branch = harness.Completed(0, b"answer\n", branch_stderr)
+
+    assert not harness._compare_processes(
+        "expected refresh", baseline, branch, allow_refresh_attempt_delta=True
+    )
+
+
+@pytest.mark.parametrize(
+    ("branch_returncode", "branch_stdout"),
+    [(1, b"answer\n"), (0, b"different\n")],
+)
+def test_refresh_attempt_delta_does_not_relax_exit_or_stdout(
+    harness: types.ModuleType, branch_returncode: int, branch_stdout: bytes
+) -> None:
+    baseline = harness.Completed(0, b"answer\n", b"minotaur: refreshed graph (1 drifted paths)\n")
+    branch = harness.Completed(
+        branch_returncode,
+        branch_stdout,
+        b"minotaur: refreshing graph (1 drifted paths)\n",
+    )
+
+    assert not harness._compare_processes(
+        "expected refresh", baseline, branch, allow_refresh_attempt_delta=True
+    )
+
+
 def test_output_is_compared_as_bytes_not_decoded_text(harness: types.ModuleType) -> None:
     """Text mode would translate newlines and hide a real byte difference."""
 

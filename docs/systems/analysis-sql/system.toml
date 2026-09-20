@@ -1,0 +1,6 @@
+schema_version = 1
+name = "analysis-sql"
+files = [
+  "minotaur/language_interpreter/sql/__init__.py",
+  "minotaur/language_interpreter/sql/interpreter.py",
+]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
@@ -12,34 +13,51 @@ from minotaur.graph_model.provenance import (
     NodeClass,
     RelationshipKind,
     SymbolKind,
+    resolve_symbol_kind,
 )
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 
 
 def symbol_node(
     label: str,
-    kind: SymbolKind,
+    kind: SymbolKind | str,
     location: Location,
     namespace: str,
     language: str,
     extensions: Mapping[str, Mapping[str, object]] | None = None,
 ) -> Node:
     """Construct a source-location-backed symbol node."""
+    resolved_kind = resolve_symbol_kind(kind.value if isinstance(kind, SymbolKind) else kind)
+    kind_value = resolved_kind.value if isinstance(resolved_kind, SymbolKind) else resolved_kind
     identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, namespace)
     return Node(
         id=compute_node_id(
             identity,
             node_class=NodeClass.SYMBOL.value,
-            symbol_kind=kind.value,
+            symbol_kind=kind_value,
             location=location,
         ),
         identity=identity,
         node_class=NodeClass.SYMBOL,
         label=label,
-        symbol_kind=kind.value,
+        symbol_kind=kind_value,
         language=language,
         location=location,
         extensions=extensions,
+    )
+
+
+def file_node(path: str, content: bytes, namespace: str, language: str) -> Node:
+    """Construct a file node identified by path and the digest of raw bytes."""
+    identity = NodeIdentity(IdentityBasis.FILE_PATH, namespace)
+    return Node(
+        id=compute_node_id(identity, node_class=NodeClass.FILE.value, path=path),
+        identity=identity,
+        node_class=NodeClass.FILE,
+        label=path,
+        path=path,
+        language=language,
+        extensions={namespace: {"content_sha256": hashlib.sha256(content).hexdigest()}},
     )
 
 

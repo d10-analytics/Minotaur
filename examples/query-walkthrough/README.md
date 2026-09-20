@@ -131,12 +131,12 @@ printf '\n# scratch edit 1\n' >> \
 
 Without `--no-refresh`, Minotaur re-analyzes the recorded selection before
 answering. The warning names the drifted path; the definition still comes from
-the refreshed graph.
+the newly analyzed graph.
 
 ```console
 $ minotaur query definitions select_sources \
     --graph /tmp/query-walkthrough-graph.json --root /tmp/query-walkthrough-src
-minotaur: refreshed graph (1 drifted paths)
+minotaur: refreshing graph (1 drifted paths)
 minotaur: stale: minotaur/language_interpreter/selection.py
 minotaur/language_interpreter/selection.py:34  minotaur.language_interpreter.selection.select_sources  function
 ```

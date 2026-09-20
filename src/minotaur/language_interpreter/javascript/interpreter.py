@@ -10,7 +10,6 @@ the enclosing emitted owner rather than inventing a second identity grain.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,7 +32,7 @@ from minotaur.graph_model.provenance import (
 )
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 from minotaur.language_interpreter.contract import AnalysisResult
-from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
+from minotaur.language_interpreter.emission import NodeEmitter, file_node, symbol_node
 from minotaur.language_interpreter.paths import resolve_relative
 from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
 from minotaur.language_interpreter.source_text import LineIndex
@@ -51,7 +50,6 @@ class _Module:
     line_index: LineIndex
     file_id: str
     module_id: str
-    digest: str
     bindings: dict[str, _Binding]
     exports: dict[str, _Binding]
     declaration_nodes: tuple[Node, ...]
@@ -70,13 +68,13 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
     """Analyze selected JavaScript files, retaining valid sibling results."""
     modules: list[_Module] = []
     sources, diagnostics = read_and_parse(workspace, files, _parse_javascript)
+    content_by_path = {parsed.relative: parsed.content for parsed in sources}
     for parsed in sources:
         modules.append(
             _make_module(
                 parsed.relative,
                 parsed.source,
                 parsed.tree,
-                hashlib.sha256(parsed.content).hexdigest(),
                 LineIndex(parsed.source),
             )
         )
@@ -84,7 +82,13 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
     by_path = {module.path: module for module in modules}
     nodes: list[Node] = []
     for module in modules:
-        nodes.extend((_file_node(module), _module_node(module), *module.declaration_nodes))
+        nodes.extend(
+            (
+                file_node(module.path, content_by_path[module.path], NAMESPACE, "javascript"),
+                _module_node(module),
+                *module.declaration_nodes,
+            )
+        )
     relationships = RelationshipAccumulator()
     emitter = NodeEmitter(NAMESPACE, "javascript")
     for module in modules:
@@ -112,7 +116,7 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
     return AnalysisResult(document, tuple(diagnostics))
 
 
-def _make_module(path: str, source: str, tree: Any, digest: str, line_index: LineIndex) -> _Module:
+def _make_module(path: str, source: str, tree: Any, line_index: LineIndex) -> _Module:
     file_identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
     file_id = compute_node_id(file_identity, node_class=NodeClass.FILE.value, path=path)
     module_location = _full_location(path, line_index)
@@ -185,7 +189,6 @@ def _make_module(path: str, source: str, tree: Any, digest: str, line_index: Lin
         line_index,
         file_id,
         module_id,
-        digest,
         bindings,
         exports,
         tuple(declaration_nodes),
@@ -279,19 +282,6 @@ def _collect_declarations(
                 exports[name] = binding
             declaration_nodes.append(node)
             declarator._minotaur_node = node
-
-
-def _file_node(module: _Module) -> Node:
-    identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
-    return Node(
-        id=module.file_id,
-        identity=identity,
-        node_class=NodeClass.FILE,
-        label=module.path,
-        path=module.path,
-        language="javascript",
-        extensions={NAMESPACE: {"content_sha256": module.digest}},
-    )
 
 
 def _module_node(module: _Module) -> Node:

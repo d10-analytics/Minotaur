@@ -177,6 +177,147 @@ def test_javascript_selection_dispatches_and_mixed_selection_is_rejected(
     )
 
 
+def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    valid = _write(root, "schema.SQL", "CREATE TABLE T (id int)\n")
+    output = tmp_path / "sql.json"
+
+    completed = _run(root, output, valid)
+
+    assert completed.returncode == 0, completed.stderr
+    graph = load_graph_file(output).document
+    assert graph.generated_by is not None
+    assert graph.generated_by.name == "minotaur-sql"
+    assert {node.path for node in graph.nodes if node.path is not None} == {"schema.SQL"}
+
+    _write(root, "broken.sql", "CREATE TABLE Broken (id int\n")
+    partial = _run(root, tmp_path / "partial.json", root)
+
+    assert partial.returncode == 1
+    assert "parse-error" in partial.stderr
+    partial_graph = load_graph_file(tmp_path / "partial.json").document
+    assert {node.path for node in partial_graph.nodes if node.path is not None} == {
+        "broken.sql",
+        "schema.SQL",
+    }
+    assert any(
+        node.label == "T" and node.symbol_kind == "sql:table" for node in partial_graph.nodes
+    )
+
+
+@pytest.mark.parametrize(
+    "suffixes",
+    [
+        ("py", "sql"),
+        ("js", "sql"),
+        ("py", "js"),
+        ("py", "js", "sql"),
+    ],
+)
+def test_every_mixed_language_selection_rejects_before_replacing_outputs(
+    tmp_path: Path, suffixes: tuple[str, ...]
+) -> None:
+    root = tmp_path / "source"
+    contents = {
+        "py": "value = 1\n",
+        "js": "export const value = 1;\n",
+        "sql": "CREATE TABLE T (id int)\n",
+    }
+    targets = tuple(_write(root, f"source.{suffix}", contents[suffix]) for suffix in suffixes)
+    output = tmp_path / "mixed.json"
+    sidecar = stamp_path(output)
+    output.write_bytes(b"previous graph")
+    sidecar.write_bytes(b"previous sidecar")
+
+    completed = _run(root, output, *targets, force=True)
+
+    assert completed.returncode == 2
+    assert "unsupported multi-interpreter graph composition" in completed.stderr
+    assert output.read_bytes() == b"previous graph"
+    assert sidecar.read_bytes() == b"previous sidecar"
+
+
+def test_sql_sidecar_failure_keeps_new_graph_for_unstamped_and_stamped_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_second_write(original_write):
+        calls = 0
+
+        def write(path: Path, content: bytes) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("simulated SQL sidecar failure")
+            original_write(path, content)
+
+        return write
+
+    unstamped_root = tmp_path / "unstamped-source"
+    unstamped = _write(unstamped_root, "schema.sql", "CREATE TABLE T (id int)\n")
+    unstamped_output = tmp_path / "unstamped.json"
+    original_write = cli._write_atomically
+    monkeypatch.setattr(cli, "_write_atomically", fail_second_write(original_write))
+
+    assert (
+        cli.main(
+            [
+                "analyze",
+                "--root",
+                str(unstamped_root),
+                "--output",
+                str(unstamped_output),
+                str(unstamped),
+            ]
+        )
+        == 2
+    )
+    assert load_graph_file(unstamped_output).document.generated_by is not None
+    assert load_graph_file(unstamped_output).document.generated_by.name == "minotaur-sql"
+    assert not stamp_path(unstamped_output).exists()
+
+    stamped_root = tmp_path / "stamped-source"
+    stamped = _write(stamped_root, "schema.sql", "CREATE TABLE T (id int)\n")
+    stamped_output = tmp_path / "stamped.json"
+    monkeypatch.setattr(cli, "_write_atomically", original_write)
+    assert (
+        cli.main(
+            [
+                "analyze",
+                "--root",
+                str(stamped_root),
+                "--output",
+                str(stamped_output),
+                str(stamped),
+            ]
+        )
+        == 0
+    )
+    old_graph = stamped_output.read_bytes()
+    old_sidecar = stamp_path(stamped_output).read_bytes()
+    stamped.write_text("CREATE TABLE T (id int, name varchar(10))\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_write_atomically", fail_second_write(original_write))
+
+    assert (
+        cli.main(
+            [
+                "analyze",
+                "--root",
+                str(stamped_root),
+                "--output",
+                str(stamped_output),
+                "--force",
+                str(stamped),
+            ]
+        )
+        == 2
+    )
+    assert stamped_output.read_bytes() != old_graph
+    assert stamp_path(stamped_output).read_bytes() == old_sidecar
+    assert load_graph_file(stamped_output).document.generated_by is not None
+
+
 def test_selection_containment_exclusions_and_direct_overrides(tmp_path: Path) -> None:
     root = tmp_path / "source"
     _write(root, "visible.py", "pass\n")
@@ -650,7 +791,7 @@ def test_analyze_writes_sidecar_matching_graph_bytes_and_query_refresh_updates_i
     )
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert status == 0
-    assert "refreshed graph" in captured.err
+    assert "refreshing graph" in captured.err
 
     # After refresh, the sidecar matches the new graph bytes.
     new_graph_bytes = output.read_bytes()
@@ -711,7 +852,7 @@ def test_query_refresh_through_symlink_updates_the_sidecar_beside_the_link(
     status = cli.main(["query", "definitions", "--graph", str(link), "--root", str(root), "app"])
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert status == 0
-    assert "refreshed graph" in captured.err
+    assert "refreshing graph" in captured.err
 
     assert link.is_symlink()
     new_bytes = real.read_bytes()

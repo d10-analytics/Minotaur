@@ -51,6 +51,43 @@ def test_esprima_dependency_is_installed_and_esm_parses(tmp_path):
     assert result.diagnostics == ()
 
 
+def test_public_javascript_analysis_observes_shared_file_constructor_without_output_drift(
+    tmp_path, monkeypatch
+):
+    files = {
+        "z.js": "\ufeffconst value = 'café';\r\n",
+        "a.js": "export function helper() {}\n",
+    }
+    baseline = _analyze(tmp_path, files)
+    baseline_bytes = serialize(baseline.document)
+    observed = []
+    original = javascript_interpreter.file_node
+
+    def observe(path, content, namespace, language):
+        observed.append((path, hashlib.sha256(content).hexdigest(), namespace, language))
+        return original(path, content, namespace, language)
+
+    monkeypatch.setattr(javascript_interpreter, "file_node", observe)
+    paths = tuple(tmp_path / name for name in files)
+    result = analyze_javascript_files(Workspace(tmp_path), paths)
+
+    assert serialize(result.document) == baseline_bytes
+    assert observed == [
+        (
+            "a.js",
+            "d2ab462fc7f45c3fb7dc5dfacee8897a7e1cbb555c84b2a5a32c06df211ba161",
+            "minotaur-javascript",
+            "javascript",
+        ),
+        (
+            "z.js",
+            "a82af4bf89524cba1e756bab179e6be46ebda02393d6eaf4d408f006a95d2d27",
+            "minotaur-javascript",
+            "javascript",
+        ),
+    ]
+
+
 def test_esm_declarations_imports_calls_and_metadata(tmp_path):
     result = _analyze(
         tmp_path,

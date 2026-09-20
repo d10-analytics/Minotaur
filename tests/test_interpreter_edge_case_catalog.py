@@ -24,6 +24,7 @@ NAVIGATION = {
     ROOT / "docs/guides/analyze-python.md": "../concepts/interpreter-edge-cases.md",
     ROOT / "docs/guides/analyze-javascript.md": "../concepts/interpreter-edge-cases.md",
     ROOT / "docs/guides/create-a-language-interpreter.md": "../concepts/interpreter-edge-cases.md",
+    ROOT / "docs/guides/analyze-sql.md": "../concepts/interpreter-edge-cases.md",
 }
 CASE_IDS = (
     "EDGE-BIND-001",
@@ -34,12 +35,36 @@ CASE_IDS = (
     "EDGE-DECL-002",
 )
 STATUS_MATRIX = {
-    "EDGE-BIND-001": {"minotaur-python": "SUPPORTED", "minotaur-javascript": "NOT_APPLICABLE"},
-    "EDGE-BIND-002": {"minotaur-python": "SUPPORTED", "minotaur-javascript": "NOT_APPLICABLE"},
-    "EDGE-BIND-003": {"minotaur-python": "SUPPORTED", "minotaur-javascript": "NOT_APPLICABLE"},
-    "EDGE-BIND-004": {"minotaur-python": "SUPPORTED", "minotaur-javascript": "NOT_APPLICABLE"},
-    "EDGE-DECL-001": {"minotaur-python": "SUPPORTED", "minotaur-javascript": "SUPPORTED"},
-    "EDGE-DECL-002": {"minotaur-python": "UNSUPPORTED", "minotaur-javascript": "UNSUPPORTED"},
+    "EDGE-BIND-001": {
+        "minotaur-python": "SUPPORTED",
+        "minotaur-javascript": "NOT_APPLICABLE",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-BIND-002": {
+        "minotaur-python": "SUPPORTED",
+        "minotaur-javascript": "NOT_APPLICABLE",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-BIND-003": {
+        "minotaur-python": "SUPPORTED",
+        "minotaur-javascript": "NOT_APPLICABLE",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-BIND-004": {
+        "minotaur-python": "SUPPORTED",
+        "minotaur-javascript": "NOT_APPLICABLE",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-DECL-001": {
+        "minotaur-python": "SUPPORTED",
+        "minotaur-javascript": "SUPPORTED",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-DECL-002": {
+        "minotaur-python": "UNSUPPORTED",
+        "minotaur-javascript": "UNSUPPORTED",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
 }
 CLOSED_STATUSES = {"SUPPORTED", "PARTIAL", "UNSUPPORTED", "NOT_APPLICABLE"}
 CASE_HEADING = re.compile(r"^###\s+(EDGE-[A-Z]+-\d{3})\s+—\s+(.+)$")

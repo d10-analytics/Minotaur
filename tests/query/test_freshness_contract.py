@@ -96,8 +96,138 @@ def test_javascript_edit_is_detected_and_refreshed(tmp_path: Path, capsys) -> No
     assert status == 0
     assert captured.out == "app.js:1  app.value  function\n"
     assert captured.err == (
-        "minotaur: refreshed graph (1 drifted paths)\nminotaur: stale: app.js\n"
+        "minotaur: refreshing graph (1 drifted paths)\nminotaur: stale: app.js\n"
     )
+
+
+def test_mixed_language_refresh_announces_attempt_and_preserves_saved_files(
+    tmp_path: Path, capsys
+) -> None:
+    """A natural mixed-language refresh refuses replacement atomically."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    capsys.readouterr()
+    graph_before = output.read_bytes()
+    sidecar = stamp_path(output)
+    sidecar_before = sidecar.read_bytes()
+
+    _write(root, "helper.js", "export function helper() {}\n")
+
+    status = cli.main(
+        [
+            "query",
+            "definitions",
+            "app",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "minotaur: refreshing graph (1 drifted paths)\n"
+        "minotaur: stale: helper.js\n"
+        "minotaur: error: selected files require unsupported multi-interpreter graph composition\n"
+    )
+    assert output.read_bytes() == graph_before
+    assert sidecar.read_bytes() == sidecar_before
+
+
+def test_sql_registration_detects_no_refresh_drift_and_refuses_mixed_refresh(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    capsys.readouterr()
+    graph_before = output.read_bytes()
+    sidecar_before = stamp_path(output).read_bytes()
+
+    _write(root, "schema.sql", "CREATE TABLE T (id int)\n")
+    no_refresh = cli.main(
+        [
+            "query",
+            "definitions",
+            "app",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+            "--no-refresh",
+            "--json",
+        ]
+    )
+    no_refresh_capture = capsys.readouterr()
+    assert no_refresh == 0
+    assert json.loads(no_refresh_capture.out)["refreshed"] is False
+    assert json.loads(no_refresh_capture.out)["stale"] == ["schema.sql"]
+    assert no_refresh_capture.err == "minotaur: stale: schema.sql\n"
+    assert output.read_bytes() == graph_before
+    assert stamp_path(output).read_bytes() == sidecar_before
+
+    mixed_refresh = cli.main(
+        [
+            "query",
+            "definitions",
+            "app",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+        ]
+    )
+    mixed_capture = capsys.readouterr()
+    assert mixed_refresh == 2
+    assert mixed_capture.out == ""
+    assert mixed_capture.err == (
+        "minotaur: refreshing graph (1 drifted paths)\n"
+        "minotaur: stale: schema.sql\n"
+        "minotaur: error: selected files require unsupported multi-interpreter graph composition\n"
+    )
+    assert output.read_bytes() == graph_before
+    assert stamp_path(output).read_bytes() == sidecar_before
+
+
+def test_pure_sql_refresh_replaces_graph_then_matching_sidecar(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "source"
+    schema = _write(root, "schema.sql", "CREATE TABLE T (id int)\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    graph_before = output.read_bytes()
+
+    schema.write_text("CREATE TABLE T (id int, name varchar(10))\n", encoding="utf-8")
+    _write(root, "view.sql", "CREATE VIEW V AS SELECT * FROM T\n")
+    capsys.readouterr()
+    status = cli.main(
+        [
+            "query",
+            "definitions",
+            "T",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    payload = json.loads(captured.out)
+    assert payload["refreshed"] is True
+    assert payload["stale"] == ["schema.sql", "view.sql"]
+    assert "minotaur: refreshing graph (2 drifted paths)" in captured.err
+    graph_after = output.read_bytes()
+    assert graph_after != graph_before
+    assert stamp_path(output).read_text(encoding="ascii").strip() == graph_digest(graph_after)
+    assert any(result["symbol"] == "T" for result in payload["results"])
 
 
 def test_unsupported_extension_edit_is_not_detected(tmp_path: Path) -> None:
@@ -191,7 +321,7 @@ def test_query_refresh_returns_one_without_reprinting_parse_diagnostic(
     assert status == 1
     assert captured.out == "app.py:1  app.foo  function\n"
     assert captured.err == (
-        "minotaur: refreshed graph (1 drifted paths)\nminotaur: stale: broken.py\n"
+        "minotaur: refreshing graph (1 drifted paths)\nminotaur: stale: broken.py\n"
     )
     assert "parse-error" not in captured.err
 
@@ -620,10 +750,12 @@ def test_freshness_document_links_and_first_read_anchor_resolve() -> None:
     repository = Path(__file__).resolve().parents[2]
     freshness = repository / "docs/concepts/freshness.md"
     javascript = repository / "docs/guides/analyze-javascript.md"
+    sql = repository / "docs/guides/analyze-sql.md"
     links = {
         repository / "README.md": "docs/concepts/freshness.md",
         repository / "docs/guides/query-reference.md": "../concepts/freshness.md",
         repository / "docs/guides/analyze-python.md": "../concepts/freshness.md",
+        repository / "docs/guides/analyze-sql.md": "../concepts/freshness.md",
     }
 
     for document, relative_link in links.items():
@@ -635,11 +767,14 @@ def test_freshness_document_links_and_first_read_anchor_resolve() -> None:
     freshness_text = freshness.read_text(encoding="utf-8")
     python_guide = (repository / "docs/guides/analyze-python.md").read_text(encoding="utf-8")
     assert "docs/guides/analyze-javascript.md" in readme
+    assert "docs/guides/analyze-sql.md" in readme
     assert "currently `.py` only" not in readme
     assert "does not yet include C#, JavaScript" not in readme
     assert "Non-Python edit" not in freshness_text
     assert "registry currently has one `.py` registration" not in freshness_text
     assert "pure `.js` selection boundary" in python_guide
+    assert "bounded T-SQL" in sql.read_text(encoding="utf-8")
+    assert "sql registration" in freshness_text.lower()
 
     interpreter_guide = (repository / "docs/guides/create-a-language-interpreter.md").read_text(
         encoding="utf-8"

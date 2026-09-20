@@ -152,11 +152,14 @@ def test_registry_normalization_preserves_namespace_and_defaults() -> None:
     assert tuple(registration.namespace for registration in defaults.registrations) == (
         "minotaur-python",
         "minotaur-javascript",
+        "minotaur-sql",
     )
     python = defaults.registration_for(Path("source.py"))
     javascript = defaults.registration_for(Path("source.js"))
+    sql = defaults.registration_for(Path("source.sql"))
     assert python is not None and python.namespace == "minotaur-python"
     assert javascript is not None and javascript.namespace == "minotaur-javascript"
+    assert sql is not None and sql.namespace == "minotaur-sql"
 
 
 def test_selection_discovers_javascript_files(tmp_path: Path) -> None:
@@ -168,6 +171,70 @@ def test_selection_discovers_javascript_files(tmp_path: Path) -> None:
     _, selected = select_sources(root, (root,), default_registry())
 
     assert selected.files == (root / "app.js",)
+
+
+def test_selection_discovers_sql_case_insensitively_and_deduplicates_overlaps(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write(root, "schema.SQL", "CREATE TABLE T (id int)\n")
+    _write(root, "notes.txt", "not source\n")
+
+    _, selected = select_sources(
+        root,
+        (root, root / "schema.SQL", root),
+        default_registry(),
+    )
+
+    assert selected.files == (root / "schema.SQL",)
+    registration = default_registry().registration_for(root / "schema.sql")
+    assert registration is not None
+    assert registration.namespace == "minotaur-sql"
+
+
+def test_activated_sql_owner_claims_match_registry_truth() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    system_readme = (repository / "docs/systems/analysis-sql/README.md").read_text(encoding="utf-8")
+    package_source = (repository / "src/minotaur/language_interpreter/sql/__init__.py").read_text(
+        encoding="utf-8"
+    )
+    interpreter_source = (
+        repository / "src/minotaur/language_interpreter/sql/interpreter.py"
+    ).read_text(encoding="utf-8")
+
+    assert "The SQL analyzer is the final `.sql` entry in `default_registry()`" in system_readme
+    assert "SQL remains absent from `default_registry()`" not in system_readme
+    assert '"""Bounded, AST-authoritative T-SQL interpretation."""' in package_source
+    assert "Unregistered, source-only" not in package_source
+    assert '"""Analyze selected SQL files through the shared final registry entry."""' in (
+        interpreter_source
+    )
+    assert "SQL is intentionally not registry-owned" not in interpreter_source
+
+
+def test_python_and_sql_interpreter_modules_collect_under_distinct_identities() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "tests/language_interpreter/python/test_interpreter.py",
+            "tests/language_interpreter/sql/test_sql_interpreter.py",
+        ],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "tests/language_interpreter/python/test_interpreter.py::" in completed.stdout
+    assert "tests/language_interpreter/sql/test_sql_interpreter.py::" in completed.stdout
+    assert "import file mismatch" not in completed.stdout + completed.stderr
 
 
 _SHAPES: tuple[tuple[str, Callable[[Path], None], str, bool], ...] = (
@@ -410,7 +477,10 @@ def test_selection_and_discovery_import_in_either_order(first_import: str) -> No
     )
     source_root = Path(__file__).parents[2] / "src"
     environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(source_root)
+    inherited_pythonpath = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value for value in (str(source_root), inherited_pythonpath) if value
+    )
     environment["PYTHONSAFEPATH"] = "1"
     result = subprocess.run(
         [sys.executable, "-c", f"import {first_import}; import {second_import}"],

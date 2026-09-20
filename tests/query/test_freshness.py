@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
-from minotaur.graph_model.loading import load_graph_file
+from minotaur.graph_model.loading import load_graph_file, stamp_path
 from minotaur.query.freshness import content_sha256, drift
 
 
@@ -215,11 +215,18 @@ def test_public_query_refreshes_changed_definition_and_no_refresh_keeps_old_answ
     refreshed_graph = json.loads(output.read_text(encoding="utf-8"))
 
     assert "app.py:2  app.foo  function" in refreshed.out
+    assert refreshed.err == (
+        "minotaur: refreshing graph (1 drifted paths)\nminotaur: stale: app.py\n"
+    )
     assert output.stat().st_mtime_ns != before_refresh
     assert old_hash != next(
         node["extensions"]["minotaur-python"]["content_sha256"]
         for node in refreshed_graph["nodes"]
         if node["node_class"] == "file"
+    )
+    assert (
+        stamp_path(output).read_text(encoding="ascii").strip()
+        == hashlib.sha256(output.read_bytes()).hexdigest()
     )
 
     source.write_text("# inserted again\n" + source.read_text(encoding="utf-8"))
@@ -289,10 +296,10 @@ def test_public_query_refresh_announces_rewrite_and_stale_paths_on_stderr(
     assert _query_definitions(root, output) == 0
     captured = capsys.readouterr()
 
-    # A refresh rewrites the file the agent analyzed, so it is announced with
-    # the same per-path lines the --no-refresh path prints.
+    # A successful refresh rewrites the file the agent analyzed, so its attempt
+    # is announced with the same per-path lines the --no-refresh path prints.
     assert captured.err.splitlines() == [
-        "minotaur: refreshed graph (2 drifted paths)",
+        "minotaur: refreshing graph (2 drifted paths)",
         "minotaur: stale: app.py",
         "minotaur: stale: other.py",
     ]
@@ -382,7 +389,7 @@ def test_public_query_refresh_rewrites_an_empty_graph_when_every_target_is_delet
     captured = capsys.readouterr()
     assert captured.out == "no definitions\n"
     assert captured.err.splitlines() == [
-        "minotaur: refreshed graph (1 drifted paths)",
+        "minotaur: refreshing graph (1 drifted paths)",
         "minotaur: stale: app.py",
     ]
 
