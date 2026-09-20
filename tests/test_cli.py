@@ -650,7 +650,7 @@ def test_analyze_writes_sidecar_matching_graph_bytes_and_query_refresh_updates_i
     )
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert status == 0
-    assert "refreshed graph" in captured.err
+    assert "refreshing graph" in captured.err
 
     # After refresh, the sidecar matches the new graph bytes.
     new_graph_bytes = output.read_bytes()
@@ -711,7 +711,7 @@ def test_query_refresh_through_symlink_updates_the_sidecar_beside_the_link(
     status = cli.main(["query", "definitions", "--graph", str(link), "--root", str(root), "app"])
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert status == 0
-    assert "refreshed graph" in captured.err
+    assert "refreshing graph" in captured.err
 
     assert link.is_symlink()
     new_bytes = real.read_bytes()

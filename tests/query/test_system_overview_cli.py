@@ -177,7 +177,7 @@ def test_systems_strict_load_rejects_malformed_declaration_before_refresh(
     assert status == 2
     assert out == ""
     assert "unknown system field: unknown" in err
-    assert "refreshed graph" not in err
+    assert "refreshing graph" not in err
     assert "minotaur: stale:" not in err
     assert graph.read_bytes() == original_graph
 
@@ -185,7 +185,7 @@ def test_systems_strict_load_rejects_malformed_declaration_before_refresh(
     assert status == 2
     assert out == ""
     assert "unknown system field: unknown" in err
-    assert "refreshed graph" not in err
+    assert "refreshing graph" not in err
     assert "minotaur: stale:" not in err
     assert graph.read_bytes() == original_graph
 
@@ -216,7 +216,7 @@ def test_systems_rejects_control_character_names_before_refresh(
     assert status == 2
     assert out == ""
     assert "system name must not contain Unicode control characters" in err
-    assert "refreshed graph" not in err
+    assert "refreshing graph" not in err
     assert "minotaur: stale:" not in err
     assert graph.read_bytes() == original_graph
 
@@ -231,7 +231,7 @@ def test_systems_refresh_and_no_refresh_report_distinct_diagnostics(
     status, out, err = _systems(capsys, root, graph, "--json")
 
     assert status == 0
-    assert "minotaur: refreshed graph" in err
+    assert "minotaur: refreshing graph" in err
     assert "minotaur: stale: orders/mod.py" in err
     assert json.loads(out)["coverage"]["source_diagnostics"] == {
         "status": "observed_on_refresh",
@@ -243,7 +243,7 @@ def test_systems_refresh_and_no_refresh_report_distinct_diagnostics(
 
     assert status == 0
     assert "minotaur: stale: orders/mod.py" in err
-    assert "refreshed graph" not in err
+    assert "refreshing graph" not in err
     assert json.loads(out)["coverage"]["source_diagnostics"] == {"status": "unavailable"}
     assert graph.read_bytes() == original_graph
 
@@ -262,7 +262,7 @@ def test_systems_refresh_reports_source_diagnostics_in_overview_json(
     assert payload["stale"] == ["orders/mod.py"]
     assert payload["coverage"]["source_diagnostics"]["status"] == "observed_on_refresh"
     assert payload["coverage"]["source_diagnostics"]["count"] > 0
-    assert "minotaur: refreshed graph" in err
+    assert "minotaur: refreshing graph" in err
     assert "minotaur: stale: orders/mod.py" in err
 
 

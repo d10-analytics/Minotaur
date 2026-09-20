@@ -701,7 +701,7 @@ def test_invalid_declaration_beside_clean_graph_exits_two_no_answer_no_rewrite(
     assert "unsupported schema_version: 99 (expected 1)" in err
     assert str(definition) in err
     assert "unknown system: orders" not in err
-    assert "refreshed graph" not in err
+    assert "refreshing graph" not in err
     assert graph.read_bytes() == original_bytes
 
 
@@ -728,7 +728,7 @@ def test_invalid_declaration_beside_drifted_graph_exits_two_without_refresh(
     assert "unknown system field: expectations" in err
     assert str(definition) in err
     assert "unknown system: orders" not in err
-    assert "refreshed graph" not in err
+    assert "refreshing graph" not in err
     assert graph.read_bytes() == original_bytes
 
     # Same drifted graph, --no-refresh: the strict load still precedes the
@@ -738,7 +738,7 @@ def test_invalid_declaration_beside_drifted_graph_exits_two_without_refresh(
     assert out == ""
     assert "unknown system field: expectations" in err
     assert "minotaur: stale:" not in err
-    assert "refreshed graph" not in err
+    assert "refreshing graph" not in err
     assert graph.read_bytes() == original_bytes
 
 
@@ -781,7 +781,7 @@ def test_valid_declaration_refresh_matches_non_system_query_and_adds_no_graph_no
     _write(root, "orders/mod.py", "def order():\n    return 5\n")
     status, out, err = _query(capsys, graph, root, "consumers", "orders")
     assert status == 0
-    assert "refreshed graph" in err
+    assert "refreshing graph" in err
     assert "minotaur: stale: orders/mod.py" in err
     assert "use.py (no_system)" in out
     refreshed_by_system_query = graph.read_bytes()
@@ -803,7 +803,7 @@ def test_valid_declaration_refresh_matches_non_system_query_and_adds_no_graph_no
     )
     captured = capsys.readouterr()
     assert callers_status == 0
-    assert "refreshed graph" in captured.err
+    assert "refreshing graph" in captured.err
     refreshed_by_callers = graph.read_bytes()
     assert refreshed_by_callers == refreshed_by_system_query
 
@@ -975,7 +975,7 @@ def test_absent_warning_is_computed_against_the_final_index_after_refresh(
     _write(root, "orders/mod.py", "def order():\n    return 2\n")
     status, out, err = _query(capsys, graph, root, "consumers", "orders")
     assert status == 0
-    assert "refreshed graph" in err
+    assert "refreshing graph" in err
     assert "warning:" not in err
     assert "use.py (no_system)" in out
 
@@ -1031,7 +1031,7 @@ def test_system_cli_refresh_composes_zero_and_positive_diagnostics(
     _write(root, "orders/mod.py", "def order():\n    return 2\n")
     status, out, err = _query(capsys, graph, root, "surface", "orders", "--json")
     assert status == 0
-    assert "refreshed graph" in err
+    assert "refreshing graph" in err
     payload = json.loads(out)
     assert payload["refreshed"] is True
     assert payload["coverage"]["source_diagnostics"] == {
@@ -1042,7 +1042,7 @@ def test_system_cli_refresh_composes_zero_and_positive_diagnostics(
     _write(root, "broken.py", "def broken(\n")
     status, out, err = _query(capsys, graph, root, "consumers", "orders", "--json")
     assert status == 1
-    assert "refreshed graph" in err
+    assert "refreshing graph" in err
     payload = json.loads(out)
     assert payload["refreshed"] is True
     assert payload["coverage"]["source_diagnostics"]["status"] == "observed_on_refresh"
