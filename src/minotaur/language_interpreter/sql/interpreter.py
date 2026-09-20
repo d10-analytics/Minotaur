@@ -329,6 +329,7 @@ def _interpret_create(
             # partial fact, including its declaration node.
             declarations.pop()
             nodes.pop()
+            _unsupported(tree, item, batch, diagnostics)
             return None
         return _Observation(declaration, tuple(reads), ())
     if kind == "TABLE":
@@ -336,6 +337,7 @@ def _interpret_create(
         if fks is None:
             declarations.pop()
             nodes.pop()
+            _unsupported(tree, item, batch, diagnostics)
             return None
         return _Observation(declaration, (), tuple(fks))
     return _Observation(declaration)
@@ -472,6 +474,12 @@ def _query_reads(
                 alias = cte.alias_or_name.casefold()
                 if not isinstance(
                     cte.this, (exp.Query, exp.Select, exp.Union, exp.Intersect, exp.Except)
+                ):
+                    return False
+                if any(
+                    len(parts) == 1 and parts[0].casefold() == alias
+                    for parts in (_parts(table) for table in cte.this.find_all(exp.Table))
+                    if parts is not None
                 ):
                     return False
                 if not visit_query(cte.this, frozenset(local)):
