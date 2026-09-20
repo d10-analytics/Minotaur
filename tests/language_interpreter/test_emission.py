@@ -10,7 +10,7 @@ from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import IdentityBasis, NodeClass, RelationshipKind, SymbolKind
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
-from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
+from minotaur.language_interpreter.emission import NodeEmitter, file_node, symbol_node
 
 
 def test_unresolved_deduplicates_nodes_but_accumulates_each_relationship_call() -> None:
@@ -63,3 +63,36 @@ def test_symbol_node_preserves_source_identity_and_extensions() -> None:
     assert node.language == "javascript"
     assert node.location == location
     assert node.extensions == extensions
+
+
+def test_file_node_hashes_original_bytes_and_symbol_node_accepts_namespaced_kinds() -> None:
+    location = Location("query.sql", Range(Position(0, 0), Position(0, 3)))
+    content = b"\xef\xbb\xbfGO\r\n"
+    node = file_node("query.sql", content, "minotaur-sql", "sql")
+    namespaced = symbol_node(
+        "query.table",
+        "minotaur-sql:table",
+        location,
+        "minotaur-sql",
+        "sql",
+    )
+
+    assert node.node_class is NodeClass.FILE
+    assert node.id == compute_node_id(
+        NodeIdentity(IdentityBasis.FILE_PATH, "minotaur-sql"),
+        node_class=NodeClass.FILE.value,
+        path="query.sql",
+    )
+    assert node.extensions == {
+        "minotaur-sql": {
+            "content_sha256": "f6092c36d3cbc7ec6cd3d7d377a55e268a41c96c2cbfd3a50f5987cd20a06be6"
+        }
+    }
+    assert namespaced.symbol_kind == "minotaur-sql:table"
+
+    try:
+        symbol_node("query.bad", "malformed", location, "minotaur-sql", "sql")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("malformed symbol kinds must be rejected")

@@ -20,9 +20,12 @@ from minotaur import cli
 from minotaur.graph_model.loading import load_graph_file
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipKind
+from minotaur.graph_model.serialization import serialize
 from minotaur.graph_model.validation import IssueCode, validate_document
+from minotaur.language_interpreter import emission as shared_emission
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
+from minotaur.language_interpreter.python import interpreter as python_interpreter
 from minotaur.language_interpreter.python.interpreter import _ScopeCallVisitor
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
@@ -187,6 +190,31 @@ def test_cli_records_file_content_hashes_and_root_relative_selection(tmp_path: P
 
     loaded = load_graph_file(output)
     assert loaded.canonical == graph
+
+
+def test_public_python_analysis_observes_shared_file_constructor_without_output_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "z.py", "value = 'café'\n")
+    _write(tmp_path, "a.py", "def helper():\n    return 1\n")
+    paths = (tmp_path / "z.py", tmp_path / "a.py")
+    before = analyze_python_files(Workspace(tmp_path), paths)
+    before_bytes = serialize(before.document)
+    observed: list[tuple[str, bytes, str, str]] = []
+    original = shared_emission.file_node
+
+    def observe(path: str, content: bytes, namespace: str, language: str):
+        observed.append((path, content, namespace, language))
+        return original(path, content, namespace, language)
+
+    monkeypatch.setattr(python_interpreter, "file_node", observe)
+    after = analyze_python_files(Workspace(tmp_path), paths)
+
+    assert serialize(after.document) == before_bytes
+    assert observed == [
+        ("a.py", b"def helper():\n    return 1\n", "minotaur-python", "python"),
+        ("z.py", b"value = 'caf\xc3\xa9'\n", "minotaur-python", "python"),
+    ]
 
 
 def test_dynamic_and_missing_imports_are_explicit_unresolved_references(tmp_path: Path) -> None:
