@@ -551,11 +551,11 @@ def _load_and_refresh_graph(
     recorded = recorded_selection(loaded.document)
     if not recorded:
         raise ValueError("graph has no recorded source selection; cannot refresh")
-    # Announce the rewrite before performing it, and from the same drift the
-    # refusal path reports: a refresh replaces the file an agent may have
-    # analyzed earlier, so it must never be the one silent freshness outcome.
+    # Announce the attempt before performing it, and from the same drift the
+    # refusal path reports: re-analysis may fail before replacement, so this
+    # line must not claim that a new graph exists yet.
     print(
-        f"minotaur: refreshed graph ({len(observed.paths)} drifted paths)",
+        f"minotaur: refreshing graph ({len(observed.paths)} drifted paths)",
         file=sys.stderr,
     )
     _report_stale(observed.paths)

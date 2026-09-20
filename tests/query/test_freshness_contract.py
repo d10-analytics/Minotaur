@@ -96,8 +96,47 @@ def test_javascript_edit_is_detected_and_refreshed(tmp_path: Path, capsys) -> No
     assert status == 0
     assert captured.out == "app.js:1  app.value  function\n"
     assert captured.err == (
-        "minotaur: refreshed graph (1 drifted paths)\nminotaur: stale: app.js\n"
+        "minotaur: refreshing graph (1 drifted paths)\nminotaur: stale: app.js\n"
     )
+
+
+def test_mixed_language_refresh_announces_attempt_and_preserves_saved_files(
+    tmp_path: Path, capsys
+) -> None:
+    """A natural mixed-language refresh refuses replacement atomically."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    capsys.readouterr()
+    graph_before = output.read_bytes()
+    sidecar = stamp_path(output)
+    sidecar_before = sidecar.read_bytes()
+
+    _write(root, "helper.js", "export function helper() {}\n")
+
+    status = cli.main(
+        [
+            "query",
+            "definitions",
+            "app",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "minotaur: refreshing graph (1 drifted paths)\n"
+        "minotaur: stale: helper.js\n"
+        "minotaur: error: selected files require unsupported multi-interpreter graph composition\n"
+    )
+    assert output.read_bytes() == graph_before
+    assert sidecar.read_bytes() == sidecar_before
 
 
 def test_unsupported_extension_edit_is_not_detected(tmp_path: Path) -> None:
@@ -191,7 +230,7 @@ def test_query_refresh_returns_one_without_reprinting_parse_diagnostic(
     assert status == 1
     assert captured.out == "app.py:1  app.foo  function\n"
     assert captured.err == (
-        "minotaur: refreshed graph (1 drifted paths)\nminotaur: stale: broken.py\n"
+        "minotaur: refreshing graph (1 drifted paths)\nminotaur: stale: broken.py\n"
     )
     assert "parse-error" not in captured.err
 
