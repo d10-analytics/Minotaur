@@ -245,12 +245,13 @@ def test_global_temporary_and_nonpersistent_alter_targets_are_rejected(tmp_path:
                 "ALTER VIEW V ADD c int\nGO\n"
                 "ALTER TABLE #scratch ADD c int\nGO\n"
                 "ALTER TABLE db.schema.T ADD c int\nGO\n"
+                "CREATE TABLE Child(id int REFERENCES ##scratch(id))\nGO\n"
                 "ALTER TABLE T ADD c int"
             )
         },
     )
     assert [node.label for node in result.document.nodes] == ["near_misses.sql"]
-    assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 6
+    assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 7
 
 
 def test_parser_fallback_is_exposed_only_as_sanitized_diagnostic(tmp_path: Path, caplog) -> None:
