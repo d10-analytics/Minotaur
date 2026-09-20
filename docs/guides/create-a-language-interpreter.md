@@ -157,10 +157,10 @@ only one registered interpreter remains the supported composition boundary.
 ## Tests to add
 
 Place an interpreter's tests at
-`tests/language_interpreter/example_language/test_interpreter.py`. Keep CLI
-and graph-model tests in their existing top-level test categories. The Python
-interpreter establishes this convention at
-`tests/language_interpreter/python/test_interpreter.py`.
+`tests/language_interpreter/example_language/test_example_language_interpreter.py`.
+The language-qualified basename prevents top-level pytest collection
+collisions when multiple interpreter test modules are selected together. Keep
+CLI and graph-model tests in their existing top-level test categories.
 
 An interpreter change should include behavioral tests that prove:
 

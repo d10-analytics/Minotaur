@@ -18,8 +18,8 @@ the copied interpreter.
 2. Copy `__init__.py.tmpl`, `interpreter.py.tmpl`, and `discovery.py.tmpl` to
    `src/minotaur/language_interpreter/example_language/`, removing `.tmpl`
    from each destination filename.
-3. Copy `test_interpreter.py.tmpl` to
-   `tests/language_interpreter/example_language/test_interpreter.py`.
+3. Copy `test_example_language_interpreter.py.tmpl` to
+   `tests/language_interpreter/example_language/test_example_language_interpreter.py`.
 4. Replace every `example_language` with the new language's lowercase package
    name, `minotaur-example` with its namespace, and `.example` with its
    normalized file extension.
