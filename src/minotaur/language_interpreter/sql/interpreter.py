@@ -470,16 +470,26 @@ def _query_reads(
         if isinstance(with_expr, exp.With):
             if with_expr.args.get("recursive"):
                 return False
+            aliases = {cte.alias_or_name.casefold() for cte in with_expr.expressions}
+            dependencies: dict[str, set[str]] = {alias: set() for alias in aliases}
+            for cte in with_expr.expressions:
+                alias = cte.alias_or_name.casefold()
+                for table in cte.this.find_all(exp.Table):
+                    parts = _parts(table)
+                    if parts is not None and len(parts) == 1 and parts[0].casefold() in aliases:
+                        dependencies[alias].add(parts[0].casefold())
+
+            def cyclic(name: str, trail: frozenset[str]) -> bool:
+                if name in trail:
+                    return True
+                return any(cyclic(child, trail | {name}) for child in dependencies[name])
+
+            if any(cyclic(alias, frozenset()) for alias in aliases):
+                return False
             for cte in with_expr.expressions:
                 alias = cte.alias_or_name.casefold()
                 if not isinstance(
                     cte.this, (exp.Query, exp.Select, exp.Union, exp.Intersect, exp.Except)
-                ):
-                    return False
-                if any(
-                    len(parts) == 1 and parts[0].casefold() == alias
-                    for parts in (_parts(table) for table in cte.this.find_all(exp.Table))
-                    if parts is not None
                 ):
                     return False
                 if not visit_query(cte.this, frozenset(local)):
