@@ -252,17 +252,13 @@ def test_global_temporary_and_nonpersistent_alter_targets_are_rejected(tmp_path:
     assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 5
 
 
-def test_parser_fallback_is_exposed_only_as_sanitized_diagnostic(
-    tmp_path: Path, caplog
-) -> None:
+def test_parser_fallback_is_exposed_only_as_sanitized_diagnostic(tmp_path: Path, caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="sqlglot"):
         result = _analyze(
             tmp_path,
             **{"fallback.sql": "CREATE VIEW V AS SELECT 1 WITH SCHEMABINDING"},
         )
-    assert result.diagnostics == (
-        result.diagnostics[0],
-    )
+    assert result.diagnostics == (result.diagnostics[0],)
     assert result.diagnostics[0].code == DiagnosticCode.UNSUPPORTED_SYNTAX
     assert result.diagnostics[0].message == "unsupported T-SQL syntax"
     assert not any(record.name == "sqlglot" for record in caplog.records)
