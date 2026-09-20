@@ -231,3 +231,21 @@ def test_quoted_dot_is_one_identifier_and_three_part_names_are_rejected(tmp_path
     assert "schema.with.dot.table.with.dot" in _symbols(result)
     assert len(_symbols(result)) == 1
     assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 1
+
+
+def test_global_temporary_and_nonpersistent_alter_targets_are_rejected(tmp_path: Path) -> None:
+    result = _analyze(
+        tmp_path,
+        **{
+            "near_misses.sql": (
+                "CREATE VIEW V AS SELECT * FROM ##scratch\nGO\n"
+                "CREATE INDEX ix ON ##scratch(id)\nGO\n"
+                "ALTER VIEW V ADD c int\nGO\n"
+                "ALTER TABLE #scratch ADD c int\nGO\n"
+                "ALTER TABLE db.schema.T ADD c int\nGO\n"
+                "ALTER TABLE T ADD c int"
+            )
+        },
+    )
+    assert [node.label for node in result.document.nodes] == ["near_misses.sql"]
+    assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 5
