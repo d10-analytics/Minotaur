@@ -1,11 +1,21 @@
-# System definitions walkthrough
+# Understand and compare systems
 
-This example walks through Minotaur's declared-system queries — `surface`,
-`consumers`, and `system-deps` — and the system-aware HTML explorer on a fabricated mini repository: an online
-storefront whose source lives in `shop/`. Two subsystems are declared as
-committed system definitions under `docs/systems/`; every other file is
-outside every declared system. Nothing here is a real product: the sources,
-definitions, and analyzed graph are all public example artifacts.
+This example uses a small online shop to answer three practical questions:
+
+- **What parts make up this project?** See `orders` and `billing` as separate
+  systems, alongside shared files that belong to neither system.
+- **Where do those parts connect?** Focus the map on one system and reveal the
+  calls and imports that cross its boundary.
+- **What changed?** Add a refund request from Orders to Billing and compare it
+  with the committed version of the project.
+
+Start with the visual map below. You do not need to understand every command
+or output field to follow the example. The longer command transcripts later
+on this page are an optional reference for readers who want to reproduce or
+automate the checks.
+
+Nothing here is a real product. The source, definitions, and generated files
+are all public example artifacts.
 
 The concept is documented in [Purpose and boundary](../../docs/concepts/purpose.md),
 the query model in [System definitions](../../docs/guides/system-definitions.md),
@@ -13,7 +23,88 @@ the committed file contract in
 [system definition format v1](../../docs/formats/system-definition-v1.md), and
 the per-command options in the [query reference](../../docs/guides/query-reference.md).
 
-## The example tree
+## 1. See the current architecture
+
+[![Orders, billing, and unassigned shop files](../../docs/assets/system-walkthrough-demo.png)](minotaur-graph.html)
+
+Open [the interactive system map](minotaur-graph.html) directly from the
+checkout. It works offline and makes no network requests.
+
+The map shows three groups:
+
+- **Orders** creates and completes customer orders.
+- **Billing** charges an order and records the transaction.
+- **External / Unassigned** contains the checkout and shared ledger files,
+  which are deliberately not assigned to either named system.
+
+The red lines cross a system boundary. They make it possible to see, for
+example, that Orders depends on Billing without reading every source file.
+
+## 2. Find a system boundary
+
+In the map:
+
+1. Choose **orders** from the **System** menu.
+2. Enable **Show Cross-System Connections**.
+3. Select a node or connection when you want its source location and evidence.
+
+The focused map keeps Orders in the center and reveals only the directly
+connected surroundings:
+
+- Billing appears because Orders calls `charge`.
+- The shared ledger appears because Orders records completed work there.
+- Checkout appears because it calls into Orders.
+
+This is the visual form of three questions available from the command line:
+
+- `consumers`: Which outside files use this system?
+- `surface`: Which symbols in this system do they reach?
+- `system-deps`: Which other systems or shared files does this system use?
+
+## 3. See what changed
+
+Minotaur can compare the system boundaries committed at `HEAD` with the source
+currently in your working tree. The included scenario adds a `refund` function
+to Billing and a `cancel_order` function in Orders that calls it.
+
+In plain language, the change means:
+
+- Orders gains a new reason to depend on Billing.
+- `shop/orders.py` becomes a consumer of Billing's new refund surface.
+- A new call crosses the boundary from `cancel_order` to `refund`.
+- The report retains the source evidence behind that conclusion.
+
+Run the complete scenario in a disposable temporary repository:
+
+```bash
+python examples/run_walkthrough.py systems
+```
+
+The important part of the result is:
+
+```text
+surface added: billing shop/billing.py.shop.billing.refund
+consumer changed: billing <- shop/orders.py
+dependency changed: orders -> billing
+boundary added: orders.shop.orders -> billing.shop.billing.refund (imports)
+boundary added: orders.shop.orders.cancel_order -> billing.shop.billing.refund (calls)
+```
+
+The runner creates and removes only its own temporary directory; it does not
+edit this checkout or change your Git configuration. The comparison is also
+read-only: it analyzes current source in memory without rewriting the saved
+graph or its checksum.
+
+Use `minotaur query diff --systems --system billing` to focus the report on
+Billing. Add `--details` for old and new evidence, or `--json` for automation.
+A difference returns status `1`; in this command that means “changes found,”
+not “the comparison failed.” Invalid input or an unusable comparison returns
+status `2`.
+
+The [comparison reference](comparison.md) records the exact setup, source edit,
+commands, membership-only example, and exit behavior used by the runner.
+
+## How this example is organized
 
 ```text
 examples/system-walkthrough/
@@ -49,7 +140,7 @@ checked-in file. `--root examples/system-walkthrough` is the source root the
 graph was analyzed against; the definitions are found at that root's default
 `docs/systems` location.
 
-## The declared systems
+### The declared systems
 
 Each system is one directory under `docs/systems/` holding one machine-readable
 `system.toml`:
@@ -74,7 +165,7 @@ human narrative; Minotaur reads and validates only each `system.toml`.
 Membership is the exact test "is this file listed": `checkout.py` and
 `ledger.py` are listed by no system and are therefore `no_system` files.
 
-## A fresh analysis matches the committed graph
+### Rebuild the generated files
 
 `minotaur-graph.json` was produced by the public `analyze` command shown here,
 with only volatile Git snapshot metadata removed so the committed bytes stay
@@ -99,20 +190,7 @@ fabricated sources change:
 $ python3 examples/system-walkthrough/regenerate_system_walkthrough.py
 ```
 
-## Explore system boundaries visually
-
-Open [minotaur-graph.html](minotaur-graph.html) directly from the checkout. It
-is self-contained and makes no network requests. The **System** menu contains
-`billing` and `orders`, loaded from this walkthrough's configured
-`docs/systems` directory.
-
-Choose `orders` to isolate its declared nodes and internal relationships, then
-enable **Show Cross-System Connections**. The focused `orders` container stays
-centered; `billing` appears in its own container, and the directly connected
-`checkout.py` and `ledger.py` nodes appear under **External / Unassigned**.
-Thick red edges mark relationships that cross the selected system boundary.
-Choose **All Systems** to restore the complete graph while retaining red edges
-between different declared systems.
+### Regenerate the documentation screenshot
 
 To regenerate the documentation screenshot from this exact checked-in HTML,
 install the visualizer dependencies and run:
@@ -121,11 +199,16 @@ install the visualizer dependencies and run:
 python3 scripts/capture_system_walkthrough_demo.py
 ```
 
-The script focuses `orders`, enables its cross-system connections, selects a
-boundary relationship, and writes `docs/assets/system-walkthrough-demo.png` at
-a fixed viewport.
+The script focuses `orders`, enables its cross-system connections, and writes
+`docs/assets/system-walkthrough-demo.png` at a fixed viewport.
 
-## surface: what outside files reach into the system
+## Command reference: inspect the current boundary
+
+The sections below preserve exact, reproducible output. They are useful when
+you want to automate a query or understand its detailed fields; they are not
+required before using the visual map or the comparison scenario.
+
+### `surface`: what outside files reach into the system
 
 `surface` answers: which in-scope symbols do files outside the system
 reach, through the symbol layer — `calls` or `references`? Importing the
@@ -163,7 +246,7 @@ shop/orders.py  shop.orders.create_order  calls
 relationships [{"evidence":[{"evidence_extensions":{"status":"unavailable"},"producer":{"name":"minotaur-python","status":"recorded","version":{"status":"unavailable"}},"provenance":"static-analysis","rule":{"status":"unavailable"},"sites":[{"coordinate_encoding":"utf-8","path":"shop/checkout.py","range":{"end":{"column":25,"line":8},"end_exclusive":true,"start":{"column":13,"line":8}}}]}],"kind":"calls","relationship_extensions":{"status":"unavailable"},"source":{"id":"node:sha256:99b2170760c1979d5601f6da9483153ac2da5ebfc7b071c4ecc53016c2e714b7","label":"shop.checkout.checkout","location":{"coordinate_encoding":"utf-8","path":"shop/checkout.py","range":{"end":{"column":25,"line":9},"end_exclusive":true,"start":{"column":1,"line":7}},"status":"recorded"},"node_class":"symbol","path":{"status":"recorded","value":"shop/checkout.py"},"semantic_identity":{"basis":"source-location","namespace":"minotaur-python","reference_text":{"status":"unavailable"},"resource_key":{"status":"unavailable"},"upstream_identifier":{"status":"unavailable"}}},"target":{"id":"node:sha256:5822107e1c8348278f492acfc50cb897197cd9ea9c52d307cf347ff0b2b0cc69","label":"shop.orders.create_order","location":{"coordinate_encoding":"utf-8","path":"shop/orders.py","range":{"end":{"column":17,"line":10},"end_exclusive":true,"start":{"column":1,"line":7}},"status":"recorded"},"node_class":"symbol","path":{"status":"recorded","value":"shop/orders.py"},"semantic_identity":{"basis":"source-location","namespace":"minotaur-python","reference_text":{"status":"unavailable"},"resource_key":{"status":"unavailable"},"upstream_identifier":{"status":"unavailable"}}}}]
 ```
 
-## consumers: which outside files use the system
+### `consumers`: which outside files use the system
 
 `consumers` answers: one record per outside file participating in a
 boundary-crossing relationship, carrying the distinct relationship kinds that
@@ -203,7 +286,7 @@ shop/checkout.py (no_system)  calls: shop.billing.charge (shop/billing.py); impo
 shop/orders.py (system: orders)  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
 ```
 
-## system-deps: what the system itself reaches
+### `system-deps`: what the system itself reaches
 
 `system-deps` answers: which target categories the system's own files reach
 through outgoing `calls`, `references`, and `imports` — other named systems,
@@ -248,7 +331,7 @@ coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_
 shop/billing.py  shop.billing.charge  calls
 ```
 
-## Empty results are answers, not errors
+### Empty results are answers, not errors
 
 A system whose boundary has no matches prints its own empty text form — `no
 exposed symbols`, `no consumers`, or `no dependencies` — and still exits `0`.
@@ -256,5 +339,5 @@ Declared files that the analyzed graph does not contain are reported as
 `minotaur: warning:` lines on standard error, never silently dropped; an
 unknown system name exits `2` with the nearest declared systems.
 
-Next, [compare the committed baseline with source and membership edits](comparison.md)
-in an isolated temporary repository.
+For exact comparison setup and automation details, continue to the
+[comparison reference](comparison.md).

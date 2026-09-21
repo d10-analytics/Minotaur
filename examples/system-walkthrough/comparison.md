@@ -1,4 +1,9 @@
-# Compare a committed system boundary with working source
+# System comparison command reference
+
+For the visual explanation and a plain-language summary of the result, begin
+with [See what changed](README.md#3-see-what-changed) in the main walkthrough.
+This page preserves the exact setup, commands, output, and exit behavior for
+readers who want to reproduce or automate that scenario.
 
 Complete [installation](../../README.md#quick-start) first. Git must be on PATH.
 From the repository root, with your Python environment activated, run:

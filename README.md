@@ -35,7 +35,8 @@ its supporting source visible in the details panel.
   relationships in graph snapshots. In a configured Git repository with a
   committed baseline, `query diff --systems` compares subsystem connections,
   consumers, and exposed symbols, including changes caused by moving files
-  between system definitions. See the [shop comparison walkthrough](examples/system-walkthrough/comparison.md).
+  between system definitions. See the shop walkthrough's
+  [plain-language comparison](examples/system-walkthrough/README.md#3-see-what-changed).
 - **Find potentially unused symbols.** `unreferenced` gives you candidates to
   investigate. An absent reference does not prove that code is safe to delete.
 - **Explore visually.** Search, filter, zoom, and select nodes or connections to
@@ -74,8 +75,8 @@ outside nodes, and highlight boundary-crossing relationships.
 
 The bundled [shop walkthrough](examples/system-walkthrough/README.md) is a
 small runnable example with `orders`, `billing`, and deliberately unassigned
-shared files. Its [comparison walkthrough](examples/system-walkthrough/comparison.md)
-shows how source and membership edits change the reported boundaries.
+shared files. Its [comparison section](examples/system-walkthrough/README.md#3-see-what-changed)
+shows how a new call changes consumers, dependencies, and reported boundaries.
 
 ## A small example
 
@@ -107,8 +108,8 @@ For a larger example, the bundled [shop](examples/system-walkthrough/README.md)
 defines orders and billing as separate systems. `complete_order` in
 `shop/orders.py` calls `charge` in `shop/billing.py`. That makes orders a
 consumer of billing and billing a dependency of orders. The walkthrough shows
-those connections; its [comparison example](examples/system-walkthrough/comparison.md)
-then adds a refund call and shows how the boundary report changes.
+those connections, then [adds a refund call](examples/system-walkthrough/README.md#3-see-what-changed)
+and explains the boundary changes in plain language.
 
 ## Quick start
 
