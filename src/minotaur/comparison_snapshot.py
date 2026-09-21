@@ -11,15 +11,13 @@ mutation is an input error rather than a mixed or partial comparison.
 from __future__ import annotations
 
 import hashlib
-import io
 import os
 import stat
-import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from minotaur.git import GitInputError, PinnedCommit, run_git
+from minotaur.git import GitInputError, PinnedCommit
 
 
 class SnapshotError(ValueError):
@@ -56,19 +54,6 @@ class CaptureManifest:
 
     def by_path(self) -> dict[str, ManifestEntry]:
         return {entry.path: entry for entry in self.entries}
-
-
-def _error_text(value: bytes | str | None) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace").strip() or "Git operation failed"
-    return value.strip() if value else "Git operation failed"
-
-
-def _safe_member_path(name: str) -> Path:
-    path = Path(name)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise ValueError(f"archive contains unsafe path {name!r}")
-    return path
 
 
 def _digest_file(path: Path) -> tuple[int, str]:
@@ -119,54 +104,54 @@ def _manifest(root: Path) -> CaptureManifest:
     return CaptureManifest(tuple(sorted(entries, key=lambda entry: entry.path)))
 
 
-def _extract_archive(data: bytes, destination: Path, *, side: str, revision: str) -> None:
-    try:
-        archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:")  # noqa: SIM115
-    except (tarfile.TarError, OSError) as error:
-        raise SnapshotError(
-            side=side,
-            revision=revision,
-            detail=f"Git archive was not a valid local tree: {error}",
-        ) from error
-    with archive:
-        seen: set[str] = set()
-        members = sorted(archive.getmembers(), key=lambda member: member.name)
-        for member in members:
-            try:
-                relative = _safe_member_path(member.name)
-            except ValueError as error:
-                raise SnapshotError(side=side, revision=revision, detail=str(error)) from error
-            key = relative.as_posix()
-            if key in seen:
+def _tree_files(pin: PinnedCommit) -> tuple[tuple[str, int], ...]:
+    """Preflight a pinned tree before creating any captured files.
+
+    Walking Git trees and reading blobs directly avoids ``git archive``
+    attributes such as ``export-ignore`` and ``export-subst``.  The preflight
+    also rejects links, gitlinks, and unsupported modes before materialization.
+    """
+    files: list[tuple[str, int]] = []
+
+    def visit(relative: str = "") -> None:
+        for entry in pin.entries(relative):
+            if entry.is_gitlink:
                 raise SnapshotError(
-                    side=side,
-                    revision=revision,
-                    detail=f"archive contains duplicate path {key!r}",
+                    side=pin.side,
+                    revision=pin.commit,
+                    commit=pin.commit,
+                    detail=f"unsafe entry {entry.path!r}: Gitlink is not a source directory",
                 )
-            seen.add(key)
-            if not (member.isdir() or member.isreg()):
+            if entry.is_link:
                 raise SnapshotError(
-                    side=side,
-                    revision=revision,
-                    detail=f"archive contains unsafe entry {key!r}",
+                    side=pin.side,
+                    revision=pin.commit,
+                    commit=pin.commit,
+                    detail=f"unsafe entry {entry.path!r}: symbolic links are not captured",
                 )
-            target = destination / relative
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=False)
-                os.chmod(target, member.mode & 0o7777)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            source = archive.extractfile(member)
-            if source is None:
+            if entry.kind == "tree":
+                visit(entry.path)
+            elif entry.is_regular_file:
+                files.append((entry.path, int(entry.mode, 8)))
+            else:
                 raise SnapshotError(
-                    side=side,
-                    revision=revision,
-                    detail=f"archive file has no content: {key!r}",
+                    side=pin.side,
+                    revision=pin.commit,
+                    commit=pin.commit,
+                    detail=f"unsafe entry {entry.path!r}: unsupported Git mode {entry.mode}",
                 )
-            with source, target.open("xb") as output:
-                while chunk := source.read(1024 * 1024):
-                    output.write(chunk)
-            os.chmod(target, member.mode & 0o7777)
+
+    visit()
+    return tuple(files)
+
+
+def _materialize_tree(pin: PinnedCommit, destination: Path) -> None:
+    """Write exact pinned blob bytes into the temporary analysis root."""
+    for relative, mode in _tree_files(pin):
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(pin.read_blob(relative))
+        os.chmod(target, mode & 0o7777)
 
 
 @dataclass(slots=True)
@@ -273,25 +258,10 @@ def capture_revision(
     """Capture a locally available revision without changing Git state."""
     root = Path(worktree_root).resolve()
     pin = PinnedCommit.resolve(root, revision, side=side)
-    completed = run_git(root, ("archive", "--format=tar", pin.commit), text=False)
-    if completed is None:
-        raise SnapshotError(
-            side=side,
-            revision=revision,
-            commit=pin.commit,
-            detail="Git archive probe was unavailable",
-        )
-    if completed.returncode != 0 or not isinstance(completed.stdout, bytes):
-        raise SnapshotError(
-            side=side,
-            revision=revision,
-            commit=pin.commit,
-            detail=f"revision tree is unavailable locally: {_error_text(completed.stderr)}",
-        )
     temporary_directory = tempfile.TemporaryDirectory(prefix="minotaur-revision-")
     destination = Path(temporary_directory.name)
     try:
-        _extract_archive(completed.stdout, destination, side=side, revision=revision)
+        _materialize_tree(pin, destination)
         manifest = _manifest(destination)
     except Exception:
         temporary_directory.cleanup()

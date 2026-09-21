@@ -161,6 +161,7 @@ class PinnedCommit:
 
     root: Path
     commit: str
+    side: str = "historical"
 
     @classmethod
     def pin(cls, root: Path) -> PinnedCommit:
@@ -191,10 +192,10 @@ class PinnedCommit:
                     cause="no committed HEAD",
                 ) from error
             raise
-        return cls(root=root, commit=commit)
+        return cls(root=root, commit=commit, side=side)
 
     def _error(self, path: str, detail: str) -> GitInputError:
-        return GitInputError(side="historical", commit=self.commit, path=path, detail=detail)
+        return GitInputError(side=self.side, commit=self.commit, path=path, detail=detail)
 
     def _validate_relative(self, relative: str) -> tuple[str, ...]:
         if not relative or relative.startswith("/"):
