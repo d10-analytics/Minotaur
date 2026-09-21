@@ -90,12 +90,49 @@ def test_pin_delegates_to_byte_mode_while_tolerant_default_stays_text(
 
     assert pinned.commit
     assert (
-        ("rev-parse", "--verify", "HEAD^{commit}"),
+        ("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"),
         {"text": False},
     ) in calls
     tolerant = original(root, ("rev-parse", "HEAD"))
     assert tolerant is not None
     assert isinstance(tolerant.stdout, str)
+
+
+def test_resolve_accepts_local_refs_and_pins_before_the_ref_moves(tmp_path: Path) -> None:
+    root, first_sha = _repository(tmp_path)
+    _run(root, "branch", "release")
+    pinned = git.PinnedCommit.resolve(root, "release", side="before")
+
+    (root / "plain file.txt").write_bytes(b"after\n")
+    _run(root, "add", "--all")
+    _run(root, "commit", "--quiet", "-m", "advance")
+    _run(root, "branch", "-f", "release", "HEAD")
+
+    assert pinned.commit == first_sha
+    assert git.resolve_commit(root, "release", side="after") != pinned.commit
+    assert pinned.read_blob("plain file.txt") == b"historical\x00bytes\n"
+
+
+def test_resolve_missing_revision_is_side_specific_and_never_fetches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _ = _repository(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    original = git.run_git
+
+    def recording(root_arg: Path, arguments: tuple[str, ...], **kwargs: object):
+        calls.append(arguments)
+        return original(root_arg, arguments, **kwargs)
+
+    monkeypatch.setattr(git, "run_git", recording)
+    with pytest.raises(git.GitInputError) as error:
+        git.PinnedCommit.resolve(root, "missing-branch", side="after")
+
+    assert error.value.side == "after"
+    assert error.value.commit is None
+    assert "missing-branch" in str(error.value)
+    assert all(arguments[0] != "fetch" for arguments in calls)
+    assert all(arguments[0] not in {"checkout", "worktree"} for arguments in calls)
 
 
 def test_pinned_commit_reads_old_bytes_after_head_advances(tmp_path: Path) -> None:
