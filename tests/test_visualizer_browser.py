@@ -443,6 +443,25 @@ def test_python_workflow_preview_generator_captures_selected_call_site(tmp_path:
     assert len(png) > 10_000
 
 
+def test_system_walkthrough_preview_generator_captures_boundary_view(tmp_path: Path) -> None:
+    """The system documentation preview is reproducible from the public artifact."""
+    preview = tmp_path / "system-walkthrough-demo.png"
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "capture_system_walkthrough_demo.py"),
+            "--output",
+            str(preview),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    png = preview.read_bytes()
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert struct.unpack(">II", png[16:24]) == (1440, 900)
+    assert len(png) > 10_000
+
+
 def test_call_site_context_is_unavailable_without_a_root_and_has_no_caller_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
