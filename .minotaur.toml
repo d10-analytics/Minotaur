@@ -8,6 +8,7 @@ targets = [
   "minotaur/__main__.py",
   "minotaur/cli.py",
   "minotaur/comparison.py",
+  "minotaur/comparison_snapshot.py",
   "minotaur/config.py",
   "minotaur/git.py",
   "minotaur/graph_model",

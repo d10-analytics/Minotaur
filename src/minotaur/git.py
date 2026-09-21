@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -86,6 +87,53 @@ def _error_text(value: bytes | str | None) -> str:
     return value.strip() if value else "Git operation failed"
 
 
+_COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+
+
+def resolve_commit(root: Path, revision: str, *, side: str = "historical") -> str:
+    """Resolve one local revision expression to an immutable commit SHA.
+
+    Resolution is deliberately a single read-only Git probe.  In particular,
+    this function never invokes a transport, fetch, checkout, index operation,
+    or worktree operation.  ``--end-of-options`` keeps a user-supplied
+    revision that starts with ``-`` from becoming a Git option.
+    """
+    if not isinstance(revision, str) or not revision.strip():
+        raise GitInputError(
+            side=side,
+            commit=None,
+            path=str(revision),
+            detail="revision expression must not be empty",
+            cause="invalid revision",
+        )
+    expression = revision.strip()
+    completed = run_git(
+        root,
+        ("rev-parse", "--verify", "--end-of-options", f"{expression}^{{commit}}"),
+        text=False,
+    )
+    if completed is None:
+        raise GitInputError(
+            side=side,
+            commit=None,
+            path=expression,
+            detail="Git revision probe was unavailable",
+            cause="unavailable Git probe",
+        )
+    stdout = completed.stdout
+    value = stdout.decode("ascii", errors="replace").strip() if isinstance(stdout, bytes) else ""
+    if completed.returncode != 0 or not _COMMIT_SHA.fullmatch(value):
+        detail = _error_text(completed.stderr)
+        raise GitInputError(
+            side=side,
+            commit=None,
+            path=expression,
+            detail=f"revision is not a locally available commit: {detail}",
+            cause="missing revision",
+        )
+    return value.lower()
+
+
 @dataclass(frozen=True, slots=True)
 class TreeEntry:
     """One immutable entry observed in a pinned Git tree."""
@@ -117,34 +165,32 @@ class PinnedCommit:
     @classmethod
     def pin(cls, root: Path) -> PinnedCommit:
         """Resolve ``HEAD`` once, rejecting unavailable or unborn repositories."""
-        completed = run_git(
-            root,
-            ("rev-parse", "--verify", "HEAD^{commit}"),
-            text=False,
-        )
-        if completed is None:
-            raise GitInputError(
-                side="historical",
-                commit=None,
-                path=str(root),
-                detail="Git probe was unavailable",
-                cause="unavailable Git probe",
-            )
-        stdout = completed.stdout
-        if isinstance(stdout, bytes):
-            commit = stdout.decode("utf-8", errors="replace").strip()
-        elif isinstance(stdout, str):
-            commit = str(stdout).strip()
-        else:
-            commit = ""
-        if completed.returncode != 0 or not commit:
-            raise GitInputError(
-                side="historical",
-                commit=None,
-                path=str(root),
-                detail="repository has no committed HEAD",
-                cause="no committed HEAD",
-            )
+        return cls.resolve(root, "HEAD", side="historical")
+
+    @classmethod
+    def resolve(cls, root: Path, revision: str, *, side: str = "historical") -> PinnedCommit:
+        """Resolve *revision* once and retain only its immutable commit SHA."""
+        try:
+            commit = resolve_commit(root, revision, side=side)
+        except GitInputError as error:
+            # Keep the historical ``HEAD`` diagnostic used by existing callers.
+            if revision == "HEAD" and error.cause == "unavailable Git probe":
+                raise GitInputError(
+                    side=side,
+                    commit=None,
+                    path=str(root),
+                    detail="Git probe was unavailable",
+                    cause="unavailable Git probe",
+                ) from error
+            if revision == "HEAD" and error.cause == "missing revision":
+                raise GitInputError(
+                    side=side,
+                    commit=None,
+                    path=str(root),
+                    detail="repository has no committed HEAD",
+                    cause="no committed HEAD",
+                ) from error
+            raise
         return cls(root=root, commit=commit)
 
     def _error(self, path: str, detail: str) -> GitInputError:
