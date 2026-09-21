@@ -7,6 +7,7 @@ import pytest
 
 import minotaur.comparison_snapshot as snapshots
 from minotaur.comparison_snapshot import (
+    SnapshotError,
     SnapshotMutationError,
     capture_pair,
     capture_revision,
@@ -105,3 +106,52 @@ def test_capture_pair_closes_first_side_when_second_side_is_missing(tmp_path: Pa
     assert getattr(error.value, "side", None) == "after"
     assert first_root is not None
     assert not first_root.exists()
+
+
+def test_capture_preserves_tracked_bytes_despite_archive_attributes(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _run(root, "init", "--quiet")
+    _run(root, "config", "user.email", "tests@example.invalid")
+    _run(root, "config", "user.name", "snapshot tests")
+    omitted = root / "omitted.py"
+    substituted = root / "substituted.py"
+    attributes = root / ".gitattributes"
+    omitted.write_text("omitted = True\n", encoding="utf-8")
+    substituted.write_text("commit = $Format:%H$\n", encoding="utf-8")
+    attributes.write_text(
+        "omitted.py export-ignore\nsubstituted.py export-subst\n", encoding="utf-8"
+    )
+    _run(root, "add", "--all")
+    _run(root, "commit", "--quiet", "-m", "attributes")
+
+    snapshot = capture_revision(root, "HEAD", side="before")
+    try:
+        assert snapshot.path("omitted.py").read_bytes() == omitted.read_bytes()
+        assert snapshot.path("substituted.py").read_bytes() == substituted.read_bytes()
+    finally:
+        snapshot.close()
+
+
+def test_capture_rejects_gitlink_entries_instead_of_materializing_empty_directories(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    nested = tmp_path / "nested"
+    root.mkdir()
+    nested.mkdir()
+    for repository in (root, nested):
+        _run(repository, "init", "--quiet")
+        _run(repository, "config", "user.email", "tests@example.invalid")
+        _run(repository, "config", "user.name", "snapshot tests")
+    (nested / "README").write_text("nested\n", encoding="utf-8")
+    _run(nested, "add", "--all")
+    _run(nested, "commit", "--quiet", "-m", "nested")
+    nested_commit = _run(nested, "rev-parse", "HEAD")
+    (root / "app.py").write_text("app = True\n", encoding="utf-8")
+    _run(root, "add", "--all")
+    _run(root, "update-index", "--add", "--cacheinfo", f"160000,{nested_commit},vendor")
+    _run(root, "commit", "--quiet", "-m", "gitlink")
+
+    with pytest.raises(SnapshotError, match="unsafe entry.*vendor"):
+        capture_revision(root, "HEAD", side="before")
