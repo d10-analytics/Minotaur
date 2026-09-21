@@ -21,6 +21,7 @@ FORMAT_REFERENCE = ROOT / "docs/formats/system-definition-v1.md"
 PURPOSE = ROOT / "docs/concepts/purpose.md"
 QUERY_REFERENCE = ROOT / "docs/guides/query-reference.md"
 README = ROOT / "README.md"
+SYSTEM_WALKTHROUGH = ROOT / "examples/system-walkthrough/README.md"
 
 
 def _collapsed(path: Path) -> str:
@@ -361,7 +362,7 @@ def test_readme_documents_optional_graph_workflow_and_system_comparison() -> Non
     assert "last-generation Git provenance" in text
     assert "Ordinary `query diff` compares symbols and relationships in graph snapshots" in text
     assert "`query diff --systems` compares subsystem connections" in text
-    assert "examples/system-walkthrough/comparison.md" in text
+    assert "examples/system-walkthrough/README.md#3-see-what-changed" in text
     assert "docs/concepts/freshness.md" in text
 
 
@@ -373,6 +374,27 @@ def test_readme_names_the_system_queries_in_prose() -> None:
     assert "`system-deps` shows its outgoing dependencies" in text
     assert "`systems` summarizes the declarations" in text
     assert "docs/guides/system-definitions.md" in text
+
+
+def test_system_walkthrough_leads_with_visual_questions_and_plain_language() -> None:
+    text = _collapsed(SYSTEM_WALKTHROUGH)
+    assert "What parts make up this project?" in text
+    assert "Where do those parts connect?" in text
+    assert "What changed?" in text
+    assert "Open [the interactive system map](minotaur-graph.html)" in text
+    assert "The red lines cross a system boundary" in text
+    assert "Orders gains a new reason to depend on Billing" in text
+    assert "A difference returns status `1`" in text
+
+
+def test_system_walkthrough_keeps_exact_commands_in_an_optional_reference() -> None:
+    text = _collapsed(SYSTEM_WALKTHROUGH)
+    introduction = text.index("## 1. See the current architecture")
+    comparison = text.index("## 3. See what changed")
+    command_reference = text.index("## Command reference: inspect the current boundary")
+    assert introduction < comparison < command_reference
+    assert "optional reference" in text
+    assert "[comparison reference](comparison.md)" in text
 
 
 def test_readme_uses_the_greeting_walkthrough_transcript() -> None:
