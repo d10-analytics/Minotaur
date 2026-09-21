@@ -407,6 +407,7 @@ def test_checked_in_system_walkthrough_exposes_configured_boundary_view() -> Non
             "orders",
         ]
         page.locator("#system-filter").select_option("orders")
+        page.locator("#btn-direction").click()
         page.locator("#cross-system-connections").check()
         page.wait_for_timeout(450)
         assert page.evaluate(
@@ -417,7 +418,13 @@ def test_checked_in_system_walkthrough_exposes_configured_boundary_view() -> Non
                 return labels.includes('orders')
                     && labels.includes('billing')
                     && labels.includes('External / Unassigned')
-                    && cy.edges(':visible').filter('.cross-system').length > 0;
+                    && cy.edges(':visible').filter('.cross-system').length > 0
+                    && cy.nodes('.boundary-system-container').every(node => {
+                        const selected = cy.getElementById('system-container:orders').position();
+                        const boundary = node.position();
+                        return Math.abs(boundary.x - selected.x)
+                            > Math.abs(boundary.y - selected.y);
+                    });
             }"""
         )
         browser.close()
