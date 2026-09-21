@@ -938,22 +938,27 @@
       var largestGroupSide = Math.max(1, ...groupNames.map(function (name) {
         return Math.ceil(Math.sqrt(boundaryGroups.get(name).length));
       }));
-      var radius = Math.max(selectedBox.w, selectedBox.h) / 2
-        + Math.max(260, largestGroupSide * 120 + groupNames.length * 35);
+      var horizontal = layoutDir === "LR" || layoutDir === "RL";
+      var radius = (horizontal ? selectedBox.w : selectedBox.h) / 2
+        + Math.max(240, largestGroupSide * 90 + groupNames.length * 25);
+      var startAngle = layoutDir === "LR" ? 0
+        : layoutDir === "RL" ? Math.PI
+        : layoutDir === "BT" ? Math.PI / 2
+        : -Math.PI / 2;
       groupNames.forEach(function (name, groupIndex) {
         var nodes = boundaryGroups.get(name).sort(function (left, right) {
           return left.id().localeCompare(right.id());
         });
         var columns = Math.ceil(Math.sqrt(nodes.length));
         var rows = Math.ceil(nodes.length / columns);
-        var angle = -Math.PI / 2 + (2 * Math.PI * groupIndex / groupNames.length);
+        var angle = startAngle + (2 * Math.PI * groupIndex / groupNames.length);
         var groupCenterX = centerX + radius * Math.cos(angle);
         var groupCenterY = centerY + radius * Math.sin(angle);
         nodes.forEach(function (node, nodeIndex) {
           var column = nodeIndex % columns;
           var row = Math.floor(nodeIndex / columns);
           node.position({
-            x: groupCenterX + (column - (columns - 1) / 2) * 220,
+            x: groupCenterX + (column - (columns - 1) / 2) * 160,
             y: groupCenterY + (row - (rows - 1) / 2) * 90
           });
         });

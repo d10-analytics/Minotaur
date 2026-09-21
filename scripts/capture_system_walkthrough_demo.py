@@ -51,15 +51,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     && cy.elements(':animated').empty();
             }"""
         )
-        page.evaluate(
-            """() => {
-                const edge = window.minotaurVisualizer.cy
-                    .edges(':visible').filter('.cross-system')[0];
-                if (!edge) throw new Error('expected a visible cross-system edge');
-                edge.emit('tap');
-            }"""
-        )
-        page.wait_for_function("() => !document.querySelector('#detail-content .empty-state')")
         page.mouse.move(VIEWPORT["width"] - 10, VIEWPORT["height"] - 10)
         page.screenshot(path=str(output))
         browser.close()

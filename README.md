@@ -1,14 +1,18 @@
 # Minotaur
 
 Minotaur turns source code into an evidence-backed map without importing or
-running the project. Trace callers and dependencies, group files into named
+running the project. Identify callers and dependencies, group files into named
 systems, inspect the connections that cross their boundaries, and compare how
 those structures change as the code evolves.
 
-Use focused CLI queries when you need a direct answer, or open the same graph
-as a portable interactive HTML explorer. Results retain source locations for
-inspection, and references that cannot be resolved remain visible instead of
-being silently treated as confirmed connections.
+Analysis stays on your machine and works offline. The standalone HTML explorer
+also makes no network requests, so source evidence does not need to be sent to
+another service. At a given source snapshot, Minotaur applies stable ordering
+and produces repeatable graph and query results. Use focused CLI queries when
+you need a direct answer, or open the same graph as an interactive HTML page.
+Results retain source locations for inspection, and references that cannot be
+resolved remain visible instead of being silently treated as confirmed
+connections.
 
 [![Python workflow explorer preview](docs/assets/python-workflow-demo.png)](https://d10-analytics.github.io/Minotaur/)
 
