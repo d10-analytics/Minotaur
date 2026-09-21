@@ -135,6 +135,25 @@ def test_resolve_missing_revision_is_side_specific_and_never_fetches(
     assert all(arguments[0] not in {"checkout", "worktree"} for arguments in calls)
 
 
+def test_resolved_pin_keeps_side_attribution_for_later_input_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _ = _repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, "HEAD", side="before")
+    original = git.run_git
+
+    def unavailable_listing(root_arg: Path, arguments: tuple[str, ...], **kwargs: object):
+        if arguments[:2] == ("ls-tree", "-z"):
+            return None
+        return original(root_arg, arguments, **kwargs)
+
+    monkeypatch.setattr(git, "run_git", unavailable_listing)
+    with pytest.raises(git.GitInputError) as error:
+        pinned.entries()
+
+    assert error.value.side == "before"
+
+
 def test_pinned_commit_reads_old_bytes_after_head_advances(tmp_path: Path) -> None:
     root, first_sha = _repository(tmp_path)
     pinned = git.PinnedCommit.pin(root)
