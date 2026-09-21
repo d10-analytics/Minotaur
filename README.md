@@ -36,7 +36,9 @@ its supporting source visible in the details panel.
   investigate. An absent reference does not prove that code is safe to delete.
 - **Explore visually.** Search, filter, zoom, and select nodes or connections to
   inspect their details and source evidence. The self-contained HTML explorer
-  opens locally without a server or network requests.
+  opens locally without a server or network requests. The bundled
+  [shop system walkthrough](examples/system-walkthrough/README.md#explore-system-boundaries-visually)
+  demonstrates system focus and cross-system connections.
 
 ## A small example
 

@@ -1236,6 +1236,7 @@ def _visualize(arguments: argparse.Namespace, located: Path | None) -> int:
     """
     try:
         source_root: Path | None
+        systems: tuple[System, ...] = ()
         if located is not None:
             resolved = resolve_config(
                 Path.cwd(),
@@ -1247,6 +1248,7 @@ def _visualize(arguments: argparse.Namespace, located: Path | None) -> int:
                 source_root = resolved.root
             else:
                 source_root = _as_path(arguments.source_root)
+            systems = load_systems(resolved.systems_dir)
         else:
             input_path = Path(arguments.input)
             source_root = _as_path(arguments.source_root)
@@ -1262,7 +1264,14 @@ def _visualize(arguments: argparse.Namespace, located: Path | None) -> int:
         # about what gets written to the sidecar.
         _stamp_if_validated(input_path, loaded)
         excerpts = prepare_excerpts(loaded.canonical, source_root)
-        content = render_html(build_presentation(loaded.canonical, excerpts))
+        content = render_html(
+            build_presentation(
+                loaded.canonical,
+                excerpts,
+                systems=systems,
+                document_nodes=loaded.document.nodes,
+            )
+        )
         _write_atomically(output, content)
     except (GraphLoadError, OSError, ValueError) as error:
         _error(str(error))

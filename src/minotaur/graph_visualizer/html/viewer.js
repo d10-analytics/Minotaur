@@ -6,6 +6,8 @@
   // remains portable structural evidence even when no source root is trusted.
   var excerptPaths = (payload.excerpts && payload.excerpts.paths) || {};
   var callSiteAssociations = (payload.excerpts && payload.excerpts.call_sites) || {};
+  var systemNames = payload.systems || [];
+  var nodeSystems = payload.node_systems || {};
   var byId = new Map(graph.nodes.map(function (n) { return [n.id, n]; }));
   var layoutDir = "TB";
   var activeLayout = null;
@@ -14,6 +16,10 @@
   // One shared value prevents node and edge labels from drifting apart as the
   // graph style evolves; edge weight adds hierarchy without reducing legibility.
   var GRAPH_LABEL_FONT_SIZE = "14px";
+  var SYSTEM_CONTAINER_COLORS = [
+    "#2f6f9f", "#b85c2c", "#4f7f52", "#7a5aa6", "#9a4f68",
+    "#287f8f", "#6b6fa8", "#a64b4b", "#3f7c70", "#76543f"
+  ];
 
   // Themes supply semantic roles, not a raw stylesheet swap: canvas-rendered
   // Cytoscape elements need the same palette as DOM controls. Yellow is absent
@@ -107,6 +113,7 @@
   graph.nodes.forEach(function (node) {
     elements.push({ group: "nodes", data: {
       id: node.id, label: node.label, node_class: node.node_class,
+      system: nodeSystems[node.id] || "",
       symbol_kind: node.symbol_kind || "", path: node.path || (node.location ? node.location.path : ""),
       reference_text: node.reference_text || "", location: node.location || null,
       bg: nodeColors(node.node_class).bg, border: nodeColors(node.node_class).border,
@@ -147,12 +154,28 @@
         "border-width": 6, "border-color": theme.accent, "opacity": 1, "z-index": 10
       }},
       { selector: "node:selected", style: { "border-width": 3, "border-color": theme.accent } },
+      { selector: "node.outside-system", style: {
+        "border-width": 6, "border-color": "#c62828"
+      }},
+      { selector: "node.system-container", style: {
+        "label": "data(label)", "shape": "roundrectangle",
+        "background-color": "data(container_color)", "background-opacity": 0.08,
+        "border-color": "data(container_color)", "border-width": 4,
+        "padding": "32px", "text-valign": "top", "text-halign": "center",
+        "font-size": "18px", "font-weight": "bold", "color": "data(container_color)",
+        "text-outline-width": 0, "compound-sizing-wrt-labels": "include"
+      }},
+      { selector: "node.selected-system-container", style: { "border-width": 7 } },
       { selector: "edge", style: {
         "width": 1.5, "line-color": "data(edge_color)", "target-arrow-color": "data(edge_color)",
         "target-arrow-shape": "triangle", "arrow-scale": 0.8, "curve-style": "bezier",
         "label": "data(kind)", "font-size": GRAPH_LABEL_FONT_SIZE, "font-weight": "bold",
         "font-family": "system-ui, -apple-system, sans-serif", "color": "data(edge_color)",
         "text-rotation": "autorotate", "text-margin-y": -8, "min-zoomed-font-size": 8
+      }},
+      { selector: "edge.cross-system", style: {
+        "width": 4, "line-color": "#c62828", "target-arrow-color": "#c62828",
+        "color": "#c62828", "z-index": 9
       }},
       { selector: "edge.highlighted", style: {
         "width": 3, "line-color": theme.selected, "target-arrow-color": theme.selected,
@@ -172,6 +195,68 @@
     minZoom: 0.1,
     maxZoom: 4
   });
+
+  // --- System focus ---
+  // Membership comes from committed exact-file definitions embedded by the
+  // renderer. An individual selection retains its complete system plus only
+  // the one-hop outside nodes joined to it by an enabled relationship.
+  var systemFilterEl = document.getElementById("system-filter");
+  var crossSystemConnectionsEl = document.getElementById("cross-system-connections");
+  systemNames.forEach(function (name) {
+    var option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    systemFilterEl.appendChild(option);
+  });
+  systemFilterEl.addEventListener("change", function () {
+    crossSystemConnectionsEl.disabled = systemFilterEl.value === "";
+    applyFilters();
+  });
+  crossSystemConnectionsEl.addEventListener("change", applyFilters);
+
+  function isCrossSystem(edge, selectedSystem) {
+    var sourceSystem = edge.source().data("system");
+    var targetSystem = edge.target().data("system");
+    if (selectedSystem !== "") {
+      return (sourceSystem === selectedSystem) !== (targetSystem === selectedSystem);
+    }
+    return sourceSystem !== "" && targetSystem !== "" && sourceSystem !== targetSystem;
+  }
+
+  function systemContainerColor(name) {
+    var index = systemNames.indexOf(name);
+    if (index < 0) index = systemNames.length;
+    return SYSTEM_CONTAINER_COLORS[index % SYSTEM_CONTAINER_COLORS.length];
+  }
+
+  function clearSystemContainers() {
+    var containers = cy.nodes(".system-container");
+    if (!containers.length) return;
+    containers.children().move({ parent: null });
+    containers.remove();
+  }
+
+  function createSystemContainers(selectedSystem) {
+    var groups = new Map();
+    cy.nodes(":visible").not(".system-container").forEach(function (node) {
+      var name = node.data("system") || "External / Unassigned";
+      if (!groups.has(name)) groups.set(name, cy.collection());
+      groups.set(name, groups.get(name).union(node));
+    });
+    Array.from(groups.keys()).sort().forEach(function (name) {
+      var id = "system-container:" + name;
+      cy.add({
+        group: "nodes",
+        data: {
+          id: id, label: name, node_class: "system-container", system: name,
+          container_color: systemContainerColor(name)
+        },
+        classes: "system-container "
+          + (name === selectedSystem ? "selected-system-container" : "boundary-system-container")
+      });
+      groups.get(name).move({ parent: id });
+    });
+  }
 
   // --- Filters: node classes ---
   // Build controls from the payload rather than a fixed taxonomy, so a valid
@@ -269,6 +354,7 @@
   applyFilters(false);
 
   function applyFilters(animate) {
+    clearSystemContainers();
     var hiddenKinds = [];
     kindsEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
       if (!cb.checked) hiddenKinds.push(cb.dataset.kind);
@@ -277,18 +363,56 @@
     edgesEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
       if (!cb.checked) hiddenEdgeKinds.push(cb.dataset.edgekind);
     });
+    var selectedSystem = systemFilterEl.value;
+    var showCrossSystemConnections = selectedSystem !== "" && crossSystemConnectionsEl.checked;
+    var eligibleNodes = cy.nodes().filter(function (node) {
+      return hiddenKinds.indexOf(node.data("node_class")) < 0;
+    });
+    var visibleNodeIds = new Set();
+    if (selectedSystem === "") {
+      eligibleNodes.forEach(function (node) { visibleNodeIds.add(node.id()); });
+    } else {
+      var selectedNodes = eligibleNodes.filter(function (node) {
+        return node.data("system") === selectedSystem;
+      });
+      selectedNodes.forEach(function (node) { visibleNodeIds.add(node.id()); });
+      if (showCrossSystemConnections) {
+        cy.edges().forEach(function (edge) {
+          if (hiddenEdgeKinds.indexOf(edge.data("kind")) >= 0) return;
+          var source = edge.source();
+          var target = edge.target();
+          var sourceSelected = source.data("system") === selectedSystem;
+          var targetSelected = target.data("system") === selectedSystem;
+          if (sourceSelected && eligibleNodes.contains(target)) visibleNodeIds.add(target.id());
+          if (targetSelected && eligibleNodes.contains(source)) visibleNodeIds.add(source.id());
+        });
+      }
+    }
     cy.batch(function () {
-      cy.nodes().forEach(function (n) {
-        if (hiddenKinds.indexOf(n.data("node_class")) >= 0) { n.hide(); } else { n.show(); }
+      cy.nodes().forEach(function (node) {
+        if (visibleNodeIds.has(node.id())) { node.show(); } else { node.hide(); }
+        node.toggleClass(
+          "outside-system",
+          showCrossSystemConnections && node.data("system") !== selectedSystem
+        );
       });
       cy.edges().forEach(function (e) {
         var srcHidden = !e.source().visible();
         var tgtHidden = !e.target().visible();
-        if (srcHidden || tgtHidden || hiddenEdgeKinds.indexOf(e.data("kind")) >= 0) {
+        var unrelated = selectedSystem !== ""
+          && e.source().data("system") !== selectedSystem
+          && e.target().data("system") !== selectedSystem;
+        if (srcHidden || tgtHidden || unrelated
+            || hiddenEdgeKinds.indexOf(e.data("kind")) >= 0) {
           e.hide();
         } else {
           e.show();
         }
+        e.toggleClass(
+          "cross-system",
+          (selectedSystem === "" || showCrossSystemConnections)
+            && isCrossSystem(e, selectedSystem)
+        );
       });
     });
     // Hidden selections must clear their details and emphasis; retaining a
@@ -312,12 +436,12 @@
   function doSearch() {
     var q = searchEl.value.trim().toLowerCase();
     if (!q) {
-      cy.nodes().removeClass("dimmed highlighted");
+      cy.nodes().not(".system-container").removeClass("dimmed highlighted");
       cy.edges().removeClass("dimmed");
       return;
     }
     cy.batch(function () {
-      cy.nodes().forEach(function (n) {
+      cy.nodes().not(".system-container").forEach(function (n) {
         var label = (n.data("label") || "").toLowerCase();
         var path = (n.data("path") || "").toLowerCase();
         var ref = (n.data("reference_text") || "").toLowerCase();
@@ -758,11 +882,91 @@
     stopLayout();
     var visible = cy.elements(":visible");
     if (!visible.nodes().length) return;
+    var selectedSystem = systemFilterEl.value;
+    if (selectedSystem !== "") {
+      runFocusedLayout(
+        visible, selectedSystem, crossSystemConnectionsEl.checked, animate
+      );
+      return;
+    }
     // Passing the collection keeps hidden nodes and edges out of Dagre's ranks
     // while preserving their identities and evidence for later restoration.
     activeLayout = visible.layout({
       name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15,
       padding: 30, animate: animate !== false, animationDuration: 300
+    });
+    activeLayout.run();
+  }
+
+  function runFocusedLayout(visible, selectedSystem, showCrossSystemConnections, animate) {
+    var selectedNodes = visible.nodes().filter(function (node) {
+      return node.data("system") === selectedSystem;
+    });
+    if (!selectedNodes.length) return;
+    var internalEdges = visible.edges().filter(function (edge) {
+      return edge.source().data("system") === selectedSystem
+        && edge.target().data("system") === selectedSystem;
+    });
+    var internal = selectedNodes.union(internalEdges);
+    activeLayout = internal.layout({
+      name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15,
+      padding: 30, fit: false, animate: animate !== false, animationDuration: 300
+    });
+    activeLayout.one("layoutstop", function () {
+      if (systemFilterEl.value !== selectedSystem
+          || crossSystemConnectionsEl.checked !== showCrossSystemConnections) return;
+      var boundaryNodes = visible.nodes().difference(selectedNodes);
+      var selectedBox = selectedNodes.boundingBox({ includeLabels: true });
+      var centerX = (selectedBox.x1 + selectedBox.x2) / 2;
+      var centerY = (selectedBox.y1 + selectedBox.y2) / 2;
+      if (!showCrossSystemConnections) {
+        cy.fit(selectedNodes, 30);
+        var selectedZoom = cy.zoom();
+        cy.pan({
+          x: cy.width() / 2 - centerX * selectedZoom,
+          y: cy.height() / 2 - centerY * selectedZoom
+        });
+        return;
+      }
+      var boundaryGroups = new Map();
+      boundaryNodes.forEach(function (node) {
+        var name = node.data("system") || "External / Unassigned";
+        if (!boundaryGroups.has(name)) boundaryGroups.set(name, []);
+        boundaryGroups.get(name).push(node);
+      });
+      var groupNames = Array.from(boundaryGroups.keys()).sort();
+      var largestGroupSide = Math.max(1, ...groupNames.map(function (name) {
+        return Math.ceil(Math.sqrt(boundaryGroups.get(name).length));
+      }));
+      var radius = Math.max(selectedBox.w, selectedBox.h) / 2
+        + Math.max(260, largestGroupSide * 120 + groupNames.length * 35);
+      groupNames.forEach(function (name, groupIndex) {
+        var nodes = boundaryGroups.get(name).sort(function (left, right) {
+          return left.id().localeCompare(right.id());
+        });
+        var columns = Math.ceil(Math.sqrt(nodes.length));
+        var rows = Math.ceil(nodes.length / columns);
+        var angle = -Math.PI / 2 + (2 * Math.PI * groupIndex / groupNames.length);
+        var groupCenterX = centerX + radius * Math.cos(angle);
+        var groupCenterY = centerY + radius * Math.sin(angle);
+        nodes.forEach(function (node, nodeIndex) {
+          var column = nodeIndex % columns;
+          var row = Math.floor(nodeIndex / columns);
+          node.position({
+            x: groupCenterX + (column - (columns - 1) / 2) * 220,
+            y: groupCenterY + (row - (rows - 1) / 2) * 90
+          });
+        });
+      });
+      createSystemContainers(selectedSystem);
+      var focusedVisible = cy.elements(":visible");
+      cy.fit(focusedVisible, 30);
+      var selectedContainer = cy.getElementById("system-container:" + selectedSystem);
+      var selectedContainerBox = selectedContainer.boundingBox({ includeLabels: true });
+      centerX = (selectedContainerBox.x1 + selectedContainerBox.x2) / 2;
+      centerY = (selectedContainerBox.y1 + selectedContainerBox.y2) / 2;
+      var zoom = cy.zoom();
+      cy.pan({ x: cy.width() / 2 - centerX * zoom, y: cy.height() / 2 - centerY * zoom });
     });
     activeLayout.run();
   }

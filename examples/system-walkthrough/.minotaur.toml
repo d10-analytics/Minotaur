@@ -1,0 +1,6 @@
+[minotaur]
+schema_version = 1
+root = "."
+graph = "minotaur-graph.json"
+targets = ["shop"]
+systems_dir = "docs/systems"

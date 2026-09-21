@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
+
+from minotaur.graph_model.node import Node
+from minotaur.system import EndpointKind, System, classify_endpoint
 
 
 def build_presentation(
-    canonical: Mapping[str, object], excerpts: Mapping[str, object] | None = None
+    canonical: Mapping[str, object],
+    excerpts: Mapping[str, object] | None = None,
+    *,
+    systems: Sequence[System] = (),
+    document_nodes: Sequence[Node] = (),
 ) -> dict[str, object]:
     """Return JSON-safe renderer input without reading files or producing HTML.
 
@@ -19,6 +26,14 @@ def build_presentation(
     """
     nodes = cast(list[dict[str, Any]], canonical["nodes"])
     relationships = cast(list[dict[str, Any]], canonical["relationships"])
+    if systems and {node.id for node in document_nodes} != {node["id"] for node in nodes}:
+        raise ValueError("system presentation requires every canonical node")
+    node_systems = {
+        node.id: membership.system.name
+        for node in document_nodes
+        if (membership := classify_endpoint(systems, node)).kind is EndpointKind.SYSTEM
+        and membership.system is not None
+    }
     node_classes = sorted({node["node_class"] for node in nodes})
     provenance = sorted(
         {
@@ -33,6 +48,8 @@ def build_presentation(
         "node_classes": node_classes,
         "relationship_kinds": relationship_kinds,
         "provenance": provenance,
+        "systems": [system.name for system in systems],
+        "node_systems": node_systems,
         # Give the self-contained viewer a stable empty shape when callers do
         # not request source loading, avoiding a UI-only special case while
         # keeping the canonical ``graph`` payload source-free.

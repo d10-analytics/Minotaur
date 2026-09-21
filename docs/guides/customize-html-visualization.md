@@ -19,6 +19,30 @@ assets. Use the controls to filter node classes and relationship kinds,
 search labels/paths/references, fit the canvas, and switch between top-down
 and left-to-right layout.
 
+When the visualization is created inside a configured project with committed
+system definitions, the System menu offers **All Systems** and every declared
+system. All Systems keeps the complete graph and draws relationships between
+different systems as thick red edges. Selecting one system initially shows only
+that system's nodes and internal relationships, without containers. Enable
+**Show Cross-System Connections** to add directly connected outside nodes, mark
+them with thick red borders, and mark their boundary-crossing relationships
+with thick red edges. The selected system is then grouped and centered inside a
+labeled container. Each outside system receives its own labeled,
+deterministically colored container; nodes without declared membership share an
+**External / Unassigned** container. These containers group the focused
+subgraph without changing graph facts. The option is disabled for All Systems,
+defaults to unchecked, and retains its value while the document remains open.
+Unrelated systems remain hidden until another system or All Systems is selected.
+Node-class and relationship-kind filters continue to apply, so an outside node
+disappears when its only enabled connection is filtered out.
+
+The [shop system walkthrough](../../examples/system-walkthrough/README.md#explore-system-boundaries-visually)
+includes a small offline explorer with two declared systems and unassigned
+boundary nodes. Its checked-in configuration and regeneration script show the
+same project layout used for production repositories. `docs/systems` is the
+recommended default, while the project configuration's `systems_dir` field can
+select a different parent directory without changing the per-system format.
+
 The left details panel stays visible while the graph is explored. Click a node
 or edge to populate it; click the canvas or press Escape to clear it. Drag its
 full-height right-hand divider, or use its arrow/Home/End keys, to adjust its

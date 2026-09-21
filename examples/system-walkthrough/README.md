@@ -1,7 +1,7 @@
 # System definitions walkthrough
 
 This example walks through Minotaur's declared-system queries — `surface`,
-`consumers`, and `system-deps` — on a fabricated mini repository: an online
+`consumers`, and `system-deps` — and the system-aware HTML explorer on a fabricated mini repository: an online
 storefront whose source lives in `shop/`. Two subsystems are declared as
 committed system definitions under `docs/systems/`; every other file is
 outside every declared system. Nothing here is a real product: the sources,
@@ -17,9 +17,11 @@ the per-command options in the [query reference](../../docs/guides/query-referen
 
 ```text
 examples/system-walkthrough/
+├── .minotaur.toml                           shared project configuration
 ├── README.md                                this walkthrough
 ├── minotaur-graph.json                      committed analysis of shop/,
-│   └── minotaur-graph.json.sha256           plus its trusted-load stamp
+├── minotaur-graph.json.sha256                trusted-load stamp
+├── minotaur-graph.html                       portable system explorer
 ├── shop/                                    the fabricated storefront package
 │   ├── __init__.py
 │   ├── billing.py                           declared system "billing"
@@ -33,8 +35,13 @@ examples/system-walkthrough/
 │   └── orders/
 │       ├── system.toml
 │       └── README.md                        human narrative, ignored
-└── regenerate_system_walkthrough.py         reproduces the committed graph
+└── regenerate_system_walkthrough.py         reproduces all three artifacts
 ```
+
+The local `.minotaur.toml` makes one project contract authoritative for the
+source root, analysis targets, graph, and system-definition directory. Its
+`systems_dir = "docs/systems"` uses the recommended layout; another project
+can keep the same per-system directories under a different configured parent.
 
 Every query command below runs from the repository root and reads the
 committed graph with `--no-refresh`, so a walkthrough never rewrites a
@@ -85,7 +92,27 @@ no changes
 
 A successful `analyze` is silent on standard output. The
 [regenerate script](regenerate_system_walkthrough.py) automates this sequence
-(including re-stamping the sidecar) when the fabricated sources change.
+(including re-stamping the sidecar and rebuilding the HTML explorer) when the
+fabricated sources change:
+
+```bash
+$ python3 examples/system-walkthrough/regenerate_system_walkthrough.py
+```
+
+## Explore system boundaries visually
+
+Open [minotaur-graph.html](minotaur-graph.html) directly from the checkout. It
+is self-contained and makes no network requests. The **System** menu contains
+`billing` and `orders`, loaded from this walkthrough's configured
+`docs/systems` directory.
+
+Choose `orders` to isolate its declared nodes and internal relationships, then
+enable **Show Cross-System Connections**. The focused `orders` container stays
+centered; `billing` appears in its own container, and the directly connected
+`checkout.py` and `ledger.py` nodes appear under **External / Unassigned**.
+Thick red edges mark relationships that cross the selected system boundary.
+Choose **All Systems** to restore the complete graph while retaining red edges
+between different declared systems.
 
 ## surface: what outside files reach into the system
 
