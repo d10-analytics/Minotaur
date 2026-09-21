@@ -75,9 +75,15 @@ def _click_connected_node_and_show_details(page: object) -> dict[str, object]:
     return node
 
 
-def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path: Path) -> None:
+def test_generated_file_artifact_filters_search_and_shows_edge_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     graph_path = tmp_path / "graph.json"
     graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+    unrelated = json.loads(
+        (ROOT / "examples/synthetic-graphs/unresolved-reference-demo.json").read_text()
+    )["nodes"][0]
+    graph["nodes"].append(unrelated)
     # Duplicate range evidence must become one user-selectable call site while
     # exposing both supporting provenance values in the rendered artifact.
     relationship = graph["relationships"][0]
@@ -96,6 +102,24 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
         "\n".join(f"line {i}" for i in range(80)), encoding="utf-8"
     )
     source.joinpath("tax.py").write_text("def calculate_tax(): pass\n", encoding="utf-8")
+    systems_dir = source_root / "docs/systems"
+    for name, file in {
+        "checkout": "src/checkout.py",
+        "notifications": "src/notifications.py",
+        "tax": "src/tax.py",
+    }.items():
+        system_dir = systems_dir / name
+        system_dir.mkdir(parents=True)
+        system_dir.joinpath("system.toml").write_text(
+            f'schema_version = 1\nname = "{name}"\nfiles = ["{file}"]\n',
+            encoding="utf-8",
+        )
+    tmp_path.joinpath(".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "source"\n'
+        'graph = "../graph.json"\ntargets = ["src/checkout.py"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
     output = tmp_path / "view.html"
     assert (
         cli.main(
@@ -118,6 +142,92 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
         page = browser.new_page()
         page.on("request", lambda request: requested.append(request.url))
         page.goto(output.as_uri())
+        assert page.locator("#system-filter option").all_text_contents() == [
+            "All Systems",
+            "checkout",
+            "notifications",
+            "tax",
+        ]
+        assert page.locator("#cross-system-connections").is_disabled()
+        assert not page.locator("#cross-system-connections").is_checked()
+        page.locator("#system-filter").select_option("checkout")
+        page.wait_for_timeout(450)
+        assert page.locator("#cross-system-connections").is_enabled()
+        assert not page.locator("#cross-system-connections").is_checked()
+        assert page.evaluate(
+            """() => {
+                const cy = window.minotaurVisualizer.cy;
+                const visible = cy.nodes(':visible');
+                const box = visible.renderedBoundingBox({includeLabels:true});
+                return visible.length === 2
+                    && visible.every(node => node.data('system') === 'checkout')
+                    && cy.edges(':visible').length === 0
+                    && cy.nodes('.system-container').length === 0
+                    && Math.abs((box.x1 + box.x2) / 2 - cy.width() / 2) < 1
+                    && Math.abs((box.y1 + box.y2) / 2 - cy.height() / 2) < 1;
+            }"""
+        )
+        page.locator("#cross-system-connections").check()
+        page.wait_for_timeout(450)
+        assert page.evaluate(
+            """() => {
+                const cy = window.minotaurVisualizer.cy;
+                const nodes = cy.nodes().not('.system-container');
+                const inside = nodes.filter(node => node.data('system') === 'checkout');
+                const outside = nodes.filter(node => node.data('system') !== 'checkout');
+                const containers = cy.nodes('.system-container');
+                return inside.length === 2
+                    && outside.length === 2
+                    && inside.every(node => !node.hasClass('outside-system'))
+                    && outside.every(node => node.hasClass('outside-system'))
+                    && outside.filter(':visible').length === 1
+                    && outside.filter(':visible').every(node =>
+                        node.pstyle('border-width').pfValue === 6
+                        && node.pstyle('border-color').strValue === 'rgb(198,40,40)')
+                    && cy.edges(':visible').length === 1
+                    && cy.edges(':visible').every(edge => edge.hasClass('cross-system')
+                        && edge.pstyle('width').pfValue === 4
+                        && edge.pstyle('line-color').strValue === 'rgb(198,40,40)')
+                    && containers.length === 2
+                    && containers.map(node => node.data('label'))
+                        .sort().join(',') === 'checkout,tax'
+                    && new Set(containers.map(node => node.data('container_color'))).size === 2
+                    && cy.getElementById('system-container:checkout').children().length === 2
+                    && cy.getElementById('system-container:tax').children().length === 1;
+            }"""
+        )
+        assert page.evaluate(
+            """() => {
+                const cy = window.minotaurVisualizer.cy;
+                const selected = cy.getElementById('system-container:checkout');
+                const boundary = cy.getElementById('system-container:tax');
+                const selectedBox = selected.renderedBoundingBox({includeLabels:true});
+                const boundaryBox = boundary.renderedBoundingBox({includeLabels:true});
+                const selectedCenter = {
+                    x:(selectedBox.x1 + selectedBox.x2) / 2,
+                    y:(selectedBox.y1 + selectedBox.y2) / 2
+                };
+                const centered = Math.abs(selectedCenter.x - cy.width() / 2) < 1
+                    && Math.abs(selectedCenter.y - cy.height() / 2) < 1;
+                const separated = boundaryBox.x2 < selectedBox.x1
+                    || boundaryBox.x1 > selectedBox.x2
+                    || boundaryBox.y2 < selectedBox.y1
+                    || boundaryBox.y1 > selectedBox.y2;
+                return centered && separated;
+            }"""
+        )
+        page.locator("#system-filter").select_option("")
+        page.wait_for_timeout(450)
+        assert page.locator("#cross-system-connections").is_disabled()
+        assert page.locator("#cross-system-connections").is_checked()
+        assert page.evaluate(
+            """() => {
+                const cy = window.minotaurVisualizer.cy;
+                return cy.nodes(':visible').length === 4
+                    && cy.nodes().every(node => !node.hasClass('outside-system'))
+                    && cy.edges().every(edge => edge.hasClass('cross-system'));
+            }"""
+        )
         assert page.locator("#theme-mode").input_value() == "system"
         for mode, expected_background in {
             "light": "rgb(245, 245, 240)",
@@ -136,18 +246,12 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
                         && color[2] * 1.4 < color[0] && color[2] * 1.4 < color[1]
                         && Math.abs(color[0] - color[1]) < 110;
                     return window.minotaurVisualizer.cy.edges().every((edge) => {
-                        const checkbox = document.querySelector(
-                            `input[data-edgekind="${edge.data('kind')}"]`
-                        );
-                        const hex = getComputedStyle(checkbox)
-                            .getPropertyValue('--kind-border').trim();
-                        const value = Number.parseInt(hex.slice(1), 16);
-                        const expected = [value >> 16, (value >> 8) & 255, value & 255];
                         const line = edge.pstyle('line-color').value;
                         const arrow = edge.pstyle('target-arrow-color').value;
                         return !isYellow(line)
-                            && line.every((channel, index) => channel === expected[index])
-                            && arrow.every((channel, index) => channel === expected[index]);
+                            && edge.hasClass('cross-system')
+                            && line.join(',') === '198,40,40'
+                            && arrow.join(',') === '198,40,40';
                     });
                 }"""
             )
@@ -165,16 +269,11 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(tmp_path:
         )
         assert page.evaluate(
             """() => window.minotaurVisualizer.cy.edges().every((edge) => {
-                const checkbox = document.querySelector(
-                    `input[data-edgekind="${edge.data('kind')}"]`
-                );
-                const hex = getComputedStyle(checkbox).getPropertyValue('--kind-border').trim();
-                const value = Number.parseInt(hex.slice(1), 16);
-                const expected = [value >> 16, (value >> 8) & 255, value & 255];
                 const line = edge.pstyle('line-color').value;
                 const arrow = edge.pstyle('target-arrow-color').value;
-                return line.every((channel, index) => channel === expected[index])
-                    && arrow.every((channel, index) => channel === expected[index]);
+                return edge.hasClass('cross-system')
+                    && line.join(',') === '198,40,40'
+                    && arrow.join(',') === '198,40,40';
             })"""
         )
         total_nodes = page.evaluate("window.minotaurVisualizer.cy.nodes().length")
@@ -289,6 +388,38 @@ def test_checked_in_python_workflow_artifact_opens_without_external_requests() -
         assert page.evaluate("window.minotaurVisualizer.cy.nodes().length") > 0
         edge = _click_visible_edge_and_show_details(page)
         assert edge["kind"] in page.locator("#detail-content").inner_text()
+        browser.close()
+    assert all(url.startswith("file:") for url in requested)
+
+
+def test_checked_in_system_walkthrough_exposes_configured_boundary_view() -> None:
+    """The public system example exercises focus, boundaries, and offline use."""
+    artifact = ROOT / "examples/system-walkthrough/minotaur-graph.html"
+    requested: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.on("request", lambda request: requested.append(request.url))
+        page.goto(artifact.as_uri())
+        assert page.locator("#system-filter option").all_text_contents() == [
+            "All Systems",
+            "billing",
+            "orders",
+        ]
+        page.locator("#system-filter").select_option("orders")
+        page.locator("#cross-system-connections").check()
+        page.wait_for_timeout(450)
+        assert page.evaluate(
+            """() => {
+                const cy = window.minotaurVisualizer.cy;
+                const labels = cy.nodes('.system-container')
+                    .map(node => node.data('label')).sort();
+                return labels.includes('orders')
+                    && labels.includes('billing')
+                    && labels.includes('External / Unassigned')
+                    && cy.edges(':visible').filter('.cross-system').length > 0;
+            }"""
+        )
         browser.close()
     assert all(url.startswith("file:") for url in requested)
 

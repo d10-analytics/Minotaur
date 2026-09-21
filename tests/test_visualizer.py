@@ -15,10 +15,12 @@ from minotaur.graph_model.loading import GraphLoadError, load_graph_bytes, stamp
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import build_presentation
 from minotaur.graph_visualizer.source import prepare_excerpts
+from minotaur.system import System
 
 ROOT = Path(__file__).parents[1]
 VENDOR = ROOT / "src/minotaur/graph_visualizer/html/vendor"
 EXAMPLE = ROOT / "examples/python-workflow"
+SYSTEM_EXAMPLE = ROOT / "examples/system-walkthrough"
 
 
 def _graph() -> dict[str, object]:
@@ -108,6 +110,8 @@ def test_renderer_is_self_contained_and_json_safe() -> None:
     assert "<link " not in html
     assert "cytoscape-dagre" in html
     assert 'id="minotaur-presentation"' in html
+    assert 'type="checkbox" id="cross-system-connections" disabled' in html
+    assert "Show Cross-System Connections" in html
     assert "textContent" in html
 
 
@@ -164,6 +168,25 @@ def test_presentation_preserves_all_provenance_records_on_one_relationship() -> 
     assert len(relationships[0]["evidence"]) == 3
 
 
+def test_presentation_assigns_exact_system_membership_to_every_located_node() -> None:
+    loaded = load_graph_bytes(json.dumps(_graph()).encode())
+    presentation = build_presentation(
+        loaded.canonical,
+        systems=(System(name="checkout", files=("src/checkout.py",)),),
+        document_nodes=loaded.document.nodes,
+    )
+
+    assert presentation["systems"] == ["checkout"]
+    assert presentation["node_systems"] == {
+        node.id: "checkout"
+        for node in loaded.document.nodes
+        if node.path == "src/checkout.py"
+        or (node.location is not None and node.location.path == "src/checkout.py")
+    }
+    tax = next(node for node in loaded.document.nodes if node.label == "calculate_tax")
+    assert tax.id not in presentation["node_systems"]
+
+
 def test_visualize_cli_refuses_alias_and_writes_atomically(tmp_path: Path) -> None:
     input_path = tmp_path / "graph.json"
     input_path.write_text(json.dumps(_graph()), encoding="utf-8")
@@ -175,6 +198,43 @@ def test_visualize_cli_refuses_alias_and_writes_atomically(tmp_path: Path) -> No
     assert (
         cli.main(["visualize", "--input", str(input_path), "--output", str(output), "--force"]) == 0
     )
+
+
+def test_visualize_cli_embeds_configured_system_names_and_exact_node_membership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    system_dir = source_root / "docs/systems/checkout"
+    system_dir.mkdir(parents=True)
+    system_dir.joinpath("system.toml").write_text(
+        'schema_version = 1\nname = "checkout"\nfiles = ["src/checkout.py"]\n',
+        encoding="utf-8",
+    )
+    tmp_path.joinpath(".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "source"\n'
+        'graph = "../graph.json"\ntargets = ["src/checkout.py"]\n',
+        encoding="utf-8",
+    )
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(_graph()), encoding="utf-8")
+    output = tmp_path / "view.html"
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["visualize", "--output", str(output)]) == 0
+    embedded = (
+        output.read_text(encoding="utf-8")
+        .split('<script id="minotaur-presentation" type="application/json">', 1)[1]
+        .split("</script>", 1)[0]
+    )
+    presentation = json.loads(embedded)
+    checkout_ids = {
+        node["id"]
+        for node in presentation["graph"]["nodes"]
+        if node.get("path") == "src/checkout.py"
+        or node.get("location", {}).get("path") == "src/checkout.py"
+    }
+    assert presentation["systems"] == ["checkout"]
+    assert presentation["node_systems"] == {node_id: "checkout" for node_id in checkout_ids}
 
 
 def test_visualize_cli_warns_but_writes_large_artifact(
@@ -235,6 +295,35 @@ def test_checked_in_python_workflow_artifacts_match_fresh_cli_output(tmp_path: P
     assert generated_sidecar.exists(), "generate_example_output.py must produce a sidecar"
     assert checked_in_sidecar.exists(), "checked-in sidecar missing from examples/"
     assert generated_sidecar.read_bytes() == checked_in_sidecar.read_bytes()
+
+
+def test_checked_in_system_walkthrough_artifacts_match_fresh_cli_output(tmp_path: Path) -> None:
+    """Keep the configured system explorer reproducible through public commands."""
+    subprocess.run(
+        [
+            sys.executable,
+            str(SYSTEM_EXAMPLE / "regenerate_system_walkthrough.py"),
+            "--output-directory",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    generated_html = tmp_path / "minotaur-graph.html"
+    embedded = (
+        generated_html.read_text(encoding="utf-8")
+        .split('<script id="minotaur-presentation" type="application/json">', 1)[1]
+        .split("</script>", 1)[0]
+    )
+    presentation = json.loads(embedded)
+    assert presentation["systems"] == ["billing", "orders"]
+    assert {
+        node["path"]
+        for node in presentation["graph"]["nodes"]
+        if node["id"] in presentation["node_systems"] and node["node_class"] == "file"
+    } == {"shop/billing.py", "shop/orders.py"}
+    for name in ("minotaur-graph.json", "minotaur-graph.json.sha256", "minotaur-graph.html"):
+        assert tmp_path.joinpath(name).read_bytes() == SYSTEM_EXAMPLE.joinpath(name).read_bytes()
 
 
 def test_renderer_keeps_resolved_reference_edges_from_analyzed_source(tmp_path: Path) -> None:
