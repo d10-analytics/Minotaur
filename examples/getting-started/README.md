@@ -46,6 +46,8 @@ removed. Use `--no-pause` to run the same commands without waiting or retaining
 the HTML for viewing. To experiment interactively, copy `app.py` into a scratch
 directory of your own and run the displayed commands from that directory.
 
-Next: [binding examples](../../docs/guides/python-binding-examples.md),
+Next, use the [system walkthrough](../system-walkthrough/README.md) to group
+files into `orders` and `billing`, then see which connections cross those
+boundaries. You can also continue with [binding examples](../../docs/guides/python-binding-examples.md),
 [error recovery](../../docs/guides/source-error-recovery.md), or the
 [implementation reading guide](../../docs/guides/contributing.md).

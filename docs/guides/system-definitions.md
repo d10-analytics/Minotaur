@@ -8,6 +8,13 @@ guide documents the repository overview and the model the three named-boundary
 queries share: how membership works, the two consumption layers they report,
 and the deterministic record semantics of each query.
 
+[![Orders system with cross-system connections](../assets/system-walkthrough-demo.png)](../../examples/system-walkthrough/minotaur-graph.html)
+
+The screenshot focuses the `orders` system in the bundled shop walkthrough.
+Its red edges cross the selected boundary into `billing` and into shared files
+that deliberately belong to no declared system. Open the linked offline HTML
+to change the focused system, filters, or layout.
+
 The committed file format itself — where definitions live and what makes one
 invalid — is the [system definition format v1](../formats/system-definition-v1.md)
 reference. Why the shipped definition is only a scope is stated in

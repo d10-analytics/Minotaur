@@ -1,14 +1,14 @@
 # Minotaur
 
-Minotaur reads source code locally without running it, so you can inspect
-who calls a function, which files depend on a subsystem, and what connections
-change as you edit code. Use it when you are learning a codebase or deciding
-where to look before making a change.
+Minotaur turns source code into an evidence-backed map without importing or
+running the project. Trace callers and dependencies, group files into named
+systems, inspect the connections that cross their boundaries, and compare how
+those structures change as the code evolves.
 
-Analyze selected files into a JSON graph, then ask focused questions from the
-command line or explore the connections in an interactive HTML page. Results
-include source locations you can check, and targets the analyzer cannot resolve
-are marked explicitly.
+Use focused CLI queries when you need a direct answer, or open the same graph
+as a portable interactive HTML explorer. Results retain source locations for
+inspection, and references that cannot be resolved remain visible instead of
+being silently treated as confirmed connections.
 
 [![Python workflow explorer preview](docs/assets/python-workflow-demo.png)](https://d10-analytics.github.io/Minotaur/)
 
@@ -39,6 +39,39 @@ its supporting source visible in the details panel.
   opens locally without a server or network requests. The bundled
   [shop system walkthrough](examples/system-walkthrough/README.md#explore-system-boundaries-visually)
   demonstrates system focus and cross-system connections.
+
+## Map systems and their boundaries
+
+A system is an explicitly named set of files: a service, package, application
+layer, or any other boundary that matters to your repository. Minotaur computes
+connections from the analyzed source; system definitions select which files
+belong together but do not contain a hand-maintained dependency diagram.
+
+Projects normally keep one definition per system under `docs/systems`, while
+`systems_dir` allows another parent directory when that better fits the
+repository:
+
+```toml
+[minotaur]
+schema_version = 1
+root = "."
+graph = "minotaur-graph.json"
+targets = ["src"]
+systems_dir = "docs/systems"
+```
+
+From that shared configuration, `systems` inventories coverage, `consumers`
+finds outside files that use a system, `surface` identifies the system symbols
+they reach, and `system-deps` reports outgoing dependencies. The HTML explorer
+uses the same definitions to focus one system, reveal directly connected
+outside nodes, and highlight boundary-crossing relationships.
+
+[![Orders system with cross-system connections](docs/assets/system-walkthrough-demo.png)](examples/system-walkthrough/minotaur-graph.html)
+
+The bundled [shop walkthrough](examples/system-walkthrough/README.md) is a
+small runnable example with `orders`, `billing`, and deliberately unassigned
+shared files. Its [comparison walkthrough](examples/system-walkthrough/comparison.md)
+shows how source and membership edits change the reported boundaries.
 
 ## A small example
 
@@ -152,7 +185,7 @@ and last-generation Git provenance.
 ## Further reading
 
 - [Query walkthrough](examples/query-walkthrough/) and [command reference](docs/guides/query-reference.md): navigate source and compare snapshots.
-- [System definitions](docs/guides/system-definitions.md): group files and inspect their boundaries.
+- [System definitions](docs/guides/system-definitions.md) and the [shop walkthrough](examples/system-walkthrough/README.md): group files, inspect their boundaries, and compare changes.
 - [HTML visualization guide](docs/guides/customize-html-visualization.md): create an explorer and control embedded source excerpts.
 - [Python workflow example](examples/python-workflow/README.md): reproduce the bundled graph, HTML, and screenshot.
 - [Purpose and boundary](docs/concepts/purpose.md) and [graph format reference](docs/formats/minotaur-graph-v1.md): understand the structural model and evidence categories.

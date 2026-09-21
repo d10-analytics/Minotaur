@@ -114,6 +114,17 @@ Thick red edges mark relationships that cross the selected system boundary.
 Choose **All Systems** to restore the complete graph while retaining red edges
 between different declared systems.
 
+To regenerate the documentation screenshot from this exact checked-in HTML,
+install the visualizer dependencies and run:
+
+```bash
+python3 scripts/capture_system_walkthrough_demo.py
+```
+
+The script focuses `orders`, enables its cross-system connections, selects a
+boundary relationship, and writes `docs/assets/system-walkthrough-demo.png` at
+a fixed viewport.
+
 ## surface: what outside files reach into the system
 
 `surface` answers: which in-scope symbols do files outside the system

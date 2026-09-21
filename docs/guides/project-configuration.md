@@ -48,6 +48,47 @@ Any other field is unknown to the current contract and is rejected, so a
 configuration can never silently carry fields the shipped commands do not
 honor.
 
+## A typical project setup
+
+For most repositories, place `.minotaur.toml` at the top level, analyze the
+source directory, and keep system definitions with the project's other
+documentation:
+
+```text
+your-project/
+├── .minotaur.toml
+├── docs/
+│   └── systems/
+│       ├── billing/system.toml
+│       └── orders/system.toml
+└── src/
+```
+
+```toml
+[minotaur]
+schema_version = 1
+root = "."
+graph = "minotaur-graph.json"
+targets = ["src"]
+systems_dir = "docs/systems"
+```
+
+Here, `root = "."` means the directory containing `.minotaur.toml`. The graph
+is written beside the configuration, `src` is analyzed, and Minotaur reads
+system definitions from `docs/systems`.
+
+`docs/systems` is a recommended layout, not a required name. A project that
+keeps architecture material elsewhere can use, for example:
+
+```toml
+systems_dir = "architecture/systems"
+```
+
+The same configured directory is used by system queries and by the HTML
+visualizer. This keeps the command-line answers and the picture in agreement.
+Without a governing configuration, the visualizer can still display the graph
+and source evidence, but it has no project-selected system directory to load.
+
 ## Locating a configuration file
 
 `analyze`, `visualize`, and the config-consuming `query` subcommands look for
@@ -132,6 +173,11 @@ root = "src"                       # /path/to/project/src
 graph = "graph.json"               # /path/to/project/src/graph.json
 targets = ["pkg", "pkg/one.py"]    # under /path/to/project/src
 ```
+
+This `root = "src"` form is useful when every configured path should be
+relative to the source directory. If system documentation lives outside that
+directory, either use the repository-level setup above or set `systems_dir` to
+the appropriate path from the declared root.
 
 Config-sourced `targets` must stay inside the declared project `root`: a
 target that resolves outside the root is rejected before any source analysis,

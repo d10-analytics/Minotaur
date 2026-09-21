@@ -6,6 +6,10 @@ Create a local, standalone graph explorer from a validated Minotaur graph:
 minotaur visualize --input graph.json --output graph.html --source-root path/to/source
 ```
 
+This direct form needs no project configuration. It displays the graph and,
+when `--source-root` is supplied, the source evidence attached to its
+connections.
+
 The command loads the graph model, performs semantic validation, and
 canonicalizes it before writing output atomically. A matching sidecar digest
 skips the JSON Schema pass; use `--validate` to force that pass regardless of
@@ -18,6 +22,20 @@ their source URLs, licenses, and checksums are recorded beside the vendored
 assets. Use the controls to filter node classes and relationship kinds,
 search labels/paths/references, fit the canvas, and switch between top-down
 and left-to-right layout.
+
+## Explore configured systems
+
+To include named systems, run the command inside a configured project or point
+to its configuration explicitly:
+
+```bash
+minotaur visualize --config /path/to/project/.minotaur.toml --output graph.html
+```
+
+The configuration tells Minotaur which graph, source root, and system directory
+belong together. This avoids showing a graph with definitions from the wrong
+project. See [Project configuration](project-configuration.md) for the common
+repository layout and alternatives to `docs/systems`.
 
 When the visualization is created inside a configured project with committed
 system definitions, the System menu offers **All Systems** and every declared
@@ -35,6 +53,13 @@ defaults to unchecked, and retains its value while the document remains open.
 Unrelated systems remain hidden until another system or All Systems is selected.
 Node-class and relationship-kind filters continue to apply, so an outside node
 disappears when its only enabled connection is filtered out.
+
+[![Orders system with cross-system connections](../assets/system-walkthrough-demo.png)](../../examples/system-walkthrough/minotaur-graph.html)
+
+In this example, `orders` is the selected system. `billing` and the shared,
+unassigned files appear because they connect directly to it. The red lines mark
+connections that cross the selected boundary. Open the linked HTML file to try
+the controls yourself.
 
 The [shop system walkthrough](../../examples/system-walkthrough/README.md#explore-system-boundaries-visually)
 includes a small offline explorer with two declared systems and unassigned
