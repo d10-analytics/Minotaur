@@ -21,7 +21,7 @@ ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # Byte comparisons include generated HTML as well as graph facts.
-BASELINE_COMMIT = "c0568506e4d46011a73fdcefc353ed94de2b5006"
+BASELINE_COMMIT = "ec5e90e5623700c8797e1cdc2f51f27fdc7000f4"
 # Preserve the historical fixture provenance independently of output revisions.
 FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
 
