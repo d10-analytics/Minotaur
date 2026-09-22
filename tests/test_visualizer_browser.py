@@ -1547,3 +1547,202 @@ def test_comparison_search_does_not_reveal_revision_hidden_items(tmp_path: Path)
             ".some(n => n.id() === 'after-added')"
         )
         browser.close()
+
+
+def test_comparison_details_state_stored_status_text(tmp_path: Path) -> None:
+    """Details label each stored classification instead of only dimming it."""
+    nodes = [
+        _comparison_node("changed-node", status="changed"),
+        _comparison_node("added-node", status="added", before=False),
+        _comparison_node("removed-node", status="removed", after=False),
+    ]
+    relationships = [
+        _comparison_edge(
+            "edge:removed",
+            "changed-node",
+            "removed-node",
+            status="removed",
+            before=True,
+            after=False,
+        ),
+    ]
+    presentation = _comparison_presentation(nodes, relationships, changed=True)
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "status-text.html")
+
+        _click_node_by_id(page, "changed-node")
+        page.wait_for_function(
+            "() => document.querySelector('#detail-content').innerText.includes('Changed')"
+        )
+        changed = page.locator("#detail-content").inner_text()
+        assert "Changed" in changed
+        assert "Not present" not in changed
+
+        _click_node_by_id(page, "added-node")
+        page.wait_for_function(
+            "() => document.querySelector('#detail-content').innerText.includes('Added')"
+        )
+        added = page.locator("#detail-content").inner_text()
+        assert "Added" in added
+        assert "Not present" in added
+
+        _click_node_by_id(page, "removed-node")
+        page.wait_for_function(
+            "() => document.querySelector('#detail-content').innerText.includes('Removed')"
+        )
+        removed = page.locator("#detail-content").inner_text()
+        assert "Removed" in removed
+        assert "Not present" in removed
+
+        _click_edge_by_id(page, "edge:removed")
+        page.wait_for_selector("#source-revision")
+        edge_detail = page.locator("#detail-content").inner_text()
+        assert "Removed" in edge_detail
+        assert "Not present" in edge_detail
+        assert page.locator("#source-revision").input_value() == "before"
+        browser.close()
+
+
+def test_comparison_unavailable_evidence_is_limitation_not_change(tmp_path: Path) -> None:
+    """Unavailable call evidence is neither emphasized nor claimed as equality."""
+    nodes = [
+        _comparison_node("changed-node", status="changed"),
+        _comparison_node("kept"),
+        _comparison_node("also-kept"),
+    ]
+    relationships = [_comparison_edge("edge:u", "kept", "also-kept")]
+    calls = [
+        {
+            "id": "edge:u",
+            "relationship_id": "edge:u",
+            "status": "unavailable",
+            "reasons": ["unavailable"],
+            "involved_systems": ["A"],
+        }
+    ]
+    limitations = [
+        {
+            "side": "old",
+            "relationship_id": "edge:u",
+            "code": "call-expression-unavailable",
+            "message": "structural call expression was unavailable for one or more observations",
+        }
+    ]
+    presentation = _comparison_presentation(
+        nodes,
+        relationships,
+        changed=True,
+        calls=calls,
+        limitations=limitations,
+    )
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "unavailable-evidence.html")
+
+        assert page.locator("#emphasis-changes").is_enabled()
+        assert page.locator("#comparison-no-change").is_hidden()
+        assert page.locator("#comparison-notices").is_visible()
+        assert "call-expression-unavailable" in page.locator("#comparison-notices").inner_text()
+
+        # The unavailable call residual is not a change: its unchanged endpoints
+        # stay de-emphasized while the stored changed node keeps full opacity.
+        assert _node_opacity(page, "changed-node") == 1
+        assert _node_opacity(page, "kept") < 1
+        assert _node_opacity(page, "also-kept") < 1
+
+        _click_edge_by_id(page, "edge:u")
+        page.wait_for_function(
+            "() => document.querySelector('#detail-content')"
+            ".innerText.includes('Call-expression comparison unavailable')"
+        )
+        assert (
+            "Call-expression comparison unavailable" in page.locator("#detail-content").inner_text()
+        )
+        browser.close()
+
+
+def test_comparison_no_change_message_qualifies_unavailable_evidence(tmp_path: Path) -> None:
+    """The no-change message and notice stay qualified when evidence is missing."""
+    nodes = [_comparison_node("a"), _comparison_node("b")]
+    relationships = [_comparison_edge("edge:u", "a", "b")]
+    calls = [
+        {
+            "id": "edge:u",
+            "relationship_id": "edge:u",
+            "status": "unavailable",
+            "reasons": ["unavailable"],
+            "involved_systems": ["A"],
+        }
+    ]
+    limitations = [
+        {
+            "side": "old",
+            "relationship_id": "edge:u",
+            "code": "call-expression-unavailable",
+            "message": "structural call expression was unavailable for one or more observations",
+        }
+    ]
+    presentation = _comparison_presentation(
+        nodes,
+        relationships,
+        changed=False,
+        calls=calls,
+        limitations=limitations,
+    )
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "qualified-no-change.html")
+
+        assert page.locator("#emphasis-changes").is_disabled()
+        message = page.locator("#comparison-no-change").inner_text()
+        assert message.startswith("No structural changes found")
+        assert "Call-expression comparison unavailable" in message
+        assert page.locator("#comparison-notices").is_visible()
+        assert "structural call expression was unavailable" in (
+            page.locator("#comparison-notices").inner_text()
+        )
+        browser.close()
+
+
+def test_comparison_hidden_selection_restores_change_emphasis(tmp_path: Path) -> None:
+    """Deselecting a hidden item restores emphasis, not the selection treatment."""
+    nodes = [
+        _comparison_node("caller"),
+        _comparison_node("target"),
+        _comparison_node("after-added", status="added", before=False),
+    ]
+    presentation = _comparison_presentation(nodes, [], changed=True)
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "restore-emphasis.html")
+
+        _click_node_by_id(page, "after-added")
+        page.wait_for_function(
+            "() => document.querySelector('#detail-content').innerText.includes('after-added')"
+        )
+        assert page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('caller').hasClass('faded')"
+        )
+
+        page.locator("#revision-view").select_option("before")
+        page.wait_for_function(
+            "() => document.querySelector('#detail-content')"
+            ".innerText.includes('Select a node or edge')"
+        )
+        assert page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('caller').hasClass('dimmed')"
+        )
+        assert not page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('caller').hasClass('faded')"
+        )
+        assert _node_opacity(page, "caller") < 0.5
+        browser.close()
