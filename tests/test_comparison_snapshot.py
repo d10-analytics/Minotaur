@@ -11,6 +11,7 @@ from minotaur.comparison_snapshot import (
     SnapshotMutationError,
     capture_pair,
     capture_revision,
+    capture_working_tree,
 )
 
 
@@ -155,3 +156,25 @@ def test_capture_rejects_gitlink_entries_instead_of_materializing_empty_director
 
     with pytest.raises(SnapshotError, match="unsafe entry.*vendor"):
         capture_revision(root, "HEAD", side="before")
+
+
+def test_working_tree_capture_includes_untracked_bytes_without_checkout_identity(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "untracked.py").write_text("value = 2\n", encoding="utf-8")
+    before = _checkout_state(root)
+
+    snapshot = capture_working_tree(root, side="after")
+    temporary_root = snapshot.root
+    try:
+        assert snapshot.revision == "WORKTREE"
+        assert snapshot.side == "after"
+        assert snapshot.path("untracked.py").read_text(encoding="utf-8") == "value = 2\n"
+        assert not snapshot.path(".git").exists()
+        snapshot.verify_unchanged()
+    finally:
+        snapshot.close()
+
+    assert not temporary_root.exists()
+    assert _checkout_state(root) == before

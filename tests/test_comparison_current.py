@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -20,6 +21,7 @@ from test_comparison_history import (
 from minotaur import config, git
 from minotaur.cli import _produce_selection
 from minotaur.comparison import CurrentInputError, prepare_comparison
+from minotaur.comparison_snapshot import SnapshotMutationError
 from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode
 
 
@@ -873,3 +875,123 @@ def test_prepare_comparison_preserves_worktree_and_git_state_on_success_and_fail
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_prepare_comparison_analyzes_head_and_worktree_from_separate_roots_with_untracked_source(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "app.py").rename(root / "old.py")
+    _set_config(root, targets=["old.py"])
+    _set_selection(root, ["old.py"])
+    _write(
+        root,
+        "docs/systems/core/system.toml",
+        'schema_version = 1\nname = "core"\nfiles = ["old.py"]\n',
+    )
+    _commit(root, "directory source target")
+    _write(root, "src/new.py", "def new():\n    return 2\n")
+    _write(
+        root,
+        "src/systems/current/system.toml",
+        'schema_version = 1\nname = "current"\nfiles = ["new.py"]\n',
+    )
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "src"\n'
+        'graph = "stale.json"\ntargets = ["new.py"]\n'
+        'systems_dir = "systems"\n',
+    )
+
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    old_paths = {node.path for node in prepared.old_snapshot.document.nodes if node.path}
+    new_paths = {node.path for node in prepared.new_snapshot.document.nodes if node.path}
+    assert "old.py" in old_paths
+    assert "old.py" not in new_paths
+    assert "new.py" not in old_paths
+    assert "new.py" in new_paths
+    assert prepared.historical.normalized_root == "."
+    assert prepared.current.normalized_root == "src"
+    assert prepared.historical.definitions[0].name == "core"
+    assert prepared.current.definitions[0].name == "current"
+    assert all(str(root) not in str(node) for node in prepared.new_snapshot.document.nodes)
+
+
+def test_prepare_comparison_ignores_stale_saved_graph_bytes(tmp_path: Path) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "graph.json").write_bytes(b"this is not a graph\n")
+    (root / "graph.json.sha256").write_text("not-a-digest\n", encoding="ascii")
+
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    assert prepared.old_snapshot.document.nodes
+    assert prepared.new_snapshot.document.nodes
+    assert prepared.historical.graph_bytes != b"this is not a graph\n"
+
+
+def test_prepare_comparison_maps_absolute_declarations_into_each_capture(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(
+        root,
+        ".minotaur.toml",
+        "[minotaur]\nschema_version = 1\n"
+        f"root = {json.dumps(str(root))}\n"
+        f"graph = {json.dumps(str(root / 'graph.json'))}\n"
+        f"targets = {json.dumps([str(root / 'app.py')])}\n"
+        f"systems_dir = {json.dumps(str(root / 'docs/systems'))}\n",
+    )
+
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    assert prepared.historical.normalized_root == "."
+    assert prepared.current.normalized_root == "."
+    assert prepared.new_snapshot.document.nodes
+
+
+def test_prepare_comparison_rejects_diagnostics_before_analyzing_other_side(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    diagnostic = Diagnostic(DiagnosticCode.PARSE_ERROR, "app.py", "broken source")
+    calls = 0
+
+    def producer(
+        workspace_root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+    ) -> object:
+        nonlocal calls
+        calls += 1
+        workspace, selection, result = _produce_selection(workspace_root, targets, metadata_targets)
+        return workspace, selection, replace(result, diagnostics=(diagnostic,))
+
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+
+    assert calls == 1
+    assert error.value.side == "before"
+    assert error.value.diagnostics == (diagnostic,)
+
+
+def test_prepare_comparison_verifies_manifest_around_each_side_analysis(tmp_path: Path) -> None:
+    root, _, _ = _repository(tmp_path)
+
+    def producer(
+        workspace_root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+    ) -> object:
+        workspace, selection, result = _produce_selection(workspace_root, targets, metadata_targets)
+        (workspace_root / "app.py").write_text("tampered\n", encoding="utf-8")
+        return workspace, selection, result
+
+    with pytest.raises(SnapshotMutationError) as error:
+        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+
+    assert error.value.side == "before"
+    assert error.value.pinned_sha
+    assert "app.py" in str(error.value)
