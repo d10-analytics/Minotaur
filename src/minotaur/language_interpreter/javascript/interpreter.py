@@ -10,6 +10,7 @@ the enclosing emitted owner rather than inventing a second identity grain.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -158,7 +159,7 @@ def _call_observations(
     return tuple(observations)
 
 
-def _iter_nodes(node: Any):
+def _iter_nodes(node: Any) -> Iterator[Any]:
     """Yield ESTree nodes without following interpreter-only annotations."""
     if node is None or not hasattr(node, "type"):
         return
