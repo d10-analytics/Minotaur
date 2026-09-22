@@ -1799,3 +1799,115 @@ def test_systems_captured_call_excerpts_resolve_under_the_side_root(
         rendered = excerpts[side]["paths"]["consumer.py"]
         assert rendered["status"] == "available"
         assert "receive" in json.dumps(rendered["spans"])
+
+
+def test_systems_json_and_html_agree_under_a_configured_source_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-02/C-07: one sub-root invocation proves both public outputs describe
+    the same captured sides and that captured excerpts resolve below each
+    side's configured root rather than the snapshot root."""
+    root = _repo(tmp_path)
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "src" / "pkg" / "api.py").write_text("def receive():\n    return 1\n", encoding="utf-8")
+    (root / "src" / "consumer.py").write_text(
+        "from pkg.api import receive\n\ndef consume():\n    return receive()\n",
+        encoding="utf-8",
+    )
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "src"\ngraph = "graph.json"\n'
+        'targets = ["pkg", "consumer.py"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    head = _head_sha(root)
+    (root / "src" / "consumer.py").write_text(
+        "from pkg.api import receive\n\ndef consume():\n    return receive(2)\n",
+        encoding="utf-8",
+    )
+    report = root / "comparison.html"
+
+    assert cli.main(["query", "diff", "--systems", "--json", "--html", str(report)]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    presentation = _embedded_presentation(report.read_text(encoding="utf-8"))
+    context = payload["comparison"]
+
+    assert context["changed"] is True
+    assert context["before"] == presentation["comparison"]["before"]
+    assert context["after"] == presentation["comparison"]["after"]
+    assert context["before"]["root"] == "src"
+    assert context["before"]["config_path"] == ".minotaur.toml"
+    assert context["before"]["targets"] == ["src/consumer.py", "src/pkg"]
+    assert context["before"]["commit"] == head
+    assert context["after"]["kind"] == "working-tree"
+    assert context["after"]["commit"] is None
+    assert context["before"]["source_digest"] != context["after"]["source_digest"]
+    for key in ("nodes", "relationships", "call_changes"):
+        assert _comparison_fingerprint(context[key]) == _comparison_fingerprint(
+            presentation["comparison"][key]
+        )
+    excerpts = presentation["excerpts"]
+    assert isinstance(excerpts, dict)
+    for side in ("before", "after"):
+        rendered = excerpts[side]["paths"]["consumer.py"]
+        assert rendered["status"] == "available"
+        assert "receive" in json.dumps(rendered["spans"])
+
+
+def test_systems_json_and_html_agree_for_one_side_target_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-02/C-01: a target declared by only one side is admitted when its
+    coordinate exists on the opposite captured tree, and both public outputs
+    describe the same admitted sides."""
+    root = _repo(tmp_path)
+    (root / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (root / "b.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["a.py"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / "b.py").unlink()
+    (root / "alt.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["b.py"]\n',
+        encoding="utf-8",
+    )
+    report = root / "comparison.html"
+
+    assert (
+        cli.main(
+            [
+                "query",
+                "diff",
+                "--systems",
+                "--after-config",
+                "alt.toml",
+                "--json",
+                "--html",
+                str(report),
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert "absent on both comparison sides" not in captured.err
+    payload = json.loads(captured.out)
+    presentation = _embedded_presentation(report.read_text(encoding="utf-8"))
+    context = payload["comparison"]
+
+    assert context["before"]["targets"] == ["a.py"]
+    assert context["after"]["targets"] == ["b.py"]
+    assert context["before"]["config_path"] == ".minotaur.toml"
+    assert context["after"]["config_path"] == "alt.toml"
+    assert context["before"] == presentation["comparison"]["before"]
+    assert context["after"] == presentation["comparison"]["after"]
+    assert context["changed"] is True
