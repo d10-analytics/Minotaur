@@ -253,7 +253,7 @@ def _caller_start(
         if str(getattr(node, "id", "")) != source_id:
             continue
         value = getattr(node, side, None)
-        payload = value if isinstance(value, Mapping) else {}
+        payload = _node_side_payload(value)
         if payload.get("node_class") != "symbol":
             return None
         if payload.get("symbol_kind") not in {"function", "method"}:
@@ -266,6 +266,21 @@ def _caller_start(
             return int(caller_location["range"]["start"]["line"])
         return None
     return None
+
+
+def _node_side_payload(value: object) -> Mapping[str, object]:
+    """Return the canonical node stored on one comparison side.
+
+    Comparison node sides are ``{node, system}`` records; a bare canonical
+    payload is still accepted so hand-built values keep working. The nested
+    canonical payload is what distinguishes the side record wrapper.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    nested = value.get("node")
+    if isinstance(nested, Mapping):
+        return nested
+    return value
 
 
 def _node_start(node: dict[str, Any] | None) -> int | None:

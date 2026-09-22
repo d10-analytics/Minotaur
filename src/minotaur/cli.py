@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import stat
 import sys
 import tempfile
 from collections import defaultdict
@@ -1219,14 +1220,20 @@ def _captured_side_root(analysis: Any) -> Path:
 
 
 def _capture_present(root: Path, coordinate: str) -> bool:
-    """Return whether a repository-relative coordinate exists in one capture."""
+    """Return whether a regular file or directory exists in one capture.
+
+    A declared target may be absent on one side only when the opposite captured
+    tree still holds a regular source file or directory at that coordinate. A
+    symlink, FIFO, socket, device, or other special entry does not establish
+    that the missing side is a deletion, so it is not admitted here.
+    """
     parts = tuple(part for part in coordinate.split("/") if part not in {"", "."})
     candidate = root.joinpath(*parts) if parts else root
     try:
-        os.lstat(candidate)
+        info = os.lstat(candidate)
     except OSError:
         return False
-    return True
+    return stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
 
 
 def _require_pair_targets_materialized(old: Any, new: Any) -> None:

@@ -72,6 +72,21 @@ def _raise_walk_error(error: OSError) -> None:
     raise error
 
 
+def _logical_mode(mode: int, *, kind: str) -> int:
+    """Reduce a filesystem mode to the logical exec/non-exec model.
+
+    Raw permission bits carry the creating process umask, so the same logical
+    captured input would otherwise produce different manifests on different
+    hosts. Directories always map to one canonical mode, and files keep only
+    the executable distinction that Git itself records. A real executable-bit
+    change still changes the manifest; ownership bits and umask-derived
+    read/write bits do not.
+    """
+    if kind == "directory":
+        return 0o755
+    return 0o755 if mode & 0o111 else 0o644
+
+
 def _manifest(root: Path) -> CaptureManifest:
     """Inventory ordinary directories and files without following links."""
     entries: list[ManifestEntry] = []
@@ -93,7 +108,15 @@ def _manifest(root: Path) -> CaptureManifest:
                     detail=f"captured path is not an ordinary directory: {relative}",
                 )
             retained_directories.append(name)
-            entries.append(ManifestEntry(relative, "directory", stat.S_IMODE(info.st_mode), 0, ""))
+            entries.append(
+                ManifestEntry(
+                    relative,
+                    "directory",
+                    _logical_mode(stat.S_IMODE(info.st_mode), kind="directory"),
+                    0,
+                    "",
+                )
+            )
         directory_names[:] = retained_directories
         for name in file_names:
             path = current_path / name
@@ -107,7 +130,13 @@ def _manifest(root: Path) -> CaptureManifest:
                 )
             size, digest = _digest_file(path)
             entries.append(
-                ManifestEntry(relative, "file", stat.S_IMODE(info.st_mode), size, digest)
+                ManifestEntry(
+                    relative,
+                    "file",
+                    _logical_mode(stat.S_IMODE(info.st_mode), kind="file"),
+                    size,
+                    digest,
+                )
             )
     return CaptureManifest(tuple(sorted(entries, key=lambda entry: entry.path)))
 

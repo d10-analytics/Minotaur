@@ -51,8 +51,22 @@
   function sidePayload(record, side) {
     if (!comparisonMode) return record;
     var value = record && record[side];
-    if (Array.isArray(value)) return value[0] || null;
+    if (Array.isArray(value)) value = value[0] || null;
+    if (value && typeof value === "object" && value.node && typeof value.node === "object") {
+      // Comparison node sides store the canonical node together with the
+      // declared system name on that revision.
+      return value.node;
+    }
     return value && typeof value === "object" ? value : null;
+  }
+
+  function sideSystemRecord(record, side) {
+    var value = record && record[side];
+    if (Array.isArray(value)) value = value[0] || null;
+    if (value && typeof value === "object" && value.node && typeof value.node === "object") {
+      return value;
+    }
+    return null;
   }
 
   function preferredPayload(record) {
@@ -148,14 +162,27 @@
   function sideSystems(record, side) {
     if (!record) return [];
     if (comparisonMode && !sidePresent(record, side)) return [];
+    if (comparisonMode) {
+      // Node sides carry the declared system for that revision only. There is
+      // deliberately no fallback to a cross-revision union: same-side internal
+      // eligibility (V-21) must never combine both revisions' memberships.
+      var stored = sideSystemRecord(record, side);
+      if (stored && typeof stored.system === "string" && stored.system) return [stored.system];
+      var sideMapped = payload.node_systems && payload.node_systems[record.id];
+      if (sideMapped && typeof sideMapped === "object" && !Array.isArray(sideMapped)) {
+        var mappedValue = sideMapped[side];
+        if (typeof mappedValue === "string" && mappedValue) return [mappedValue];
+      }
+      return [];
+    }
     var payloadValue = sidePayload(record, side);
     var candidates = [];
     if (payloadValue) {
       candidates = payloadValue.systems || payloadValue.involved_systems || payloadValue.system || [];
     }
-    if (typeof candidates === "string") return [candidates];
+    if (typeof candidates === "string") return candidates ? [candidates] : [];
     if (Array.isArray(candidates) && candidates.length) {
-      return candidates.filter(function (name) { return typeof name === "string"; });
+      return candidates.filter(function (name) { return typeof name === "string" && name; });
     }
     var mapped = payload.node_systems && payload.node_systems[record.id];
     if (mapped && typeof mapped === "object" && !Array.isArray(mapped)) {
@@ -166,6 +193,20 @@
     if (Array.isArray(mapped)) return mapped;
     if (typeof mapped === "string") return [mapped];
     return Array.isArray(record.involved_systems) ? record.involved_systems : [];
+  }
+
+  function sideEndpointSystems(record, side, endpoint) {
+    if (!record || !record.eligibility) return [];
+    var value = record.eligibility[side];
+    if (!value || typeof value !== "object") return [];
+    var names = value[endpoint + "_systems"];
+    return Array.isArray(names) ? names : [];
+  }
+
+  function membershipLabel(record, side) {
+    if (!sidePresent(record, side)) return "Not present";
+    var names = sideSystems(record, side);
+    return names.length ? names.join(", ") : "unassigned";
   }
 
   function nodeBelongsTo(node, system, side) {
@@ -191,9 +232,12 @@
   }
 
   function edgeHasInternalSide(edge, system, side) {
+    // The stored relationship eligibility already resolves each side's endpoint
+    // memberships, so this never compares memberships across revisions.
+    var record = edge.data("comparison_record");
     return edgePresentInView(edge, side)
-      && nodeBelongsTo(edge.source(), system, side)
-      && nodeBelongsTo(edge.target(), system, side);
+      && sideEndpointSystems(record, side, "source").indexOf(system) >= 0
+      && sideEndpointSystems(record, side, "target").indexOf(system) >= 0;
   }
 
   function edgeHasInternalInView(edge, system, view) {
@@ -206,17 +250,20 @@
     return edgeHasInternalSide(edge, system, view);
   }
 
+  function edgeTouchesSide(edge, system, side) {
+    var record = edge.data("comparison_record");
+    return sideEndpointSystems(record, side, "source").indexOf(system) >= 0
+      || sideEndpointSystems(record, side, "target").indexOf(system) >= 0;
+  }
+
   function edgeTouchesSystemInView(edge, system, view) {
     if (!comparisonMode) {
       return edge.source().data("system") === system || edge.target().data("system") === system;
     }
     if (view === "combined") {
-      return nodeBelongsTo(edge.source(), system, "before")
-        || nodeBelongsTo(edge.source(), system, "after")
-        || nodeBelongsTo(edge.target(), system, "before")
-        || nodeBelongsTo(edge.target(), system, "after");
+      return edgeTouchesSide(edge, system, "before") || edgeTouchesSide(edge, system, "after");
     }
-    return nodeBelongsTo(edge.source(), system, view) || nodeBelongsTo(edge.target(), system, view);
+    return edgeTouchesSide(edge, system, view);
   }
 
   function comparisonNodeData(record) {
@@ -461,6 +508,14 @@
     option.textContent = name;
     systemFilterEl.appendChild(option);
   });
+  // C-08: the saved comparison may name a CLI-selected system. Initialize the
+  // filter to it while leaving All Systems selectable.
+  if (comparisonMode && comparisonPayload
+      && typeof comparisonPayload.selected_system === "string"
+      && systemNames.indexOf(comparisonPayload.selected_system) >= 0) {
+    systemFilterEl.value = comparisonPayload.selected_system;
+  }
+  crossSystemConnectionsEl.disabled = systemFilterEl.value === "";
   systemFilterEl.addEventListener("change", function () {
     crossSystemConnectionsEl.disabled = systemFilterEl.value === "";
     applyFilters();
@@ -509,12 +564,13 @@
     containerNodes.forEach(function (node) {
       var name = node.data("system") || "External / Unassigned";
       if (comparisonMode) {
-        var systems = sideSystems(node.data("comparison_record"), revisionView);
-        if (!systems.length && revisionView === "combined") {
-          systems = sideSystems(node.data("comparison_record"), "after");
-        }
-        if (!systems.length) systems = node.data("systems") || [];
-        name = systems[0] || name;
+        // V-08 placement: a node that survives into After is placed in its
+        // After system; a removed node keeps its Before system. Membership is
+        // read per side, never from the cross-revision union.
+        var record = node.data("comparison_record");
+        var placement = sideSystems(record, "after");
+        if (!placement.length) placement = sideSystems(record, "before");
+        name = placement[0] || "External / Unassigned";
       }
       if (!groups.has(name)) groups.set(name, cy.collection());
       groups.set(name, groups.get(name).union(node));
@@ -1286,7 +1342,9 @@
     if (record.reasons && record.reasons.length) {
       html += '<div class="field"><div class="field-label">Reasons</div><div class="field-value">' + escHtml(record.reasons.map(titleCase).join(", ")) + '</div></div>';
     }
-    html += '<div class="field"><div class="field-label">Membership</div><div class="field-value">' + escHtml((record.involved_systems || []).join(", ") || "unassigned") + '</div></div>';
+    html += '<div class="field"><div class="field-label">Membership</div><div class="field-value">'
+      + "Before: " + escHtml(membershipLabel(record, "before"))
+      + " · After: " + escHtml(membershipLabel(record, "after")) + '</div></div>';
     html += structuralSideFields(record);
     detailContent.innerHTML = html;
   }

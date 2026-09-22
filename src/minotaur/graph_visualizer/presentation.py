@@ -117,13 +117,29 @@ def build_comparison_presentation(
             "calls": call_payloads,
         },
         "systems": system_names,
+        # Membership is per side: a node that moved between systems belongs to
+        # different names on Before and After, so a flat union would let the
+        # viewer invent same-revision internal relationships.
         "node_systems": {
-            item["id"]: item["involved_systems"]
+            item["id"]: {
+                "before": _side_system(item.get("before")),
+                "after": _side_system(item.get("after")),
+            }
             for item in node_payloads
-            if item["involved_systems"]
         },
         "excerpts": comparison_excerpts,
     }
+
+
+def _side_system(value: object) -> str | None:
+    """Return the declared system stored on one side record, if any."""
+    if isinstance(value, (tuple, list)):
+        value = value[0] if value else None
+    if isinstance(value, Mapping):
+        name = value.get("system")
+        if isinstance(name, str):
+            return name
+    return None
 
 
 def _result_dict(result: object) -> dict[str, object]:

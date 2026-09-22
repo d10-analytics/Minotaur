@@ -28,9 +28,11 @@ selected graph.
   queries.
 - `analysis-sql` points to graph contract for SQL graph facts.
 - `source-presentation` consumes the canonical graph payload and source
-  locations through command-interface composition. This owner/data-flow
-  direction is not a direct static `source-presentation` to `graph-contract`
-  connection in the selected graph.
+  locations through command-interface composition. The selected graph also
+  observes a direct static `source-presentation` to `graph-contract` connection
+  (`calls`, `imports`, and `references`), including the shared `is_safe_path`
+  path guard. Like every observed edge in this section, it is not asserted as
+  required.
 
 Graph contract therefore has a documented ownership or data-flow relationship
 with the other eight systems. These directions describe the selected proof

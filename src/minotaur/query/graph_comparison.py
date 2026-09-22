@@ -14,7 +14,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.node import Node
@@ -96,6 +96,75 @@ def _category(snapshot: ReportingSnapshot | None, node: Node) -> str | None:
     return None
 
 
+def _node_side(nodes: Sequence[Node], snapshot: ReportingSnapshot | None) -> object:
+    """Return the stored side value for one matched node group.
+
+    C-05 stores the original canonical node together with the declared system
+    name on that revision, so the viewer never has to compare memberships
+    across revisions to decide same-side eligibility.
+    """
+    if not nodes:
+        return None
+    records = tuple(
+        _freeze({"node": _node_payload(item), "system": _category(snapshot, item)})
+        for item in nodes
+    )
+    return records[0] if len(records) == 1 else records
+
+
+def endpoint_eligibility(
+    before_pairs: Sequence[tuple[str | None, str | None]],
+    after_pairs: Sequence[tuple[str | None, str | None]],
+) -> Mapping[str, object]:
+    """Precompute per-side endpoint membership and internal/boundary systems.
+
+    Each pair is ``(source_system, target_system)`` for one relationship
+    occurrence on that revision. ``internal_systems`` names every system whose
+    membership covered both endpoints on the *same* side; combining memberships
+    across revisions would invent an internal relationship that never existed.
+    """
+    before_sources = sorted({source for source, _ in before_pairs if source})
+    before_targets = sorted({target for _, target in before_pairs if target})
+    after_sources = sorted({source for source, _ in after_pairs if source})
+    after_targets = sorted({target for _, target in after_pairs if target})
+    internal = sorted(
+        (set(before_sources) & set(before_targets)) | (set(after_sources) & set(after_targets))
+    )
+    touching = set(before_sources) | set(before_targets) | set(after_sources) | set(after_targets)
+    payload = {
+        "before": {
+            "source_systems": before_sources,
+            "target_systems": before_targets,
+        },
+        "after": {
+            "source_systems": after_sources,
+            "target_systems": after_targets,
+        },
+        "internal_systems": internal,
+        "boundary_systems": sorted(touching - set(internal)),
+    }
+    return cast(Mapping[str, object], _freeze(payload))
+
+
+def _eligibility(
+    old: Sequence[RelationshipOccurrence],
+    new: Sequence[RelationshipOccurrence],
+    old_snapshot: ReportingSnapshot | None,
+    new_snapshot: ReportingSnapshot | None,
+) -> Mapping[str, object]:
+    """Precompute eligibility from matched occurrence endpoints and snapshots."""
+    return endpoint_eligibility(
+        tuple(
+            (_category(old_snapshot, item.source), _category(old_snapshot, item.target))
+            for item in old
+        ),
+        tuple(
+            (_category(new_snapshot, item.source), _category(new_snapshot, item.target))
+            for item in new
+        ),
+    )
+
+
 def _involved(
     old_snapshot: ReportingSnapshot | None,
     new_snapshot: ReportingSnapshot | None,
@@ -160,12 +229,14 @@ class GraphRelationshipChange:
     involved_systems: tuple[str, ...] = ()
     before: object = None
     after: object = None
+    eligibility: object = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reasons", tuple(sorted(set(self.reasons))))
         object.__setattr__(self, "involved_systems", tuple(sorted(set(self.involved_systems))))
         object.__setattr__(self, "before", _freeze(self.before))
         object.__setattr__(self, "after", _freeze(self.after))
+        object.__setattr__(self, "eligibility", _freeze(self.eligibility))
 
     @property
     def key(self) -> str:
@@ -182,6 +253,7 @@ class GraphRelationshipChange:
             "involved_systems": list(self.involved_systems),
             "before": _thaw(self.before),
             "after": _thaw(self.after),
+            "eligibility": _thaw(self.eligibility),
         }
 
 
@@ -245,8 +317,8 @@ def _node_changes(
     for key in sorted(set(old.nodes_by_key) | set(new.nodes_by_key), key=repr):
         left = old.nodes_by_key.get(key, ())
         right = new.nodes_by_key.get(key, ())
-        before = _group_payload(_node_payload(item) for item in left) if left else None
-        after = _group_payload(_node_payload(item) for item in right) if right else None
+        before = _node_side(left, old_snapshot)
+        after = _node_side(right, new_snapshot)
         reasons: list[str] = []
         if not left:
             status = "added"
@@ -366,6 +438,7 @@ def _relationship_changes(
                 ),
                 before=before,
                 after=after,
+                eligibility=_eligibility(left, right, old_snapshot, new_snapshot),
             )
         )
     return tuple(sorted(result, key=lambda item: item.id))
@@ -395,6 +468,7 @@ __all__ = [
     "compare_graph",
     "compare_graphs",
     "compare_whole_graph",
+    "endpoint_eligibility",
     "node_display_id",
     "relationship_display_id",
 ]

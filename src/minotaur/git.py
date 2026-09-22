@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+def _probe_environment() -> dict[str, str]:
+    """Return an environment that forbids implicit promisor object fetches.
+
+    Git reads for a pinned local revision must never reach a network remote.
+    A partial clone would otherwise transparently fetch a missing promised
+    object on ``rev-parse``, ``ls-tree``, or ``show``. ``GIT_NO_LAZY_FETCH``
+    turns that implicit fetch into an ordinary command failure, which the
+    strict read paths already translate into a side-attributed error.
+    """
+    environment = dict(os.environ)
+    environment["GIT_NO_LAZY_FETCH"] = "1"
+    return environment
 
 
 def run_git(
@@ -24,6 +39,7 @@ def run_git(
             capture_output=True,
             check=False,
             text=text,
+            env=_probe_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -46,17 +62,13 @@ def read_head_blob(root: Path, relative_path: str) -> bytes | None:
     callers deciding whether Git is available use :func:`work_tree_root`.
     """
     try:
-        completed = subprocess.run(
-            ["git", "show", f"HEAD:{relative_path}"],
-            cwd=root,
-            capture_output=True,
-            check=False,
-        )
+        completed = run_git(root, ("show", f"HEAD:{relative_path}"), text=False)
     except (OSError, subprocess.SubprocessError):
         return None
-    if completed.returncode != 0:
+    if completed is None or completed.returncode != 0:
         return None
-    return completed.stdout
+    output = completed.stdout
+    return output if isinstance(output, bytes) else None
 
 
 class GitInputError(ValueError):

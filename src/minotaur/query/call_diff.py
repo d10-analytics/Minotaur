@@ -179,15 +179,19 @@ def _relation_ids(
 def _normalize(
     observations: Sequence[CallExpressionObservation],
     index: CorrespondenceIndex | None,
-) -> dict[tuple[str, tuple[object, ...]], list[CallExpressionObservation]]:
-    grouped: dict[tuple[str, tuple[object, ...]], list[CallExpressionObservation]] = defaultdict(
-        list
-    )
+) -> dict[str, list[CallExpressionObservation]]:
+    """Group observations per corresponding caller/target relationship.
+
+    Call-site location is deliberately not part of the group identity: the
+    comparison is per relationship and per normalized expression, so a call
+    that merely moves within its file still belongs to the same group.
+    """
+    grouped: dict[str, list[CallExpressionObservation]] = defaultdict(list)
     for observation in observations:
         if not isinstance(observation, CallExpressionObservation):
             raise TypeError("call observations must be CallExpressionObservation values")
         for relation_id in _relation_ids(observation, index):
-            grouped[(relation_id, _location_key(observation.callee_location))].append(observation)
+            grouped[relation_id].append(observation)
     return grouped
 
 
@@ -241,10 +245,9 @@ def compare_call_observations(
     )
     changes: list[CallChange] = []
     limitations: list[CallLimitation] = []
-    for key in sorted(set(old_groups) | set(new_groups), key=repr):
-        relation_id, _location = key
-        before_values = old_groups.get(key, [])
-        after_values = new_groups.get(key, [])
+    for relation_id in sorted(set(old_groups) | set(new_groups)):
+        before_values = old_groups.get(relation_id, [])
+        after_values = new_groups.get(relation_id, [])
         before = (
             tuple(sorted((_observation_dict(item) for item in before_values), key=repr)) or None
         )
@@ -271,11 +274,17 @@ def compare_call_observations(
             if any(item.fingerprint is None for item in (*before_values, *after_values)):
                 status, reasons = "unavailable", ("unavailable",)
             elif before_counts == after_counts:
+                # Equal multisets cancel completely: moved or reordered
+                # occurrences with the same normalized expressions are equal.
                 status, reasons = "unchanged", ()
             else:
-                reason_values = ["expression_changed"]
-                if len(before_values) != len(after_values):
+                reason_values: list[str] = []
+                if set(before_counts) != set(after_counts):
+                    reason_values.append("expression_changed")
+                if sum(before_counts.values()) != sum(after_counts.values()):
                     reason_values.append("multiplicity_changed")
+                if not reason_values:
+                    reason_values.append("expression_changed")
                 status, reasons = "changed", tuple(reason_values)
         changes.append(
             CallChange(
