@@ -158,6 +158,28 @@ def test_capture_rejects_gitlink_entries_instead_of_materializing_empty_director
         capture_revision(root, "HEAD", side="before")
 
 
+def test_capture_attributes_unexpected_blob_read_failure_to_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    original = snapshots.PinnedCommit.read_blob
+
+    def fail_read(pin: snapshots.PinnedCommit, relative: str) -> bytes:
+        if relative == "app.py":
+            raise OSError("simulated blob read failure")
+        return original(pin, relative)
+
+    monkeypatch.setattr(snapshots.PinnedCommit, "read_blob", fail_read)
+
+    with pytest.raises(SnapshotError) as error:
+        capture_revision(root, "HEAD", side="before")
+
+    assert error.value.side == "before"
+    assert error.value.revision == "HEAD"
+    assert error.value.pinned_sha
+    assert "simulated blob read failure" in str(error.value)
+
+
 def test_working_tree_capture_includes_untracked_bytes_without_checkout_identity(
     tmp_path: Path,
 ) -> None:
