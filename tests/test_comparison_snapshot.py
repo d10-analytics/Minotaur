@@ -224,6 +224,30 @@ def test_capture_attributes_materialization_write_failure_to_side(
     assert "simulated materialization write failure" in str(error.value)
 
 
+def test_manifest_verification_translates_traversal_failure_to_mutation_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    snapshot = capture_revision(root, "HEAD", side="before")
+    original_walk = snapshots.os.walk
+
+    def fail_walk(*args: object, **kwargs: object):
+        raise OSError("simulated manifest traversal failure")
+
+    monkeypatch.setattr(snapshots.os, "walk", fail_walk)
+    try:
+        with pytest.raises(SnapshotMutationError) as error:
+            snapshot.verify_unchanged()
+    finally:
+        monkeypatch.setattr(snapshots.os, "walk", original_walk)
+        snapshot.close()
+
+    assert error.value.side == "before"
+    assert error.value.revision == "HEAD"
+    assert error.value.pinned_sha
+    assert "simulated manifest traversal failure" in str(error.value)
+
+
 def test_working_tree_capture_includes_untracked_bytes_without_checkout_identity(
     tmp_path: Path,
 ) -> None:
