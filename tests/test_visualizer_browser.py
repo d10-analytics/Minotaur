@@ -870,6 +870,7 @@ def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_pat
 
 def test_comparison_empty_filter_view_keeps_controls_safe(tmp_path: Path) -> None:
     """An empty comparison view remains safe for reset, direction, and switches."""
+
     def node(node_id: str, *, before: bool, after: bool) -> dict[str, object]:
         value = {
             "node_class": "symbol",
@@ -928,12 +929,15 @@ def test_comparison_empty_filter_view_keeps_controls_safe(tmp_path: Path) -> Non
         page.locator("#revision-view").select_option("before")
         page.locator("#revision-view").select_option("after")
         assert page.evaluate("window.minotaurVisualizer.cy.nodes(':visible').length") == 0
-        assert page.evaluate(
-            """() => ({
-                zoom: window.minotaurVisualizer.cy.zoom(),
-                pan: window.minotaurVisualizer.cy.pan(),
-            })"""
-        ) == camera
+        assert (
+            page.evaluate(
+                """() => ({
+                    zoom: window.minotaurVisualizer.cy.zoom(),
+                    pan: window.minotaurVisualizer.cy.pan(),
+                })"""
+            )
+            == camera
+        )
         browser.close()
 
     assert not errors
