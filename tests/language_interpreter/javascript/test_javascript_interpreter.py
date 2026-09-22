@@ -164,10 +164,7 @@ def test_javascript_call_observations_retain_regex_structure(tmp_path):
     result = _analyze(
         tmp_path,
         {
-            "app.js": (
-                "function helper(value) { return value; }\n"
-                "function run() { helper(/token/gi); }\n"
-            )
+            "app.js": "function helper(value) { return value; }\nfunction run() { helper(/token/gi); }\n"
         },
     )
 
@@ -177,19 +174,13 @@ def test_javascript_call_observations_retain_regex_structure(tmp_path):
     changed_pattern = _analyze(
         tmp_path,
         {
-            "app.js": (
-                "function helper(value) { return value; }\n"
-                "function run() { helper(/other/gi); }\n"
-            )
+            "app.js": "function helper(value) { return value; }\nfunction run() { helper(/other/gi); }\n"
         },
     )
     changed_flags = _analyze(
         tmp_path,
         {
-            "app.js": (
-                "function helper(value) { return value; }\n"
-                "function run() { helper(/token/g); }\n"
-            )
+            "app.js": "function helper(value) { return value; }\nfunction run() { helper(/token/g); }\n"
         },
     )
     assert changed_pattern.call_expressions[0].fingerprint != observation.fingerprint
