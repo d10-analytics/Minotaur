@@ -9,6 +9,7 @@ import pytest
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.provenance import CoordinateEncoding
+from minotaur.graph_model.serialization import serialize
 from minotaur.language_interpreter.call_expressions import (
     CallExpressionObservation,
     javascript_call_fingerprint,
@@ -33,6 +34,25 @@ def test_missing_call_evidence_is_not_invented_for_unresolved_javascript_calls(t
     result = analyze_javascript_files(Workspace(tmp_path), (path,))
 
     assert result.call_expressions == ()
+
+
+def test_call_observations_remain_out_of_band_from_graph_serialization(tmp_path) -> None:
+    path = tmp_path / "app.js"
+    path.write_text(
+        "\n".join(
+            (
+                "function helper(value) { return value; }",
+                "function run() { helper(1); }",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = analyze_javascript_files(Workspace(tmp_path), (path,))
+
+    assert result.call_expressions
+    assert b"call_expressions" not in serialize(result.document)
 
 
 def test_unavailable_fingerprint_is_explicit_on_an_observation() -> None:

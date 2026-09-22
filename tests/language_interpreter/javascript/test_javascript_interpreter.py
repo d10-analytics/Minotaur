@@ -161,11 +161,18 @@ def test_javascript_call_observations_ignore_formatting_and_retain_literals(tmp_
 
 
 def test_javascript_call_observations_retain_regex_structure(tmp_path):
+    source = (
+        "\n".join(
+            (
+                "function helper(value) { return value; }",
+                "function run() { helper(/token/gi); }",
+            )
+        )
+        + "\n"
+    )
     result = _analyze(
         tmp_path,
-        {
-            "app.js": "function helper(value) { return value; }\nfunction run() { helper(/token/gi); }\n"
-        },
+        {"app.js": source},
     )
 
     observation = result.call_expressions[0]
@@ -174,17 +181,50 @@ def test_javascript_call_observations_retain_regex_structure(tmp_path):
     changed_pattern = _analyze(
         tmp_path,
         {
-            "app.js": "function helper(value) { return value; }\nfunction run() { helper(/other/gi); }\n"
+            "app.js": source.replace("/token/gi", "/other/gi"),
         },
     )
     changed_flags = _analyze(
         tmp_path,
-        {
-            "app.js": "function helper(value) { return value; }\nfunction run() { helper(/token/g); }\n"
-        },
+        {"app.js": source.replace("/token/gi", "/token/g")},
     )
     assert changed_pattern.call_expressions[0].fingerprint != observation.fingerprint
     assert changed_flags.call_expressions[0].fingerprint != observation.fingerprint
+
+
+def test_javascript_call_observations_cover_nested_calls_and_template_structure(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function leaf(value) { return value; }\n"
+                "function helper(value) { return value; }\n"
+                "function run(name) { helper(leaf(`hello ${name}`)); }\n"
+            )
+        },
+    )
+
+    observations = result.call_expressions
+    assert len(observations) == 2
+    assert {item.callee_location.range.start.character for item in observations} == {
+        "function run(name) { helper(leaf(`hello ${name}`)); }".index("helper"),
+        "function run(name) { helper(leaf(`hello ${name}`)); }".index("leaf"),
+    }
+    assert all(item.fingerprint is not None for item in observations)
+
+    changed_template = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function leaf(value) { return value; }\n"
+                "function helper(value) { return value; }\n"
+                "function run(name) { helper(leaf(`goodbye ${name}`)); }\n"
+            )
+        },
+    )
+    assert {item.fingerprint for item in changed_template.call_expressions} != {
+        item.fingerprint for item in observations
+    }
 
 
 def test_declaration_kinds_containment_and_anonymous_default_exclusion(tmp_path):

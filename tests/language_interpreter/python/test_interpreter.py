@@ -182,6 +182,26 @@ def test_python_call_observations_preserve_multiplicity_and_literal_structure(
     }
 
 
+def test_python_call_observations_preserve_nested_keyword_and_spread_structure(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def leaf(value):\n    return value\n"
+        "def helper(*values, option=0, **named):\n    return values, named\n"
+        "def run(values):\n    return helper(leaf(1), *values, option=1, **values)\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    observations = result.call_expressions
+
+    assert len(observations) == 2
+    assert observations[0].expression_location.range.start.line == 5
+    assert observations[1].expression_location.range.start.line == 5
+    assert observations[0].fingerprint != observations[1].fingerprint
+
+
 def test_public_python_analysis_runs_without_retired_kernel(
     tmp_path: Path,
 ) -> None:
