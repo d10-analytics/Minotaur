@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 import tempfile
@@ -900,6 +901,7 @@ class _SystemsPair:
     new_call_observations: tuple[Any, ...]
     old_revision: str | None
     new_revision: str | None
+    comparison_context: Mapping[str, object]
     protected_files: frozenset[Path]
     protected_directories: frozenset[Path]
 
@@ -954,11 +956,13 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
         )
         comparison_payload = presentation.get("comparison")
         if isinstance(comparison_payload, dict):
+            comparison_payload.update(pair.comparison_context)
             comparison_payload["selected_system"] = requested_system
         content = render_html(presentation)
 
     if query.json:
         context = complete.to_dict()
+        context.update(pair.comparison_context)
         context["selected_system"] = requested_system
         payload = selected.to_dict()
         payload["comparison"] = context
@@ -993,7 +997,7 @@ def _acquire_systems_pair(query: argparse.Namespace) -> _SystemsPair:
     after_revision: str | None = getattr(query, "new", None)
     validate = bool(getattr(query, "validate", False))
     worktree, preserved_start = _select_worktree(Path.cwd())
-    shared = _shared_config_coordinate(worktree, getattr(query, "config", None))
+    shared = _shared_config_coordinate(worktree, preserved_start, getattr(query, "config", None))
     before_override = _side_config_coordinate(
         getattr(query, "before_config", None), label="--before-config"
     )
@@ -1063,6 +1067,23 @@ def _acquire_systems_pair(query: argparse.Namespace) -> _SystemsPair:
         protected_files, protected_directories = _protected_comparison_paths(
             worktree, (old, new), (before_coordinate, after_coordinate)
         )
+        comparison_context = {
+            "schema_version": 1,
+            "before": _side_context_record(
+                kind="commit",
+                requested_revision="HEAD" if before_revision is None else before_revision,
+                commit=old.snapshot.commit,
+                config_path=before_coordinate,
+                analysis=old,
+            ),
+            "after": _side_context_record(
+                kind="working-tree" if after_revision is None else "commit",
+                requested_revision=after_revision,
+                commit=None if after_revision is None else new.snapshot.commit,
+                config_path=after_coordinate,
+                analysis=new,
+            ),
+        }
         return _SystemsPair(
             old_snapshot=system_query.ReportingSnapshot.prepare(old.graph.document, old.systems),
             new_snapshot=system_query.ReportingSnapshot.prepare(new.graph.document, new.systems),
@@ -1078,9 +1099,39 @@ def _acquire_systems_pair(query: argparse.Namespace) -> _SystemsPair:
                 if after_revision is None
                 else _revision_label(after_revision, new.snapshot.commit)
             ),
+            comparison_context=comparison_context,
             protected_files=protected_files,
             protected_directories=protected_directories,
         )
+
+
+def _side_context_record(
+    *,
+    kind: str,
+    requested_revision: str | None,
+    commit: str | None,
+    config_path: str,
+    analysis: Any,
+) -> dict[str, object]:
+    """Build one schema-versioned captured-side record for the comparison object."""
+    return {
+        "kind": kind,
+        "requested_revision": requested_revision,
+        "commit": commit,
+        "config_path": config_path,
+        "root": analysis.normalized_root,
+        "targets": list(analysis.normalized_targets),
+        "source_digest": _capture_digest(analysis.snapshot.manifest),
+    }
+
+
+def _capture_digest(manifest: Any) -> str:
+    """Digest the captured logical entries without any temporary path."""
+    digest = hashlib.sha256()
+    for entry in manifest.entries:
+        token = f"{entry.path}\x00{entry.kind}\x00{entry.mode}\x00{entry.size}\x00{entry.digest}\n"
+        digest.update(token.encode())
+    return digest.hexdigest()
 
 
 def _repository_relative(value: str, *, label: str) -> str:
@@ -1104,11 +1155,12 @@ def _repository_relative(value: str, *, label: str) -> str:
     return "/".join(parts)
 
 
-def _shared_config_coordinate(worktree: Path, raw: str | None) -> str | None:
+def _shared_config_coordinate(worktree: Path, start: Path, raw: str | None) -> str | None:
     """Convert the shared config spelling into a repository-relative coordinate.
 
-    An absolute shared path is accepted only when it is lexically inside the
-    invoking repository, and it is converted without resolving through the
+    A relative shared path keeps its existing working-directory meaning. An
+    absolute shared path is accepted only when it is lexically inside the
+    invoking repository; both are converted without resolving through the
     current tree.
     """
     if raw is None:
@@ -1116,13 +1168,12 @@ def _shared_config_coordinate(worktree: Path, raw: str | None) -> str | None:
     if not raw.strip():
         raise ValueError("--config requires a non-empty file path")
     candidate = Path(raw)
-    if candidate.is_absolute():
-        try:
-            candidate = candidate.relative_to(worktree)
-        except ValueError as error:
-            raise ValueError(
-                f"--config absolute path is outside the invoking repository: {raw}"
-            ) from error
+    if not candidate.is_absolute():
+        candidate = start / candidate
+    try:
+        candidate = candidate.relative_to(worktree)
+    except ValueError as error:
+        raise ValueError(f"--config path is outside the invoking repository: {raw}") from error
     return _repository_relative(candidate.as_posix(), label="--config")
 
 
