@@ -255,6 +255,13 @@ class RevisionSnapshot:
                 commit=self.commit,
                 detail=str(error),
             ) from error
+        except OSError as error:
+            raise SnapshotMutationError(
+                side=self.side,
+                revision=self.revision,
+                commit=self.commit,
+                detail=f"could not verify captured input: {error}",
+            ) from error
         if current != self.manifest:
             before = self.manifest.by_path()
             after = current.by_path()
