@@ -190,3 +190,46 @@ def test_comparison_call_site_does_not_use_cross_file_caller_context() -> None:
     after_site = excerpts["after"]["call_sites"]["relationship:call"][0]
     assert "caller_start" not in before_site
     assert "caller_start" not in after_site
+
+
+def test_comparison_excerpt_includes_same_file_caller_start_in_bounded_span() -> None:
+    comparison = _comparison()
+    caller = comparison.nodes[0]
+    nodes = (
+        GraphNodeChange(
+            caller.id,
+            caller.status,
+            caller.reasons,
+            caller.involved_systems,
+            {**dict(caller.before), "location": _location("app.py", 0)},
+            {**dict(caller.after), "location": _location("app.py", 0)},
+        ),
+        *comparison.nodes[1:],
+    )
+    call = comparison.call_changes[0]
+
+    def relocate(value: object, line: int) -> dict[str, object]:
+        assert isinstance(value, tuple)
+        observation = dict(value[0])
+        observation["callee"] = _location("app.py", line)
+        observation["expression"] = _location("app.py", line)
+        return observation
+
+    relocated_call = CallChange(
+        call.relationship_id,
+        call.status,
+        call.reasons,
+        call.involved_systems,
+        before=(relocate(call.before, 120),),
+        after=(relocate(call.after, 121),),
+    )
+    comparison = replace(comparison, nodes=nodes, call_changes=(relocated_call,))
+    content = "\n".join(f"line {line}" for line in range(200)).encode()
+
+    excerpts = prepare_comparison_excerpts(
+        comparison,
+        {"before": {"app.py": content}, "after": {"app.py": content}},
+    )
+
+    assert excerpts["before"]["paths"]["app.py"]["spans"][0]["start"] == 0
+    assert excerpts["after"]["paths"]["app.py"]["spans"][0]["start"] == 0
