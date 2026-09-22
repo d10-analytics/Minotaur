@@ -181,6 +181,30 @@ def test_replacement_selection_uses_complete_result_and_copies_none() -> None:
     assert complete.to_dict() == original
 
 
+def test_view_retains_complete_graph_call_and_limitation_facts() -> None:
+    complete = SystemDiffResult(
+        old_system_names=("Checkout",),
+        new_system_names=("Checkout",),
+        nodes=(
+            system_diff_module.GraphNodeChange(
+                "node:comparison:one",
+                "changed",
+                ("membership_changed",),
+                ("Checkout",),
+                {"label": "old"},
+                {"label": "new"},
+            ),
+        ),
+        relationships=(),
+        call_changes=(),
+    )
+
+    selected = filter_system_diff(complete, "Checkout")
+    assert selected.nodes == complete.nodes
+    assert selected.to_dict()["nodes"] == [item.to_dict() for item in complete.nodes]
+    assert render_json(selected) == dump_json(selected.to_dict())
+
+
 def test_old_only_deleted_name_resolves_and_unrelated_name_is_neutral() -> None:
     old_only = _symbol("legacy", "legacy.py")
     old_systems = _systems(("legacy.toml", "Legacy", ("legacy.py",)))
