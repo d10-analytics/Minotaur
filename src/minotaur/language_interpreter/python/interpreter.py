@@ -27,6 +27,10 @@ from minotaur.graph_model.provenance import (
     SymbolKind,
 )
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
+from minotaur.language_interpreter.call_expressions import (
+    CallExpressionObservation,
+    python_call_fingerprint,
+)
 from minotaur.language_interpreter.contract import (
     IMPORT_ROOT_HINT,
     IMPORTS_RESOLVED,
@@ -2223,11 +2227,25 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             builtin_names,
         )
 
+    relationship_documents = relationships.documents(_PRODUCER)
+    call_locations = {
+        location
+        for relationship in relationship_documents
+        if relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    call_expressions = tuple(
+        observation
+        for module in modules
+        for observation in _call_observations(module, call_locations)
+    )
+
     return AnalysisResult(
         GraphDocument(
             coordinate_encoding=CoordinateEncoding.UTF_8,
             nodes=tuple(nodes),
-            relationships=relationships.documents(_PRODUCER),
+            relationships=relationship_documents,
             generated_by=_PRODUCER,
             # Flat keys: extension namespaces hold scalar-valued objects.
             extensions={
@@ -2240,7 +2258,30 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
             },
         ),
         tuple(diagnostics),
+        call_expressions,
     )
+
+
+def _call_observations(
+    module: _Module, call_locations: set[Location]
+) -> tuple[CallExpressionObservation, ...]:
+    """Capture parsed calls that also have emitted graph call evidence."""
+    observations: list[CallExpressionObservation] = []
+    for node in ast.walk(module.tree):
+        if not isinstance(node, ast.Call) or not hasattr(node, "func"):
+            continue
+        callee_location = _location(module.path, node.func)
+        if callee_location not in call_locations:
+            continue
+        observations.append(
+            CallExpressionObservation(
+                language="python",
+                callee_location=callee_location,
+                expression_location=_location(module.path, node),
+                fingerprint=python_call_fingerprint(node),
+            )
+        )
+    return tuple(observations)
 
 
 def _make_module(path: str, tree: ast.Module, source: str, line_index: LineIndex) -> _Module:
