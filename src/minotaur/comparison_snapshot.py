@@ -1,9 +1,9 @@
 """Read-only, immutable source captures for revision comparisons.
 
 The comparison command must analyze source belonging to a resolved revision
-without borrowing the caller's checkout.  A :class:`RevisionSnapshot` therefore
-pins a local revision once, captures its tree with ``git archive`` into a unique
-temporary directory, and records a manifest of that captured directory.  The
+without borrowing the caller's checkout. A :class:`RevisionSnapshot` therefore
+pins a local revision once, materializes exact tree/blob bytes into a unique
+temporary directory, and records a manifest of that captured directory. The
 manifest is checked before the snapshot is consumed and again on cleanup; a
 mutation is an input error rather than a mixed or partial comparison.
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -258,7 +259,9 @@ def capture_revision(
     """Capture a locally available revision without changing Git state."""
     root = Path(worktree_root).resolve()
     pin = PinnedCommit.resolve(root, revision, side=side)
-    temporary_directory = tempfile.TemporaryDirectory(prefix="minotaur-revision-")
+    temporary_directory = tempfile.TemporaryDirectory(
+        prefix="minotaur-revision-", ignore_cleanup_errors=True
+    )
     destination = Path(temporary_directory.name)
     try:
         _materialize_tree(pin, destination)
@@ -274,6 +277,58 @@ def capture_local_revision(
 ) -> RevisionSnapshot:
     """Explicit alias for :func:`capture_revision` used by command owners."""
     return capture_revision(worktree_root, revision, side=side)
+
+
+def capture_working_tree(worktree_root: Path, *, side: str = "after") -> RevisionSnapshot:
+    """Capture the current working tree, including ordinary untracked files.
+
+    The comparison analyzes this copy rather than the live checkout. Git
+    administrative entries are excluded, while links and special files are
+    omitted so a path cannot escape the captured side. Configured unsafe paths
+    are rejected by side-specific route validation before production. The
+    pinned ``HEAD`` is retained only as a stable identity for diagnostics; the
+    manifest guards the copied working-tree bytes during analysis.
+    """
+    root = Path(worktree_root).resolve()
+    pin = PinnedCommit.resolve(root, "HEAD", side=side)
+    temporary_directory = tempfile.TemporaryDirectory(
+        prefix="minotaur-working-", ignore_cleanup_errors=True
+    )
+    destination = Path(temporary_directory.name)
+    try:
+        for current, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
+            current_path = Path(current)
+            retained_directories: list[str] = []
+            for name in sorted(directory_names):
+                if name == ".git":
+                    continue
+                source = current_path / name
+                info = source.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    continue
+                if not stat.S_ISDIR(info.st_mode):
+                    continue
+                retained_directories.append(name)
+            directory_names[:] = retained_directories
+            relative_directory = current_path.relative_to(root)
+            (destination / relative_directory).mkdir(parents=True, exist_ok=True)
+            for name in sorted(file_names):
+                if name == ".git":
+                    continue
+                source = current_path / name
+                info = source.lstat()
+                relative = source.relative_to(root)
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                os.chmod(target, stat.S_IMODE(info.st_mode))
+        manifest = _manifest(destination)
+    except Exception:
+        temporary_directory.cleanup()
+        raise
+    return RevisionSnapshot(pin, "WORKTREE", side, destination, manifest, temporary_directory)
 
 
 def capture_pair(
@@ -301,4 +356,5 @@ __all__ = [
     "capture_local_revision",
     "capture_pair",
     "capture_revision",
+    "capture_working_tree",
 ]
