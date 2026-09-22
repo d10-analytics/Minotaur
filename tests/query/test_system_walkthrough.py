@@ -850,6 +850,25 @@ def test_public_working_tree_comparison_labels_after_without_commit_identity(
     # The approved label must not smuggle in a commit ID for the working tree.
     assert head_commit[:7] not in payload["revisions"]["new"]
 
+    # The saved report carries the same identities into its embedded header
+    # payload, so the rendered header cannot invent a working-tree commit.
+    report = tmp_path / "working-tree-comparison.html"
+    written = _cli(
+        root,
+        "query",
+        "diff",
+        "--systems",
+        "--html",
+        str(report),
+    )
+    assert written.returncode == 1
+    embedded = _embedded_presentation(report)["comparison"]["revisions"]
+    assert embedded == {
+        "old": f"HEAD · {head_commit[:7]}",
+        "new": "Working tree at report generation",
+    }
+    assert head_commit[:7] not in embedded["new"]
+
 
 def test_public_comparison_report_is_offline_static_and_keeps_identities(
     tmp_path: Path,

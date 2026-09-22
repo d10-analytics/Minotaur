@@ -422,6 +422,12 @@ def test_comparison_reference_documents_both_workflows_and_identities() -> None:
     assert (
         "using each revision's own configuration, source selection, and system definitions" in text
     )
+    # The historical command's real stdout is the same change rows and context
+    # lines as the working-tree command; it prints no revision header. The
+    # identities belong to the saved report's compact header.
+    assert "byte-for-byte the same as the working-tree report above" in text
+    assert "The command line prints no revision header" in text
+    assert "Writing the report with `--html` renders a compact header above the graph" in text
     assert "Before: v1.0 · 134b138" in text
     assert "After: v2.0 · a2b78dd" in text
     assert "Working tree at report generation" in text
@@ -477,6 +483,9 @@ def test_customize_html_documents_comparison_controls_and_limits() -> None:
         "tree as a commit" in text
     )
     assert "shown in a notice region and is never drawn as a detected change" in text
+    assert "shows them in a compact header above the graph" in text
+    assert "`Before: v1.0 · 134b138`" in text
+    assert "`After: v2.0 · a2b78dd`" in text
 
 
 def test_system_definitions_guide_documents_per_revision_source_selection() -> None:

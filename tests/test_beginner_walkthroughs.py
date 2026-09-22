@@ -130,6 +130,19 @@ def test_system_example_reports_changes_without_comparison_writes(
     assert changes in diffs[6][2], "the HTML report must print the same rows"
     assert "old evidence" in diffs[5][2] and "new evidence" in diffs[5][2]
 
+    # The documented historical rows are byte-equal to the real standard
+    # output, and that output carries no revision-identity header at all: the
+    # identities live in the saved report, not on the command line.
+    historical = diffs[4][2].splitlines()[1:-1]
+    assert "\n".join(historical[:19]) + "\n" == changes
+    assert historical[19].startswith("old coverage: ")
+    assert historical[20].startswith("new coverage: ")
+    assert historical[21] == 'old selection: {"status":"recorded","targets":["shop"]}'
+    assert historical[22] == 'new selection: {"status":"recorded","targets":["shop"]}'
+    for token in ("Before:", "After:", "134b138", "a2b78dd"):
+        assert token not in diffs[4][2]
+    assert historical == diffs[1][2].splitlines()[1:-1]
+
     working_tree = json.loads(diffs[3][2].splitlines()[1])
     assert working_tree["exit_code"] == 1
     assert working_tree["revisions"]["new"] == "Working tree at report generation"

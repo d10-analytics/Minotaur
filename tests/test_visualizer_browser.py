@@ -1017,6 +1017,7 @@ def _comparison_presentation(
     excerpts: dict[str, object] | None = None,
     added_systems: list[str] | None = None,
     limitations: list[dict[str, object]] | None = None,
+    revisions: dict[str, str] | None = None,
 ) -> dict[str, object]:
     comparison = {
         "changed": changed,
@@ -1034,7 +1035,7 @@ def _comparison_presentation(
         "relationships": relationships,
         "calls": calls or [],
         "limitations": limitations or [],
-        "revisions": {"old": "before-sha", "new": "after-sha"},
+        "revisions": revisions or {"old": "before-sha", "new": "after-sha"},
     }
     return {
         "graph": {"nodes": nodes, "relationships": relationships},
@@ -1295,6 +1296,67 @@ def test_comparison_summary_lists_change_without_drawable_node(tmp_path: Path) -
         body = page.locator("#comparison-summary-body").inner_text()
         assert "system added: empty-system" in body
         assert page.locator("#emphasis-changes").is_enabled()
+        browser.close()
+
+
+def test_comparison_header_shows_captured_historical_revision_identities() -> None:
+    """The saved historical report visibly names both resolved revisions."""
+    artifact = ROOT / "examples" / "system-walkthrough" / "minotaur-comparison.html"
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(artifact.as_uri())
+        page.wait_for_function("() => window.minotaurVisualizer?.cy")
+
+        header = page.locator("#comparison-header")
+        assert header.is_visible()
+        revisions = page.locator("#comparison-revisions")
+        assert revisions.is_visible()
+        assert page.locator(".comparison-revision").all_inner_texts() == [
+            "Before: v1.0 · 134b138",
+            "After: v2.0 · a2b78dd",
+        ]
+        browser.close()
+
+
+def test_graph_only_artifact_hides_comparison_revision_header() -> None:
+    """An ordinary graph view never shows comparison-only revision identity."""
+    artifact = ROOT / "examples" / "system-walkthrough" / "minotaur-graph.html"
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(artifact.as_uri())
+        page.wait_for_function("() => window.minotaurVisualizer?.cy")
+
+        assert not page.locator("#comparison-header").is_visible()
+        assert not page.locator("#comparison-revisions").is_visible()
+        browser.close()
+
+
+def test_comparison_header_labels_working_tree_without_a_commit_id(tmp_path: Path) -> None:
+    """The working-tree side is labeled, never given a fabricated commit ID."""
+    presentation = _comparison_presentation(
+        [],
+        [],
+        changed=True,
+        revisions={"old": "HEAD · 134b138", "new": "Working tree at report generation"},
+    )
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "working-tree-header.html")
+
+        assert page.locator("#comparison-revisions").is_visible()
+        assert page.locator(".comparison-revision").all_inner_texts() == [
+            "Before: HEAD · 134b138",
+            "After: Working tree at report generation",
+        ]
+        after = page.locator(".comparison-revision").nth(1).inner_text()
+        assert after == "After: Working tree at report generation"
+        assert "·" not in after
         browser.close()
 
 
