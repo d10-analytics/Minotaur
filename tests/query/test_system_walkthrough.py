@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import runpy
 import shlex
 import subprocess
 import sys
@@ -29,6 +30,8 @@ from minotaur.graph_model.loading import graph_digest, load_graph_bytes, stamp_p
 ROOT = Path(__file__).parents[2]
 EXAMPLE = ROOT / "examples" / "system-walkthrough"
 WALKTHROUGH = EXAMPLE / "README.md"
+RUNNER = ROOT / "examples" / "run_walkthrough.py"
+COMPARISON_REPORT = EXAMPLE / "minotaur-comparison.html"
 CONSOLE_BLOCK = re.compile(r"^```console\n(.*?)^```$", re.DOTALL | re.MULTILINE)
 
 SCRATCH_GRAPH = "/tmp/system-walkthrough-graph.json"
@@ -663,3 +666,253 @@ def test_public_systems_ambiguity_is_attributed_before_unrelated_filter_output(
         ).stdout
         == before_index
     )
+
+
+# ---------------------------------------------------------------------------
+# Historical and working-tree comparison workflows
+# ---------------------------------------------------------------------------
+
+
+def _example_runner() -> dict[str, object]:
+    """Load the example runner that owns the fixed-identity comparison fixture."""
+    return runpy.run_path(str(RUNNER))
+
+
+def _baseline_repository(root: Path) -> dict[str, object]:
+    """Create the tagged ``v1.0`` fixture in ``root`` without touching the checkout."""
+    runner = _example_runner()
+    runner["create_systems_baseline"](root)
+    return runner
+
+
+def _cli(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run one public Minotaur command in the fixture repository."""
+    return subprocess.run(
+        [sys.executable, "-m", "minotaur", *arguments],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _rev_parse(root: Path, revision: str) -> str:
+    """Resolve one revision to its full commit ID in the fixture repository."""
+    return subprocess.run(
+        ["git", "rev-parse", revision],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+
+
+def _embedded_presentation(report: Path) -> dict[str, object]:
+    """Parse the inert presentation payload an offline report embeds."""
+    _, rest = report.read_text(encoding="utf-8").split(
+        '<script id="minotaur-presentation" type="application/json">', 1
+    )
+    embedded, _ = rest.split("</script>", 1)
+    return json.loads(embedded)
+
+
+def _committed_historical_pair(root: Path) -> None:
+    """Stage, commit, and tag the documented second revision."""
+    runner = _baseline_repository(root)
+    runner["stage_systems_revision"](root)
+    runner["commit_systems_revision"](root)
+
+
+def test_public_historical_comparison_retains_revisions_and_representative_changes(
+    tmp_path: Path,
+) -> None:
+    """Explicit tags keep their requested names and resolved IDs, with real facts."""
+    root = tmp_path / "repository"
+    root.mkdir()
+    _committed_historical_pair(root)
+
+    completed = _cli(root, "query", "diff", "--systems", "v1.0", "v2.0", "--json")
+
+    assert completed.returncode == 1
+    assert completed.stderr == ""
+    payload = json.loads(completed.stdout)
+    before_commit = _rev_parse(root, "v1.0")
+    after_commit = _rev_parse(root, "v2.0")
+    assert payload["revisions"] == {
+        "old": f"v1.0 · {before_commit[:7]}",
+        "new": f"v2.0 · {after_commit[:7]}",
+    }
+    assert payload["changed"] is True
+    assert payload["exit_code"] == 1
+    assert payload["limitations"] == []
+
+    comparison = payload["comparison"]
+    assert comparison["revisions"] == payload["revisions"]
+    for side, revision, commit in (
+        ("before", "v1.0", before_commit),
+        ("after", "v2.0", after_commit),
+    ):
+        assert comparison[side]["kind"] == "commit"
+        assert comparison[side]["requested_revision"] == revision
+        assert comparison[side]["commit"] == commit
+
+    # A boundary change: the new Orders call into Billing crosses the boundary.
+    boundary = [
+        change
+        for change in payload["boundary_changes"]
+        if change["kind"] == "added"
+        and change["new"] is not None
+        and change["new"]["kind"] == "calls"
+        and "shop.orders.cancel_order" in json.dumps(change["new"]["projections"])
+        and "shop.billing.refund" in json.dumps(change["new"]["projections"])
+    ]
+    assert boundary, "expected the added cancel_order -> refund boundary call"
+
+    # An internal call-expression change: Billing's charge still calls record,
+    # but the recorded call expression differs and stays inside Billing.
+    expression_changes = [
+        change
+        for change in payload["call_changes"]
+        if change["status"] == "changed" and change["reasons"] == ["expression_changed"]
+    ]
+    assert len(expression_changes) == 1
+    expression = expression_changes[0]
+    assert expression["involved_systems"] == ["billing"]
+    assert expression["before"][0]["expression"]["path"] == "shop/billing.py"
+    assert expression["after"][0]["expression"]["path"] == "shop/billing.py"
+    assert expression["before"][0]["fingerprint"] != expression["after"][0]["fingerprint"]
+
+    # A move: the same symbol leaves shop/orders.py and appears in shop/order_ops.py.
+    node_labels = {
+        (change["status"], side, node["label"])
+        for change in payload["nodes"]
+        for side in ("before", "after")
+        if isinstance(change.get(side), dict)
+        for node in [change[side]]
+    }
+    assert ("removed", "before", "shop.orders.complete_order") in node_labels
+    assert ("added", "after", "shop.order_ops.complete_order") in node_labels
+
+    # A removed item: the unassigned checkout file disappears with its module
+    # and symbol, and the Orders surface it reached is removed.
+    removed_labels = {
+        change["before"]["label"]
+        for change in payload["nodes"]
+        if change["status"] == "removed" and isinstance(change.get("before"), dict)
+    }
+    assert {"shop/checkout.py", "shop.checkout", "shop.checkout.checkout"} <= removed_labels
+    assert any(
+        change["kind"] == "removed"
+        and change["key"] == ["orders", "shop/orders.py", "shop.orders.create_order"]
+        for change in payload["surface_changes"]
+    )
+    assert any(
+        change["kind"] == "changed"
+        and change["key"] == ["shop/order_ops.py"]
+        and change["old"]["system"] is None
+        and change["new"]["system"] == "orders"
+        for change in payload["membership_changes"]
+    )
+
+
+def test_public_working_tree_comparison_labels_after_without_commit_identity(
+    tmp_path: Path,
+) -> None:
+    """HEAD-versus-working-tree keeps the approved After label and no commit ID."""
+    root = tmp_path / "repository"
+    root.mkdir()
+    runner = _baseline_repository(root)
+    runner["stage_systems_revision"](root)
+
+    completed = _cli(root, "query", "diff", "--systems", "--json")
+
+    assert completed.returncode == 1
+    assert completed.stderr == ""
+    payload = json.loads(completed.stdout)
+    head_commit = _rev_parse(root, "HEAD")
+    assert payload["revisions"] == {
+        "old": f"HEAD · {head_commit[:7]}",
+        "new": "Working tree at report generation",
+    }
+    comparison = payload["comparison"]
+    assert comparison["before"]["kind"] == "commit"
+    assert comparison["before"]["commit"] == head_commit
+    assert comparison["before"]["requested_revision"] == "HEAD"
+    assert comparison["after"] == {
+        "kind": "working-tree",
+        "requested_revision": None,
+        "commit": None,
+        "config_path": ".minotaur.toml",
+        "root": ".",
+        "targets": ["shop"],
+        "source_digest": comparison["after"]["source_digest"],
+    }
+    # The approved label must not smuggle in a commit ID for the working tree.
+    assert head_commit[:7] not in payload["revisions"]["new"]
+
+
+def test_public_comparison_report_is_offline_static_and_keeps_identities(
+    tmp_path: Path,
+) -> None:
+    """A written report has no remote assets and does not track later edits."""
+    root = tmp_path / "repository"
+    root.mkdir()
+    _committed_historical_pair(root)
+    report = tmp_path / "comparison.html"
+    completed = _cli(
+        root,
+        "query",
+        "diff",
+        "--systems",
+        "v1.0",
+        "v2.0",
+        "--html",
+        str(report),
+    )
+    assert completed.returncode == 1
+    assert report.is_file()
+
+    presentation = _embedded_presentation(report)
+    comparison = presentation["comparison"]
+    before_commit = _rev_parse(root, "v1.0")[:7]
+    after_commit = _rev_parse(root, "v2.0")[:7]
+    assert comparison["revisions"] == {
+        "old": f"v1.0 · {before_commit}",
+        "new": f"v2.0 · {after_commit}",
+    }
+    assert comparison["changed"] is True
+
+    content = report.read_text(encoding="utf-8")
+    assert str(root) not in content, "the report must not embed temporary paths"
+    remote = re.findall(r"""(?:src|href)\s*=\s*["']https?://""", content)
+    assert remote == [], "the report must be self-contained and offline"
+
+    before_bytes = report.read_bytes()
+    (root / "shop" / "billing.py").write_text(
+        "def charge(order):\n    return order\n", encoding="utf-8"
+    )
+    (root / "shop" / "orders.py").write_text(
+        "def create_order(cart):\n    return cart\n", encoding="utf-8"
+    )
+    assert report.read_bytes() == before_bytes, "a captured report must not re-read source"
+
+
+def test_checked_in_comparison_report_matches_fixed_identity_regeneration(
+    tmp_path: Path,
+) -> None:
+    """The committed report comes from the public commands and is reproducible."""
+    assert COMPARISON_REPORT.is_file(), "checked-in comparison report is missing"
+    subprocess.run(
+        [
+            sys.executable,
+            str(EXAMPLE / "regenerate_system_walkthrough.py"),
+            "--comparison-only",
+            "--output-directory",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    generated = tmp_path / "minotaur-comparison.html"
+    assert generated.read_bytes() == COMPARISON_REPORT.read_bytes()
+    assert _embedded_presentation(generated)["comparison"]["changed"] is True

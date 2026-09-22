@@ -81,6 +81,11 @@ def test_system_example_reports_changes_without_comparison_writes(
     runner = runpy.run_path(str(RUNNER))
     original = runner["command"]
     observed = []
+    checkout_before = {
+        path.relative_to(ROOT): path.read_bytes()
+        for path in (ROOT / "examples/system-walkthrough/shop").rglob("*")
+        if path.is_file()
+    }
 
     def state() -> dict[str, bytes]:
         return {
@@ -95,43 +100,72 @@ def test_system_example_reports_changes_without_comparison_writes(
         output = capsys.readouterr().out
         observed.append((arguments, expected, output))
         if arguments[:2] == ("query", "diff"):
-            assert state() == before, "comparison changed source, artifacts, definitions, or Git"
+            after = state()
+            requested = (
+                {arguments[arguments.index("--html") + 1]} if "--html" in arguments else set()
+            )
+            changed = {
+                name for name in set(before) | set(after) if before.get(name) != after.get(name)
+            }
+            assert changed <= requested, "comparison changed source, artifacts, definitions, or Git"
 
     monkeypatch.setitem(runner["systems"].__globals__, "command", checked)
     runner["systems"](tmp_path)
     diffs = [(args, status, output) for args, status, output in observed if args[0] == "query"]
-    assert [status for _, status, _ in diffs] == [0, 1, 1, 1, 1, 1]
+    # A clean HEAD comparison, then working-tree comparisons that write a
+    # report, then the historical pair and its report. Both workflows exit 1.
+    assert [status for _, status, _ in diffs] == [0, 1, 1, 1, 1, 1, 1]
     assert "no system differences\n" in diffs[0][2]
-    rows = re.findall(
+
+    blocks = re.findall(
         r"```text\n(.*?)```",
         (ROOT / "examples/system-walkthrough/comparison.md").read_text(),
         re.DOTALL,
     )
+    rows = [block for block in blocks if "boundary added" in block]
     assert len(rows) == 1
-    assert rows[0] in diffs[1][2]
-    assert rows[0] in diffs[2][2]
-    assert "old evidence" in diffs[3][2] and "new evidence" in diffs[3][2]
-    payload = json.loads(diffs[4][2].splitlines()[1])
-    assert payload["exit_code"] == 1
+    changes = rows[0]
+    assert changes in diffs[1][2], "the working-tree report must match the walkthrough rows"
+    assert changes in diffs[4][2], "the historical report must match the walkthrough rows"
+    assert changes in diffs[6][2], "the HTML report must print the same rows"
+    assert "old evidence" in diffs[5][2] and "new evidence" in diffs[5][2]
+
+    working_tree = json.loads(diffs[3][2].splitlines()[1])
+    assert working_tree["exit_code"] == 1
+    assert working_tree["revisions"]["new"] == "Working tree at report generation"
+    assert working_tree["revisions"]["old"].startswith("HEAD · ")
+    assert working_tree["comparison"]["after"]["commit"] is None
     assert [
-        (change["kind"], change["key"], change["involved_systems"])
-        for change in payload["surface_changes"]
-    ] == [("added", ["billing", "shop/billing.py", "shop.billing.refund"], ["billing", "orders"])]
-    added = payload["surface_changes"][0]
-    assert added["old"] is None
-    relationship = added["new"]["relationships"][0]
-    assert relationship["source"]["label"] == "shop.orders.cancel_order"
-    assert relationship["target"]["label"] == "shop.billing.refund"
-    assert relationship["evidence"][0]["sites"][0]["path"] == "shop/orders.py"
-    assert "membership changed: shop/ledger.py — unassigned -> billing\n" in diffs[5][2]
-    baseline = subprocess.run(
-        ["git", "show", "HEAD:graph.json"], cwd=tmp_path, capture_output=True, check=True
-    ).stdout
-    assert (tmp_path / "graph.json").read_bytes() == baseline
-    for name in ("billing.py", "orders.py"):
-        assert (tmp_path / "shop" / name).read_bytes() == (
-            ROOT / "examples/system-walkthrough/shop" / name
-        ).read_bytes()
+        (change["kind"], change["key"])
+        for change in working_tree["surface_changes"]
+        if change["kind"] == "added"
+    ] == [("added", ["billing", "shop/billing.py", "shop.billing.refund"])]
+    assert [
+        change["reasons"]
+        for change in working_tree["call_changes"]
+        if change["status"] == "changed"
+    ] == [["expression_changed"]]
+    moved = {
+        (change["status"], side, change[side]["label"])
+        for change in working_tree["nodes"]
+        for side in ("before", "after")
+        if isinstance(change.get(side), dict)
+    }
+    assert ("removed", "before", "shop.orders.complete_order") in moved
+    assert ("added", "after", "shop.order_ops.complete_order") in moved
+
+    # The comparison analyzes captured source directly, so the fixture commits
+    # no graph or sidecar at all and still reports the complete change set.
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=tmp_path, text=True, capture_output=True, check=True
+    ).stdout.splitlines()
+    assert "graph.json" not in tracked
+    assert "graph.json.sha256" not in tracked
+    assert checkout_before == {
+        path.relative_to(ROOT): path.read_bytes()
+        for path in (ROOT / "examples/system-walkthrough/shop").rglob("*")
+        if path.is_file()
+    }, "the walkthrough must not modify the checked-in example sources"
 
 
 def test_documented_file_node_hashes_original_bytes_and_detects_edit(tmp_path: Path) -> None:
