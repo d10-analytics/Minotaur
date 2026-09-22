@@ -770,6 +770,22 @@ def test_prepare_comparison_uses_actual_producer_diagnostics_for_broken_source(
     assert error.value.diagnostics[0].code == DiagnosticCode.PARSE_ERROR
 
 
+def test_prepare_comparison_attributes_worktree_diagnostics_to_after_side(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "app.py").write_bytes(b"def broken(:\n")
+
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, _produce_selection)
+
+    assert error.value.side == "after"
+    assert error.value.revision == "WORKTREE"
+    assert error.value.path == "app.py"
+    assert error.value.diagnostics
+    assert error.value.diagnostics[0].code == DiagnosticCode.PARSE_ERROR
+
+
 def test_prepare_comparison_rejects_invalid_utf8_from_actual_producer(
     tmp_path: Path,
 ) -> None:
