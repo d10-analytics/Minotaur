@@ -128,18 +128,24 @@ def prepare_comparison_excerpts(
         for side, field in (("before", "before"), ("after", "after")):
             observations = _observation_records(getattr(change, field, None))
             evidence = _relationship_evidence(relationships, relationship_id, side)
-            caller_start = _caller_start(nodes, relationships, relationship_id, side)
             for observation in observations:
                 location = _observation_location(observation)
                 if location is None:
                     continue
                 path, start, end = _location_lines(location)
                 paths_by_side[side][path].append((max(0, start - _MAX_CONTEXT), end + _MAX_CONTEXT))
+                caller_start = _caller_start(
+                    nodes, relationships, relationship_id, side, observed_path=path
+                )
                 site: dict[str, object] = {
                     "location": dict(location),
                     "provenance": list(evidence),
                 }
                 if caller_start is not None:
+                    # Merge the caller prefix into the same stored byte span;
+                    # rendering after capture release must never need a live
+                    # source reread to satisfy the prefix mode.
+                    paths_by_side[side][path].append((caller_start, end))
                     site["caller_start"] = caller_start
                 sites_by_side[side][relationship_id].append(site)
 
@@ -229,7 +235,12 @@ def _relationship_evidence(
 
 
 def _caller_start(
-    nodes: Sequence[object], relationships: Sequence[object], relationship_id: str, side: str
+    nodes: Sequence[object],
+    relationships: Sequence[object],
+    relationship_id: str,
+    side: str,
+    *,
+    observed_path: str,
 ) -> int | None:
     source_id: str | None = None
     for relationship in relationships:
@@ -249,7 +260,10 @@ def _caller_start(
             return None
         location = payload.get("location")
         if isinstance(location, Mapping) and isinstance(location.get("range"), Mapping):
-            return int(cast(Mapping[str, Any], location["range"])["start"]["line"])
+            caller_location = cast(Mapping[str, Any], location)
+            if caller_location.get("path") != observed_path:
+                return None
+            return int(caller_location["range"]["start"]["line"])
         return None
     return None
 
