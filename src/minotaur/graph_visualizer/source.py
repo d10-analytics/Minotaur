@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from minotaur.source import read_source_path
+from minotaur.source import capture_source_bytes as _capture_source_bytes
+from minotaur.source import read_source_bytes, read_source_path
 
 _MAX_CONTEXT = 50
+
+capture_source_bytes = _capture_source_bytes
+
+__all__ = [
+    "capture_source_bytes",
+    "prepare_comparison_excerpts",
+    "prepare_excerpts",
+    "read_source_bytes",
+]
 
 
 def prepare_excerpts(
@@ -87,6 +97,161 @@ def prepare_excerpts(
     # Relationship indexes are stable because both this function and the
     # presentation renderer consume the already-canonical relationship order.
     return {"paths": result, "call_sites": dict(call_sites)}
+
+
+def prepare_comparison_excerpts(
+    complete_result: object,
+    captured_sources: Mapping[str, Mapping[str, bytes]] | None = None,
+) -> dict[str, object]:
+    """Build side-correct call excerpts from immutable captured source bytes.
+
+    ``complete_result`` is the already-computed comparison.  This function
+    intentionally accepts only byte maps for source evidence; it has no source
+    root parameter and therefore cannot reread a checkout after comparison.
+    The returned ``before``/``after`` records retain unavailable states instead
+    of presenting a live or partial excerpt as comparison evidence.
+    """
+    source_maps = _comparison_source_maps(captured_sources)
+    call_changes = tuple(getattr(complete_result, "call_changes", ()))
+    relationships = tuple(getattr(complete_result, "relationships", ()))
+    nodes = tuple(getattr(complete_result, "nodes", ()))
+    paths_by_side: dict[str, dict[str, list[tuple[int, int]]]] = {
+        "before": defaultdict(list),
+        "after": defaultdict(list),
+    }
+    sites_by_side: dict[str, dict[str, list[dict[str, object]]]] = {
+        "before": defaultdict(list),
+        "after": defaultdict(list),
+    }
+    for change in call_changes:
+        relationship_id = str(getattr(change, "relationship_id", ""))
+        for side, field in (("before", "before"), ("after", "after")):
+            observations = _observation_records(getattr(change, field, None))
+            evidence = _relationship_evidence(relationships, relationship_id, side)
+            caller_start = _caller_start(nodes, relationships, relationship_id, side)
+            for observation in observations:
+                location = _observation_location(observation)
+                if location is None:
+                    continue
+                path, start, end = _location_lines(location)
+                paths_by_side[side][path].append((max(0, start - _MAX_CONTEXT), end + _MAX_CONTEXT))
+                site: dict[str, object] = {
+                    "location": dict(location),
+                    "provenance": list(evidence),
+                }
+                if caller_start is not None:
+                    site["caller_start"] = caller_start
+                sites_by_side[side][relationship_id].append(site)
+
+    rendered: dict[str, object] = {}
+    for side in ("before", "after"):
+        paths: dict[str, object] = {}
+        source_map = source_maps[side]
+        for path, spans in paths_by_side[side].items():
+            content = source_map.get(path)
+            if content is None:
+                paths[path] = {
+                    "status": "unavailable",
+                    "reason": "captured source bytes are unavailable",
+                }
+            else:
+                paths[path] = read_source_bytes(path, content, spans)
+        rendered[side] = {
+            "paths": paths,
+            "call_sites": dict(sites_by_side[side]),
+        }
+    return rendered
+
+
+def _comparison_source_maps(
+    captured_sources: Mapping[str, Mapping[str, bytes]] | None,
+) -> dict[str, Mapping[str, bytes]]:
+    """Normalize old/new aliases while retaining a detached read-only view."""
+    supplied = captured_sources or {}
+    before = supplied.get("before", supplied.get("old", {}))
+    after = supplied.get("after", supplied.get("new", {}))
+    if not isinstance(before, Mapping) or not isinstance(after, Mapping):
+        raise TypeError("comparison captured sources must map before/after sides to byte maps")
+    return {"before": before, "after": after}
+
+
+def _observation_records(value: object) -> tuple[Mapping[str, object], ...]:
+    if isinstance(value, Mapping):
+        if "expression" in value or "callee" in value:
+            return (value,)
+        return ()
+    if isinstance(value, (tuple, list)):
+        return tuple(record for item in value for record in _observation_records(item))
+    return ()
+
+
+def _observation_location(observation: Mapping[str, object]) -> Mapping[str, object] | None:
+    expression = observation.get("expression")
+    callee = observation.get("callee")
+    location = expression if isinstance(expression, Mapping) else callee
+    if not isinstance(location, Mapping):
+        return None
+    if not isinstance(location.get("path"), str) or not isinstance(location.get("range"), Mapping):
+        return None
+    return _plain_mapping(location)
+
+
+def _plain_mapping(value: Mapping[str, object]) -> dict[str, object]:
+    """Detach nested frozen comparison values for the JSON presentation."""
+    return {str(key): _plain_value(item) for key, item in value.items()}
+
+
+def _plain_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _plain_mapping(value)
+    if isinstance(value, (tuple, list)):
+        return [_plain_value(item) for item in value]
+    return value
+
+
+def _relationship_evidence(
+    relationships: Sequence[object], relationship_id: str, side: str
+) -> tuple[str, ...]:
+    for relationship in relationships:
+        if str(getattr(relationship, "id", "")) != relationship_id:
+            continue
+        value = getattr(relationship, side, None)
+        payload = value if isinstance(value, Mapping) else {}
+        evidence = payload.get("evidence", ())
+        if not isinstance(evidence, (tuple, list)):
+            return ()
+        return tuple(
+            str(item.get("provenance"))
+            for item in evidence
+            if isinstance(item, Mapping) and isinstance(item.get("provenance"), str)
+        )
+    return ()
+
+
+def _caller_start(
+    nodes: Sequence[object], relationships: Sequence[object], relationship_id: str, side: str
+) -> int | None:
+    source_id: str | None = None
+    for relationship in relationships:
+        if str(getattr(relationship, "id", "")) == relationship_id:
+            source_id = str(getattr(relationship, "source", ""))
+            break
+    if not source_id:
+        return None
+    for node in nodes:
+        if str(getattr(node, "id", "")) != source_id:
+            continue
+        value = getattr(node, side, None)
+        payload = value if isinstance(value, Mapping) else {}
+        if payload.get("node_class") != "symbol":
+            return None
+        if payload.get("symbol_kind") not in {"function", "method"}:
+            return None
+        location = payload.get("location")
+        if isinstance(location, Mapping) and isinstance(location.get("range"), Mapping):
+            return int(cast(Mapping[str, Any], location["range"])["start"]["line"])
+        return None
+    return None
 
 
 def _node_start(node: dict[str, Any] | None) -> int | None:
