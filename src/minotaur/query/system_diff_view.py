@@ -24,6 +24,8 @@ _CHANGE_GROUPS: tuple[tuple[str, str], ...] = (
     ("boundary_changes", "boundary"),
 )
 
+_COMPLETE_GROUPS = ("nodes", "relationships", "call_changes")
+
 
 def filter_system_diff(
     complete_result: SystemDiffResult, system_name: str | None = None
@@ -67,11 +69,18 @@ def filter_system_diff(
         "new_coverage": complete_result.new_coverage,
         "old_selection": complete_result.old_selection,
         "new_selection": complete_result.new_selection,
+        "old_revision": complete_result.old_revision,
+        "new_revision": complete_result.new_revision,
     }
     for field_name, _label in _CHANGE_GROUPS:
         kwargs[field_name] = tuple(
             change for change in getattr(complete_result, field_name) if retain(change)
         )
+    for field_name in _COMPLETE_GROUPS:
+        kwargs[field_name] = tuple(
+            change for change in getattr(complete_result, field_name) if retain(change)
+        )
+    kwargs["limitations"] = tuple(complete_result.limitations)
     return SystemDiffResult(**cast(Any, kwargs))
 
 
@@ -120,6 +129,10 @@ def render_text(result: SystemDiffResult, *, details: bool = False) -> str:
         ]
     if not lines:
         lines.append("no system differences\n")
+    if result.limitations:
+        lines.extend(
+            f"limitation {item.side}: {item.code}: {item.message}\n" for item in result.limitations
+        )
     return "".join(lines) + render_context_text(result)
 
 
@@ -133,10 +146,10 @@ def _render_details(change: SystemChange) -> str:
     return "".join(
         f"{label}: {_detail_value(value)}\n"
         for label, value in (
-            ("old", change.old),
-            ("new", change.new),
-            ("old evidence", _side_evidence(change.old)),
-            ("new evidence", _side_evidence(change.new)),
+            ("old", _change_before(change)),
+            ("new", _change_after(change)),
+            ("old evidence", _side_evidence(_change_before(change))),
+            ("new evidence", _side_evidence(_change_after(change))),
         )
     )
 
@@ -149,12 +162,12 @@ def render_json(result: SystemDiffResult) -> str:
 def _ordered(changes: Sequence[SystemChange]) -> tuple[SystemChange, ...]:
     return tuple(
         sorted(
-            changes,
+            tuple(change for change in changes if getattr(change, "status", None) != "unchanged"),
             key=lambda change: (
-                change.kind,
+                _change_status(change),
                 change.key,
-                repr(change.old),
-                repr(change.new),
+                repr(_change_before(change)),
+                repr(_change_after(change)),
             ),
         )
     )
@@ -175,13 +188,13 @@ def _change_line(label: str, change: SystemChange) -> str:
     """
     if label == "systems":
         return f"system {change.kind}: {_safe_atom(_key_part(change, 0))}\n"
-    kind = _safe_atom(change.kind)
+    kind = _safe_atom(_change_status(change))
     if label == "membership":
-        old = _mapping_side(change.old)
-        new = _mapping_side(change.new)
+        old = _mapping_side(_change_before(change))
+        new = _mapping_side(_change_after(change))
         file = (
-            _mapping_value(change.new, "file")
-            or _mapping_value(change.old, "file")
+            _mapping_value(_change_after(change), "file")
+            or _mapping_value(_change_before(change), "file")
             or _key_part(change, 0)
         )
         return f"membership {kind}: {_safe_atom(file)} — {_safe_atom(old)} -> {_safe_atom(new)}\n"
@@ -197,12 +210,14 @@ def _change_line(label: str, change: SystemChange) -> str:
     if label == "dependency":
         source = _key_part(change, 0)
         category = (
-            _record_category(change.new) or _record_category(change.old) or _key_part(change, 1)
+            _record_category(_change_after(change))
+            or _record_category(_change_before(change))
+            or _key_part(change, 1)
         )
         category = _display_category(category)
         return f"dependency {kind}: {_safe_atom(source)} -> {_safe_atom(category)}\n"
     if label == "boundary":
-        payload = _mapping(change.new) or _mapping(change.old)
+        payload = _mapping(_change_after(change)) or _mapping(_change_before(change))
         source = _endpoint_display(payload, "source_endpoint", "source_category")
         target = _endpoint_display(payload, "target_endpoint", "target_category")
         relation = _mapping_value(payload, "kind") or "unknown"
@@ -210,6 +225,12 @@ def _change_line(label: str, change: SystemChange) -> str:
             f"boundary {kind}: {_safe_atom(source)} -> {_safe_atom(target)} "
             f"({_safe_atom(relation)})\n"
         )
+    if label == "graph-node":
+        return f"node {kind}: {_safe_atom(_key_part(change, 0))}\n"
+    if label == "graph-relationship":
+        return f"relationship {kind}: {_safe_atom(_key_part(change, 0))}\n"
+    if label == "call":
+        return f"call {kind}: {_safe_atom(_key_part(change, 0))}\n"
     raise AssertionError(f"unsupported change label: {label}")
 
 
@@ -218,6 +239,14 @@ def _side_evidence(value: object) -> object:
     if evidence is None:
         return "unavailable"
     return evidence
+
+
+def _change_before(change: object) -> object:
+    return getattr(change, "old", getattr(change, "before", None))
+
+
+def _change_after(change: object) -> object:
+    return getattr(change, "new", getattr(change, "after", None))
 
 
 def _detail_value(value: object) -> str:
@@ -274,7 +303,18 @@ def _endpoint_display(payload: Mapping[str, object], endpoint_key: str, category
 
 
 def _key_part(change: SystemChange, index: int) -> str:
-    return str(change.key[index]) if index < len(change.key) else ""
+    key = getattr(change, "key", ())
+    if isinstance(key, str):
+        return key if index == 0 else ""
+    return str(key[index]) if index < len(key) else ""
+
+
+def _change_status(change: object) -> str:
+    value = getattr(change, "kind", None)
+    if isinstance(value, str):
+        return value
+    value = getattr(change, "status", "changed")
+    return str(value)
 
 
 def _safe_atom(value: object) -> str:

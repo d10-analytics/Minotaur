@@ -8,13 +8,20 @@ without rebuilding structural rules or losing row evidence.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, cast
 
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.validation import validate_document
+from minotaur.language_interpreter.call_expressions import CallExpressionObservation
+from minotaur.query.call_diff import (
+    CallChange,
+    CallComparison,
+    CallLimitation,
+    compare_call_observations,
+)
 from minotaur.query.correspondence import (
     CorrespondenceAdmissionError,
     CorrespondenceAmbiguityError,
@@ -24,6 +31,11 @@ from minotaur.query.correspondence import (
     RelationshipKey,
     RelationshipOccurrence,
     prepare_correspondence,
+)
+from minotaur.query.graph_comparison import (
+    GraphNodeChange,
+    GraphRelationshipChange,
+    compare_graphs,
 )
 from minotaur.query.system import (
     ConsumersRecord,
@@ -163,6 +175,12 @@ class SystemDiffResult:
     new_coverage: Mapping[str, object] = field(default_factory=dict)
     old_selection: Mapping[str, object] = field(default_factory=dict)
     new_selection: Mapping[str, object] = field(default_factory=dict)
+    nodes: tuple[GraphNodeChange, ...] = ()
+    relationships: tuple[GraphRelationshipChange, ...] = ()
+    call_changes: tuple[CallChange, ...] = ()
+    limitations: tuple[CallLimitation, ...] = ()
+    old_revision: str | None = None
+    new_revision: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -182,6 +200,8 @@ class SystemDiffResult:
             object.__setattr__(self, name, tuple(getattr(self, name)))
         for name in ("old_coverage", "new_coverage", "old_selection", "new_selection"):
             object.__setattr__(self, name, _freeze(getattr(self, name)))
+        for name in ("nodes", "relationships", "call_changes", "limitations"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
 
     @property
     def old_names(self) -> tuple[str, ...]:
@@ -209,6 +229,9 @@ class SystemDiffResult:
             or self.consumer_changes
             or self.dependency_changes
             or self.boundary_changes
+            or any(item.status != "unchanged" for item in self.nodes)
+            or any(item.status != "unchanged" for item in self.relationships)
+            or any(item.status in {"added", "removed", "changed"} for item in self.call_changes)
         )
 
     @property
@@ -239,6 +262,42 @@ class SystemDiffResult:
             self.boundary_changes,
         ):
             result.extend(changes)
+        result.extend(
+            SystemChange(
+                "graph-node",
+                item.status,
+                (item.id,),
+                item.before,
+                item.after,
+                item.involved_systems,
+            )
+            for item in self.nodes
+            if item.status != "unchanged"
+        )
+        result.extend(
+            SystemChange(
+                "graph-relationship",
+                item.status,
+                (item.id,),
+                item.before,
+                item.after,
+                item.involved_systems,
+            )
+            for item in self.relationships
+            if item.status != "unchanged"
+        )
+        result.extend(
+            SystemChange(
+                "call",
+                item.status,
+                (item.relationship_id,),
+                item.before,
+                item.after,
+                item.involved_systems,
+            )
+            for item in self.call_changes
+            if item.status != "unchanged"
+        )
         return tuple(result)
 
     def to_dict(self) -> dict[str, object]:
@@ -257,6 +316,11 @@ class SystemDiffResult:
             "boundary_changes": [item.to_dict() for item in self.boundary_changes],
             "coverage": {"old": _thaw(self.old_coverage), "new": _thaw(self.new_coverage)},
             "selection": {"old": _thaw(self.old_selection), "new": _thaw(self.new_selection)},
+            "nodes": [item.to_dict() for item in self.nodes],
+            "relationships": [item.to_dict() for item in self.relationships],
+            "call_changes": [item.to_dict() for item in self.call_changes],
+            "limitations": [item.to_dict() for item in self.limitations],
+            "revisions": {"old": self.old_revision, "new": self.new_revision},
         }
 
 
@@ -608,7 +672,15 @@ def _boundary_changes(
 
 
 def compare_systems(
-    old_snapshot: ReportingSnapshot, new_snapshot: ReportingSnapshot
+    old_snapshot: ReportingSnapshot,
+    new_snapshot: ReportingSnapshot,
+    *,
+    old_call_observations: Sequence[CallExpressionObservation] | None = None,
+    new_call_observations: Sequence[CallExpressionObservation] | None = None,
+    old_calls: Sequence[CallExpressionObservation] | None = None,
+    new_calls: Sequence[CallExpressionObservation] | None = None,
+    old_revision: str | None = None,
+    new_revision: str | None = None,
 ) -> SystemDiffResult:
     """Compare two complete reporting snapshots after canonical graph admission.
 
@@ -637,10 +709,21 @@ def compare_systems(
     selected |= changed_row_keys
     old_index.validate_required_keys(selected, side="old")
     new_index.validate_required_keys(selected, side="new")
+    graph = compare_graphs(old_snapshot, new_snapshot)
     old_coverage, old_selection = _context(old_snapshot)
     new_coverage, new_selection = _context(new_snapshot)
     membership = _membership_changes(old_snapshot, new_snapshot)
     boundary = _boundary_changes(old_snapshot, new_snapshot, old_index, new_index, selected)
+    old_observations = old_call_observations if old_call_observations is not None else old_calls
+    new_observations = new_call_observations if new_call_observations is not None else new_calls
+    call_comparison = CallComparison()
+    if old_observations is not None or new_observations is not None:
+        call_comparison = compare_call_observations(
+            tuple(old_observations or ()),
+            tuple(new_observations or ()),
+            old_index=prepare_correspondence(old_snapshot.document, side="old", whole_graph=True),
+            new_index=prepare_correspondence(new_snapshot.document, side="new", whole_graph=True),
+        )
     return SystemDiffResult(
         old_system_names=old_names,
         new_system_names=new_names,
@@ -655,6 +738,12 @@ def compare_systems(
         new_coverage=new_coverage,
         old_selection=old_selection,
         new_selection=new_selection,
+        nodes=graph.nodes,
+        relationships=graph.relationships,
+        call_changes=call_comparison.changes,
+        limitations=call_comparison.limitations,
+        old_revision=old_revision,
+        new_revision=new_revision,
     )
 
 
@@ -665,9 +754,11 @@ def _admit(snapshot: ReportingSnapshot, side: str) -> None:
 
 
 def compare_system_snapshots(
-    old_snapshot: ReportingSnapshot, new_snapshot: ReportingSnapshot
+    old_snapshot: ReportingSnapshot,
+    new_snapshot: ReportingSnapshot,
+    **kwargs: object,
 ) -> SystemDiffResult:
-    return compare_systems(old_snapshot, new_snapshot)
+    return compare_systems(old_snapshot, new_snapshot, **kwargs)  # type: ignore[arg-type]
 
 
 __all__ = [

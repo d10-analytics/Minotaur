@@ -217,6 +217,7 @@ class CorrespondenceIndex:
     nodes_by_key: Mapping[NodeKey, tuple[Node, ...]]
     relationships_by_key: Mapping[RelationshipKey, tuple[RelationshipOccurrence, ...]]
     origin_dependencies: Mapping[NodeKey, NodeKey]
+    whole_graph: bool = False
 
     @property
     def candidate_groups(self) -> Mapping[NodeKey, tuple[Node, ...]]:
@@ -285,6 +286,29 @@ class CorrespondenceIndex:
                         )
         return self
 
+    def validate_whole_graph(self, *, side: str = "local") -> CorrespondenceIndex:
+        """Reject ambiguous ordinary node identities for complete comparison.
+
+        Unresolved-reference occurrences may legitimately share a semantic key:
+        their multiplicity is retained for multiset comparison.  Ordinary
+        nodes, however, need one deterministic counterpart; pairing them by
+        input order would make results depend on serializer ordering.
+        """
+        _check_side(side)
+        if not self.whole_graph:
+            raise ValueError("whole-graph validation requires a whole-graph index")
+        for key in sorted(self.nodes_by_key, key=_key_sort):
+            candidates = self.nodes_by_key[key]
+            if len(candidates) <= 1 or candidates[0].node_class == NodeClass.UNRESOLVED_REFERENCE:
+                continue
+            raise CorrespondenceAmbiguityError(
+                (key, key, "<nodes>"),
+                side=side,
+                endpoint="node",
+                candidates=candidates,
+            )
+        return self
+
 
 def _check_side(side: str) -> None:
     if side not in {"local", "old", "new", "left", "right"}:
@@ -322,6 +346,8 @@ def prepare_correspondence(
     document: GraphDocument,
     *,
     side: str = "local",
+    whole_graph: bool = False,
+    scope: str | None = None,
 ) -> CorrespondenceIndex:
     """Validate and prepare one graph document for semantic correspondence.
 
@@ -330,6 +356,13 @@ def prepare_correspondence(
     usable only after the complete ordered validator report is valid.
     """
     _check_side(side)
+    if scope is not None:
+        if scope not in {"ordinary", "boundary", "whole", "whole-graph"}:
+            raise ValueError("scope must be ordinary, boundary, whole, or whole-graph")
+        requested_whole = scope in {"whole", "whole-graph"}
+        if whole_graph and not requested_whole:
+            raise ValueError("whole_graph and scope request different correspondence modes")
+        whole_graph = requested_whole
     report = validate_document(document, verify_node_ids=True)
     if not report.is_valid:
         raise CorrespondenceAdmissionError(report, document, side=side)
@@ -358,7 +391,7 @@ def prepare_correspondence(
             candidate_ids[key].add(node.id)
 
     for relationship in document.relationships:
-        if relationship.kind not in _SUPPORTED_RELATIONSHIPS:
+        if not whole_graph and relationship.kind not in _SUPPORTED_RELATIONSHIPS:
             continue
         for endpoint_name, endpoint_id in (
             ("source", relationship.source),
@@ -399,6 +432,23 @@ def prepare_correspondence(
             side=side,
         )
 
+    if whole_graph:
+        # Complete comparison includes an edgeless unresolved occurrence too.
+        # Its direct ordinary origin is enough to form the nested semantic key;
+        # an unresolved-origin chain remains ineligible when it participates in
+        # a relationship, as handled above.
+        for endpoint in document.nodes:
+            if endpoint.node_class != NodeClass.UNRESOLVED_REFERENCE:
+                continue
+            origin_id = endpoint.identity.originating_node
+            if origin_id is None or origin_id not in ordinary_keys:
+                continue
+            origin_key = ordinary_keys[origin_id]
+            key = node_key(endpoint, origin=origin_key)
+            unresolved_keys[endpoint.id] = key
+            origin_dependencies[key] = origin_key
+            add_candidate(key, endpoint)
+
     immutable_groups = MappingProxyType(
         {
             key: tuple(sorted(nodes, key=_node_sort))
@@ -409,7 +459,7 @@ def prepare_correspondence(
 
     relationship_groups: dict[RelationshipKey, list[RelationshipOccurrence]] = defaultdict(list)
     for relationship in document.relationships:
-        if relationship.kind not in _SUPPORTED_RELATIONSHIPS:
+        if not whole_graph and relationship.kind not in _SUPPORTED_RELATIONSHIPS:
             continue
         source = by_id[relationship.source]
         target = by_id[relationship.target]
@@ -438,7 +488,13 @@ def prepare_correspondence(
         origin_dependencies=MappingProxyType(
             {key: origin_dependencies[key] for key in sorted(origin_dependencies, key=_key_sort)}
         ),
+        whole_graph=whole_graph,
     )
+
+
+def prepare_whole_graph(document: GraphDocument, *, side: str = "local") -> CorrespondenceIndex:
+    """Prepare all nodes and relationship kinds for complete comparison."""
+    return prepare_correspondence(document, side=side, whole_graph=True)
 
 
 def validate_required_keys(
@@ -462,5 +518,6 @@ __all__ = [
     "RelationshipOccurrence",
     "node_key",
     "prepare_correspondence",
+    "prepare_whole_graph",
     "validate_required_keys",
 ]
