@@ -63,16 +63,33 @@ This is the visual form of three questions available from the command line:
 
 ## 3. See what changed
 
-Minotaur can compare the system boundaries committed at `HEAD` with the source
-currently in your working tree. The included scenario adds a `refund` function
-to Billing and a `cancel_order` function in Orders that calls it.
+Minotaur can compare two revisions without a saved graph. It analyzes the
+source that belongs to each side with the same installed Minotaur version, so
+the answer cannot go stale merely because a graph was not regenerated. There
+are two workflows:
 
-In plain language, the change means:
+- **HEAD versus working tree** compares the committed source at `HEAD` with the
+  source in your working tree — the convenient way to review uncommitted work.
+- **An explicit historical pair** compares two revisions you name, such as two
+  tags, branches, or commit IDs.
 
-- Orders gains a new reason to depend on Billing.
-- `shop/orders.py` becomes a consumer of Billing's new refund surface.
-- A new call crosses the boundary from `cancel_order` to `refund`.
-- The report retains the source evidence behind that conclusion.
+Both forms accept `--system`, `--details`, `--json`, and `--html PATH` for a
+self-contained offline report, and both exit `1` when they succeed and find
+changes.
+
+The included scenario commits a baseline and tags it `v1.0`, then applies one
+change set and tags it `v2.0`. In plain language, the change set means:
+
+- Orders gains a new reason to depend on Billing: a `cancel_order` function
+  imports and calls Billing's new `refund`.
+- `shop/orders.py` stops being a consumer of Billing's `charge`, and the new
+  `shop/order_ops.py` becomes one instead.
+- Billing's `charge` changes the value it passes to the shared ledger; the call
+  still resolves, so it is a changed call expression rather than a new call.
+- `complete_order` moves from `shop/orders.py` to the new `shop/order_ops.py`
+  in the same Orders system, so the old symbol is removed and a new one added.
+- The unassigned `shop/checkout.py` file is deleted, so its module, symbol, and
+  the Orders surface it reached are removed.
 
 Run the complete scenario in a disposable temporary repository:
 
@@ -80,29 +97,49 @@ Run the complete scenario in a disposable temporary repository:
 python examples/run_walkthrough.py systems
 ```
 
-The important part of the result is:
+The important part of the historical result is:
 
 ```text
+membership changed: shop/order_ops.py — unassigned -> orders
 surface added: billing shop/billing.py.shop.billing.refund
+surface removed: orders shop/orders.py.shop.orders.create_order
+consumer added: billing <- shop/order_ops.py
 consumer changed: billing <- shop/orders.py
+consumer removed: billing <- shop/checkout.py
+consumer removed: orders <- shop/checkout.py
 dependency changed: orders -> billing
-boundary added: orders.shop.orders -> billing.shop.billing.refund (imports)
 boundary added: orders.shop.orders.cancel_order -> billing.shop.billing.refund (calls)
+boundary removed: orders.shop.orders.complete_order -> billing.shop.billing.charge (calls)
 ```
 
+The runner prints the complete report, including the internal call-expression
+change and the moved symbol, for both the working-tree and historical commands.
+
 The runner creates and removes only its own temporary directory; it does not
-edit this checkout or change your Git configuration. The comparison is also
-read-only: it analyzes current source in memory without rewriting the saved
-graph or its checksum.
+edit this checkout or change your Git configuration. It fixes the commit
+author, committer, and timestamps, so the two revision IDs are reproducible.
+The comparison itself is read-only: it analyzes each captured revision in
+memory without rewriting the saved graph or its checksum.
 
-Use `minotaur query diff --systems --system billing` to focus the report on
-Billing. Add `--details` for old and new evidence, or `--json` for automation.
-A difference returns status `1`; in this command that means “changes found,”
-not “the comparison failed.” Invalid input or an unusable comparison returns
-status `2`.
+A difference returns status `1`; in this command that means "changes found,"
+not "the comparison failed" — including when `--html` successfully writes a
+report. Invalid input or an unusable comparison returns status `2`. When call
+evidence is unavailable on a side, the report prints a limitation notice rather
+than calling the call unchanged or changed.
 
-The [comparison reference](comparison.md) records the exact setup, source edit,
-commands, membership-only example, and exit behavior used by the runner.
+[![Combined comparison of the v1.0 and v2.0 shop revisions](../../docs/assets/system-comparison-demo.png)](minotaur-comparison.html)
+
+Open [the saved comparison report](minotaur-comparison.html) to explore the
+difference offline. Use **Graph view** to switch the whole map between
+**Combined**, **Before**, and **After**, and **Emphasize changes** to dim
+unchanged structure. Selecting a changed call opens its details, where a
+separate **Source revision** switch changes only the captured source excerpt,
+not the graph view. The saved report is static: it keeps the revisions it was
+generated from and does not observe later working-file changes.
+
+The [comparison reference](comparison.md) records the exact setup, source edits,
+commands, identities, exit behavior, evidence limits, and regeneration steps
+used by the runner.
 
 ## How this example is organized
 
@@ -113,6 +150,9 @@ examples/system-walkthrough/
 ├── minotaur-graph.json                      committed analysis of shop/,
 ├── minotaur-graph.json.sha256                trusted-load stamp
 ├── minotaur-graph.html                       portable system explorer
+├── minotaur-comparison.html                  saved offline comparison of
+│                                             the v1.0 and v2.0 revisions
+├── comparison.md                             comparison command reference
 ├── shop/                                    the fabricated storefront package
 │   ├── __init__.py
 │   ├── billing.py                           declared system "billing"
@@ -126,7 +166,8 @@ examples/system-walkthrough/
 │   └── orders/
 │       ├── system.toml
 │       └── README.md                        human narrative, ignored
-└── regenerate_system_walkthrough.py         reproduces all three artifacts
+└── regenerate_system_walkthrough.py         reproduces the graph, explorer,
+                                              and comparison report
 ```
 
 The local `.minotaur.toml` makes one project contract authoritative for the
@@ -183,24 +224,34 @@ no changes
 
 A successful `analyze` is silent on standard output. The
 [regenerate script](regenerate_system_walkthrough.py) automates this sequence
-(including re-stamping the sidecar and rebuilding the HTML explorer) when the
-fabricated sources change:
+(including re-stamping the sidecar, rebuilding the HTML explorer, and writing
+the comparison report) when the fabricated sources or the comparison scenario
+change:
 
 ```bash
 $ python3 examples/system-walkthrough/regenerate_system_walkthrough.py
 ```
 
-### Regenerate the documentation screenshot
+The comparison report is generated from a disposable repository whose commits
+use a fixed identity and timestamp, so its revision IDs stay stable. Use
+`--comparison-only` to rebuild just that report, or `--skip-comparison` to
+rebuild just the graph, sidecar, and explorer.
 
-To regenerate the documentation screenshot from this exact checked-in HTML,
-install the visualizer dependencies and run:
+### Regenerate the documentation screenshots
+
+To regenerate the documentation screenshots from the checked-in HTML, install
+the visualizer dependencies and run:
 
 ```bash
 python3 scripts/capture_system_walkthrough_demo.py
+python3 scripts/capture_system_walkthrough_demo.py --comparison
 ```
 
-The script focuses `orders`, enables its cross-system connections, and writes
-`docs/assets/system-walkthrough-demo.png` at a fixed viewport.
+The first command focuses `orders`, enables its cross-system connections, and
+writes `docs/assets/system-walkthrough-demo.png`. The `--comparison` command
+captures `minotaur-comparison.html` with the combined diff and a selected
+boundary call, and writes `docs/assets/system-comparison-demo.png`. Both use a
+fixed viewport.
 
 ## Command reference: inspect the current boundary
 

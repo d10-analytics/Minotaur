@@ -74,6 +74,54 @@ full-height right-hand divider, or use its arrow/Home/End keys, to adjust its
 width. Node connections use separate relationship and target rows so long
 qualified names wrap within the chosen width.
 
+## Compare two revisions visually
+
+`query diff --systems` writes the same self-contained kind of page for a typed
+system comparison:
+
+```bash
+minotaur query diff --systems --html comparison.html
+minotaur query diff --systems BEFORE AFTER --html comparison.html
+```
+
+The first form compares `HEAD` with the current working tree; the second
+compares two explicit Git revisions. Both save a captured comparison: the page
+embeds both snapshots as unchanged context plus the stored change records, and
+it does not re-read your working files, so editing source after generation
+cannot change what the saved report shows. Like the explorer, it makes no
+network requests and opens directly from disk. The command still prints its
+summary and exits `1` when it finds changes, including when the report is
+written successfully.
+
+The comparison page keeps the explorer's System menu, node-class and
+relationship-kind filters, search, and color modes, and adds:
+
+- **Graph view** switches the whole map between **Combined**, **Before**, and
+  **After**. This is a graph-level view. It changes which revision's structure
+  is drawn while keeping the layout stationary, so the same node stays in the
+  same place as you switch.
+- **Emphasize changes** dims unchanged structure and leaves added, removed, and
+  changed structure at full opacity. Node-class and relationship-kind colors
+  keep their meaning, so a dimmed node is still recognizable as the kind it is.
+- The **details panel** adds a separate **Source revision** switch for a
+  selected call. That switch changes only which side's captured source excerpt
+  is displayed; it never changes the graph view, layout, zoom, pan, selection,
+  or emphasis. The excerpt caption names the captured revision, for example
+  `Captured Before revision: v1.0 · 134b138`.
+
+The report retains the identities resolved when it was generated. A historical
+report names both requested revisions with their short commit IDs; a
+working-tree report names Before as `HEAD` and labels After
+`Working tree at report generation` without presenting the working tree as a
+commit. A limitation such as unavailable call-expression evidence is shown in a
+notice region and is never drawn as a detected change.
+
+[![Combined comparison of the v1.0 and v2.0 shop revisions](../assets/system-comparison-demo.png)](../../examples/system-walkthrough/minotaur-comparison.html)
+
+The [shop comparison walkthrough](../../examples/system-walkthrough/comparison.md)
+explains both workflows in plain language and records the exact commands,
+identities, and exit behavior behind the saved report.
+
 ## Color modes
 
 The top navigation bar provides System, Light, Catppuccin Mocha, Nord Polar

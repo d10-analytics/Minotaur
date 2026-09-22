@@ -32,10 +32,14 @@ its supporting source visible in the details panel.
   and `system-deps` shows its outgoing dependencies. `systems` summarizes the
   declarations and how much of their source is represented in the graph.
 - **Compare structural changes.** Ordinary `query diff` compares symbols and
-  relationships in graph snapshots. In a configured Git repository with a
-  committed baseline, `query diff --systems` compares subsystem connections,
-  consumers, and exposed symbols, including changes caused by moving files
-  between system definitions. See the shop walkthrough's
+  relationships in graph snapshots. In a configured Git repository,
+  `query diff --systems` compares subsystem connections, consumers, and
+  exposed symbols between two analyzed source revisions — either `HEAD` versus
+  the working tree or an explicit historical pair such as two tags — including
+  internal and call-expression changes and files moved between system
+  definitions. Add `--html comparison.html` to save a self-contained offline
+  visual report that retains the revision identities it was generated from. See
+  the shop walkthrough's
   [plain-language comparison](examples/system-walkthrough/README.md#3-see-what-changed).
 - **Find potentially unused symbols.** `unreferenced` gives you candidates to
   investigate. An absent reference does not prove that code is safe to delete.
@@ -76,7 +80,11 @@ outside nodes, and highlight boundary-crossing relationships.
 The bundled [shop walkthrough](examples/system-walkthrough/README.md) is a
 small runnable example with `orders`, `billing`, and deliberately unassigned
 shared files. Its [comparison section](examples/system-walkthrough/README.md#3-see-what-changed)
-shows how a new call changes consumers, dependencies, and reported boundaries.
+shows how a new call, a moved symbol, and a removed file change consumers,
+dependencies, and reported boundaries. It links a saved
+[offline comparison report](examples/system-walkthrough/minotaur-comparison.html)
+that compares two tagged revisions and names both revisions with their resolved
+commit IDs.
 
 ## A small example
 

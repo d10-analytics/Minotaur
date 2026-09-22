@@ -229,30 +229,44 @@ or definitions exit `2` before refresh or output.
 
 ## Compare configured system snapshots
 
-Use the public systems mode to compare the graph and definitions committed at
-`HEAD` with a fresh analysis of the current working tree:
+Use the public systems mode to compare two analyzed source revisions. Both
+command forms are supported:
 
 ```bash
+# HEAD versus the current working tree
 minotaur query diff --systems
 minotaur query diff --systems --system SYSTEM_NAME
 minotaur query diff --systems --system SYSTEM_NAME --details
 minotaur query diff --systems --system SYSTEM_NAME --json
+
+# two explicit Git revisions
+minotaur query diff --systems BEFORE AFTER
 ```
 
-The command locates `.minotaur.toml`, reads the configured graph and systems
-definitions from `HEAD`, analyzes the current configured selection in memory,
-then compares the complete pair. `--system` replaces the output view: every
-change whose stored involvement contains that system remains visible, so a
-boundary change involving systems `A` and `B` is reported when selecting either
-`A` or `B`. There is no `OLD NEW` or `--scope` form in systems mode; those
-arguments are rejected before either snapshot is read.
+Each revision is interpreted with the configuration, source selection, and
+system definitions that belong to that revision, using the installed Minotaur
+version. A committed graph or sidecar is not required, so a stale saved graph
+cannot change the source-derived baseline. The working-tree form identifies
+Before as `HEAD` with its resolved commit ID and labels After
+`Working tree at report generation` without inventing a commit identity. The
+historical form retains each requested revision name and its resolved short
+commit ID in the saved result.
+
+The command locates `.minotaur.toml`, or accepts explicit per-side config
+coordinates with `--before-config` and `--after-config`. `--system` replaces the
+output view: every change whose stored involvement contains that system remains
+visible, so a boundary change involving systems `A` and `B` is reported when
+selecting either `A` or `B`. There is no `OLD NEW` or `--scope` combination
+inside systems mode; those arguments are rejected before either revision is
+read.
 
 The command is read-only. It never rewrites the committed graph, its sidecar,
 the configuration, or system definitions. A source-only edit produces a
-`surface`, `consumer`, or `dependency` row while the graph bytes remain equal;
-an identical graph with changed system membership produces a `membership` row.
-For example, adding `send` to `app/api.py` and calling it from `consumer.py`
-produces these compact rows (followed by the four context lines):
+`surface`, `consumer`, `dependency`, or `boundary` row without touching the
+saved graph; a changed definition produces a `membership` row. Internal graph
+and call-expression changes are included even when the system boundaries stay
+identical. For example, adding `send` to `app/api.py` and calling it from
+`consumer.py` produces these compact rows (followed by the four context lines):
 
 ```text
 surface added: App app/api.py.app.api.send
@@ -261,22 +275,23 @@ boundary added: no_system.consumer -> App.app.api.send (imports)
 boundary added: no_system.consumer.consume -> App.app.api.send (calls)
 ```
 
-The source-change command exits `1`; an identical comparison exits `0`.
-Membership-only changes also exit `1`, even when the serialized graph bytes are
-identical. `--details` adds `old`, `new`, `old evidence`, and `new evidence`
-after each changed row. The old side is `unavailable` when the relationship did
-not exist there; the new side contains the recorded endpoint and evidence
-projection. `--json` preserves the same typed categories, status-neutral
-coverage, and old/new selection context in deterministic JSON.
+The source-change command exits `1`; an identical comparison exits `0`. A
+successful comparison that also writes a requested `--html` report still exits
+`1`. `--details` adds `old`, `new`, `old evidence`, and `new evidence` after
+each changed row. The old side is `unavailable` when the relationship did not
+exist there; the new side contains the recorded endpoint and evidence
+projection. `--json` preserves the same typed categories, the resolved
+before/after identities, status-neutral coverage, and old/new selection context
+in deterministic JSON.
 
-Both complete snapshots must pass graph admission, and all committed/current
-system definitions are loaded before filtering. Invalid serialized input or a
-semantically ambiguous identity exits `2`, prints an attributed diagnostic to
-standard error, and prints no report, even when an unrelated `--system` filter
-was requested. The comparison reports observed graph facts and membership; it
-does not infer renames, edit timing, causality, or intent. Coverage retains the
-available selection and diagnostic context on each side, including unavailable
-history where the source was not refreshed.
+Both analyzed revisions must pass admission, and each revision's system
+definitions are loaded before filtering. A revision that cannot be acquired or
+interpreted, or a semantically ambiguous identity, exits `2`, prints an
+attributed diagnostic to standard error, and prints no report, even when an
+unrelated `--system` filter was requested. Missing call-expression evidence is a
+limitation notice, not a detected change. The comparison reports observed
+source facts and membership; it does not infer renames, edit timing, causality,
+or intent.
 
 ## Strict loading and warnings
 
