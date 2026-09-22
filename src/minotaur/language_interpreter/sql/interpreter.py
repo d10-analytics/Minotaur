@@ -310,7 +310,7 @@ def _interpret_create(
 ) -> _Observation | None:
     kind = str(tree.args.get("kind") or "").upper()
     target = tree.this
-    if kind == "INDEX":
+    if kind in {"INDEX", "NONCLUSTERED INDEX", "CLUSTERED INDEX"}:
         if _valid_index(tree):
             return None
         _unsupported(tree, item, batch, diagnostics)
