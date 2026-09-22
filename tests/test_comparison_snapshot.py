@@ -202,6 +202,28 @@ def test_working_tree_attributes_copy_failure_to_after_side(
     assert "simulated working-tree copy failure" in str(error.value)
 
 
+def test_capture_attributes_materialization_write_failure_to_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    original = Path.write_bytes
+
+    def fail_write(path: Path, data: bytes) -> int:
+        if path.name == "app.py":
+            raise OSError("simulated materialization write failure")
+        return original(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_write)
+
+    with pytest.raises(SnapshotError) as error:
+        capture_revision(root, "HEAD", side="before")
+
+    assert error.value.side == "before"
+    assert error.value.revision == "HEAD"
+    assert error.value.pinned_sha
+    assert "simulated materialization write failure" in str(error.value)
+
+
 def test_working_tree_capture_includes_untracked_bytes_without_checkout_identity(
     tmp_path: Path,
 ) -> None:
