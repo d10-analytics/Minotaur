@@ -1,7 +1,15 @@
 (function () {
   "use strict";
   var payload = JSON.parse(document.getElementById("minotaur-presentation").textContent);
-  var graph = payload.graph;
+  var graph = payload.graph || { nodes: [], relationships: [] };
+  var comparisonPayload = payload.comparison || null;
+  var comparisonMode = Boolean(
+    comparisonPayload && Array.isArray(graph.nodes) && graph.nodes.some(function (node) {
+      return Object.prototype.hasOwnProperty.call(node, "before")
+        || Object.prototype.hasOwnProperty.call(node, "after");
+    })
+  );
+  var revisionView = comparisonMode ? "combined" : null;
   // Excerpts are deliberately a separate presentation concern: graph JSON
   // remains portable structural evidence even when no source root is trusted.
   var excerptPaths = (payload.excerpts && payload.excerpts.paths) || {};
@@ -11,6 +19,8 @@
   var byId = new Map(graph.nodes.map(function (n) { return [n.id, n]; }));
   var layoutDir = "TB";
   var activeLayout = null;
+  var layoutRuns = 0;
+  var comparisonLayoutCache = new Map();
   var themeModeEl = document.getElementById("theme-mode");
   var systemColorScheme = window.matchMedia("(prefers-color-scheme: dark)");
   // One shared value prevents node and edge labels from drifting apart as the
@@ -20,6 +30,127 @@
     "#2f6f9f", "#b85c2c", "#4f7f52", "#7a5aa6", "#9a4f68",
     "#287f8f", "#6b6fa8", "#a64b4b", "#3f7c70", "#76543f"
   ];
+
+  function sidePresent(record, side) {
+    return Boolean(record && record[side] !== null && record[side] !== undefined);
+  }
+
+  function sidePayload(record, side) {
+    if (!comparisonMode) return record;
+    var value = record && record[side];
+    if (Array.isArray(value)) return value[0] || null;
+    return value && typeof value === "object" ? value : null;
+  }
+
+  function preferredPayload(record) {
+    if (!comparisonMode) return record;
+    var preferred = record && record.default_side === "before" ? "before" : "after";
+    return sidePayload(record, preferred) || sidePayload(record, preferred === "after" ? "before" : "after") || {};
+  }
+
+  function recordPresence(record, view) {
+    if (!comparisonMode) return true;
+    if (view === "before") return sidePresent(record, "before");
+    if (view === "after") return sidePresent(record, "after");
+    return sidePresent(record, "before") || sidePresent(record, "after");
+  }
+
+  function sideSystems(record, side) {
+    if (!record) return [];
+    if (comparisonMode && !sidePresent(record, side)) return [];
+    var payloadValue = sidePayload(record, side);
+    var candidates = [];
+    if (payloadValue) {
+      candidates = payloadValue.systems || payloadValue.involved_systems || payloadValue.system || [];
+    }
+    if (typeof candidates === "string") return [candidates];
+    if (Array.isArray(candidates) && candidates.length) {
+      return candidates.filter(function (name) { return typeof name === "string"; });
+    }
+    var mapped = payload.node_systems && payload.node_systems[record.id];
+    if (mapped && typeof mapped === "object" && !Array.isArray(mapped)) {
+      var mappedSide = mapped[side];
+      if (typeof mappedSide === "string") return [mappedSide];
+      if (Array.isArray(mappedSide) && mappedSide.length) return mappedSide;
+    }
+    if (Array.isArray(mapped)) return mapped;
+    if (typeof mapped === "string") return [mapped];
+    return Array.isArray(record.involved_systems) ? record.involved_systems : [];
+  }
+
+  function nodeBelongsTo(node, system, side) {
+    var record = node.data("comparison_record");
+    return sideSystems(record, side).indexOf(system) >= 0;
+  }
+
+  function nodeBelongsInView(node, system, view) {
+    if (system === "") return true;
+    if (!comparisonMode) return node.data("system") === system;
+    if (view === "combined") {
+      return nodeBelongsTo(node, system, "before") || nodeBelongsTo(node, system, "after");
+    }
+    return nodeBelongsTo(node, system, view);
+  }
+
+  function edgePresentInView(edge, view) {
+    if (!comparisonMode) return true;
+    var record = edge.data("comparison_record");
+    return view === "combined"
+      ? sidePresent(record, "before") || sidePresent(record, "after")
+      : sidePresent(record, view);
+  }
+
+  function edgeHasInternalSide(edge, system, side) {
+    return edgePresentInView(edge, side)
+      && nodeBelongsTo(edge.source(), system, side)
+      && nodeBelongsTo(edge.target(), system, side);
+  }
+
+  function edgeHasInternalInView(edge, system, view) {
+    if (!comparisonMode) return edge.source().data("system") === system
+      && edge.target().data("system") === system;
+    if (view === "combined") {
+      return edgeHasInternalSide(edge, system, "before")
+        || edgeHasInternalSide(edge, system, "after");
+    }
+    return edgeHasInternalSide(edge, system, view);
+  }
+
+  function edgeTouchesSystemInView(edge, system, view) {
+    if (!comparisonMode) {
+      return edge.source().data("system") === system || edge.target().data("system") === system;
+    }
+    if (view === "combined") {
+      return nodeBelongsTo(edge.source(), system, "before")
+        || nodeBelongsTo(edge.source(), system, "after")
+        || nodeBelongsTo(edge.target(), system, "before")
+        || nodeBelongsTo(edge.target(), system, "after");
+    }
+    return nodeBelongsTo(edge.source(), system, view) || nodeBelongsTo(edge.target(), system, view);
+  }
+
+  function comparisonNodeData(record) {
+    var value = preferredPayload(record);
+    var systems = Array.isArray(record.involved_systems) ? record.involved_systems : [];
+    return {
+      id: record.id,
+      label: value.label || record.id,
+      node_class: value.node_class || "symbol",
+      system: systems[0] || "",
+      systems: systems,
+      symbol_kind: value.symbol_kind || "",
+      path: value.path || (value.location ? value.location.path : ""),
+      reference_text: value.reference_text || "",
+      location: value.location || null,
+      status: record.status || "unchanged",
+      comparison_record: record,
+      comparison_before: record.before,
+      comparison_after: record.after,
+      bg: nodeColors(value.node_class || "symbol").bg,
+      border: nodeColors(value.node_class || "symbol").border,
+      label_color: activeTheme.text
+    };
+  }
 
   // Themes supply semantic roles, not a raw stylesheet swap: canvas-rendered
   // Cytoscape elements need the same palette as DOM controls. Yellow is absent
@@ -111,6 +242,10 @@
 
   var elements = [];
   graph.nodes.forEach(function (node) {
+    if (comparisonMode) {
+      elements.push({ group: "nodes", data: comparisonNodeData(node) });
+      return;
+    }
     elements.push({ group: "nodes", data: {
       id: node.id, label: node.label, node_class: node.node_class,
       system: nodeSystems[node.id] || "",
@@ -123,11 +258,16 @@
   graph.relationships.forEach(function (rel, i) {
     // The compact edge style has one provenance label, but the full evidence
     // array remains on the element so inspection never loses additional facts.
-    var provenance = rel.evidence.length > 0 ? rel.evidence[0].provenance : "unknown";
-    var colors = edgeColors(rel.kind);
+    var displayRelationship = preferredPayload(rel);
+    var evidence = displayRelationship.evidence || [];
+    var provenance = evidence.length > 0 ? evidence[0].provenance : "unknown";
+    var colors = edgeColors(rel.kind || displayRelationship.kind);
     elements.push({ group: "edges", data: {
-      id: "edge-" + i, source: rel.source, target: rel.target,
-      kind: rel.kind, provenance: provenance, evidence: rel.evidence,
+      id: comparisonMode ? rel.id : "edge-" + i,
+      source: rel.source, target: rel.target,
+      kind: rel.kind || displayRelationship.kind, provenance: provenance, evidence: evidence,
+      status: rel.status || "unchanged", comparison_record: rel,
+      comparison_before: rel.before, comparison_after: rel.after,
       // The extractor keys associations by canonical relationship index. Copy
       // them onto the interactive edge so later rendering never has to infer
       // call-site ownership from potentially duplicate evidence locations.
@@ -202,6 +342,19 @@
   // the one-hop outside nodes joined to it by an enabled relationship.
   var systemFilterEl = document.getElementById("system-filter");
   var crossSystemConnectionsEl = document.getElementById("cross-system-connections");
+  var revisionControlEl = document.getElementById("revision-control");
+  var revisionViewEl = document.getElementById("revision-view");
+  if (comparisonMode) {
+    revisionControlEl.hidden = false;
+    revisionViewEl.value = revisionView;
+    revisionViewEl.addEventListener("change", function () {
+      revisionView = revisionViewEl.value;
+      // Revision changes are visibility changes over the already-laid-out
+      // union. They must never move survivors, refit the camera, or rebuild a
+      // filtered layout merely because a side was selected.
+      applyFilters(false, { layout: false, preserveContainers: true });
+    });
+  }
   systemNames.forEach(function (name) {
     var option = document.createElement("option");
     option.value = name;
@@ -215,6 +368,16 @@
   crossSystemConnectionsEl.addEventListener("change", applyFilters);
 
   function isCrossSystem(edge, selectedSystem) {
+    if (comparisonMode && selectedSystem !== "") {
+      var view = revisionView;
+      if (view === "combined") {
+        return !edgeHasInternalSide(edge, selectedSystem, "before")
+          && !edgeHasInternalSide(edge, selectedSystem, "after")
+          && edgeTouchesSystemInView(edge, selectedSystem, view);
+      }
+      return !edgeHasInternalSide(edge, selectedSystem, view)
+        && edgeTouchesSystemInView(edge, selectedSystem, view);
+    }
     var sourceSystem = edge.source().data("system");
     var targetSystem = edge.target().data("system");
     if (selectedSystem !== "") {
@@ -238,8 +401,17 @@
 
   function createSystemContainers(selectedSystem) {
     var groups = new Map();
-    cy.nodes(":visible").not(".system-container").forEach(function (node) {
+    var containerNodes = comparisonMode
+      ? checkedComparisonNodes().filter(function (node) {
+        return comparisonLayoutEligible(node, selectedSystem, true);
+      })
+      : cy.nodes(":visible").not(".system-container");
+    containerNodes.forEach(function (node) {
       var name = node.data("system") || "External / Unassigned";
+      if (comparisonMode) {
+        var systems = node.data("systems") || [];
+        name = systems[0] || name;
+      }
       if (!groups.has(name)) groups.set(name, cy.collection());
       groups.set(name, groups.get(name).union(node));
     });
@@ -353,8 +525,10 @@
 
   applyFilters(false);
 
-  function applyFilters(animate) {
-    clearSystemContainers();
+  function applyFilters(animate, options) {
+    options = options || {};
+    var shouldRelayout = options.layout !== false;
+    if (!comparisonMode || shouldRelayout) clearSystemContainers();
     var hiddenKinds = [];
     kindsEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
       if (!cb.checked) hiddenKinds.push(cb.dataset.kind);
@@ -365,15 +539,19 @@
     });
     var selectedSystem = systemFilterEl.value;
     var showCrossSystemConnections = selectedSystem !== "" && crossSystemConnectionsEl.checked;
-    var eligibleNodes = cy.nodes().filter(function (node) {
-      return hiddenKinds.indexOf(node.data("node_class")) < 0;
+    var eligibleNodes = cy.nodes().not(".system-container").filter(function (node) {
+      return hiddenKinds.indexOf(node.data("node_class")) < 0
+        && (!comparisonMode || recordPresence(node.data("comparison_record"), "combined"));
     });
     var visibleNodeIds = new Set();
+    var currentView = comparisonMode ? revisionView : "combined";
     if (selectedSystem === "") {
-      eligibleNodes.forEach(function (node) { visibleNodeIds.add(node.id()); });
+      eligibleNodes.forEach(function (node) {
+        if (recordPresence(node.data("comparison_record"), currentView)) visibleNodeIds.add(node.id());
+      });
     } else {
       var selectedNodes = eligibleNodes.filter(function (node) {
-        return node.data("system") === selectedSystem;
+        return nodeBelongsInView(node, selectedSystem, comparisonMode ? revisionView : "combined");
       });
       selectedNodes.forEach(function (node) { visibleNodeIds.add(node.id()); });
       if (showCrossSystemConnections) {
@@ -381,10 +559,13 @@
           if (hiddenEdgeKinds.indexOf(edge.data("kind")) >= 0) return;
           var source = edge.source();
           var target = edge.target();
-          var sourceSelected = source.data("system") === selectedSystem;
-          var targetSelected = target.data("system") === selectedSystem;
-          if (sourceSelected && eligibleNodes.contains(target)) visibleNodeIds.add(target.id());
-          if (targetSelected && eligibleNodes.contains(source)) visibleNodeIds.add(source.id());
+          if (!edgePresentInView(edge, currentView)) return;
+          var sourceSelected = nodeBelongsInView(source, selectedSystem, currentView);
+          var targetSelected = nodeBelongsInView(target, selectedSystem, currentView);
+          if (sourceSelected && eligibleNodes.contains(target)
+              && edgeTouchesSystemInView(edge, selectedSystem, currentView)) visibleNodeIds.add(target.id());
+          if (targetSelected && eligibleNodes.contains(source)
+              && edgeTouchesSystemInView(edge, selectedSystem, currentView)) visibleNodeIds.add(source.id());
         });
       }
     }
@@ -393,16 +574,19 @@
         if (visibleNodeIds.has(node.id())) { node.show(); } else { node.hide(); }
         node.toggleClass(
           "outside-system",
-          showCrossSystemConnections && node.data("system") !== selectedSystem
+          showCrossSystemConnections && !nodeBelongsInView(
+            node, selectedSystem, comparisonMode ? revisionView : "combined"
+          )
         );
       });
       cy.edges().forEach(function (e) {
         var srcHidden = !e.source().visible();
         var tgtHidden = !e.target().visible();
-        var unrelated = selectedSystem !== ""
-          && e.source().data("system") !== selectedSystem
-          && e.target().data("system") !== selectedSystem;
-        if (srcHidden || tgtHidden || unrelated
+        var unrelated = selectedSystem !== "" && !edgeTouchesSystemInView(e, selectedSystem, currentView);
+        var wrongSide = comparisonMode && !edgePresentInView(e, currentView);
+        var invalidInternal = selectedSystem !== "" && !showCrossSystemConnections
+          && !edgeHasInternalInView(e, selectedSystem, currentView);
+        if (srcHidden || tgtHidden || unrelated || wrongSide || invalidInternal
             || hiddenEdgeKinds.indexOf(e.data("kind")) >= 0) {
           e.hide();
         } else {
@@ -420,7 +604,7 @@
     if (selectedElement && !selectedElement.visible()) {
       closeAll();
     }
-    runLayout(animate !== false);
+    if (shouldRelayout) runLayout(animate !== false);
   }
 
   // --- Search ---
@@ -880,6 +1064,10 @@
 
   function runLayout(animate) {
     stopLayout();
+    if (comparisonMode) {
+      runComparisonLayout(animate);
+      return;
+    }
     var visible = cy.elements(":visible");
     if (!visible.nodes().length) return;
     var selectedSystem = systemFilterEl.value;
@@ -894,6 +1082,87 @@
     activeLayout = visible.layout({
       name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15,
       padding: 30, animate: animate !== false, animationDuration: 300
+    });
+    activeLayout.run();
+  }
+
+  function checkedComparisonNodes() {
+    var hiddenKinds = [];
+    kindsEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      if (!cb.checked) hiddenKinds.push(cb.dataset.kind);
+    });
+    return cy.nodes().not(".system-container").filter(function (node) {
+      return hiddenKinds.indexOf(node.data("node_class")) < 0
+        && recordPresence(node.data("comparison_record"), "combined");
+    });
+  }
+
+  function checkedComparisonEdges() {
+    var hiddenKinds = [];
+    edgesEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      if (!cb.checked) hiddenKinds.push(cb.dataset.edgekind);
+    });
+    return cy.edges().filter(function (edge) {
+      return hiddenKinds.indexOf(edge.data("kind")) < 0
+        && edgePresentInView(edge, "combined");
+    });
+  }
+
+  function comparisonLayoutEligible(node, selectedSystem, showCross) {
+    if (selectedSystem === "") return true;
+    if (nodeBelongsTo(node, selectedSystem, "before")
+        || nodeBelongsTo(node, selectedSystem, "after")) return true;
+    if (!showCross) return false;
+    return checkedComparisonEdges().some(function (edge) {
+      return (edge.source().id() === node.id() || edge.target().id() === node.id())
+        && edgeTouchesSystemInView(edge, selectedSystem, "combined");
+    });
+  }
+
+  function comparisonLayoutEdgeEligible(edge, selectedSystem, showCross, nodes) {
+    if (!nodes.contains(edge.source()) || !nodes.contains(edge.target())) return false;
+    if (selectedSystem === "") return true;
+    if (showCross) return edgeTouchesSystemInView(edge, selectedSystem, "combined");
+    return edgeHasInternalInView(edge, selectedSystem, "combined");
+  }
+
+  function runComparisonLayout(animate) {
+    var selectedSystem = systemFilterEl.value;
+    var showCrossSystemConnections = selectedSystem !== "" && crossSystemConnectionsEl.checked;
+    var nodes = checkedComparisonNodes().filter(function (node) {
+      return comparisonLayoutEligible(node, selectedSystem, showCrossSystemConnections);
+    });
+    var edges = checkedComparisonEdges().filter(function (edge) {
+      return comparisonLayoutEdgeEligible(edge, selectedSystem, showCrossSystemConnections, nodes);
+    });
+    var layoutElements = nodes.union(edges);
+    layoutRuns += 1;
+    var cacheKey = [layoutDir, selectedSystem, showCrossSystemConnections,
+      nodes.map(function (node) { return node.id(); }).sort().join(","),
+      edges.map(function (edge) { return edge.id(); }).sort().join(",")].join("|");
+    var cached = comparisonLayoutCache.get(cacheKey);
+    if (cached) {
+      nodes.forEach(function (node) {
+        var position = cached.positions[node.id()];
+        if (position) node.position(position);
+      });
+      if (cached.zoom !== undefined) cy.zoom(cached.zoom);
+      if (cached.pan) cy.pan(cached.pan);
+      if (selectedSystem !== "" && showCrossSystemConnections) createSystemContainers(selectedSystem);
+      return;
+    }
+    if (!nodes.length) return;
+    activeLayout = layoutElements.layout({
+      name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15,
+      padding: 30, fit: true, animate: animate !== false, animationDuration: 300
+    });
+    activeLayout.one("layoutstop", function () {
+      var positions = {};
+      nodes.forEach(function (node) { positions[node.id()] = node.position(); });
+      comparisonLayoutCache.set(cacheKey, {
+        positions: positions, zoom: cy.zoom(), pan: cy.pan()
+      });
+      if (selectedSystem !== "" && showCrossSystemConnections) createSystemContainers(selectedSystem);
     });
     activeLayout.run();
   }
@@ -993,6 +1262,10 @@
   // inspection; callers can observe the rendered graph without mutating state.
   window.minotaurVisualizer = {
     cy: cy,
-    activeTheme: function () { return { name: activeThemeName, selected: activeTheme.selected }; }
+    activeTheme: function () { return { name: activeThemeName, selected: activeTheme.selected }; },
+    comparison: comparisonMode,
+    revisionView: function () { return revisionView; },
+    layoutRuns: function () { return layoutRuns; },
+    layoutCacheSize: function () { return comparisonLayoutCache.size; }
   };
 }());

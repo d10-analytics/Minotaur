@@ -214,6 +214,17 @@ body {
   cursor: pointer;
   font: inherit;
 }
+
+#revision-view {
+  background: var(--button-bg);
+  border: 1px solid var(--control-border);
+  color: var(--control-text);
+  border-radius: 3px;
+  padding: 4px 22px 4px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+#revision-view:focus { outline: none; border-color: var(--accent); }
 #theme-mode:focus { outline: none; border-color: var(--accent); }
 
 .btn {
