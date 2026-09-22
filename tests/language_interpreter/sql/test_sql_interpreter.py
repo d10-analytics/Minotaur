@@ -274,6 +274,46 @@ EXEC sys.sp_dropextendedproperty @name=N'x'
     assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 0
 
 
+def test_bare_and_sys_extended_property_executes_are_graph_neutral(tmp_path: Path) -> None:
+    procedures = (
+        "sp_addextendedproperty",
+        "sp_updateextendedproperty",
+        "sp_dropextendedproperty",
+    )
+    statements = [
+        f"{keyword} {prefix}{procedure} @name=N'x', @value=N'y'"
+        for keyword in ("EXEC", "EXECUTE")
+        for prefix in ("", "sys.")
+        for procedure in procedures
+    ]
+    result = _analyze(tmp_path, **{"property.sql": "\nGO\n".join(statements)})
+
+    assert not result.diagnostics
+    assert not _symbols(result)
+    assert not result.document.relationships
+
+
+def test_qualified_and_unrelated_executes_remain_unsupported(tmp_path: Path) -> None:
+    statements = (
+        "EXEC dbo.sp_addextendedproperty @name=N'x', @value=N'y'",
+        "EXECUTE dbo.sp_addextendedproperty @name=N'x', @value=N'y'",
+        "EXEC database.sys.sp_updateextendedproperty @name=N'x', @value=N'y'",
+        "EXECUTE database.sys.sp_updateextendedproperty @name=N'x', @value=N'y'",
+        "EXEC sys..sp_dropextendedproperty @name=N'x'",
+        "EXECUTE sys..sp_dropextendedproperty @name=N'x'",
+        "EXEC sp_rename N'x', N'y'",
+        "EXECUTE sp_rename N'x', N'y'",
+    )
+    result = _analyze(tmp_path, **{"unsupported.sql": "\nGO\n".join(statements)})
+
+    assert not _symbols(result)
+    assert not result.document.relationships
+    assert not any(d.code == DiagnosticCode.AMBIGUOUS_REFERENCE for d in result.diagnostics)
+    assert [d.code for d in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX] * len(
+        statements
+    )
+
+
 def test_complete_index_neutral_predicate_never_resolves_a_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

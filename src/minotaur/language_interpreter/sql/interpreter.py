@@ -597,14 +597,7 @@ def _valid_index(tree: Any) -> bool:
 
 def _neutral_statement(tree: exp.Expression) -> bool:
     if isinstance(tree, exp.Execute):
-        target = tree.this
-        parts = _parts(target) if isinstance(target, exp.Table) else None
-        return bool(
-            parts
-            and len(parts) == 2
-            and parts[0].casefold() == "sys"
-            and parts[1].casefold() in _PROPERTY_PROCEDURES
-        )
+        return _property_execute_target(tree.this)
     if isinstance(tree, exp.Alter):
         target = tree.this
         parts = _parts(target) if isinstance(target, exp.Table) else None
@@ -624,6 +617,22 @@ def _neutral_statement(tree: exp.Expression) -> bool:
             for action in actions
         )
     return False
+
+
+def _property_execute_target(target: exp.Expression) -> bool:
+    if not isinstance(target, exp.Table):
+        return False
+    procedure = target.args.get("this")
+    if not isinstance(procedure, exp.Identifier):
+        return False
+    if target.args.get("catalog") is not None:
+        return False
+    database = target.args.get("db")
+    if database is not None and (
+        not isinstance(database, exp.Identifier) or str(database.this).casefold() != "sys"
+    ):
+        return False
+    return str(procedure.this).casefold() in _PROPERTY_PROCEDURES
 
 
 def _unsupported(
