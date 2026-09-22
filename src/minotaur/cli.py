@@ -1062,8 +1062,12 @@ def _acquire_systems_pair(query: argparse.Namespace) -> _SystemsPair:
             after, after_coordinate, _producer_for(new_observations), validate=True
         )
         _require_pair_targets_materialized(old, new)
-        before_sources = capture_source_bytes(before.root, _document_paths(old.graph.document))
-        after_sources = capture_source_bytes(after.root, _document_paths(new.graph.document))
+        before_sources = capture_source_bytes(
+            _captured_side_root(old), _document_paths(old.graph.document)
+        )
+        after_sources = capture_source_bytes(
+            _captured_side_root(new), _document_paths(new.graph.document)
+        )
         protected_files, protected_directories = _protected_comparison_paths(
             worktree, (old, new), (before_coordinate, after_coordinate)
         )
@@ -1207,30 +1211,39 @@ def _document_paths(document: GraphDocument) -> tuple[str, ...]:
     return tuple(sorted({node.path for node in document.nodes if node.path}))
 
 
-def _present_targets(analysis: Any) -> frozenset[str]:
-    """Return the declared target coordinates that exist in one capture."""
-    present: set[str] = set()
-    root = analysis.snapshot.root
-    for coordinate in analysis.normalized_targets:
-        parts = tuple(part for part in coordinate.split("/") if part not in {"", "."})
-        candidate = root.joinpath(*parts) if parts else root
-        try:
-            os.lstat(candidate)
-        except OSError:
-            continue
-        present.add(coordinate)
-    return frozenset(present)
+def _captured_side_root(analysis: Any) -> Path:
+    """Resolve one captured side's configured analysis root below its snapshot."""
+    parts = tuple(part for part in analysis.normalized_root.split("/") if part not in {"", "."})
+    root = Path(analysis.snapshot.root)
+    return root.joinpath(*parts) if parts else root
+
+
+def _capture_present(root: Path, coordinate: str) -> bool:
+    """Return whether a repository-relative coordinate exists in one capture."""
+    parts = tuple(part for part in coordinate.split("/") if part not in {"", "."})
+    candidate = root.joinpath(*parts) if parts else root
+    try:
+        os.lstat(candidate)
+    except OSError:
+        return False
+    return True
 
 
 def _require_pair_targets_materialized(old: Any, new: Any) -> None:
-    """Reject a declared target that is absent on both captured sides."""
-    before_present = _present_targets(old)
-    after_present = _present_targets(new)
+    """Reject a declared target that is absent on both captured sides.
+
+    A target declared by one side may legitimately name a coordinate that
+    exists only on the opposite captured tree, so a deletion or addition stays
+    representable.  Only a coordinate absent from both trees is unresolvable.
+    """
+    before_root = old.snapshot.root
+    after_root = new.snapshot.root
     declared = set(old.normalized_targets) | set(new.normalized_targets)
     absent = sorted(
         coordinate
         for coordinate in declared
-        if coordinate not in before_present and coordinate not in after_present
+        if not _capture_present(before_root, coordinate)
+        and not _capture_present(after_root, coordinate)
     )
     if absent:
         raise ValueError(
