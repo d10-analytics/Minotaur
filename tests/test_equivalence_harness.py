@@ -24,7 +24,7 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # reviewed single-view artifact commit: across the advance the graph, Drift, and
 # query rows stayed byte-identical and only the intentional viewer-asset HTML
 # changed, which the advance proof below re-checks against the previous pin.
-BASELINE_COMMIT = "2a00c51cfff2183f094ccf48dc4cd60483bc603a"
+BASELINE_COMMIT = "4cb9bef4246d1461b48e27c908c812d39f946ff4"
 # Preserve the historical fixture provenance independently of output revisions.
 FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
 
