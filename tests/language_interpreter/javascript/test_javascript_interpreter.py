@@ -122,6 +122,44 @@ def test_esm_declarations_imports_calls_and_metadata(tmp_path):
     )
 
 
+def test_javascript_call_observations_ignore_formatting_and_retain_literals(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function helper(value) { return value; }\n"
+                "function run() { helper(1); /* first */ helper(1); }\n"
+            )
+        },
+    )
+
+    observations = result.call_expressions
+    assert len(observations) == 2
+    assert all(item.language == "javascript" for item in observations)
+    assert observations[0].callee_location.range.start.character == len("function run() { ")
+    assert observations[0].expression_location.range.start.character == len("function run() { ")
+    assert observations[0].fingerprint == observations[1].fingerprint
+
+    reformatted = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function helper(value) { return value; }\n"
+                "function run() {\n  helper(1);\n  helper(1);\n}\n"
+            )
+        },
+    )
+    assert [item.fingerprint for item in reformatted.call_expressions] == [
+        item.fingerprint for item in observations
+    ]
+
+    changed_literal = _analyze(
+        tmp_path,
+        {"app.js": "function helper(value) { return value; }\nfunction run() { helper(2); }\n"},
+    )
+    assert changed_literal.call_expressions[0].fingerprint != observations[0].fingerprint
+
+
 def test_declaration_kinds_containment_and_anonymous_default_exclusion(tmp_path):
     result = _analyze(
         tmp_path,
