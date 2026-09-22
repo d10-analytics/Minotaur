@@ -462,3 +462,65 @@ body {
   line-height: 1.4;
   z-index: 100;
 }
+
+/* Comparison context stays outside the details panel so it never competes with
+   an inspected node or edge, and it never introduces a disappearance message. */
+#comparison-header {
+  flex-shrink: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+#comparison-status-line {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.comparison-message {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.comparison-legend { color: var(--text-muted); }
+
+#comparison-summary { margin-top: 4px; }
+
+#comparison-summary summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+#comparison-summary-body ul {
+  margin: 4px 0 2px 18px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+#comparison-summary-body li {
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+
+.comparison-notices { margin-top: 4px; }
+
+.comparison-notice {
+  color: var(--text-muted);
+  font-size: 11px;
+  border-left: 3px solid var(--border);
+  padding-left: 8px;
+  margin-top: 3px;
+}
+
+#detail .structural-absent {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+#detail .comparison-status .field-value { font-weight: 700; }
+

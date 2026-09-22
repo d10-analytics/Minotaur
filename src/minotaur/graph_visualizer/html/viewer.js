@@ -3,12 +3,9 @@
   var payload = JSON.parse(document.getElementById("minotaur-presentation").textContent);
   var graph = payload.graph || { nodes: [], relationships: [] };
   var comparisonPayload = payload.comparison || null;
-  var comparisonMode = Boolean(
-    comparisonPayload && Array.isArray(graph.nodes) && graph.nodes.some(function (node) {
-      return Object.prototype.hasOwnProperty.call(node, "before")
-        || Object.prototype.hasOwnProperty.call(node, "after");
-    })
-  );
+  // A comparison payload is present even when it has no drawable node, for
+  // example a comparison whose only stored change is an added empty system.
+  var comparisonMode = Boolean(comparisonPayload);
   var revisionView = comparisonMode ? "combined" : null;
   // Excerpts are deliberately a separate presentation concern: graph JSON
   // remains portable structural evidence even when no source root is trusted.
@@ -22,6 +19,21 @@
   var layoutRuns = 0;
   var comparisonLayoutCache = new Map();
   var comparisonContainerGeometry = new Map();
+  // The emphasis control, the no-change message, and the detail panel are all
+  // presentations of stored comparison facts. Nothing here recomputes status
+  // from the two snapshots; the payload already classified every record.
+  var emphasisEl = document.getElementById("emphasis-changes");
+  var noChangeState = comparisonMode
+    && comparisonPayload !== null
+    && comparisonPayload.changed === false;
+  var comparisonLimitations = comparisonMode && comparisonPayload
+    ? (comparisonPayload.limitations || [])
+    : [];
+  // Change emphasis is derived only from stored statuses: a changed record, or a
+  // call-change residual for the relationship, plus the endpoints of changed
+  // relationships. It is never inferred from a label or a source difference.
+  var changedNodeIds = new Set();
+  var changedEdgeIds = new Set();
   var themeModeEl = document.getElementById("theme-mode");
   var systemColorScheme = window.matchMedia("(prefers-color-scheme: dark)");
   // One shared value prevents node and edge labels from drifting apart as the
@@ -54,6 +66,83 @@
     if (view === "before") return sidePresent(record, "before");
     if (view === "after") return sidePresent(record, "after");
     return sidePresent(record, "before") || sidePresent(record, "after");
+  }
+
+  function titleCase(value) {
+    return String(value === null || value === undefined ? "" : value)
+      .replace(/[_-]+/g, " ")
+      .replace(/(^|\s)([a-z])/g, function (match, space, letter) {
+        return space + letter.toUpperCase();
+      });
+  }
+
+  function recordChanged(record) {
+    return Boolean(record) && ["added", "removed", "changed"].indexOf(record.status) >= 0;
+  }
+
+  function comparisonCallChanges() {
+    return comparisonMode && comparisonPayload && Array.isArray(comparisonPayload.calls)
+      ? comparisonPayload.calls
+      : [];
+  }
+
+  function callChangeFor(relationshipId) {
+    var found = null;
+    comparisonCallChanges().forEach(function (change) {
+      if (change && (change.id === relationshipId
+          || change.relationship_id === relationshipId)) {
+        found = change;
+      }
+    });
+    return found;
+  }
+
+  function computeChangeEmphasis() {
+    changedNodeIds = new Set();
+    changedEdgeIds = new Set();
+    if (!comparisonMode) return;
+    var callChanged = new Set();
+    comparisonCallChanges().forEach(function (change) {
+      if (recordChanged(change)) callChanged.add(change.id || change.relationship_id);
+    });
+    graph.nodes.forEach(function (node) {
+      if (recordChanged(node)) changedNodeIds.add(node.id);
+    });
+    graph.relationships.forEach(function (relationship) {
+      if (recordChanged(relationship) || callChanged.has(relationship.id)) {
+        changedEdgeIds.add(relationship.id);
+      }
+    });
+    graph.relationships.forEach(function (relationship) {
+      if (!changedEdgeIds.has(relationship.id)) return;
+      if (relationship.source) changedNodeIds.add(relationship.source);
+      if (relationship.target) changedNodeIds.add(relationship.target);
+    });
+  }
+
+  function comparisonExcerpts(side) {
+    var excerpts = payload.excerpts || {};
+    var sideRecord = excerpts[side];
+    if (sideRecord && typeof sideRecord === "object") return sideRecord;
+    return { paths: {}, call_sites: {} };
+  }
+
+  function excerptPathsForSide(side) {
+    if (!comparisonMode) return excerptPaths;
+    return comparisonExcerpts(side).paths || {};
+  }
+
+  function comparisonOrigin(side) {
+    var revisions = comparisonPayload && comparisonPayload.revisions
+      ? comparisonPayload.revisions
+      : {};
+    var name = side === "before" ? revisions.old : revisions.new;
+    var label = side === "before" ? "Before" : "After";
+    return "Captured " + label + " revision" + (name ? ": " + String(name) : "") + ".";
+  }
+
+  function sideLabel(side) {
+    return side === "before" ? "Before" : "After";
   }
 
   function sideSystems(record, side) {
@@ -583,7 +672,84 @@
     if (themeModeEl.value === "system") applyTheme();
   });
 
-  applyFilters(false);
+  function changeEmphasisActive() {
+    return comparisonMode && emphasisEl && !emphasisEl.disabled && emphasisEl.checked;
+  }
+
+  function searchQuery() {
+    return searchEl ? searchEl.value.trim().toLowerCase() : "";
+  }
+
+  function nodeMatchesSearch(node, query) {
+    var label = (node.data("label") || "").toLowerCase();
+    var path = (node.data("path") || "").toLowerCase();
+    var ref = (node.data("reference_text") || "").toLowerCase();
+    return label.indexOf(query) >= 0 || path.indexOf(query) >= 0 || ref.indexOf(query) >= 0;
+  }
+
+  function applySelectionClasses(selection) {
+    cy.elements().addClass("faded").removeClass("highlighted");
+    if (selection.isNode()) {
+      selection.addClass("highlighted").removeClass("faded");
+      selection.neighborhood().addClass("highlighted").removeClass("faded");
+    } else {
+      selection.addClass("highlighted").removeClass("faded");
+      selection.source().addClass("highlighted").removeClass("faded");
+      selection.target().addClass("highlighted").removeClass("faded");
+    }
+  }
+
+  function applySearchClasses(query) {
+    // Search must not reveal an item the active view or filters exclude, so a
+    // revision-hidden fact is skipped rather than highlighted back into view.
+    cy.nodes().not(".system-container").forEach(function (node) {
+      if (node.hidden() || node.hasClass("revision-hidden")) return;
+      if (nodeMatchesSearch(node, query)) {
+        node.removeClass("dimmed").addClass("highlighted");
+      } else {
+        node.addClass("dimmed").removeClass("highlighted");
+      }
+    });
+    cy.edges().forEach(function (edge) {
+      if (edge.hidden()) return;
+      if (edge.source().hasClass("dimmed") && edge.target().hasClass("dimmed")) {
+        edge.addClass("dimmed");
+      } else {
+        edge.removeClass("dimmed");
+      }
+    });
+  }
+
+  function applyChangeClasses() {
+    cy.nodes().not(".system-container").forEach(function (node) {
+      if (node.hidden() || node.hasClass("revision-hidden")) return;
+      node.toggleClass("dimmed", !changedNodeIds.has(node.id()));
+    });
+    cy.edges().forEach(function (edge) {
+      if (edge.hidden()) return;
+      edge.toggleClass("dimmed", !changedEdgeIds.has(edge.id()));
+    });
+  }
+
+  // One priority path: selection, then a nonempty search, then change emphasis,
+  // then ordinary opacity. Each pass recomputes from the current state, so
+  // clearing a lower-priority state can never override an active higher one.
+  function applyEmphasis() {
+    cy.batch(function () {
+      cy.elements().removeClass("dimmed highlighted faded");
+      if (selectedElement && selectedElement.visible()
+          && !selectedElement.hasClass("revision-hidden")) {
+        applySelectionClasses(selectedElement);
+        return;
+      }
+      var query = searchQuery();
+      if (query) {
+        applySearchClasses(query);
+        return;
+      }
+      if (changeEmphasisActive()) applyChangeClasses();
+    });
+  }
 
   function applyFilters(animate, options) {
     options = options || {};
@@ -690,9 +856,14 @@
       });
     });
     // Hidden selections must clear their details and emphasis; retaining a
-    // panel for an element the user can no longer see is misleading.
-    if (selectedElement && !selectedElement.visible()) {
+    // panel for an element the user can no longer see is misleading. A
+    // revision-excluded fact stays mounted (to keep union geometry stable) but
+    // is opacity-hidden, so it counts as hidden here too.
+    if (selectedElement && (!selectedElement.visible()
+        || selectedElement.hasClass("revision-hidden"))) {
       closeAll();
+    } else {
+      applyEmphasis();
     }
     if (shouldRelayout) runLayout(animate !== false);
   }
@@ -708,31 +879,7 @@
   });
 
   function doSearch() {
-    var q = searchEl.value.trim().toLowerCase();
-    if (!q) {
-      cy.nodes().not(".system-container").removeClass("dimmed highlighted");
-      cy.edges().removeClass("dimmed");
-      return;
-    }
-    cy.batch(function () {
-      cy.nodes().not(".system-container").forEach(function (n) {
-        var label = (n.data("label") || "").toLowerCase();
-        var path = (n.data("path") || "").toLowerCase();
-        var ref = (n.data("reference_text") || "").toLowerCase();
-        if (label.indexOf(q) >= 0 || path.indexOf(q) >= 0 || ref.indexOf(q) >= 0) {
-          n.removeClass("dimmed").addClass("highlighted");
-        } else {
-          n.addClass("dimmed").removeClass("highlighted");
-        }
-      });
-      cy.edges().forEach(function (e) {
-        if (e.source().hasClass("dimmed") && e.target().hasClass("dimmed")) {
-          e.addClass("dimmed");
-        } else {
-          e.removeClass("dimmed");
-        }
-      });
-    });
+    applyEmphasis();
   }
 
   // --- Helpers ---
@@ -774,12 +921,19 @@
     return loc.path + "|" + r.start.line + ":" + r.start.character + "-" + r.end.line + ":" + r.end.character;
   }
 
-  function callSitesForEdge(d) {
+  function rawCallSites(d, side) {
+    if (comparisonMode) {
+      return comparisonExcerpts(side).call_sites[d.id] || [];
+    }
+    return d.call_sites || [];
+  }
+
+  function callSitesForEdge(d, side) {
     // Evidence records may independently support the same physical call. The
     // selector represents a location a reader can inspect, not each producer's
     // record, while provenance remains visible as the reason it is supported.
     var sites = new Map();
-    (d.call_sites || []).forEach(function (association) {
+    rawCallSites(d, side).forEach(function (association) {
       var key = physicalLocationKey(association.location);
       var site = sites.get(key);
       if (!site) {
@@ -796,8 +950,8 @@
     return Array.from(sites.values());
   }
 
-  function excerptLines(path, start, end) {
-    var excerpt = excerptPaths[path];
+  function excerptLines(path, start, end, paths) {
+    var excerpt = (paths || excerptPaths)[path];
     if (!excerpt || excerpt.status !== "available") return null;
     var rows = [];
     var cursor = start;
@@ -820,13 +974,15 @@
     return rows;
   }
 
-  function renderCallSite(site, mode) {
+  function renderCallSite(site, mode, paths, originNote) {
     var location = site.location;
     var range = location.range;
-    var excerpt = excerptPaths[location.path];
+    var excerpt = (paths || excerptPaths)[location.path];
     var html = '<div class="field"><div class="field-label">Location</div><div class="field-value">' + escHtml(locationLabel(location)) + '</div></div>';
     html += '<div class="field"><div class="field-label">Supporting provenance</div><div class="field-value">' + escHtml(site.provenance.join(", ")) + '</div></div>';
-    html += '<div class="excerpt-origin">Derived from the source root at visualization time; it may not match the graph analysis snapshot.</div>';
+    html += '<div class="excerpt-origin">' + escHtml(
+      originNote || "Derived from the source root at visualization time; it may not match the graph analysis snapshot."
+    ) + '</div>';
     if (!excerpt || excerpt.status !== "available") {
       html += '<div class="excerpt-unavailable">Source context unavailable: ' + escHtml(excerpt ? excerpt.reason : "no excerpt was embedded") + '</div>';
       return html;
@@ -835,7 +991,7 @@
     // when extraction established a real enclosing caller boundary.
     var start = mode === "caller" ? site.caller_start : Math.max(0, range.start.line - 50);
     var end = mode === "caller" ? range.end.line + 1 : range.end.line + 51;
-    var rows = excerptLines(location.path, start, end);
+    var rows = excerptLines(location.path, start, end, paths);
     html += '<div class="code-excerpt" aria-label="Source excerpt">';
     rows.forEach(function (row) {
       if (row.omitted) {
@@ -913,48 +1069,42 @@
 
   setDetailWidth(detailEl.getBoundingClientRect().width);
 
-  function clearHighlights() {
-    cy.elements().removeClass("highlighted faded");
-  }
-
   function closeAll() {
     clearDetail();
-    clearHighlights();
+    applyEmphasis();
   }
 
   clearDetail();
+
+  // Initial comparison presentation is data-driven: emphasis is derived from
+  // stored statuses, the no-change state from the complete stored boolean, and
+  // the summary from the stored system change categories.
+  computeChangeEmphasis();
+  initComparisonControls();
+  renderComparisonSummary();
+  applyFilters(false);
 
   // --- Node click: update details panel ---
   // Details are persistent rather than a popover so evidence has no competing
   // overlay dimensions and remains visible while the graph is explored.
   cy.on("tap", "node", function (evt) {
-    var n = evt.target;
-    selectedElement = n;
-    showNodeDetail(n);
-
-    var neighborhood = n.neighborhood();
-    cy.batch(function () {
-      cy.elements().addClass("faded").removeClass("highlighted");
-      n.addClass("highlighted").removeClass("faded");
-      neighborhood.addClass("highlighted").removeClass("faded");
-    });
+    selectedElement = evt.target;
+    showNodeDetail(evt.target);
+    applyEmphasis();
   });
 
   // --- Edge click: update details panel ---
   cy.on("tap", "edge", function (evt) {
-    var e = evt.target;
-    selectedElement = e;
-    showEdgeDetail(e);
-
-    cy.batch(function () {
-      cy.elements().addClass("faded").removeClass("highlighted");
-      e.addClass("highlighted").removeClass("faded");
-      e.source().addClass("highlighted").removeClass("faded");
-      e.target().addClass("highlighted").removeClass("faded");
-    });
+    selectedElement = evt.target;
+    showEdgeDetail(evt.target);
+    applyEmphasis();
   });
 
   function showNodeDetail(n) {
+    if (comparisonMode) {
+      showComparisonNodeDetail(n);
+      return;
+    }
     var d = n.data();
     var raw = byId.get(d.id);
     var c = CLASS_COLORS[d.node_class] || { bg: "#ddd", border: "#999" };
@@ -1000,12 +1150,16 @@
   }
 
   function showEdgeDetail(e) {
+    if (comparisonMode) {
+      showComparisonEdgeDetail(e);
+      return;
+    }
     var d = e.data();
     var c = EDGE_KIND_COLORS[d.kind] || { bg: "#ddd", border: "#999" };
     var srcLabel = e.source().data("label");
     var tgtLabel = e.target().data("label");
     var locs = collectLocations(d.evidence);
-    var sites = d.kind === "calls" ? callSitesForEdge(d) : [];
+    var sites = d.kind === "calls" ? callSitesForEdge(d, null) : [];
 
     var html = badgeHtml(d.kind, c);
     html += '<h3>' + escHtml(srcLabel) + ' → ' + escHtml(tgtLabel) + '</h3>';
@@ -1080,6 +1234,295 @@
         document.getElementById("site-location").textContent = locationLabel(locs[idx]);
       });
     }
+  }
+
+  // --- Comparison details: stored status, sides, and one source excerpt ---
+  // Every value below is read from the immutable comparison payload. The panel
+  // never decides whether something changed; it only labels what it was told.
+  function comparisonStatusField(text) {
+    return '<div class="field comparison-status"><div class="field-label">Status</div><div class="field-value">' + escHtml(text) + '</div></div>';
+  }
+
+  function reasonSuffix(reasons) {
+    if (!reasons || !reasons.length) return "";
+    return " · " + reasons.map(titleCase).join(", ");
+  }
+
+  function structuralSideFields(record) {
+    var html = "";
+    ["before", "after"].forEach(function (side) {
+      html += '<div class="field"><div class="field-label">' + sideLabel(side) + '</div>';
+      if (!sidePresent(record, side)) {
+        html += '<div class="field-value structural-absent">Not present</div>';
+      } else {
+        var value = sidePayload(record, side) || {};
+        var parts = [];
+        if (value.label) parts.push(value.label);
+        if (value.location && value.location.range) {
+          parts.push(value.location.path + ":" + (value.location.range.start.line + 1));
+        } else if (value.path) {
+          parts.push(value.path);
+        }
+        html += '<div class="field-value">' + escHtml(parts.join(" · ") || "present") + '</div>';
+      }
+      html += '</div>';
+    });
+    return html;
+  }
+
+  function showComparisonNodeDetail(n) {
+    var record = n.data("comparison_record") || {};
+    var d = n.data();
+    var c = CLASS_COLORS[d.node_class] || { bg: "#ddd", border: "#999" };
+    var status = titleCase(record.status || "unchanged");
+    if ((record.status || "unchanged") === "unchanged" && changedNodeIds.has(n.id())) {
+      // Emphasis because of a changed connection is stated explicitly so the
+      // node is never relabeled as changed by the visual treatment alone.
+      status += " · Connected to a changed relationship";
+    }
+    var html = badgeHtml(d.node_class, c);
+    html += '<h3>' + escHtml(d.label) + '</h3>';
+    html += comparisonStatusField(status);
+    if (record.reasons && record.reasons.length) {
+      html += '<div class="field"><div class="field-label">Reasons</div><div class="field-value">' + escHtml(record.reasons.map(titleCase).join(", ")) + '</div></div>';
+    }
+    html += '<div class="field"><div class="field-label">Membership</div><div class="field-value">' + escHtml((record.involved_systems || []).join(", ") || "unassigned") + '</div></div>';
+    html += structuralSideFields(record);
+    detailContent.innerHTML = html;
+  }
+
+  function showComparisonEdgeDetail(e) {
+    var d = e.data();
+    var record = d.comparison_record || {};
+    var call = callChangeFor(record.id);
+    var c = EDGE_KIND_COLORS[d.kind] || { bg: "#ddd", border: "#999" };
+    var html = badgeHtml(d.kind, c);
+    html += '<h3>' + escHtml(e.source().data("label")) + ' → ' + escHtml(e.target().data("label")) + '</h3>';
+    html += comparisonStatusField(titleCase(record.status || "unchanged") + reasonSuffix(record.reasons));
+    if (call) {
+      var callText = call.status === "unavailable"
+        ? "Call-expression comparison unavailable"
+        : titleCase(call.status) + reasonSuffix(call.reasons);
+      html += '<div class="field"><div class="field-label">Call expression</div><div class="field-value">' + escHtml(callText) + '</div></div>';
+    }
+    html += structuralSideFields(record);
+    if (d.kind === "calls") {
+      html += '<div class="field"><div class="field-label">Source revision</div><select id="source-revision" aria-label="Source revision"></select></div>';
+      // Only one side is rendered at a time, so the panel never holds two
+      // competing excerpt regions.
+      html += '<div id="comparison-side-detail"></div>';
+      detailContent.innerHTML = html;
+      setupComparisonSourceRegion(e, record);
+      return;
+    }
+    var locs = collectLocations(d.evidence);
+    if (locs.length === 0) {
+      html += '<div class="field"><div class="field-label">Location</div><div class="field-value">No source location available</div></div>';
+    } else {
+      html += '<div class="field"><div class="field-label">Location</div><div class="field-value">' + escHtml(locs.map(locationLabel).join(", ")) + '</div></div>';
+    }
+    detailContent.innerHTML = html;
+  }
+
+  function refocus(elementId) {
+    var element = document.getElementById(elementId);
+    if (element) element.focus();
+  }
+
+  function scrollHighlight() {
+    window.requestAnimationFrame(function () {
+      var detail = document.getElementById("call-site-detail");
+      if (!detail) return;
+      var highlighted = detail.querySelector(".call-site-highlight");
+      // Scroll only the code region, and never move focus away from a control.
+      if (highlighted) highlighted.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function sideExcerptUnavailableReason(side) {
+    var paths = excerptPathsForSide(side);
+    var keys = Object.keys(paths);
+    if (!keys.length) return null;
+    for (var index = 0; index < keys.length; index += 1) {
+      if (paths[keys[index]].status === "available") return null;
+    }
+    return paths[keys[0]].reason || "captured source bytes are unavailable";
+  }
+
+  function setupComparisonSourceRegion(edge, record) {
+    var sourceSelect = document.getElementById("source-revision");
+    var state = {
+      side: record.default_side === "before" ? "before" : "after",
+      perSide: {
+        before: { site: 0, mode: "window" },
+        after: { site: 0, mode: "window" },
+      },
+    };
+    ["before", "after"].forEach(function (side) {
+      var option = document.createElement("option");
+      option.value = side;
+      option.textContent = sideLabel(side) + (sidePresent(record, side) ? "" : " (not present)");
+      sourceSelect.appendChild(option);
+    });
+    sourceSelect.value = state.side;
+    renderComparisonSide(edge, record, state);
+    sourceSelect.addEventListener("change", function () {
+      // Details-only switch: the source revision never changes graph view,
+      // layout, zoom, pan, selection, or emphasis.
+      state.side = sourceSelect.value;
+      renderComparisonSide(edge, record, state);
+    });
+  }
+
+  function renderComparisonSide(edge, record, state) {
+    var container = document.getElementById("comparison-side-detail");
+    if (!container) return;
+    var side = state.side;
+    var sideState = state.perSide[side];
+    if (!sidePresent(record, side)) {
+      container.innerHTML = '<div class="field"><div class="field-label">' + sideLabel(side) + '</div><div class="field-value structural-absent">Not present</div></div>';
+      return;
+    }
+    var sites = callSitesForEdge(edge.data(), side);
+    if (!sites.length) {
+      var unavailableReason = sideExcerptUnavailableReason(side);
+      container.innerHTML = unavailableReason
+        ? '<div class="excerpt-unavailable">Source unavailable: ' + escHtml(unavailableReason) + '</div>'
+        : '<div class="field"><div class="field-label">' + sideLabel(side) + '</div><div class="field-value">No call site recorded</div></div>';
+      return;
+    }
+    if (sideState.site >= sites.length) sideState.site = 0;
+    var site = sites[sideState.site];
+    var modes = site.caller_start === undefined ? ["window"] : ["window", "caller"];
+    if (modes.indexOf(sideState.mode) < 0) sideState.mode = "window";
+    var html = '<div class="field"><div class="field-label">Call sites (' + sites.length + ')</div><select id="call-site-select" aria-label="Call sites">';
+    sites.forEach(function (item, index) {
+      html += '<option value="' + index + '"' + (index === sideState.site ? " selected" : "") + '>' + (index + 1) + '. ' + escHtml(locationLabel(item.location)) + '</option>';
+    });
+    html += '</select></div>';
+    html += '<div class="field"><div class="field-label">Context mode</div><select id="context-mode" aria-label="Context mode">';
+    modes.forEach(function (mode) {
+      html += '<option value="' + mode + '"' + (mode === sideState.mode ? " selected" : "") + '>' + (mode === "caller" ? "Caller start → call" : "Call-site window") + '</option>';
+    });
+    html += '</select></div>';
+    html += '<div id="call-site-detail"></div>';
+    container.innerHTML = html;
+    document.getElementById("call-site-detail").innerHTML = renderCallSite(
+      site, sideState.mode, excerptPathsForSide(side), comparisonOrigin(side)
+    );
+    var siteSelect = document.getElementById("call-site-select");
+    siteSelect.addEventListener("change", function () {
+      sideState.site = Number(siteSelect.value);
+      renderComparisonSide(edge, record, state);
+      refocus("call-site-select");
+      scrollHighlight();
+    });
+    var modeSelect = document.getElementById("context-mode");
+    modeSelect.addEventListener("change", function () {
+      sideState.mode = modeSelect.value;
+      renderComparisonSide(edge, record, state);
+      refocus("context-mode");
+      scrollHighlight();
+    });
+    scrollHighlight();
+  }
+
+  // --- Comparison summary and no-change presentation ---
+  function unavailableExpressionLimitation() {
+    return comparisonLimitations.some(function (item) {
+      return item && item.code === "call-expression-unavailable";
+    });
+  }
+
+  function changeSubject(change) {
+    var key = Array.isArray(change.key) ? change.key.join(" ") : String(change.key || "");
+    var beforeValue = change.old || {};
+    var afterValue = change.new || {};
+    var beforeLabel = beforeValue.system === undefined || beforeValue.system === null
+      ? null : String(beforeValue.system);
+    var afterLabel = afterValue.system === undefined || afterValue.system === null
+      ? null : String(afterValue.system);
+    if (beforeLabel !== null || afterLabel !== null) {
+      return key + " — " + (beforeLabel === null ? "unassigned" : beforeLabel)
+        + " -> " + (afterLabel === null ? "unassigned" : afterLabel);
+    }
+    return key;
+  }
+
+  function comparisonSummaryLines() {
+    var lines = [];
+    (comparisonPayload.added_systems || []).forEach(function (name) {
+      lines.push("system added: " + name);
+    });
+    (comparisonPayload.removed_systems || []).forEach(function (name) {
+      lines.push("system removed: " + name);
+    });
+    [
+      ["membership_changes", "membership"],
+      ["surface_changes", "surface"],
+      ["consumer_changes", "consumer"],
+      ["dependency_changes", "dependency"],
+      ["boundary_changes", "boundary"],
+    ].forEach(function (pair) {
+      (comparisonPayload[pair[0]] || []).forEach(function (change) {
+        lines.push(pair[1] + " " + titleCase(change.kind) + ": " + changeSubject(change));
+      });
+    });
+    (comparisonPayload.nodes || []).forEach(function (node) {
+      if (recordChanged(node)) lines.push("node " + titleCase(node.status) + ": " + node.id);
+    });
+    (comparisonPayload.relationships || []).forEach(function (relationship) {
+      if (recordChanged(relationship)) {
+        lines.push("relationship " + titleCase(relationship.status) + ": " + relationship.id);
+      }
+    });
+    comparisonCallChanges().forEach(function (change) {
+      if (recordChanged(change)) {
+        lines.push("call " + titleCase(change.status) + ": " + (change.id || change.relationship_id));
+      }
+    });
+    return lines;
+  }
+
+  function renderComparisonSummary() {
+    if (!comparisonMode || !comparisonPayload) return;
+    document.getElementById("comparison-header").hidden = false;
+    document.getElementById("comparison-legend").hidden = false;
+    var lines = comparisonSummaryLines();
+    document.getElementById("comparison-summary-body").innerHTML = lines.length
+      ? "<ul>" + lines.map(function (line) {
+        return "<li>" + escHtml(line) + "</li>";
+      }).join("") + "</ul>"
+      : "<p>No stored structural change categories.</p>";
+    if (comparisonLimitations.length) {
+      var noticesEl = document.getElementById("comparison-notices");
+      noticesEl.hidden = false;
+      noticesEl.innerHTML = comparisonLimitations.map(function (item) {
+        return '<div class="comparison-notice">' + escHtml(
+          "limitation " + item.side + ": " + item.code + ": " + item.message
+        ) + "</div>";
+      }).join("");
+    }
+    if (noChangeState) {
+      var noChangeEl = document.getElementById("comparison-no-change");
+      noChangeEl.hidden = false;
+      noChangeEl.textContent = "No structural changes found"
+        + (unavailableExpressionLimitation()
+          ? " · Call-expression comparison unavailable" : "");
+    }
+  }
+
+  function initComparisonControls() {
+    if (!comparisonMode) return;
+    document.getElementById("emphasis-control").hidden = false;
+    if (noChangeState) {
+      emphasisEl.checked = false;
+      emphasisEl.disabled = true;
+    } else {
+      emphasisEl.checked = true;
+      emphasisEl.disabled = false;
+    }
+    emphasisEl.addEventListener("change", applyEmphasis);
   }
 
   // --- Canvas click: close everything ---

@@ -19,12 +19,18 @@
     </select>
   </div>
   <div class="group comparison-control" id="revision-control" hidden>
-    <label class="group-label" for="revision-view">Revision</label>
-    <select id="revision-view" aria-label="Revision view">
+    <label class="group-label" for="revision-view">Graph view</label>
+    <select id="revision-view" aria-label="Graph view">
       <option value="combined">Combined</option>
       <option value="before">Before</option>
       <option value="after">After</option>
     </select>
+  </div>
+  <div class="group comparison-control" id="emphasis-control" hidden>
+    <label>
+      <input type="checkbox" id="emphasis-changes" checked>
+      Emphasize changes
+    </label>
   </div>
   <div class="group">
     <label>
@@ -56,6 +62,18 @@
     <button class="btn" id="btn-direction">TB</button>
     <button class="btn" id="btn-fit">Reset View</button>
   </div>
+</div>
+
+<div id="comparison-header" hidden>
+  <div id="comparison-status-line">
+    <span id="comparison-no-change" class="comparison-message" hidden></span>
+    <span id="comparison-legend" class="comparison-legend" hidden>Dimmed structure is unchanged; full opacity is changed. Colors keep their node-class and relationship-kind meaning.</span>
+  </div>
+  <details id="comparison-summary">
+    <summary id="comparison-summary-label">Comparison summary</summary>
+    <div id="comparison-summary-body"></div>
+  </details>
+  <div id="comparison-notices" class="comparison-notices" hidden></div>
 </div>
 
 <div id="main">
