@@ -332,16 +332,40 @@ def test_complete_index_neutral_predicate_never_resolves_a_target(
                 "CREATE INDEX missing_ix ON Missing(id)\nGO\n"
                 "CREATE UNIQUE INDEX qualified_ix ON S.Qualified(id DESC) INCLUDE (id)\nGO\n"
                 "CREATE INDEX qualified_missing_ix ON S.Missing(id) WITH (FILLFACTOR=80)\nGO\n"
+                "CREATE NONCLUSTERED INDEX nonclustered_table_ix ON T(id)\nGO\n"
+                "CREATE CLUSTERED INDEX clustered_view_ix ON V(id)\nGO\n"
+                "CREATE UNIQUE NONCLUSTERED INDEX un_missing_ix ON Missing(id)\nGO\n"
+                "CREATE UNIQUE CLUSTERED INDEX unique_clustered_table_ix ON T(id)\nGO\n"
                 "CREATE INDEX local_temp_ix ON #scratch(id)\nGO\n"
                 "CREATE INDEX global_temp_ix ON ##scratch(id)\nGO\n"
                 "CREATE INDEX variable_ix ON @scratch(id)\nGO\n"
                 "CREATE INDEX three_part_ix ON db.S.T(id)\nGO\n"
-                "CREATE INDEX empty_ix ON T"
+                "CREATE INDEX empty_ix ON T\nGO\n"
+                "CREATE NONCLUSTERED INDEX nonclustered_local_temp_ix ON #scratch(id)\nGO\n"
+                "CREATE NONCLUSTERED INDEX nonclustered_global_temp_ix ON ##scratch(id)\nGO\n"
+                "CREATE NONCLUSTERED INDEX nonclustered_variable_ix ON @scratch(id)\nGO\n"
+                "CREATE NONCLUSTERED INDEX nonclustered_three_part_ix ON db.S.T(id)\nGO\n"
+                "CREATE NONCLUSTERED INDEX nonclustered_empty_ix ON T\nGO\n"
+                "CREATE CLUSTERED INDEX clustered_local_temp_ix ON #scratch(id)\nGO\n"
+                "CREATE CLUSTERED INDEX clustered_global_temp_ix ON ##scratch(id)\nGO\n"
+                "CREATE CLUSTERED INDEX clustered_variable_ix ON @scratch(id)\nGO\n"
+                "CREATE CLUSTERED INDEX clustered_three_part_ix ON db.S.T(id)\nGO\n"
+                "CREATE CLUSTERED INDEX clustered_empty_ix ON T\nGO\n"
+                "CREATE UNIQUE NONCLUSTERED INDEX un_local_ix ON #scratch(id)\nGO\n"
+                "CREATE UNIQUE NONCLUSTERED INDEX un_global_ix ON ##scratch(id)\nGO\n"
+                "CREATE UNIQUE NONCLUSTERED INDEX un_variable_ix ON @scratch(id)\nGO\n"
+                "CREATE UNIQUE NONCLUSTERED INDEX un_three_part_ix ON db.S.T(id)\nGO\n"
+                "CREATE UNIQUE NONCLUSTERED INDEX un_empty_ix ON T\nGO\n"
+                "CREATE UNIQUE CLUSTERED INDEX uc_local_ix ON #scratch(id)\nGO\n"
+                "CREATE UNIQUE CLUSTERED INDEX uc_global_ix ON ##scratch(id)\nGO\n"
+                "CREATE UNIQUE CLUSTERED INDEX uc_variable_ix ON @scratch(id)\nGO\n"
+                "CREATE UNIQUE CLUSTERED INDEX uc_three_part_ix ON db.S.T(id)\nGO\n"
+                "CREATE UNIQUE CLUSTERED INDEX uc_empty_ix ON T"
             )
         },
     )
-    assert {"S", "T", "S.Qualified", "V"} <= _symbols(result).keys()
-    assert sum(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics) == 5
+    assert set(_symbols(result)) == {"S", "T", "S.Qualified", "V"}
+    assert [d.code for d in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX] * 25
     assert not any(
         node.node_class.value == "unresolved-reference" for node in result.document.nodes
     )
