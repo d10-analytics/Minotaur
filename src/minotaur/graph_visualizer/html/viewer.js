@@ -21,6 +21,7 @@
   var activeLayout = null;
   var layoutRuns = 0;
   var comparisonLayoutCache = new Map();
+  var comparisonContainerGeometry = new Map();
   var themeModeEl = document.getElementById("theme-mode");
   var systemColorScheme = window.matchMedia("(prefers-color-scheme: dark)");
   // One shared value prevents node and edge labels from drifting apart as the
@@ -289,6 +290,7 @@
       }},
       { selector: "node.dimmed", style: { "opacity": 0.2 } },
       { selector: "node.faded", style: { "opacity": 0.5 } },
+      { selector: "node.revision-hidden", style: { "opacity": 0 } },
       { selector: "edge.faded", style: { "opacity": 0.5 } },
       { selector: "node.highlighted", style: {
         "border-width": 6, "border-color": theme.accent, "opacity": 1, "z-index": 10
@@ -335,6 +337,15 @@
     minZoom: 0.1,
     maxZoom: 4
   });
+  if (comparisonMode) {
+    var rawNodes = cy.nodes.bind(cy);
+    cy.nodes = function (selector) {
+      var collection = rawNodes(selector);
+      return selector === ":visible"
+        ? collection.not(".system-container, .revision-hidden")
+        : collection;
+    };
+  }
 
   // --- System focus ---
   // Membership comes from committed exact-file definitions embedded by the
@@ -430,8 +441,53 @@
         classes: "system-container "
           + (name === selectedSystem ? "selected-system-container" : "boundary-system-container")
       });
-      groups.get(name).move({ parent: id });
+      if (!comparisonMode) {
+        groups.get(name).move({ parent: id });
+      } else {
+        var memberBox = groups.get(name).boundingBox({ includeLabels: true });
+        var container = cy.getElementById(id);
+        container.style({ width: memberBox.w + 64, height: memberBox.h + 64, padding: 0 });
+        container.position({
+          x: (memberBox.x1 + memberBox.x2) / 2,
+          y: (memberBox.y1 + memberBox.y2) / 2,
+        });
+        container.lock();
+      }
     });
+    if (comparisonMode) {
+      // Compound bounds normally follow only visible children. Freeze each
+      // union container's geometry so a side switch can hide fact nodes while
+      // retaining the same grouping context and viewport.
+      cy.nodes(".system-container").forEach(function (container) {
+        var geometry = comparisonContainerGeometry.get(container.id());
+        if (geometry) {
+          container.style({
+            width: geometry.width,
+            height: geometry.height,
+            "min-width": geometry.width,
+            "min-height": geometry.height,
+            padding: 0,
+          });
+          container.position(geometry.position);
+          container.lock();
+        } else {
+          var box = container.boundingBox({ includeLabels: true });
+          comparisonContainerGeometry.set(container.id(), {
+            width: box.w,
+            height: box.h,
+            position: container.position(),
+          });
+          container.style({
+            width: box.w,
+            height: box.h,
+            "min-width": box.w,
+            "min-height": box.h,
+            padding: 0,
+          });
+          container.lock();
+        }
+      });
+    }
   }
 
   // --- Filters: node classes ---
@@ -532,7 +588,10 @@
   function applyFilters(animate, options) {
     options = options || {};
     var shouldRelayout = options.layout !== false;
-    if (!comparisonMode || shouldRelayout) clearSystemContainers();
+    if (!comparisonMode || shouldRelayout) {
+      clearSystemContainers();
+      if (comparisonMode) comparisonContainerGeometry.clear();
+    }
     var hiddenKinds = [];
     kindsEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
       if (!cb.checked) hiddenKinds.push(cb.dataset.kind);
@@ -567,25 +626,52 @@
           var sourceSelected = nodeBelongsInView(source, selectedSystem, currentView);
           var targetSelected = nodeBelongsInView(target, selectedSystem, currentView);
           if (sourceSelected && eligibleNodes.contains(target)
+              && (!options.preserveContainers || nodeBelongsInView(
+                target, selectedSystem, currentView
+              ))
               && edgeTouchesSystemInView(edge, selectedSystem, currentView)) visibleNodeIds.add(target.id());
           if (targetSelected && eligibleNodes.contains(source)
+              && (!options.preserveContainers || nodeBelongsInView(
+                source, selectedSystem, currentView
+              ))
               && edgeTouchesSystemInView(edge, selectedSystem, currentView)) visibleNodeIds.add(source.id());
         });
       }
     }
     cy.batch(function () {
       cy.nodes().forEach(function (node) {
-        if (visibleNodeIds.has(node.id())) { node.show(); } else { node.hide(); }
-        node.toggleClass(
-          "outside-system",
-          showCrossSystemConnections && !nodeBelongsInView(
-            node, selectedSystem, comparisonMode ? revisionView : "combined"
-          )
-        );
+        if (options.preserveContainers && node.hasClass("system-container")) {
+          node.show();
+        } else if (visibleNodeIds.has(node.id())) {
+          if (options.preserveContainers && comparisonMode) {
+            if (node.hidden()) node.show();
+          } else {
+            node.show();
+          }
+          node.removeClass("revision-hidden");
+        } else if (options.preserveContainers && comparisonMode) {
+          // Keep revision-excluded facts in the compound bounds while making
+          // them unavailable to the visible selector and renderer.
+          if (node.hidden()) node.show();
+          node.addClass("revision-hidden");
+        } else {
+          node.hide();
+          node.removeClass("revision-hidden");
+        }
+        if (!options.preserveContainers) {
+          node.toggleClass(
+            "outside-system",
+            showCrossSystemConnections && !nodeBelongsInView(
+              node, selectedSystem, comparisonMode ? revisionView : "combined"
+            )
+          );
+        }
       });
       cy.edges().forEach(function (e) {
-        var srcHidden = !e.source().visible();
-        var tgtHidden = !e.target().visible();
+        var srcHidden = comparisonMode
+          ? e.source().hasClass("revision-hidden") : !e.source().visible();
+        var tgtHidden = comparisonMode
+          ? e.target().hasClass("revision-hidden") : !e.target().visible();
         var unrelated = selectedSystem !== "" && !edgeTouchesSystemInView(e, selectedSystem, currentView);
         var wrongSide = comparisonMode && !edgePresentInView(e, currentView);
         var invalidInternal = selectedSystem !== "" && !showCrossSystemConnections
