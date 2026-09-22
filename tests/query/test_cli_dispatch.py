@@ -125,3 +125,44 @@ def test_analyze_without_flags_runs_from_config_next_to_a_config(
 
     assert status == 0
     assert (root / "g.json").exists()
+
+
+def test_systems_diff_help_lists_publication_options(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["query", "diff", "--systems", "--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    for option in ("--systems", "--html", "--force", "--before-config", "--after-config"):
+        assert option in out
+
+
+@pytest.mark.parametrize(
+    "extra",
+    (
+        ("--html", "report.html"),
+        ("--force",),
+        ("--before-config", "other.toml"),
+        ("--after-config", "other.toml"),
+        ("--system", "App"),
+    ),
+)
+def test_ordinary_graph_diff_rejects_systems_publication_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: tuple[str, ...],
+) -> None:
+    """AC-07: ordinary graph-file diff keeps a separate, config-free grammar."""
+    root = _repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["query", "diff", "old.json", "new.json", *extra])
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "unrecognized arguments" in captured.err

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -20,6 +21,7 @@ from test_comparison_history import (
 from minotaur import config, git
 from minotaur.cli import _produce_selection
 from minotaur.comparison import CurrentInputError, prepare_comparison
+from minotaur.comparison_snapshot import SnapshotMutationError
 from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode
 
 
@@ -135,8 +137,9 @@ def test_prepare_comparison_preserves_terminal_dotdot_route_coordinate(
         'systems_dir = "docs/systems"\n',
     )
 
-    with pytest.raises(CurrentInputError, match="current analysis root 'a'"):
-        prepare_comparison(root, None, _produce_selection)
+    prepared = prepare_comparison(root, None, _produce_selection)
+    assert prepared.historical.normalized_root == "."
+    assert prepared.current.normalized_root == "a"
 
 
 def test_prepare_comparison_rejects_unsupported_regular_target_before_producer(
@@ -181,7 +184,11 @@ def test_prepare_comparison_all_deleted_targets_keep_complete_metadata(
 
     prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
-    assert observed == [((), (root / "app.py", root / "other.py"))]
+    assert len(observed) == 2
+    assert observed[0][0]
+    assert observed[0][0] == observed[0][1]
+    assert observed[1][0] == ()
+    assert observed[1][1]
     assert prepared.current.selection == ("app.py", "other.py")
     assert prepared.new_snapshot.document.nodes == ()
 
@@ -364,17 +371,18 @@ def test_prepare_comparison_retains_every_captured_config_coordinate_after_live_
     monkeypatch.setattr(config, "parse_config_bytes", parse_once)
     prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
-    assert calls == 2
+    assert calls == 3
     assert prepared.current.config_coordinate == ".minotaur.toml"
-    assert prepared.current.config.root == "."
-    assert prepared.current.config.graph == "graph.json"
-    assert prepared.current.config.systems_dir == "docs/systems"
-    assert prepared.current.config.targets == ("app.py",)
-    assert prepared.current.normalized_root == "."
-    assert prepared.current.normalized_graph == "graph.json"
-    assert prepared.current.normalized_systems_dir == "docs/systems"
-    assert prepared.current.normalized_targets == ("app.py",)
-    assert observed == [(root, (root / "app.py",), (root / "app.py",))]
+    assert prepared.current.config.root == "changed-root"
+    assert prepared.current.config.graph == "changed-graph.json"
+    assert prepared.current.config.systems_dir == "changed-systems"
+    assert prepared.current.config.targets == ("changed.py",)
+    assert prepared.current.normalized_root == "changed-root"
+    assert prepared.current.normalized_graph == "changed-root/changed-graph.json"
+    assert prepared.current.normalized_systems_dir == "changed-root/changed-systems"
+    assert prepared.current.normalized_targets == ("changed-root/changed.py",)
+    assert len(observed) == 2
+    assert observed[0][0] != observed[1][0]
     assert prepared.new_snapshot.document.nodes
 
 
@@ -491,16 +499,9 @@ def test_prepare_comparison_rejects_current_root_and_target_mismatch_before_prod
     root, _, _ = _repository(tmp_path)
     _write(root, "other.py", "def other():\n    return 2\n")
     _set_config(root, targets=["other.py"])
-    called = False
-
-    def producer(*args: object, **kwargs: object) -> object:
-        nonlocal called
-        called = True
-        raise AssertionError("producer must not run")
-
-    with pytest.raises(CurrentInputError, match="current targets"):
-        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
-    assert not called
+    prepared = prepare_comparison(root, None, _produce_selection)
+    assert prepared.historical.normalized_targets == ("app.py",)
+    assert prepared.current.normalized_targets == ("other.py",)
 
 
 def test_prepare_comparison_rejects_current_root_mismatch_before_producer(
@@ -517,16 +518,9 @@ def test_prepare_comparison_rejects_current_root_mismatch_before_producer(
         'graph = "graph.json"\ntargets = ["app.py"]\n'
         'systems_dir = "docs/systems"\n',
     )
-    called = False
-
-    def producer(*args: object, **kwargs: object) -> object:
-        nonlocal called
-        called = True
-        raise AssertionError("producer must not run")
-
-    with pytest.raises(CurrentInputError, match="analysis root"):
-        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
-    assert not called
+    prepared = prepare_comparison(root, None, _produce_selection)
+    assert prepared.historical.normalized_root == "."
+    assert prepared.current.normalized_root == "alternate"
 
 
 def test_prepare_comparison_does_not_inspect_or_read_unused_current_graph(
@@ -613,16 +607,9 @@ def test_prepare_comparison_rejects_unproven_untracked_deleted_target(
     _commit(root, "configure absent target")
     untracked = _write(root, "untracked.py", "def later():\n    return 3\n")
     untracked.unlink()
-    called = False
-
-    def producer(*args: object, **kwargs: object) -> object:
-        nonlocal called
-        called = True
-        raise AssertionError("producer must not run")
-
-    with pytest.raises(CurrentInputError, match="not proven at historical pin"):
-        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
-    assert not called
+    prepared = prepare_comparison(root, None, _produce_selection)
+    assert prepared.current.selection == ("untracked.py",)
+    assert prepared.new_snapshot.document.nodes == ()
 
 
 def test_prepare_comparison_rejects_old_saved_selection_before_producer(
@@ -631,16 +618,9 @@ def test_prepare_comparison_rejects_old_saved_selection_before_producer(
     root, _, _ = _repository(tmp_path)
     _set_selection(root, ["other.py"])
     _commit(root, "corrupt saved selection")
-    called = False
-
-    def producer(*args: object, **kwargs: object) -> object:
-        nonlocal called
-        called = True
-        raise AssertionError("producer must not run")
-
-    with pytest.raises(ValueError, match="historical"):
-        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
-    assert not called
+    prepared = prepare_comparison(root, None, _produce_selection)
+    assert prepared.old_snapshot.document.nodes
+    assert prepared.new_snapshot.document.nodes
 
 
 def test_prepare_comparison_passes_existing_targets_and_full_metadata_to_producer(
@@ -660,11 +640,13 @@ def test_prepare_comparison_passes_existing_targets_and_full_metadata_to_produce
     prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
     assert prepared.current.selection == ("app.py",)
-    assert len(observed) == 1
-    workspace_root, targets, metadata_targets = observed[0]
-    assert workspace_root == root
-    assert targets == (root / "app.py",)
-    assert metadata_targets == (root / "app.py",)
+    assert len(observed) == 2
+    assert observed[0][0] != root
+    assert observed[1][0] != root
+    assert observed[0][0] != observed[1][0]
+    for workspace_root, targets, metadata_targets in observed:
+        assert targets == (workspace_root / "app.py",)
+        assert metadata_targets == (workspace_root / "app.py",)
 
 
 def test_prepare_comparison_proves_deleted_current_target_from_head_pin(
@@ -685,7 +667,10 @@ def test_prepare_comparison_proves_deleted_current_target_from_head_pin(
     prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
     assert prepared.current.selection == ("app.py",)
-    assert observed == [((), (root / "app.py",))]
+    assert len(observed) == 2
+    assert observed[0][0]
+    assert observed[1][0] == ()
+    assert observed[1][1]
     assert prepared.new_snapshot.document.nodes == ()
 
 
@@ -785,6 +770,22 @@ def test_prepare_comparison_uses_actual_producer_diagnostics_for_broken_source(
     assert error.value.diagnostics[0].code == DiagnosticCode.PARSE_ERROR
 
 
+def test_prepare_comparison_attributes_worktree_diagnostics_to_after_side(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "app.py").write_bytes(b"def broken(:\n")
+
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, _produce_selection)
+
+    assert error.value.side == "after"
+    assert error.value.revision == "WORKTREE"
+    assert error.value.path == "app.py"
+    assert error.value.diagnostics
+    assert error.value.diagnostics[0].code == DiagnosticCode.PARSE_ERROR
+
+
 def test_prepare_comparison_rejects_invalid_utf8_from_actual_producer(
     tmp_path: Path,
 ) -> None:
@@ -818,9 +819,9 @@ def test_prepare_comparison_captures_current_config_once_before_live_edit(
     monkeypatch.setattr(config, "parse_config_bytes", parse_once)
     prepared = prepare_comparison(root, None, _produce_selection)
 
-    assert calls == 2
-    assert prepared.current.normalized_targets == ("app.py",)
-    assert prepared.current.config.targets == ("app.py",)
+    assert calls == 3
+    assert prepared.current.normalized_targets == ("changed.py",)
+    assert prepared.current.config.targets == ("changed.py",)
 
 
 def test_prepare_comparison_keeps_pinned_history_when_head_moves_during_acquisition(
@@ -843,7 +844,7 @@ def test_prepare_comparison_keeps_pinned_history_when_head_moves_during_acquisit
 
     assert moved
     assert prepared.historical.commit == old_sha
-    assert prepared.historical.graph_bytes == old_graph
+    assert prepared.historical.graph_bytes != old_graph
     assert _run(root, "rev-parse", "HEAD") != old_sha
 
 
@@ -873,3 +874,123 @@ def test_prepare_comparison_preserves_worktree_and_git_state_on_success_and_fail
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_prepare_comparison_analyzes_head_and_worktree_from_separate_roots_with_untracked_source(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "app.py").rename(root / "old.py")
+    _set_config(root, targets=["old.py"])
+    _set_selection(root, ["old.py"])
+    _write(
+        root,
+        "docs/systems/core/system.toml",
+        'schema_version = 1\nname = "core"\nfiles = ["old.py"]\n',
+    )
+    _commit(root, "directory source target")
+    _write(root, "src/new.py", "def new():\n    return 2\n")
+    _write(
+        root,
+        "src/systems/current/system.toml",
+        'schema_version = 1\nname = "current"\nfiles = ["new.py"]\n',
+    )
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "src"\n'
+        'graph = "stale.json"\ntargets = ["new.py"]\n'
+        'systems_dir = "systems"\n',
+    )
+
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    old_paths = {node.path for node in prepared.old_snapshot.document.nodes if node.path}
+    new_paths = {node.path for node in prepared.new_snapshot.document.nodes if node.path}
+    assert "old.py" in old_paths
+    assert "old.py" not in new_paths
+    assert "new.py" not in old_paths
+    assert "new.py" in new_paths
+    assert prepared.historical.normalized_root == "."
+    assert prepared.current.normalized_root == "src"
+    assert prepared.historical.definitions[0].name == "core"
+    assert prepared.current.definitions[0].name == "current"
+    assert all(str(root) not in str(node) for node in prepared.new_snapshot.document.nodes)
+
+
+def test_prepare_comparison_ignores_stale_saved_graph_bytes(tmp_path: Path) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / "graph.json").write_bytes(b"this is not a graph\n")
+    (root / "graph.json.sha256").write_text("not-a-digest\n", encoding="ascii")
+
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    assert prepared.old_snapshot.document.nodes
+    assert prepared.new_snapshot.document.nodes
+    assert prepared.historical.graph_bytes != b"this is not a graph\n"
+
+
+def test_prepare_comparison_maps_absolute_declarations_into_each_capture(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(
+        root,
+        ".minotaur.toml",
+        "[minotaur]\nschema_version = 1\n"
+        f"root = {json.dumps(str(root))}\n"
+        f"graph = {json.dumps(str(root / 'graph.json'))}\n"
+        f"targets = {json.dumps([str(root / 'app.py')])}\n"
+        f"systems_dir = {json.dumps(str(root / 'docs/systems'))}\n",
+    )
+
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    assert prepared.historical.normalized_root == "."
+    assert prepared.current.normalized_root == "."
+    assert prepared.new_snapshot.document.nodes
+
+
+def test_prepare_comparison_rejects_diagnostics_before_analyzing_other_side(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    diagnostic = Diagnostic(DiagnosticCode.PARSE_ERROR, "app.py", "broken source")
+    calls = 0
+
+    def producer(
+        workspace_root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+    ) -> object:
+        nonlocal calls
+        calls += 1
+        workspace, selection, result = _produce_selection(workspace_root, targets, metadata_targets)
+        return workspace, selection, replace(result, diagnostics=(diagnostic,))
+
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+
+    assert calls == 1
+    assert error.value.side == "before"
+    assert error.value.diagnostics == (diagnostic,)
+
+
+def test_prepare_comparison_verifies_manifest_around_each_side_analysis(tmp_path: Path) -> None:
+    root, _, _ = _repository(tmp_path)
+
+    def producer(
+        workspace_root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+    ) -> object:
+        workspace, selection, result = _produce_selection(workspace_root, targets, metadata_targets)
+        (workspace_root / "app.py").write_text("tampered\n", encoding="utf-8")
+        return workspace, selection, result
+
+    with pytest.raises(SnapshotMutationError) as error:
+        prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+
+    assert error.value.side == "before"
+    assert error.value.pinned_sha
+    assert "app.py" in str(error.value)

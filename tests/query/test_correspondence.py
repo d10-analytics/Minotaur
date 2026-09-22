@@ -1545,3 +1545,23 @@ def test_same_evidence_site_is_retained_across_distinct_valid_relationships() ->
     occurrences = [item for group in prepared.relationship_groups.values() for item in group]
     assert len(occurrences) == 2
     assert all(item.relationship.evidence[0].locations == (site,) for item in occurrences)
+
+
+def test_whole_graph_mode_is_explicit_and_retains_internal_relationships() -> None:
+    source = _symbol("source", 0)
+    target = _symbol("target", 1)
+    internal = Relationship(
+        source.id,
+        target.id,
+        "contains",
+        (Evidence(Provenance.STATIC_ANALYSIS),),
+    )
+    document = _document(source, target, relationships=(internal,))
+
+    ordinary = _prepare_after_full_load(document)
+    whole = correspondence.prepare_whole_graph(document)
+
+    assert ordinary.relationship_groups == {}
+    assert len(whole.relationship_groups) == 1
+    assert whole.whole_graph is True
+    assert correspondence.prepare_correspondence(document).whole_graph is False

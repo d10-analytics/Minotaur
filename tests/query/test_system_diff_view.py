@@ -10,8 +10,10 @@ import pytest
 from test_system_diff import _call, _reference, _snapshot, _symbol, _systems, _upstream
 
 from minotaur.graph_model.evidence import Evidence, Producer
+from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.provenance import Provenance
 from minotaur.graph_model.relationship import Relationship
+from minotaur.language_interpreter.call_expressions import CallExpressionObservation
 from minotaur.query import system_diff as system_diff_module
 from minotaur.query.render import dump_json
 from minotaur.query.system import ReportingSnapshot
@@ -179,6 +181,57 @@ def test_replacement_selection_uses_complete_result_and_copies_none() -> None:
     assert unrelated.changed is False
     assert unrelated.exit_code == 0
     assert complete.to_dict() == original
+
+
+def test_view_retains_complete_graph_call_and_limitation_facts() -> None:
+    complete = SystemDiffResult(
+        old_system_names=("Checkout",),
+        new_system_names=("Checkout",),
+        nodes=(
+            system_diff_module.GraphNodeChange(
+                "node:comparison:one",
+                "changed",
+                ("membership_changed",),
+                ("Checkout",),
+                {"label": "old"},
+                {"label": "new"},
+            ),
+        ),
+        relationships=(),
+        call_changes=(),
+    )
+
+    selected = filter_system_diff(complete, "Checkout")
+    assert selected.nodes == complete.nodes
+    assert selected.to_dict()["nodes"] == [item.to_dict() for item in complete.nodes]
+    assert render_json(selected) == dump_json(selected.to_dict())
+
+
+def test_call_change_retains_endpoint_membership_in_selected_view() -> None:
+    source = _symbol("caller", "a.py")
+    target = _symbol("callee", "b.py")
+    site = Location("a.py", Range(Position(2, 0), Position(2, 4)))
+    edge = Relationship(
+        source.id,
+        target.id,
+        "calls",
+        (Evidence(Provenance.STATIC_ANALYSIS, locations=(site,)),),
+    )
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    observation = CallExpressionObservation(
+        "python", site, Location("a.py", Range(Position(2, 0), Position(2, 8))), "fingerprint"
+    )
+
+    complete = compare_systems(
+        _snapshot((source, target), (edge,), systems),
+        _snapshot((source, target), (edge,), systems),
+        old_call_observations=(observation,),
+        new_call_observations=(),
+    )
+
+    assert complete.call_changes[0].involved_systems == ("A", "B")
+    assert filter_system_diff(complete, "A").call_changes == complete.call_changes
+    assert filter_system_diff(complete, "B").call_changes == complete.call_changes
 
 
 def test_old_only_deleted_name_resolves_and_unrelated_name_is_neutral() -> None:

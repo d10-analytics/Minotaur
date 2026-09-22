@@ -20,8 +20,11 @@ from minotaur.language_interpreter.workspace import Workspace
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
-# Byte comparisons include generated HTML as well as graph facts.
-BASELINE_COMMIT = "ec5e90e5623700c8797e1cdc2f51f27fdc7000f4"
+# Byte comparisons include generated HTML as well as graph facts. The pin is the
+# reviewed single-view artifact commit: across the advance the graph, Drift, and
+# query rows stayed byte-identical and only the intentional viewer-asset HTML
+# changed, which the advance proof below re-checks against the previous pin.
+BASELINE_COMMIT = "4cb9bef4246d1461b48e27c908c812d39f946ff4"
 # Preserve the historical fixture provenance independently of output revisions.
 FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
 
@@ -1172,3 +1175,111 @@ def test_root_two_import_isolated_from_top_level_package_and_self_test_detects_d
     assert result.returncode == 0, result.stderr
     assert "artifact=analyze graph SHA-256: DIFFERENT" in result.stdout
     assert "self-test: PASS" in result.stdout
+
+
+# The frozen pin that predates the reviewed viewer-asset change. It is the
+# control for the advance proof below, not a second equivalence authority.
+PRE_ADVANCE_BASELINE = "ec5e90e5623700c8797e1cdc2f51f27fdc7000f4"
+
+
+def _is_ancestor(older: str, newer: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "-C", str(ROOT), "merge-base", "--is-ancestor", older, newer],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def _worktree_side(tmp_path: Path, label: str, commit: str) -> Path:
+    checkout = tmp_path / f"checkout-{label}"
+    added = subprocess.run(
+        ["git", "-C", str(ROOT), "worktree", "add", "--detach", str(checkout), commit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if added.returncode:
+        raise RuntimeError(f"could not create worktree for {commit}: {added.stderr}")
+    return checkout / "src"
+
+
+def _remove_worktree(src: Path) -> None:
+    subprocess.run(
+        ["git", "-C", str(ROOT), "worktree", "remove", "--force", str(src.parent)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "-C", str(ROOT), "worktree", "prune"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_equivalence_baseline_advance_is_necessary_and_sufficient(tmp_path: Path) -> None:
+    """``C-10``: the reviewed viewer change is the only reason the pin moved.
+
+    Reverting only ``BASELINE_COMMIT`` must reproduce the intentional
+    ``visualize HTML`` difference while the graph, Drift, and query rows stay
+    identical, and the advanced pin must compare cleanly. The pair makes the
+    advance falsifiable instead of an unreviewed normalization.
+    """
+
+    assert _is_ancestor(PRE_ADVANCE_BASELINE, BASELINE_COMMIT)
+
+    source_workload = json.loads(
+        (ROOT / "scripts" / "equivalence_queries.json").read_text(encoding="utf-8")
+    )
+    fixture_workload = source_workload[FIXTURE_ROOT.name]
+    # The deliberate D-08 ``query diff`` exit-status change is proven directly
+    # elsewhere; it is not part of this reviewed-baseline advance.
+    fixture_workload["queries"] = [
+        item for item in fixture_workload["queries"] if item.get("command") != "diff"
+    ]
+    workload_path = tmp_path / "advance-workload.json"
+    workload_path.write_text(json.dumps(source_workload), encoding="utf-8")
+
+    reverted_side = _worktree_side(tmp_path, "reverted", PRE_ADVANCE_BASELINE)
+    advanced_side = _worktree_side(tmp_path, "advanced", BASELINE_COMMIT)
+    try:
+        reverted = _run(
+            "--baseline-src",
+            str(reverted_side),
+            "--branch-src",
+            str(ROOT / "src"),
+            "--queries",
+            str(workload_path),
+            "--root",
+            str(FIXTURE_ROOT),
+        )
+        assert reverted.returncode == 1, reverted.stdout + reverted.stderr
+        assert "artifact=analyze graph SHA-256: IDENTICAL" in reverted.stdout
+        assert "artifact=Drift: IDENTICAL" in reverted.stdout
+        assert "FAILED" not in reverted.stdout
+        differing = [line for line in reverted.stdout.splitlines() if line.endswith(": DIFFERENT")]
+        assert differing, "reverting the pin must not silently pass"
+        assert all("artifact=visualize HTML SHA-256: DIFFERENT" in line for line in differing), (
+            differing
+        )
+
+        advanced = _run(
+            "--baseline-src",
+            str(advanced_side),
+            "--branch-src",
+            str(ROOT / "src"),
+            "--queries",
+            str(workload_path),
+            "--root",
+            str(FIXTURE_ROOT),
+        )
+        assert advanced.returncode == 0, advanced.stdout + advanced.stderr
+        assert "DIFFERENT" not in advanced.stdout
+    finally:
+        _remove_worktree(reverted_side)
+        _remove_worktree(advanced_side)

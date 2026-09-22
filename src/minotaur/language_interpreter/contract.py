@@ -7,6 +7,7 @@ from enum import Enum
 
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import Location
+from minotaur.language_interpreter.call_expressions import CallExpressionObservation
 
 IMPORTS_RESOLVED = "imports_resolved"
 IMPORTS_UNRESOLVED = "imports_unresolved"
@@ -40,3 +41,4 @@ class AnalysisResult:
 
     document: GraphDocument
     diagnostics: tuple[Diagnostic, ...] = field(default_factory=tuple)
+    call_expressions: tuple[CallExpressionObservation, ...] = field(default_factory=tuple)

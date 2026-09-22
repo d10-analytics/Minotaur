@@ -344,50 +344,74 @@ answer keeps diagnostic history unavailable. `--details` adds one
 `relationships` text line containing the same deterministic evidence array
 that appears in JSON.
 
-### Compare snapshots
+### Compare system snapshots across revisions
 
-Compare the committed graph at `HEAD` with the current working tree through the
-complete configured system result:
+Compare two analyzed source revisions through the complete configured system
+result. Both command forms analyze each side's own source with the same
+installed Minotaur version, using that revision's configuration, source
+selection, and system definitions; a saved graph or sidecar is never required:
 
 ```bash
+# HEAD versus the current working tree
 minotaur query diff --systems
 minotaur query diff --systems --system NAME
 minotaur query diff --systems --system NAME --details
 minotaur query diff --systems --system NAME --json
+
+# two explicit Git revisions
+minotaur query diff --systems BEFORE AFTER
+minotaur query diff --systems BEFORE AFTER --system NAME
+minotaur query diff --systems BEFORE AFTER --system NAME --details
+minotaur query diff --systems BEFORE AFTER --json
+
+# write a self-contained offline report
+minotaur query diff --systems --html comparison.html
+minotaur query diff --systems BEFORE AFTER --html comparison.html
 ```
 
-Systems mode requires a located `.minotaur.toml`. It reads the historical graph,
-configuration, and system definitions from `HEAD`, analyzes the current
-configured selection in memory, and compares the complete pair before applying
-the optional `--system NAME` output selection. A change involving both `A` and
-`B` remains visible when selecting either `A` or `B`; selection is replacement,
-not cumulative narrowing. `OLD NEW` and `--scope` cannot be combined with
-`--systems` and are rejected before either snapshot is read.
+Systems mode requires a located `.minotaur.toml`; per-side configuration can be
+supplied with `--before-config` and `--after-config`. The working-tree form
+identifies Before as `HEAD` with its resolved commit ID and labels After
+`Working tree at report generation` without inventing a commit identity. The
+historical form retains each requested revision name and its resolved short
+commit ID in the saved result, so a later branch move does not obscure which
+revisions were compared. `--system NAME` replaces the output view: a change
+involving both `A` and `B` remains visible when selecting either `A` or `B`;
+selection is replacement, not cumulative narrowing. `OLD NEW` and `--scope`
+cannot be combined with `--systems` and are rejected before either revision is
+read.
 
-The command is read-only: it does not rewrite the committed graph, graph
-sidecar, configuration, or definitions. A source-only change that affects system reports produces the corresponding
-surface, consumer, dependency, or boundary rows. Internal symbol changes that
-do not affect those reports need not appear; use ordinary graph diff for
-symbol-level additions, removals, and relocations. A membership-only
-change can produce a `membership changed` row while the old and new graph bytes
-remain identical. The compact output ends with the old/new coverage and
-selection lines. With `--details`, each changed row is followed by its `old`,
-`new`, `old evidence`, and `new evidence` values; an absent side is explicitly
-`unavailable`, while an observed side includes the stored relationship and
-source evidence. JSON contains the same typed categories and context with
-deterministic key ordering.
+The comparison covers system membership, exposed surface, consumers,
+dependencies, and boundary relationships, and also internal graph-node and
+edge changes and call-site additions, removals, and expression changes.
+Internal changes are included even when the system boundaries remain
+identical, so a moved symbol is visible as a removal plus an addition. The
+command is read-only: it does not rewrite the committed graph, graph sidecar,
+configuration, or definitions.
+
+The compact output ends with the old/new coverage and selection lines. With
+`--details`, each changed row is followed by its `old`, `new`, `old evidence`,
+and `new evidence` values; an absent side is explicitly `unavailable`, while an
+observed side includes the stored relationship and source evidence. JSON
+contains the same typed categories plus the resolved before/after identities
+with deterministic key ordering. `--html` writes a self-contained offline
+report and still prints the summary; the saved report is static and does not
+re-read working files after generation.
 
 Status is `0` when the complete selected result is identical and `1` when it
-contains a structural, relationship, membership, or boundary change. Both
-snapshots must pass admission before filtering. Invalid graph serialization and
-ambiguous semantic identity are errors with attributed diagnostics, status `2`,
-and empty standard output even if the requested filter names an unrelated
-system. The comparison reports accepted graph and membership facts only; it
-does not infer renames, causality, edit timing, or intent.
+contains a structural, relationship, membership, boundary, or call-expression
+change — including a successful comparison that also wrote a requested
+`--html` report. Both revisions must pass admission before filtering. A
+revision that cannot be acquired or interpreted, an invalid configuration, and
+an ambiguous semantic identity are errors with attributed diagnostics, status
+`2`, and empty standard output even if the requested filter names an unrelated
+system. Missing call-expression evidence on a side is a limitation notice, not
+a detected change. The comparison reports accepted source facts only; it does
+not infer renames, causality, edit timing, or intent.
 
-The plain committed-reference mode remains available for comparing the current
-working tree with either the configured repository selection or one committed
-system graph:
+Compare the committed graph at `HEAD` with the current working tree through the
+plain committed-reference mode, for either the configured repository selection
+or one committed system graph:
 
 ```bash
 minotaur query diff
@@ -493,7 +517,9 @@ Exit statuses are:
   use `0` for a successful result, including an empty result set, and `--help`
   exits `0`);
 * `1` — `diff` found structures differing in any recorded way, including an
-  added, removed, or relocated symbol or a relationship change. For the other
+  added, removed, or relocated symbol or a relationship change. For
+  `query diff --systems` this includes a successful comparison that also wrote
+  a requested `--html` report. For the other
   graph queries, `1` means a graph refresh completed with source diagnostics;
 * `2` — `diff` encountered an argument, configuration, graph-load, or analysis
   error, or another query encountered an argument, graph-load, selection,

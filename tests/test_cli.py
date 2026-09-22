@@ -2128,3 +2128,92 @@ def test_space_separated_empty_config_value_is_rejected_like_the_equals_form(
     assert not (root / "walkup.json").exists()
     assert list(root.glob("*.json")) == []
     assert list(root.glob("*.sha256")) == []
+
+
+def test_systems_diff_parser_registers_zero_or_two_revisions_and_options() -> None:
+    """The systems route owns a grammar separate from explicit graph files."""
+    parser = cli._parser(systems_mode=True)
+
+    arguments = parser.parse_args(
+        [
+            "query",
+            "diff",
+            "--systems",
+            "--html",
+            "report.html",
+            "--force",
+            "--before-config",
+            "before.toml",
+            "--after-config",
+            "after.toml",
+            "--config",
+            "shared.toml",
+            "--system",
+            "App",
+            "--details",
+            "--validate",
+        ]
+    )
+    assert arguments.name == "diff"
+    assert arguments.systems is True
+    assert arguments.html == "report.html"
+    assert arguments.force is True
+    assert arguments.before_config == "before.toml"
+    assert arguments.after_config == "after.toml"
+    assert arguments.old is None
+    assert arguments.new is None
+
+    pinned = parser.parse_args(["query", "diff", "--systems", "HEAD", "main"])
+    assert pinned.old == "HEAD"
+    assert pinned.new == "main"
+    assert pinned.html is None
+    assert pinned.force is False
+
+
+def test_systems_diff_help_lists_publication_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.chdir(root)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["query", "diff", "--systems", "--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "usage: minotaur query diff" in out
+    for option in ("--systems", "--html", "--force", "--before-config", "--after-config"):
+        assert option in out
+
+
+def test_ordinary_diff_help_does_not_advertise_systems_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.chdir(root)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["query", "diff", "--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    for option in ("--systems", "--html", "--before-config", "--after-config"):
+        assert option not in out
+
+
+def test_systems_diff_output_preflight_failure_reports_without_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    blocker = root / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    assert cli.main(["query", "diff", "--systems", "--html", str(blocker / "report.html")]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "parent directory does not exist" in captured.err
+    assert not (blocker / "report.html").exists()

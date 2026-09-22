@@ -4,6 +4,7 @@ files = [
   "minotaur/language_interpreter/__init__.py",
   "minotaur/language_interpreter/accumulation.py",
   "minotaur/language_interpreter/contract.py",
+  "minotaur/language_interpreter/call_expressions.py",
   "minotaur/language_interpreter/emission.py",
   "minotaur/language_interpreter/exclusions.py",
   "minotaur/language_interpreter/paths.py",

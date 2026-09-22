@@ -19,6 +19,7 @@ from minotaur.graph_model.provenance import (
     Provenance,
 )
 from minotaur.graph_model.relationship import Relationship
+from minotaur.language_interpreter.call_expressions import CallExpressionObservation
 from minotaur.query import system as system_query
 from minotaur.query.correspondence import CorrespondenceAmbiguityError, node_key
 from minotaur.query.system import (
@@ -173,6 +174,36 @@ def test_identical_snapshots_are_complete_and_immutable() -> None:
         result.old_coverage["new"] = "mutation"  # type: ignore[index]
 
 
+def test_complete_result_retains_whole_graph_and_call_classifications() -> None:
+    source = _symbol("caller", "a.py")
+    target = _symbol("entry", "b.py")
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    relationship = _call(source, target)
+    old = _snapshot((source, target), (), systems)
+    new = _snapshot((source, target), (relationship,), systems)
+    site = Location("b.py", Range(Position(0, 0), Position(0, 1)))
+    expression = Location("a.py", Range(Position(0, 0), Position(0, 4)))
+    observation = CallExpressionObservation("python", site, expression, "fingerprint")
+
+    result = compare_systems(
+        old,
+        new,
+        old_call_observations=(),
+        new_call_observations=(observation,),
+        old_revision="old-sha",
+        new_revision="new-sha",
+    )
+
+    assert any(item.status == "added" for item in result.relationships)
+    assert result.call_changes[0].status == "added"
+    assert result.old_revision == "old-sha"
+    assert result.new_revision == "new-sha"
+    payload = result.to_dict()
+    assert payload["relationships"] == [item.to_dict() for item in result.relationships]
+    assert payload["call_changes"] == [item.to_dict() for item in result.call_changes]
+    assert payload["limitations"] == []
+
+
 def test_membership_and_rows_retain_exact_side_evidence() -> None:
     source = _symbol("caller", "a.py")
     target = _symbol("entry", "b.py")
@@ -310,7 +341,7 @@ def test_actual_provenance_and_evidence_sites_are_observational() -> None:
     assert new_detail.evidence[0].sites[0]["range"]["start"]["line"] == 10
 
 
-def test_repeated_unresolved_occurrence_count_is_neutral_but_new_pair_changes() -> None:
+def test_repeated_unresolved_occurrence_count_is_a_deterministic_multiset_change() -> None:
     origin = _symbol("caller", "a.py")
     first = _unresolved(origin, "b.py", 0)
     repeated = _unresolved(origin, "b.py", 1)
@@ -328,7 +359,12 @@ def test_repeated_unresolved_occurrence_count_is_neutral_but_new_pair_changes() 
         systems,
     )
 
-    assert not compare_systems(old, same).changed
+    repeated_result = compare_systems(old, same)
+    assert repeated_result.changed
+    assert any(
+        item.status == "changed" and "multiplicity_changed" in item.reasons
+        for item in repeated_result.relationships
+    )
     endpoint = compare_systems(old, distinct).boundary_changes
     assert len(endpoint) == 1
     assert endpoint[0].kind == "endpoint"
@@ -420,7 +456,7 @@ def test_system_declarations_report_add_remove_rename_and_absent_files() -> None
 
 
 @pytest.mark.parametrize("kind", ("contains", "inherits", "implements", "python:decorates"))
-def test_unsupported_relationship_kinds_never_create_structural_changes(kind: str) -> None:
+def test_whole_graph_relationship_kinds_create_structural_changes(kind: str) -> None:
     source = _symbol("source", "a.py")
     target = _symbol("target", "b.py")
     systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
@@ -430,7 +466,8 @@ def test_unsupported_relationship_kinds_never_create_structural_changes(kind: st
 
     result = compare_systems(old, new)
 
-    assert not result.changed
+    assert result.changed
+    assert [(item.kind, item.status) for item in result.relationships] == [(kind, "added")]
 
 
 def test_boundary_internal_transition_is_matched_in_both_directions() -> None:
@@ -902,20 +939,19 @@ def test_source_symbol_kind_key_change_is_addition_and_removal() -> None:
     assert any("'class'" in part for change in result.boundary_changes for part in change.key)
 
 
-def test_unrelated_duplicate_candidate_does_not_block_other_boundary() -> None:
+def test_ambiguous_unrelated_candidate_fails_whole_graph_comparison() -> None:
     source = _symbol("source", "a.py")
     duplicate_a = _symbol("duplicate", "b.py", 0)
     duplicate_b = _symbol("duplicate", "b.py", 1)
     external = _upstream("external")
     systems = _systems(("a.toml", "A", ("a.py",)))
     edge = _call(source, external)
-    result = compare_systems(
-        _snapshot((source, duplicate_a, duplicate_b, external), (edge,), systems),
-        _snapshot((source, duplicate_a, duplicate_b, external), (edge,), systems),
-    )
-
-    assert not result.changed
-    assert result.boundary_changes == ()
+    with pytest.raises(CorrespondenceAmbiguityError) as raised:
+        compare_systems(
+            _snapshot((source, duplicate_a, duplicate_b, external), (edge,), systems),
+            _snapshot((source, duplicate_a, duplicate_b, external), (edge,), systems),
+        )
+    assert raised.value.endpoint == "node"
 
 
 def test_node_and_relationship_observation_changes_remain_neutral() -> None:

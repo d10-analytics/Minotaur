@@ -10,6 +10,7 @@ the enclosing emitted owner rather than inventing a second identity grain.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,10 @@ from minotaur.graph_model.provenance import (
     SymbolKind,
 )
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
+from minotaur.language_interpreter.call_expressions import (
+    CallExpressionObservation,
+    javascript_call_fingerprint,
+)
 from minotaur.language_interpreter.contract import AnalysisResult
 from minotaur.language_interpreter.emission import NodeEmitter, file_node, symbol_node
 from minotaur.language_interpreter.paths import resolve_relative
@@ -107,13 +112,66 @@ def analyze_javascript_files(workspace: Workspace, files: tuple[Path, ...]) -> A
     for module in modules:
         _expressions(module, by_path, relationships, nodes, emitter)
 
+    relationship_documents = relationships.documents(_PRODUCER)
+    call_locations = {
+        location
+        for relationship in relationship_documents
+        if relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+    call_expressions = tuple(
+        observation
+        for module in modules
+        for observation in _call_observations(module, call_locations)
+    )
     document = GraphDocument(
         coordinate_encoding=CoordinateEncoding.UTF_8,
         nodes=tuple(nodes),
-        relationships=relationships.documents(_PRODUCER),
+        relationships=relationship_documents,
         generated_by=_PRODUCER,
     )
-    return AnalysisResult(document, tuple(diagnostics))
+    return AnalysisResult(document, tuple(diagnostics), call_expressions)
+
+
+def _call_observations(
+    module: _Module, call_locations: set[Location]
+) -> tuple[CallExpressionObservation, ...]:
+    """Capture parsed calls that also have emitted graph call evidence."""
+    observations: list[CallExpressionObservation] = []
+    for node in _iter_nodes(module.tree):
+        if getattr(node, "type", None) != "CallExpression":
+            continue
+        callee = getattr(node, "callee", None)
+        if callee is None:
+            continue
+        callee_location = _node_location(module.path, callee, module.line_index)
+        if callee_location not in call_locations:
+            continue
+        observations.append(
+            CallExpressionObservation(
+                language="javascript",
+                callee_location=callee_location,
+                expression_location=_node_location(module.path, node, module.line_index),
+                fingerprint=javascript_call_fingerprint(node),
+            )
+        )
+    return tuple(observations)
+
+
+def _iter_nodes(node: Any) -> Iterator[Any]:
+    """Yield ESTree nodes without following interpreter-only annotations."""
+    if node is None or not hasattr(node, "type"):
+        return
+    yield node
+    for name, value in vars(node).items():
+        if name in {"_minotaur_node", "loc", "range", "tokens", "comments", "errors"}:
+            continue
+        if isinstance(value, list):
+            for child in value:
+                yield from _iter_nodes(child)
+        else:
+            yield from _iter_nodes(value)
 
 
 def _make_module(path: str, source: str, tree: Any, line_index: LineIndex) -> _Module:

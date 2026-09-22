@@ -4,6 +4,8 @@ files = [
   "minotaur/query/__init__.py",
   "minotaur/query/context.py",
   "minotaur/query/correspondence.py",
+  "minotaur/query/graph_comparison.py",
+  "minotaur/query/call_diff.py",
   "minotaur/query/diff.py",
   "minotaur/query/freshness.py",
   "minotaur/query/impact.py",

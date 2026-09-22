@@ -11,14 +11,21 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from minotaur import config, git, system
+from minotaur.comparison_snapshot import (
+    RevisionSnapshot,
+    capture_local_revision,
+    capture_working_tree,
+)
 from minotaur.config import ValidatedConfig
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import LoadedGraph
+from minotaur.graph_model.serialization import serialize
 from minotaur.graph_model.validation import validate_document
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
 from minotaur.language_interpreter.registry import default_registry
@@ -41,8 +48,11 @@ class CurrentInputError(ValueError):
         detail: str,
         cause: str | None = None,
         diagnostics: Sequence[Diagnostic] = (),
+        side: str = "current",
+        revision: str | None = None,
     ) -> None:
-        self.side = "current"
+        self.side = side
+        self.revision = revision
         self.path = str(path)
         self.detail = detail
         self.cause = cause
@@ -50,7 +60,8 @@ class CurrentInputError(ValueError):
         self.diagnostics = tuple(diagnostics)
         self.source_diagnostics = self.diagnostics
         identity = f" ({cause})" if cause else ""
-        super().__init__(f"current input at {self.path!r}{identity}: {detail}")
+        revision_text = f" revision {revision!r}" if revision else ""
+        super().__init__(f"{side} input{revision_text} at {self.path!r}{identity}: {detail}")
 
 
 class SelectionProducer(Protocol):
@@ -555,12 +566,16 @@ def _current_error(
     error: Exception | None = None,
     *,
     diagnostics: Sequence[Diagnostic] = (),
+    side: str = "current",
+    revision: str | None = None,
 ) -> CurrentInputError:
     return CurrentInputError(
         path=path,
         detail=detail,
         cause=type(error).__name__ if error is not None else None,
         diagnostics=diagnostics,
+        side=side,
+        revision=revision,
     )
 
 
@@ -792,73 +807,119 @@ def _pinned_target_entry(historical: HistoricalInputs, coordinate: str) -> git.T
     return historical.pin.entry(coordinate)
 
 
-def prepare_comparison(
-    start: Path,
-    raw_config_path: Path | None,
-    producer: SelectionProducer,
-    validate: bool = False,
-) -> PreparedComparison:
-    """Acquire a complete pair without writing graphs, stamps, definitions, or Git state.
+@dataclass(frozen=True, slots=True)
+class _CapturedAnalysis:
+    """One complete analysis produced from one immutable captured root."""
 
-    Discover the worktree from ``start`` and preserve ``raw_config_path`` spelling
-    for route inspection. Anchor the analysis root at the config directory and
-    targets, graph, and systems declarations at that root. Historical paths are
-    interpreted within the pinned commit, never resolved through current files.
+    snapshot: RevisionSnapshot
+    config_coordinate: str
+    config: ValidatedConfig
+    normalized_root: str
+    normalized_graph: str
+    normalized_systems_dir: str
+    normalized_targets: tuple[str, ...]
+    systems: tuple[system.System, ...]
+    selection: tuple[str, ...]
+    graph: LoadedGraph
+    graph_bytes: bytes
 
-    Inspect current routes and parse config before historical acquisition; then
-    require matching root/target coordinates and load current definitions. Call
-    the no-write ``producer`` with the absolute root, deduplicated existing
-    analysis targets, and all metadata targets (including proven deletions).
-    Reject producer diagnostics, invalid saved selection, and invalid graph/IDs
-    before constructing either reporting snapshot. ``validate`` forces full
-    historical graph validation; current produced graphs always receive it.
 
-    Route, definition, production, and pair failures raise ``CurrentInputError``;
-    historical acquisition retains its ``HistoricalInputError`` failures.
-    """
-    worktree, preserved_start = _select_worktree(start)
-    selected_config = _current_config_route(worktree, preserved_start, raw_config_path)
+def _relabel_snapshot_error(
+    error: CurrentInputError, snapshot: RevisionSnapshot
+) -> CurrentInputError:
+    """Attach a route or producer failure to the captured side that observed it."""
+    public_path = error.path
+    with suppress(TypeError, ValueError):
+        public_path = Path(error.path).relative_to(snapshot.root).as_posix()
+    if (
+        error.side == snapshot.side
+        and error.revision == snapshot.revision
+        and public_path == error.path
+    ):
+        return error
+    return _current_error(
+        public_path,
+        error.detail,
+        diagnostics=error.diagnostics,
+        side=snapshot.side,
+        revision=snapshot.revision,
+    )
+
+
+def _captured_declaration_path(
+    snapshot: RevisionSnapshot, root: Path, base: Path, raw: str
+) -> Path:
+    """Map declarations written for the live checkout into a captured root."""
+    if not isinstance(raw, str):
+        raise _current_error(str(raw), "path declaration must be a string")
+    if not raw.startswith("/"):
+        return base / raw
+    candidate = Path(raw)
     try:
-        raw_config_bytes = selected_config.path.read_bytes()
-        current_config = config.parse_config_bytes(raw_config_bytes, source=selected_config.path)
-    except CurrentInputError:
-        raise
-    except Exception as error:
-        raise _current_error(
-            selected_config.path, "invalid current configuration", error
-        ) from error
+        relative = candidate.relative_to(snapshot.pin.root.resolve())
+    except ValueError:
+        return candidate
+    return root / relative
 
-    root_path = _declaration_path(worktree, selected_config.path.parent, current_config.root)
-    root_route = _inspect_current_route(
-        worktree, root_path, label="analysis root", allow_missing=False
-    )
-    if root_route.entry is None or not stat.S_ISDIR(root_route.entry.st_mode):
-        raise _current_error(root_path, "analysis root is not an ordinary directory")
 
-    graph_route = _lexical_declaration(
-        worktree, root_path, current_config.graph, label="configured graph"
-    )
-    systems_path = _declaration_path(worktree, root_path, current_config.systems_dir)
-    systems_route = _inspect_current_route(worktree, systems_path, label="systems root")
+def _captured_analysis(
+    snapshot: RevisionSnapshot,
+    config_coordinate: str,
+    producer: SelectionProducer,
+    *,
+    validate: bool,
+) -> _CapturedAnalysis:
+    """Parse declarations and analyze only the bytes in *snapshot*.
 
-    target_routes: list[_CurrentRoute] = []
-    analyzed_targets: list[Path] = []
-    metadata_targets: list[Path] = []
-    target_coordinates: list[str] = []
-    seen_existing: set[str] = set()
-    for raw_target in current_config.targets:
-        target_path = _declaration_path(worktree, root_path, raw_target)
-        target_route = _inspect_current_route(worktree, target_path, label="target")
+    The saved graph and sidecar are deliberately never read here. They are
+    outputs of an earlier analysis, not evidence for the source currently being
+    compared. Both old and new sides use this same route/selection/diagnostic
+    path, which prevents a live checkout path or the other side's root from
+    entering a result.
+    """
+    root = snapshot.root
+    config_path = root.joinpath(*_coordinate_parts(config_coordinate))
+    try:
+        config_route = _inspect_current_route(
+            root, config_path, label="config", allow_missing=False
+        )
+        if config_route.entry is None:
+            raise _current_error(config_path, "required config is absent")
+        try:
+            raw_config = config.parse_config_bytes(config_path.read_bytes(), source=config_path)
+        except Exception as error:
+            raise _current_error(config_path, "invalid captured configuration", error) from error
+
+        root_path = _captured_declaration_path(snapshot, root, config_path.parent, raw_config.root)
+        root_route = _inspect_current_route(
+            root, root_path, label="analysis root", allow_missing=False
+        )
+        if root_route.entry is None or not stat.S_ISDIR(root_route.entry.st_mode):
+            raise _current_error(root_path, "analysis root is not an ordinary directory")
+        graph_path = _captured_declaration_path(snapshot, root, root_path, raw_config.graph)
+        graph_route = _lexical_declaration(
+            root, root_path, str(graph_path), label="configured graph"
+        )
+        systems_path = _captured_declaration_path(snapshot, root, root_path, raw_config.systems_dir)
+        systems_route = _inspect_current_route(root, systems_path, label="systems root")
+
+        analyzed_targets: list[Path] = []
+        metadata_targets: list[Path] = []
+        target_coordinates: list[str] = []
+        seen_existing: set[str] = set()
         root_parts = _coordinate_parts(root_route.coordinate)
-        target_parts = _coordinate_parts(target_route.coordinate)
-        if target_parts[: len(root_parts)] != root_parts:
-            raise _current_error(target_path, "configured target escapes the current analysis root")
-        target_routes.append(target_route)
-        target_coordinates.append(target_route.coordinate)
-        metadata_targets.append(target_route.path)
-        if target_route.entry is None:
-            continue
-        else:
+        for raw_target in raw_config.targets:
+            target_path = _captured_declaration_path(snapshot, root, root_path, raw_target)
+            target_route = _inspect_current_route(root, target_path, label="target")
+            target_parts = _coordinate_parts(target_route.coordinate)
+            if target_parts[: len(root_parts)] != root_parts:
+                raise _current_error(
+                    target_path, "configured target escapes the captured analysis root"
+                )
+            metadata_targets.append(target_route.path)
+            target_coordinates.append(target_route.coordinate)
+            if target_route.entry is None:
+                continue
             mode = target_route.entry.st_mode
             if stat.S_ISREG(mode) and not default_registry().supports(target_route.path):
                 raise _current_error(target_path, "target is an unsupported source file")
@@ -868,77 +929,169 @@ def prepare_comparison(
                 analyzed_targets.append(target_route.path)
                 seen_existing.add(target_route.coordinate)
 
-    # Historical acquisition is deliberately after the single current config read.
-    historical = load_historical_inputs(worktree, selected_config.coordinate, validate=validate)
-    current_targets = tuple(sorted(set(target_coordinates)))
-    if root_route.coordinate != historical.normalized_root:
-        raise _current_error(
-            selected_config.path,
-            f"current analysis root {root_route.coordinate!r} does not match historical "
-            f"root {historical.normalized_root!r} at pinned commit {historical.commit}",
-        )
-    if current_targets != historical.normalized_targets:
-        raise _current_error(
-            selected_config.path,
-            f"current targets {current_targets!r} do not match historical targets "
-            f"{historical.normalized_targets!r} at pinned commit {historical.commit}",
-        )
+        systems = _current_systems(root, systems_route)
+        try:
+            workspace, selected, produced = producer(
+                root_route.path,
+                tuple(analyzed_targets),
+                tuple(metadata_targets),
+            )
+        except CurrentInputError:
+            raise
+        except Exception as error:
+            raise _current_error(
+                root_route.path, "captured source production failed", error
+            ) from error
 
-    for target_route in target_routes:
-        if target_route.entry is None:
-            pinned_entry = _pinned_target_entry(historical, target_route.coordinate)
-            if pinned_entry is None or not (
-                pinned_entry.is_regular_file or pinned_entry.kind == "tree"
-            ):
+        expected_root = root_route.path.resolve()
+        if workspace.root != expected_root:
+            raise _current_error(
+                workspace.root,
+                f"producer workspace crossed the {snapshot.side} capture root",
+            )
+        for source in selected.files:
+            try:
+                source.resolve().relative_to(expected_root)
+            except ValueError as error:
                 raise _current_error(
-                    target_route.path,
-                    f"absent current target is not proven at historical pin {historical.commit}",
-                )
+                    source, f"producer selected a path outside the {snapshot.side} capture root"
+                ) from error
 
-    current_systems = _current_systems(worktree, systems_route)
-    try:
-        produced_workspace, produced_selection, produced = producer(
-            root_route.path,
-            tuple(analyzed_targets),
-            tuple(metadata_targets),
+        diagnostics = tuple(produced.diagnostics)
+        if diagnostics:
+            path = diagnostics[0].path
+            raise _current_error(
+                path,
+                "captured source analysis produced diagnostics",
+                diagnostics=diagnostics,
+            )
+        current_targets = tuple(sorted(set(target_coordinates)))
+        expected_selection = {
+            _analysis_relative_coordinate(target, root_parts) for target in current_targets
+        }
+        try:
+            selection = validate_saved_selection(
+                _raw_selection(produced.document), expected_selection
+            )
+        except Exception as error:
+            raise _current_error("<produced graph>", "invalid produced selection", error) from error
+        report = validate_document(produced.document, verify_node_ids=True)
+        if not report.is_valid:
+            raise _current_error("<produced graph>", f"invalid produced graph: {report.issues!r}")
+        graph_bytes = serialize(produced.document)
+        graph = loading.load_graph_blob(graph_bytes, validate=validate)
+        snapshot.verify_unchanged()
+        return _CapturedAnalysis(
+            snapshot=snapshot,
+            config_coordinate=config_coordinate,
+            config=raw_config,
+            normalized_root=root_route.coordinate,
+            normalized_graph=graph_route.coordinate,
+            normalized_systems_dir=systems_route.coordinate,
+            normalized_targets=current_targets,
+            systems=systems,
+            selection=selection,
+            graph=graph,
+            graph_bytes=graph_bytes,
         )
+    except CurrentInputError as error:
+        raise _relabel_snapshot_error(error, snapshot) from error.__cause__
+
+
+def _validate_live_current_contract(worktree: Path, selected_config: _CurrentRoute) -> None:
+    """Reject unsafe current declarations before either side is analyzed."""
+    try:
+        current_config = config.parse_config_bytes(
+            selected_config.path.read_bytes(), source=selected_config.path
+        )
+    except Exception as error:
+        raise _current_error(
+            selected_config.path, "invalid current configuration", error
+        ) from error
+    root_path = _declaration_path(worktree, selected_config.path.parent, current_config.root)
+    root_route = _inspect_current_route(
+        worktree, root_path, label="analysis root", allow_missing=False
+    )
+    if root_route.entry is None or not stat.S_ISDIR(root_route.entry.st_mode):
+        raise _current_error(root_path, "analysis root is not an ordinary directory")
+    _lexical_declaration(worktree, root_path, current_config.graph, label="configured graph")
+    systems_path = _declaration_path(worktree, root_path, current_config.systems_dir)
+    systems_route = _inspect_current_route(worktree, systems_path, label="systems root")
+    _current_systems(worktree, systems_route)
+    root_parts = _coordinate_parts(root_route.coordinate)
+    for raw_target in current_config.targets:
+        target_path = _declaration_path(worktree, root_path, raw_target)
+        target_route = _inspect_current_route(worktree, target_path, label="target")
+        target_parts = _coordinate_parts(target_route.coordinate)
+        if target_parts[: len(root_parts)] != root_parts:
+            raise _current_error(target_path, "configured target escapes the current analysis root")
+        if target_route.entry is None:
+            continue
+        mode = target_route.entry.st_mode
+        if stat.S_ISREG(mode) and not default_registry().supports(target_route.path):
+            raise _current_error(target_path, "target is an unsupported source file")
+        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise _current_error(target_path, "target is not an ordinary file or directory")
+
+
+def prepare_comparison(
+    start: Path,
+    raw_config_path: Path | None,
+    producer: SelectionProducer,
+    validate: bool = False,
+) -> PreparedComparison:
+    """Analyze a complete old/new pair from isolated source captures.
+
+    The old side is a pinned ``HEAD`` tree and the new side is a read-only copy
+    of the working tree, so untracked and unstaged source participate without
+    mutating the checkout. Each side parses its own config and system
+    declarations and runs the same producer against its own root. Saved graph
+    files and sidecars are intentionally not inputs to this operation.
+    """
+    worktree, preserved_start = _select_worktree(start)
+    selected_config = _current_config_route(worktree, preserved_start, raw_config_path)
+    _validate_live_current_contract(worktree, selected_config)
+    before = capture_local_revision(worktree, "HEAD", side="before")
+    try:
+        after = capture_working_tree(worktree, side="after")
+    except Exception:
+        before.close()
+        raise
+    try:
+        with before, after:
+            old = _captured_analysis(
+                before, selected_config.coordinate, producer, validate=validate
+            )
+            new = _captured_analysis(after, selected_config.coordinate, producer, validate=True)
+            historical = HistoricalInputs(
+                pin=before.pin,
+                config_coordinate=old.config_coordinate,
+                config=old.config,
+                normalized_root=old.normalized_root,
+                normalized_graph=old.normalized_graph,
+                normalized_systems_dir=old.normalized_systems_dir,
+                normalized_targets=old.normalized_targets,
+                graph=old.graph,
+                graph_bytes=old.graph_bytes,
+                sidecar=(loading.graph_digest(old.graph_bytes) + "\n").encode("ascii"),
+                systems=old.systems,
+                selection=old.selection,
+            )
+            current = CurrentInputs(
+                config_coordinate=new.config_coordinate,
+                config=new.config,
+                normalized_root=new.normalized_root,
+                normalized_graph=new.normalized_graph,
+                normalized_systems_dir=new.normalized_systems_dir,
+                normalized_targets=new.normalized_targets,
+                systems=new.systems,
+                selection=new.selection,
+            )
+            old_reporting = ReportingSnapshot.prepare(old.graph.document, old.systems)
+            new_reporting = ReportingSnapshot.prepare(new.graph.document, new.systems)
+            return PreparedComparison(historical, current, old_reporting, new_reporting)
     except CurrentInputError:
         raise
-    except Exception as error:
-        raise _current_error(root_route.path, "current source production failed", error) from error
-
-    diagnostics = tuple(produced.diagnostics)
-    if diagnostics:
-        path = diagnostics[0].path if diagnostics else "<source diagnostics>"
-        raise _current_error(
-            path,
-            "current source analysis produced diagnostics",
-            diagnostics=diagnostics,
-        )
-    try:
-        expected_selection = {
-            _analysis_relative_coordinate(target, _coordinate_parts(root_route.coordinate))
-            for target in current_targets
-        }
-        selection = validate_saved_selection(_raw_selection(produced.document), expected_selection)
-    except Exception as error:
-        raise _current_error("<produced graph>", "invalid produced selection", error) from error
-    report = validate_document(produced.document, verify_node_ids=True)
-    if not report.is_valid:
-        raise _current_error("<produced graph>", f"invalid produced graph: {report.issues!r}")
-    current = CurrentInputs(
-        config_coordinate=selected_config.coordinate,
-        config=current_config,
-        normalized_root=root_route.coordinate,
-        normalized_graph=graph_route.coordinate,
-        normalized_systems_dir=systems_route.coordinate,
-        normalized_targets=current_targets,
-        systems=current_systems,
-        selection=selection,
-    )
-    old_snapshot = ReportingSnapshot.prepare(historical.graph.document, historical.systems)
-    new_snapshot = ReportingSnapshot.prepare(produced.document, current_systems)
-    return PreparedComparison(historical, current, old_snapshot, new_snapshot)
 
 
 def _declaration_path(root: Path, base: Path, raw: str) -> Path:

@@ -403,3 +403,110 @@ def test_readme_uses_the_greeting_walkthrough_transcript() -> None:
     assert "app.py:11:12  app.welcome" in text
     assert "python examples/run_walkthrough.py python" in text
     assert "examples/system-walkthrough/minotaur-graph.json" not in text
+
+
+# ---------------------------------------------------------------------------
+# AC-08 / AC-14: historical and working-tree comparison documentation
+# ---------------------------------------------------------------------------
+
+
+COMPARISON_REFERENCE = ROOT / "examples/system-walkthrough/comparison.md"
+CUSTOMIZE = ROOT / "docs/guides/customize-html-visualization.md"
+
+
+def test_comparison_reference_documents_both_workflows_and_identities() -> None:
+    assert COMPARISON_REFERENCE.is_file(), f"comparison reference missing: {COMPARISON_REFERENCE}"
+    text = _collapsed(COMPARISON_REFERENCE)
+    assert "minotaur query diff --systems BEFORE AFTER" in text
+    assert "minotaur query diff --systems --html working-tree-comparison.html" in text
+    assert (
+        "using each revision's own configuration, source selection, and system definitions" in text
+    )
+    # The historical command's real stdout is the same change rows and context
+    # lines as the working-tree command; it prints no revision header. The
+    # identities belong to the saved report's compact header.
+    assert "byte-for-byte the same as the working-tree report above" in text
+    assert "The command line prints no revision header" in text
+    assert "Writing the report with `--html` renders a compact header above the graph" in text
+    assert "Before: v1.0 · 134b138" in text
+    assert "After: v2.0 · a2b78dd" in text
+    assert "Working tree at report generation" in text
+    assert "does not change when your working files change" in text
+
+
+def test_comparison_reference_explains_changes_exit_and_evidence_limits() -> None:
+    text = _collapsed(COMPARISON_REFERENCE)
+    assert "A boundary change" in text
+    assert "A call-expression change" in text
+    assert "A move" in text
+    assert "A removed item" in text
+    assert "means the comparison succeeded and found changes" in text
+    assert "Writing a requested `--html` report does not change this" in text
+    assert (
+        "prints a limitation notice for that side instead of claiming the call is unchanged" in text
+    )
+    assert "a revision that cannot be acquired or interpreted is an error at exit `2`" in text
+
+
+def test_comparison_reference_distinguishes_graph_views_from_details_source_switch() -> None:
+    text = _collapsed(COMPARISON_REFERENCE)
+    assert "This is a graph-level view" in text
+    assert "changes only which side's captured source excerpt is shown" in text
+    assert "`Captured After revision: v2.0 · a2b78dd`" in text
+    assert "makes no network requests" in text
+    assert "The saved report is static" in text
+
+
+def test_query_reference_documents_systems_html_and_historical_revisions() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert "minotaur query diff --systems BEFORE AFTER --html comparison.html" in text
+    assert "minotaur query diff --systems --html comparison.html" in text
+    assert "using that revision's configuration, source selection, and system definitions" in text
+    assert "identifies Before as `HEAD` with its resolved commit ID" in text
+    assert "`Working tree at report generation` without inventing a commit identity" in text
+    assert "retains each requested revision name and its resolved short commit ID" in text
+    assert "including a successful comparison that also wrote a requested" in text
+    assert "Missing call-expression evidence on a side is a limitation notice" in text
+
+
+def test_customize_html_documents_comparison_controls_and_limits() -> None:
+    text = _collapsed(CUSTOMIZE)
+    assert "minotaur query diff --systems BEFORE AFTER --html comparison.html" in text
+    assert "Graph view" in text
+    assert "**Combined**, **Before**, and **After**" in text
+    assert "**Emphasize changes**" in text
+    assert "**Source revision** switch" in text
+    assert "it never changes the graph view, layout, zoom, pan, selection" in text
+    assert "`Captured Before revision: v1.0 · 134b138`" in text
+    assert (
+        "`Working tree at report generation` without presenting the working "
+        "tree as a commit" in text
+    )
+    assert "shown in a notice region and is never drawn as a detected change" in text
+    assert "shows them in a compact header above the graph" in text
+    assert "`Before: v1.0 · 134b138`" in text
+    assert "`After: v2.0 · a2b78dd`" in text
+
+
+def test_system_definitions_guide_documents_per_revision_source_selection() -> None:
+    text = _collapsed(QUERY_GUIDE)
+    assert "minotaur query diff --systems BEFORE AFTER" in text
+    assert (
+        "configuration, source selection, and system definitions that belong "
+        "to that revision" in text
+    )
+    assert "A committed graph or sidecar is not required" in text
+    assert "`Working tree at report generation` without inventing a commit identity" in text
+    assert (
+        "A successful comparison that also writes a requested `--html` report "
+        "still exits `1`" in text
+    )
+
+
+def test_readme_documents_historical_comparison_and_offline_report() -> None:
+    text = _collapsed(README)
+    assert "either `HEAD` versus the working tree or an explicit historical pair" in text
+    assert "`--html comparison.html`" in text
+    assert "retains the revision identities it was generated from" in text
+    assert "examples/system-walkthrough/minotaur-comparison.html" in text
+    assert "resolved commit IDs" in text

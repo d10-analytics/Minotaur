@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from hashlib import sha256
@@ -378,3 +379,182 @@ def test_renderer_keeps_resolved_reference_edges_from_analyzed_source(tmp_path: 
     ] == [
         ("src.fixture", "src.fixture.handler"),
     ]
+
+
+ARTIFACT_NAMES = ("minotaur-graph.json", "minotaur-graph.json.sha256", "minotaur-graph.html")
+
+
+def _generate_python_workflow(directory: Path) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/generate_example_output.py"),
+            "--output-directory",
+            str(directory),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+
+def _generate_system_walkthrough(directory: Path) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(SYSTEM_EXAMPLE / "regenerate_system_walkthrough.py"),
+            "--output-directory",
+            str(directory),
+            "--skip-comparison",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+
+def _tracked_changes() -> set[str]:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return {line[3:] for line in result.stdout.splitlines() if line}
+
+
+def test_analyzing_and_visualizing_source_never_executes_it(tmp_path: Path) -> None:
+    """Under ``R-07``/``AR-03`` analyzed code is parsed, never imported or run.
+
+    The module writes an observable file the moment it executes, so the real
+    public analyze and visualize commands are the natural trigger. The closing
+    direct execution keeps the sentinel honest: it fires only if the command
+    path would have executed the same module.
+    """
+    source_root = tmp_path / "sentinel-root"
+    source_root.mkdir()
+    marker = tmp_path / "module-executed.sentinel"
+    (source_root / "dangerous.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
+        "\n"
+        "def entry():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    graph = tmp_path / "graph.json"
+    html = tmp_path / "graph.html"
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(ROOT / "src")
+
+    analyzed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "minotaur",
+            "analyze",
+            "--root",
+            str(source_root),
+            "--output",
+            str(graph),
+            "--force",
+            str(source_root / "dangerous.py"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    assert analyzed.returncode == 0, analyzed.stderr
+    loaded = load_graph_bytes(graph.read_bytes())
+    assert any(node.label == "dangerous.entry" for node in loaded.document.nodes), (
+        "the sentinel module must reach the analyzer for this proof to be non-vacuous"
+    )
+
+    visualized = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "minotaur",
+            "visualize",
+            "--input",
+            str(graph),
+            "--output",
+            str(html),
+            "--source-root",
+            str(source_root),
+            "--force",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    assert visualized.returncode == 0, visualized.stderr
+    assert not marker.exists(), "analyzed project code must never be executed or imported"
+
+    executed = subprocess.run([sys.executable, str(source_root / "dangerous.py")], check=False)
+    assert executed.returncode == 0
+    assert marker.exists(), "the execution sentinel must fire when the module is run"
+
+
+def test_checked_in_viewer_artifacts_stay_offline_single_graph_explorers() -> None:
+    """The regenerated examples remain ordinary single-view offline explorers.
+
+    The shared template carries historical-comparison chrome, so a reviewed
+    single-graph artifact must embed every asset and keep that chrome
+    statically hidden. Nothing else keeps a leaked comparison control inert
+    when the embedded payload has no ``comparison`` block.
+    """
+    for artifact in (EXAMPLE / "minotaur-graph.html", SYSTEM_EXAMPLE / "minotaur-graph.html"):
+        html = artifact.read_text(encoding="utf-8")
+        assert "<script src=" not in html
+        assert "<link " not in html
+        assert 'src="http' not in html
+        assert 'href="http' not in html
+        assert "cytoscape-dagre" in html
+        prefix = '<script id="minotaur-presentation" type="application/json">'
+        presentation = json.loads(html.split(prefix, 1)[1].split("</script>", 1)[0])
+        assert "comparison" not in presentation
+        assert presentation["systems"]
+        assert presentation["node_systems"]
+        assert '<div class="group comparison-control" id="revision-control" hidden>' in html
+        assert '<div id="comparison-header" hidden>' in html
+        assert '<span id="comparison-legend" class="comparison-legend" hidden>' in html
+        assert '<div id="comparison-notices" class="comparison-notices" hidden>' in html
+        assert '<select id="system-filter"' in html
+        assert '<input type="checkbox" id="cross-system-connections" disabled>' in html
+        assert '<div id="cy" ' in html
+
+
+def test_regenerating_checked_in_examples_is_reproducible(tmp_path: Path) -> None:
+    """Under ``R-07`` controlled inputs and repeated generation are identical."""
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _generate_python_workflow(first)
+    _generate_python_workflow(second)
+    _generate_system_walkthrough(first)
+    _generate_system_walkthrough(second)
+
+    for directory in (first, second):
+        assert sorted(path.name for path in directory.iterdir()) == sorted(ARTIFACT_NAMES)
+    for name in ARTIFACT_NAMES:
+        assert first.joinpath(name).read_bytes() == second.joinpath(name).read_bytes(), name
+
+
+def test_regenerating_checked_in_examples_only_reproduces_reviewed_bytes() -> None:
+    """Under ``R-07``/``D-03`` generation is read-only apart from its outputs.
+
+    ``git status`` is the natural repository-mutation probe: introducing any
+    tracked change other than the intended artifacts fails the assertion, and
+    the intended artifacts themselves must regenerate byte-identically.
+    """
+    before = _tracked_changes()
+    _generate_python_workflow(EXAMPLE)
+    _generate_system_walkthrough(SYSTEM_EXAMPLE)
+    introduced = _tracked_changes() - before
+    assert introduced == set(), (
+        "regeneration must reproduce the reviewed artifacts without touching any "
+        f"other tracked file: {sorted(introduced)}"
+    )

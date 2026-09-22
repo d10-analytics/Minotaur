@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
+
+from minotaur.graph_model.location import is_safe_path
 
 
 def read_source_path(root: Path, wire_path: str, spans: list[tuple[int, int]]) -> dict[str, object]:
@@ -23,7 +26,7 @@ def read_source_path(root: Path, wire_path: str, spans: list[tuple[int, int]]) -
     except (OSError, ValueError):
         return {"status": "unavailable", "reason": "path is missing or escapes the source root"}
     try:
-        text = resolved.read_text(encoding="utf-8")
+        content = resolved.read_bytes()
     except UnicodeDecodeError:
         return {"status": "unavailable", "reason": "source file is not UTF-8"}
     except OSError as error:
@@ -31,12 +34,66 @@ def read_source_path(root: Path, wire_path: str, spans: list[tuple[int, int]]) -
             "status": "unavailable",
             "reason": f"source file is unreadable: {error.strerror or error}",
         }
+    return read_source_bytes(wire_path, content, spans)
+
+
+def read_source_bytes(
+    wire_path: str, content: bytes, spans: Sequence[tuple[int, int]]
+) -> dict[str, object]:
+    """Render bounded line spans from already captured UTF-8 *content*.
+
+    Comparison presentation must use this boundary after its source captures
+    have been released.  Keeping byte decoding here makes it impossible for a
+    later renderer call to silently fall back to a live checkout path.
+    """
+    if not isinstance(content, bytes):
+        raise TypeError("captured source content must be bytes")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"status": "unavailable", "reason": "source file is not UTF-8"}
     lines = text.splitlines()
     merged = merge_spans(spans, len(lines))
     return {
         "status": "available",
         "spans": [{"start": start, "lines": lines[start:end]} for start, end in merged],
     }
+
+
+def capture_source_bytes(root: Path, paths: Iterable[str]) -> Mapping[str, bytes]:
+    """Capture selected repository-relative files as an immutable byte map.
+
+    The returned mapping is detached from *root*: callers may mutate or remove
+    the source tree after capture without changing the captured evidence.
+    Unsafe, missing, or unreadable paths are omitted and are represented as
+    unavailable by comparison excerpt preparation.
+    """
+    try:
+        source_root = root.resolve(strict=True)
+    except OSError:
+        return MappingProxyType({})
+    if not source_root.is_dir():
+        return MappingProxyType({})
+    captured: dict[str, bytes] = {}
+    for wire_path in sorted(set(paths)):
+        if not isinstance(wire_path, str) or not is_safe_path(wire_path):
+            continue
+        candidate = source_root.joinpath(*wire_path.split("/"))
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(source_root)
+            if not resolved.is_file():
+                continue
+            captured[wire_path] = bytes(resolved.read_bytes())
+        except (OSError, ValueError):
+            continue
+    return MappingProxyType(captured)
+
+
+# Descriptive aliases keep the capture boundary discoverable to comparison
+# owners without introducing another source-reading implementation.
+capture_source = capture_source_bytes
+read_captured_source = read_source_bytes
 
 
 def merge_spans(spans: Iterable[tuple[int, int]], line_count: int) -> list[tuple[int, int]]:

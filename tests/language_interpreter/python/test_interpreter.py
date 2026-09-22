@@ -136,6 +136,72 @@ def test_python_interpreter_establishes_containment_imports_and_direct_calls(
     assert call.evidence[0].locations[0].range.start.line == 7
 
 
+def test_python_call_observations_preserve_multiplicity_and_literal_structure(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def helper(value):\n    return value\n\n"
+        "def run():\n"
+        "    helper(1)  # first\n"
+        "    helper(1)\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    observations = result.call_expressions
+
+    assert len(observations) == 2
+    assert all(observation.language == "python" for observation in observations)
+    assert observations[0].callee_location.range.start.line == 4
+    assert observations[0].expression_location.range.start.line == 4
+    assert observations[0].fingerprint == observations[1].fingerprint
+
+    _write(
+        tmp_path,
+        "app.py",
+        "def helper(value):\n    return value\n\n"
+        "def run():\n"
+        "    helper(1)\n"
+        "    # moved\n"
+        "    helper(1)\n",
+    )
+    moved = analyze_python_workspace(tmp_path)
+    assert [item.fingerprint for item in moved.call_expressions] == [
+        item.fingerprint for item in observations
+    ]
+
+    _write(
+        tmp_path,
+        "app.py",
+        "def helper(value):\n    return value\n\ndef run():\n    helper(2)\n    helper(1)\n",
+    )
+    changed_literal = analyze_python_workspace(tmp_path)
+    assert {item.fingerprint for item in changed_literal.call_expressions} != {
+        item.fingerprint for item in observations
+    }
+
+
+def test_python_call_observations_preserve_nested_keyword_and_spread_structure(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def leaf(value):\n    return value\n"
+        "def helper(*values, option=0, **named):\n    return values, named\n"
+        "def run(values):\n    return helper(leaf(1), *values, option=1, **values)\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    observations = result.call_expressions
+
+    assert len(observations) == 2
+    assert observations[0].expression_location.range.start.line == 5
+    assert observations[1].expression_location.range.start.line == 5
+    assert observations[0].fingerprint != observations[1].fingerprint
+
+
 def test_public_python_analysis_runs_without_retired_kernel(
     tmp_path: Path,
 ) -> None:
