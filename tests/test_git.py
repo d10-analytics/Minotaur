@@ -94,6 +94,19 @@ def _promisor_clone(tmp_path: Path) -> tuple[Path, str]:
     return clone, sha
 
 
+def _tree_blob_oid(root: Path, sha: str, relative: str) -> str:
+    """Return the blob OID recorded for ``relative`` in ``sha``'s tree."""
+    mode, kind, oid = _run(root, "ls-tree", sha, "--", relative).split()[:3]
+    assert (mode, kind) == ("100644", "blob")
+    return oid
+
+
+def _local_object_oids(root: Path) -> set[str]:
+    """Return the OIDs in the local object store; enumerating never fetches."""
+    listing = _run(root, "cat-file", "--batch-all-objects", "--batch-check")
+    return {line.split()[0] for line in listing.splitlines() if line.strip()}
+
+
 def test_run_git_keeps_text_default_and_supports_bytes(tmp_path: Path) -> None:
     root, _ = _repository(tmp_path)
 
@@ -182,7 +195,12 @@ def test_promisor_clone_reads_refuse_lazy_fetching_missing_objects(tmp_path: Pat
     assert error.value.side == "before"
     assert error.value.commit == sha
     assert error.value.path == "promised.py"
-    assert "could not fetch" in str(error.value)
+
+    # Behavior-based proof that the strict read refused to fetch rather than
+    # failing for an unrelated reason: the promised blob is still absent from
+    # the local object store. Enumerating local objects cannot lazy-fetch.
+    blob_oid = _tree_blob_oid(clone, sha, "promised.py")
+    assert blob_oid not in _local_object_oids(clone)
 
     # Control: the same object is genuinely fetchable from the promisor remote,
     # so the refusal above is the lazy-fetch policy and not an absent object.
