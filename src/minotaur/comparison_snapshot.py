@@ -67,10 +67,17 @@ def _digest_file(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+def _raise_walk_error(error: OSError) -> None:
+    """Keep filesystem traversal failures visible to the capture owner."""
+    raise error
+
+
 def _manifest(root: Path) -> CaptureManifest:
     """Inventory ordinary directories and files without following links."""
     entries: list[ManifestEntry] = []
-    for current, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
+    for current, directory_names, file_names in os.walk(
+        root, topdown=True, followlinks=False, onerror=_raise_walk_error
+    ):
         current_path = Path(current)
         directory_names.sort()
         file_names.sort()
@@ -146,13 +153,41 @@ def _tree_files(pin: PinnedCommit) -> tuple[tuple[str, int], ...]:
     return tuple(files)
 
 
-def _materialize_tree(pin: PinnedCommit, destination: Path) -> None:
+def _materialize_tree(pin: PinnedCommit, destination: Path, revision: str) -> None:
     """Write exact pinned blob bytes into the temporary analysis root."""
     for relative, mode in _tree_files(pin):
         target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(pin.read_blob(relative))
-        os.chmod(target, mode & 0o7777)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(pin.read_blob(relative))
+            os.chmod(target, mode & 0o7777)
+        except OSError as error:
+            raise _capture_os_error(
+                side=pin.side,
+                revision=revision,
+                commit=pin.commit,
+                path=relative,
+                operation="could not materialize captured file",
+                error=error,
+            ) from error
+
+
+def _capture_os_error(
+    *,
+    side: str,
+    revision: str,
+    commit: str | None,
+    path: str | Path,
+    operation: str,
+    error: OSError,
+) -> SnapshotError:
+    """Translate an unexpected capture I/O failure without hiding its cause."""
+    return SnapshotError(
+        side=side,
+        revision=revision,
+        commit=commit,
+        detail=f"{operation} at {path!r}: {error}",
+    )
 
 
 @dataclass(slots=True)
@@ -257,15 +292,48 @@ def capture_revision(
     side: str = "historical",
 ) -> RevisionSnapshot:
     """Capture a locally available revision without changing Git state."""
-    root = Path(worktree_root).resolve()
+    try:
+        root = Path(worktree_root).resolve()
+    except OSError as error:
+        raise _capture_os_error(
+            side=side,
+            revision=revision,
+            commit=None,
+            path=worktree_root,
+            operation="could not resolve capture worktree",
+            error=error,
+        ) from error
     pin = PinnedCommit.resolve(root, revision, side=side)
-    temporary_directory = tempfile.TemporaryDirectory(
-        prefix="minotaur-revision-", ignore_cleanup_errors=True
-    )
+    try:
+        temporary_directory = tempfile.TemporaryDirectory(
+            prefix="minotaur-revision-", ignore_cleanup_errors=True
+        )
+    except OSError as error:
+        raise _capture_os_error(
+            side=side,
+            revision=revision,
+            commit=pin.commit,
+            path=root,
+            operation="could not create temporary revision capture",
+            error=error,
+        ) from error
     destination = Path(temporary_directory.name)
     try:
-        _materialize_tree(pin, destination)
+        _materialize_tree(pin, destination, revision)
         manifest = _manifest(destination)
+    except SnapshotError:
+        temporary_directory.cleanup()
+        raise
+    except OSError as error:
+        temporary_directory.cleanup()
+        raise _capture_os_error(
+            side=side,
+            revision=revision,
+            commit=pin.commit,
+            path=destination,
+            operation="could not finalize revision capture",
+            error=error,
+        ) from error
     except Exception:
         temporary_directory.cleanup()
         raise
@@ -289,20 +357,44 @@ def capture_working_tree(worktree_root: Path, *, side: str = "after") -> Revisio
     pinned ``HEAD`` is retained only as a stable identity for diagnostics; the
     manifest guards the copied working-tree bytes during analysis.
     """
-    root = Path(worktree_root).resolve()
-    pin = PinnedCommit.resolve(root, "HEAD", side=side)
-    temporary_directory = tempfile.TemporaryDirectory(
-        prefix="minotaur-working-", ignore_cleanup_errors=True
-    )
-    destination = Path(temporary_directory.name)
     try:
-        for current, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
+        root = Path(worktree_root).resolve()
+    except OSError as error:
+        raise _capture_os_error(
+            side=side,
+            revision="WORKTREE",
+            commit=None,
+            path=worktree_root,
+            operation="could not resolve working-tree capture root",
+            error=error,
+        ) from error
+    pin = PinnedCommit.resolve(root, "HEAD", side=side)
+    try:
+        temporary_directory = tempfile.TemporaryDirectory(
+            prefix="minotaur-working-", ignore_cleanup_errors=True
+        )
+    except OSError as error:
+        raise _capture_os_error(
+            side=side,
+            revision="WORKTREE",
+            commit=pin.commit,
+            path=root,
+            operation="could not create temporary working-tree capture",
+            error=error,
+        ) from error
+    destination = Path(temporary_directory.name)
+    failing_path = root
+    try:
+        for current, directory_names, file_names in os.walk(
+            root, topdown=True, followlinks=False, onerror=_raise_walk_error
+        ):
             current_path = Path(current)
             retained_directories: list[str] = []
             for name in sorted(directory_names):
                 if name == ".git":
                     continue
                 source = current_path / name
+                failing_path = source
                 info = source.lstat()
                 if stat.S_ISLNK(info.st_mode):
                     continue
@@ -316,6 +408,7 @@ def capture_working_tree(worktree_root: Path, *, side: str = "after") -> Revisio
                 if name == ".git":
                     continue
                 source = current_path / name
+                failing_path = source
                 info = source.lstat()
                 relative = source.relative_to(root)
                 if not stat.S_ISREG(info.st_mode):
@@ -325,6 +418,19 @@ def capture_working_tree(worktree_root: Path, *, side: str = "after") -> Revisio
                 shutil.copyfile(source, target)
                 os.chmod(target, stat.S_IMODE(info.st_mode))
         manifest = _manifest(destination)
+    except SnapshotError:
+        temporary_directory.cleanup()
+        raise
+    except OSError as error:
+        temporary_directory.cleanup()
+        raise _capture_os_error(
+            side=side,
+            revision="WORKTREE",
+            commit=pin.commit,
+            path=failing_path,
+            operation="could not capture working-tree input",
+            error=error,
+        ) from error
     except Exception:
         temporary_directory.cleanup()
         raise
