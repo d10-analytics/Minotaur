@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_visualizer.html.render import render_html
 
 playwright = pytest.importorskip("playwright.sync_api")
 sync_playwright = playwright.sync_playwright
@@ -662,3 +663,172 @@ def test_layout_uses_only_filter_eligible_elements(tmp_path: Path, bundled: bool
         browser.close()
     assert not errors
     assert all(url.startswith("file:") for url in requests)
+
+
+def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_path: Path) -> None:
+    """Revision controls hide side records without rerunning the union layout."""
+
+    def node(
+        node_id: str, label: str, system: str, *, before: bool = True, after: bool = True
+    ) -> dict[str, object]:
+        location = {
+            "path": f"{label}.py",
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 4}},
+        }
+        base = {
+            "node_class": "symbol",
+            "label": label,
+            "symbol_kind": "function",
+            "location": location,
+        }
+        return {
+            "id": node_id,
+            "status": "unchanged" if before and after else "removed" if before else "added",
+            "reasons": [],
+            "involved_systems": [system],
+            "before": {**base, "systems": [system]} if before else None,
+            "after": {**base, "systems": [system]} if after else None,
+        }
+
+    nodes = [
+        node("shared", "shared", "A"),
+        node("moved", "moved", "A"),
+        node("departed", "departed", "A", after=False),
+        node("added", "added", "A", before=False),
+    ]
+    nodes[1]["after"] = {**nodes[1]["after"], "systems": ["B"]}  # type: ignore[typeddict-item]
+    relationships = [
+        {
+            "id": "edge:stable",
+            "source": "shared",
+            "target": "moved",
+            "kind": "calls",
+            "status": "changed",
+            "reasons": ["membership_changed"],
+            "involved_systems": ["A", "B"],
+            "before": {"evidence": []},
+            "after": {"evidence": []},
+        },
+        {
+            "id": "edge:departed",
+            "source": "shared",
+            "target": "departed",
+            "kind": "references",
+            "status": "removed",
+            "reasons": ["removed"],
+            "involved_systems": ["A"],
+            "before": {"evidence": []},
+            "after": None,
+        },
+        {
+            "id": "edge:added",
+            "source": "shared",
+            "target": "added",
+            "kind": "references",
+            "status": "added",
+            "reasons": ["added"],
+            "involved_systems": ["A"],
+            "before": None,
+            "after": {"evidence": []},
+        },
+    ]
+    presentation = {
+        "graph": {"nodes": nodes, "relationships": relationships},
+        "comparison": {
+            "old_system_names": ["A", "B"],
+            "new_system_names": ["A", "B"],
+            "revisions": {"old": "before", "new": "after"},
+            "nodes": nodes,
+            "relationships": relationships,
+            "calls": [],
+        },
+        "systems": ["A", "B"],
+        "node_systems": {
+            "shared": {"before": ["A"], "after": ["A"]},
+            "moved": {"before": ["A"], "after": ["B"]},
+            "departed": {"before": ["A"], "after": []},
+            "added": {"before": [], "after": ["A"]},
+        },
+        "excerpts": {"paths": {}, "call_sites": {}},
+    }
+    artifact = tmp_path / "comparison.html"
+    artifact.write_bytes(render_html(presentation))
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(artifact.as_uri())
+        page.wait_for_timeout(500)
+        assert page.locator("#revision-control").is_visible()
+        assert page.locator("#revision-view").locator("option").all_text_contents() == [
+            "Combined",
+            "Before",
+            "After",
+        ]
+        page.locator("#system-filter").select_option("A")
+        page.wait_for_timeout(500)
+        drag = page.evaluate(
+            """() => {
+                const cy = window.minotaurVisualizer.cy;
+                const node = cy.getElementById('shared');
+                const point = node.renderedPosition();
+                const bounds = cy.container().getBoundingClientRect();
+                return {x: bounds.left + point.x, y: bounds.top + point.y};
+            }"""
+        )
+        page.mouse.move(drag["x"], drag["y"])
+        page.mouse.down()
+        page.mouse.move(drag["x"] + 70, drag["y"] + 35)
+        page.mouse.up()
+        dragged_position = page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('shared').position()"
+        )
+        before_switch = page.evaluate(
+            """() => ({
+                runs: window.minotaurVisualizer.layoutRuns(),
+                zoom: window.minotaurVisualizer.cy.zoom(),
+                pan: window.minotaurVisualizer.cy.pan(),
+                positions: Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                    node => [node.id(), node.position()]
+                )),
+            })"""
+        )
+        assert abs(before_switch["positions"]["shared"]["x"] - dragged_position["x"]) < 0.01
+        assert abs(before_switch["positions"]["shared"]["y"] - dragged_position["y"]) < 0.01
+        page.locator("#revision-view").select_option("before")
+        assert page.evaluate("window.minotaurVisualizer.layoutRuns()") == before_switch["runs"]
+        assert page.evaluate(
+            "window.minotaurVisualizer.cy.nodes(':visible').map(n => n.id()).sort()"
+        ) == ["departed", "moved", "shared"]
+        assert page.evaluate(
+            "window.minotaurVisualizer.cy.edges(':visible').map(e => e.id()).sort()"
+        ) == ["edge:departed", "edge:stable"]
+        page.locator("#revision-view").select_option("after")
+        assert page.evaluate("window.minotaurVisualizer.layoutRuns()") == before_switch["runs"]
+        assert page.evaluate(
+            "window.minotaurVisualizer.cy.nodes(':visible').map(n => n.id()).sort()"
+        ) == ["added", "shared"]
+        # The moved endpoint is no longer in A on the After side, so the
+        # relationship cannot be presented as an invented A-internal edge.
+        assert page.evaluate(
+            "window.minotaurVisualizer.cy.edges(':visible').map(e => e.id()).sort()"
+        ) == ["edge:added"]
+        after_switch = page.evaluate(
+            """() => ({
+                zoom: window.minotaurVisualizer.cy.zoom(),
+                pan: window.minotaurVisualizer.cy.pan(),
+                positions: Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                    node => [node.id(), node.position()]
+                )),
+            })"""
+        )
+        assert after_switch["zoom"] == before_switch["zoom"]
+        assert after_switch["pan"] == before_switch["pan"]
+        for node_id in ("shared", "moved"):
+            assert after_switch["positions"][node_id] == before_switch["positions"][node_id]
+        # Direction is an explicit layout action and uses the two-side union,
+        # including the hidden departed/added records as layout inputs.
+        page.locator("#btn-direction").click()
+        page.wait_for_timeout(450)
+        assert page.evaluate("window.minotaurVisualizer.layoutRuns()") > before_switch["runs"]
+        browser.close()
