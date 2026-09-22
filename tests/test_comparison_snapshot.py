@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 import minotaur.comparison_snapshot as snapshots
+from minotaur import cli
 from minotaur.comparison_snapshot import (
     SnapshotError,
     SnapshotMutationError,
@@ -268,3 +270,53 @@ def test_working_tree_capture_includes_untracked_bytes_without_checkout_identity
 
     assert not temporary_root.exists()
     assert _checkout_state(root) == before
+
+
+def _digest_under_umask(root: Path, revision: str, mask: int) -> str:
+    previous = os.umask(mask)
+    try:
+        snapshot = capture_revision(root, revision)
+        try:
+            return cli._capture_digest(snapshot.manifest)
+        finally:
+            snapshot.close()
+    finally:
+        os.umask(previous)
+
+
+def test_manifest_digest_is_independent_of_process_umask(tmp_path: Path) -> None:
+    """C-02/R-07: the same logical input yields the same digest under any umask."""
+    root, old, _ = _repository(tmp_path)
+
+    restrictive = _digest_under_umask(root, old, 0o022)
+    permissive = _digest_under_umask(root, old, 0o002)
+
+    assert restrictive == permissive
+
+
+def test_manifest_digest_still_detects_executable_bit_changes(tmp_path: Path) -> None:
+    """Normalizing to the logical mode keeps a real +x change observable."""
+    root = tmp_path / "exec-repo"
+    root.mkdir()
+    _run(root, "init", "--quiet")
+    _run(root, "config", "user.email", "tests@example.invalid")
+    _run(root, "config", "user.name", "snapshot tests")
+    (root / "tool.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    _run(root, "add", "--all")
+    _run(root, "commit", "--quiet", "-m", "plain")
+    plain = _run(root, "rev-parse", "HEAD")
+    _run(root, "update-index", "--chmod=+x", "tool.sh")
+    _run(root, "commit", "--quiet", "-m", "executable")
+    executable = _run(root, "rev-parse", "HEAD")
+
+    first = capture_revision(root, plain)
+    second = capture_revision(root, executable)
+    try:
+        modes = {entry.path: entry.mode for entry in first.manifest.entries}
+        executable_modes = {entry.path: entry.mode for entry in second.manifest.entries}
+        assert modes["tool.sh"] == 0o644
+        assert executable_modes["tool.sh"] == 0o755
+        assert cli._capture_digest(first.manifest) != cli._capture_digest(second.manifest)
+    finally:
+        first.close()
+        second.close()

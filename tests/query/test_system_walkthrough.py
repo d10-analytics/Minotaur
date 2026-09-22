@@ -784,11 +784,10 @@ def test_public_historical_comparison_retains_revisions_and_representative_chang
 
     # A move: the same symbol leaves shop/orders.py and appears in shop/order_ops.py.
     node_labels = {
-        (change["status"], side, node["label"])
+        (change["status"], side, change[side]["node"]["label"])
         for change in payload["nodes"]
         for side in ("before", "after")
         if isinstance(change.get(side), dict)
-        for node in [change[side]]
     }
     assert ("removed", "before", "shop.orders.complete_order") in node_labels
     assert ("added", "after", "shop.order_ops.complete_order") in node_labels
@@ -796,7 +795,7 @@ def test_public_historical_comparison_retains_revisions_and_representative_chang
     # A removed item: the unassigned checkout file disappears with its module
     # and symbol, and the Orders surface it reached is removed.
     removed_labels = {
-        change["before"]["label"]
+        change["before"]["node"]["label"]
         for change in payload["nodes"]
         if change["status"] == "removed" and isinstance(change.get("before"), dict)
     }

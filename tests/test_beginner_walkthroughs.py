@@ -159,7 +159,7 @@ def test_system_example_reports_changes_without_comparison_writes(
         if change["status"] == "changed"
     ] == [["expression_changed"]]
     moved = {
-        (change["status"], side, change[side]["label"])
+        (change["status"], side, change[side]["node"]["label"])
         for change in working_tree["nodes"]
         for side in ("before", "after")
         if isinstance(change.get(side), dict)

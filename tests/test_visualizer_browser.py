@@ -12,6 +12,14 @@ import pytest
 
 from minotaur import cli
 from minotaur.graph_visualizer.html.render import render_html
+from minotaur.graph_visualizer.presentation import build_comparison_presentation
+from minotaur.query.call_diff import CallChange, CallLimitation
+from minotaur.query.graph_comparison import (
+    GraphNodeChange,
+    GraphRelationshipChange,
+    endpoint_eligibility,
+)
+from minotaur.query.system_diff import SystemDiffResult
 
 playwright = pytest.importorskip("playwright.sync_api")
 sync_playwright = playwright.sync_playwright
@@ -668,89 +676,55 @@ def test_layout_uses_only_filter_eligible_elements(tmp_path: Path, bundled: bool
 def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_path: Path) -> None:
     """Revision controls hide side records without rerunning the union layout."""
 
-    def node(
-        node_id: str, label: str, system: str, *, before: bool = True, after: bool = True
-    ) -> dict[str, object]:
-        location = {
-            "path": f"{label}.py",
-            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 4}},
-        }
-        base = {
-            "node_class": "symbol",
-            "label": label,
-            "symbol_kind": "function",
-            "location": location,
-        }
-        return {
-            "id": node_id,
-            "status": "unchanged" if before and after else "removed" if before else "added",
-            "reasons": [],
-            "involved_systems": [system],
-            "before": {**base, "systems": [system]} if before else None,
-            "after": {**base, "systems": [system]} if after else None,
-        }
-
     nodes = [
-        node("shared", "shared", "A"),
-        node("moved", "moved", "A"),
-        node("departed", "departed", "A", after=False),
-        node("added", "added", "A", before=False),
+        _comparison_node("shared", label="shared", before_system="A", after_system="A"),
+        _comparison_node("moved", label="moved", before_system="A", after_system="B"),
+        _comparison_node(
+            "departed",
+            label="departed",
+            status="removed",
+            after=False,
+            before_system="A",
+            after_system=None,
+        ),
+        _comparison_node(
+            "added",
+            label="added",
+            status="added",
+            before=False,
+            before_system=None,
+            after_system="A",
+        ),
     ]
-    nodes[1]["after"] = {**nodes[1]["after"], "systems": ["B"]}  # type: ignore[typeddict-item]
     relationships = [
-        {
-            "id": "edge:stable",
-            "source": "shared",
-            "target": "moved",
-            "kind": "calls",
-            "status": "changed",
-            "reasons": ["membership_changed"],
-            "involved_systems": ["A", "B"],
-            "before": {"evidence": []},
-            "after": {"evidence": []},
-        },
-        {
-            "id": "edge:departed",
-            "source": "shared",
-            "target": "departed",
-            "kind": "references",
-            "status": "removed",
-            "reasons": ["removed"],
-            "involved_systems": ["A"],
-            "before": {"evidence": []},
-            "after": None,
-        },
-        {
-            "id": "edge:added",
-            "source": "shared",
-            "target": "added",
-            "kind": "references",
-            "status": "added",
-            "reasons": ["added"],
-            "involved_systems": ["A"],
-            "before": None,
-            "after": {"evidence": []},
-        },
+        _comparison_edge(
+            "edge:stable",
+            "shared",
+            "moved",
+            status="changed",
+            before_systems=("A", "A"),
+            after_systems=("A", "B"),
+        ),
+        _comparison_edge(
+            "edge:departed",
+            "shared",
+            "departed",
+            kind="references",
+            status="removed",
+            before_systems=("A", "A"),
+            after=False,
+        ),
+        _comparison_edge(
+            "edge:added",
+            "shared",
+            "added",
+            kind="references",
+            status="added",
+            before=False,
+            after_systems=("A", "A"),
+        ),
     ]
-    presentation = {
-        "graph": {"nodes": nodes, "relationships": relationships},
-        "comparison": {
-            "old_system_names": ["A", "B"],
-            "new_system_names": ["A", "B"],
-            "revisions": {"old": "before", "new": "after"},
-            "nodes": nodes,
-            "relationships": relationships,
-            "calls": [],
-        },
-        "systems": ["A", "B"],
-        "node_systems": {
-            "shared": {"before": ["A"], "after": ["A"]},
-            "moved": {"before": ["A"], "after": ["B"]},
-            "departed": {"before": ["A"], "after": []},
-            "added": {"before": [], "after": ["A"]},
-        },
-        "excerpts": {"paths": {}, "call_sites": {}},
-    }
+    presentation = _comparison_presentation(nodes, relationships, changed=True)
     artifact = tmp_path / "comparison.html"
     artifact.write_bytes(render_html(presentation))
 
@@ -871,40 +845,15 @@ def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_pat
 def test_comparison_empty_filter_view_keeps_controls_safe(tmp_path: Path) -> None:
     """An empty comparison view remains safe for reset, direction, and switches."""
 
-    def node(node_id: str, *, before: bool, after: bool) -> dict[str, object]:
-        value = {
-            "node_class": "symbol",
-            "label": node_id,
-            "symbol_kind": "function",
-            "systems": ["A"],
-        }
-        return {
-            "id": node_id,
-            "status": "unchanged" if before and after else "removed" if before else "added",
-            "reasons": [],
-            "involved_systems": ["A"],
-            "before": value if before else None,
-            "after": value if after else None,
-        }
-
-    nodes = [node("departed", before=True, after=False), node("added", before=False, after=True)]
-    presentation = {
-        "graph": {"nodes": nodes, "relationships": []},
-        "comparison": {
-            "old_system_names": ["A"],
-            "new_system_names": ["A"],
-            "revisions": {"old": "before", "new": "after"},
-            "nodes": nodes,
-            "relationships": [],
-            "calls": [],
-        },
-        "systems": ["A"],
-        "node_systems": {
-            "departed": {"before": ["A"], "after": []},
-            "added": {"before": [], "after": ["A"]},
-        },
-        "excerpts": {"paths": {}, "call_sites": {}},
-    }
+    nodes = [
+        _comparison_node(
+            "departed", status="removed", after=False, before_system="A", after_system=None
+        ),
+        _comparison_node(
+            "added", status="added", before=False, before_system=None, after_system="A"
+        ),
+    ]
+    presentation = _comparison_presentation(nodes, [], changed=True)
     artifact = tmp_path / "empty-comparison.html"
     artifact.write_bytes(render_html(presentation))
     errors: list[str] = []
@@ -965,22 +914,37 @@ def _comparison_node(
     after: bool = True,
     path: str | None = None,
     line: int = 0,
-) -> dict[str, object]:
-    value = {
-        "node_class": "symbol",
-        "label": label or node_id,
-        "symbol_kind": "function",
-        "location": _comparison_location(path or f"{node_id}.py", line),
-        "systems": ["A"],
-    }
-    return {
-        "id": node_id,
-        "status": status,
-        "reasons": [status] if status != "unchanged" else [],
-        "involved_systems": ["A"],
-        "before": dict(value) if before else None,
-        "after": dict(value) if after else None,
-    }
+    before_system: str | None = "A",
+    after_system: str | None = "A",
+) -> GraphNodeChange:
+    """Build one comparison node through the production side-record shape.
+
+    Each side is ``{node, system}`` exactly as the comparator emits it, so a
+    fixture cannot inject a per-side ``systems`` field that production never
+    writes.
+    """
+
+    def side(system: str | None) -> dict[str, object]:
+        return {
+            "node": {
+                "node_class": "symbol",
+                "label": label or node_id,
+                "symbol_kind": "function",
+                "location": _comparison_location(path or f"{node_id}.py", line),
+            },
+            "system": system,
+        }
+
+    reasons = [status] if status != "unchanged" else []
+    involved = sorted({name for name in (before_system, after_system) if name})
+    return GraphNodeChange(
+        node_id,
+        status,
+        tuple(reasons),
+        tuple(involved),
+        side(before_system) if before else None,
+        side(after_system) if after else None,
+    )
 
 
 def _comparison_edge(
@@ -992,25 +956,31 @@ def _comparison_edge(
     kind: str = "calls",
     before: bool = True,
     after: bool = True,
-) -> dict[str, object]:
+    before_systems: tuple[str | None, str | None] = ("A", "A"),
+    after_systems: tuple[str | None, str | None] = ("A", "A"),
+) -> GraphRelationshipChange:
     payload = {"source": source, "target": target, "kind": kind, "evidence": []}
-    return {
-        "id": edge_id,
-        "source": source,
-        "target": target,
-        "kind": kind,
-        "status": status,
-        "reasons": [status] if status != "unchanged" else [],
-        "involved_systems": ["A"],
-        "before": dict(payload) if before else None,
-        "after": dict(payload) if after else None,
-        "default_side": "before" if status == "removed" else "after",
-    }
+    involved = sorted({name for pair in (before_systems, after_systems) for name in pair if name})
+    return GraphRelationshipChange(
+        edge_id,
+        source,
+        target,
+        kind,
+        status,
+        tuple([status] if status != "unchanged" else []),
+        tuple(involved),
+        dict(payload) if before else None,
+        dict(payload) if after else None,
+        endpoint_eligibility(
+            (before_systems,) if before else (),
+            (after_systems,) if after else (),
+        ),
+    )
 
 
 def _comparison_presentation(
-    nodes: list[dict[str, object]],
-    relationships: list[dict[str, object]],
+    nodes: list[GraphNodeChange],
+    relationships: list[GraphRelationshipChange],
     *,
     changed: bool,
     calls: list[dict[str, object]] | None = None,
@@ -1019,31 +989,46 @@ def _comparison_presentation(
     limitations: list[dict[str, object]] | None = None,
     revisions: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    comparison = {
-        "changed": changed,
-        "exit_code": int(changed),
-        "old_system_names": ["A"],
-        "new_system_names": ["A"],
-        "added_systems": added_systems or [],
-        "removed_systems": [],
-        "membership_changes": [],
-        "surface_changes": [],
-        "consumer_changes": [],
-        "dependency_changes": [],
-        "boundary_changes": [],
-        "nodes": nodes,
-        "relationships": relationships,
-        "calls": calls or [],
-        "limitations": limitations or [],
-        "revisions": revisions or {"old": "before-sha", "new": "after-sha"},
-    }
-    return {
-        "graph": {"nodes": nodes, "relationships": relationships},
-        "comparison": comparison,
-        "systems": ["A"],
-        "node_systems": {node["id"]: node["involved_systems"] for node in nodes},
-        "excerpts": excerpts if excerpts is not None else {"paths": {}, "call_sites": {}},
-    }
+    """Serialize a comparison fixture through the production presentation builder.
+
+    ``changed`` is retained at the call sites for documentation value; the
+    complete-result boolean is derived from the stored records exactly as it is
+    in production.
+    """
+    del changed
+    revision_names = revisions or {"old": "before-sha", "new": "after-sha"}
+    call_changes = tuple(
+        CallChange(
+            str(call.get("relationship_id") or call.get("id")),
+            str(call.get("status", "unchanged")),
+            tuple(str(reason) for reason in call.get("reasons", ())),
+            tuple(str(name) for name in call.get("involved_systems", ())),
+            call.get("before"),
+            call.get("after"),
+        )
+        for call in (calls or [])
+    )
+    system_names = {name for item in (*nodes, *relationships) for name in item.involved_systems}
+    result = SystemDiffResult(
+        old_system_names=tuple(sorted(system_names)),
+        new_system_names=tuple(sorted(system_names)),
+        added_systems=tuple(added_systems or ()),
+        nodes=tuple(nodes),
+        relationships=tuple(relationships),
+        call_changes=call_changes,
+        limitations=tuple(
+            CallLimitation(
+                str(item.get("side", "")),
+                item.get("relationship_id"),  # type: ignore[arg-type]
+                str(item.get("code", "")),
+                str(item.get("message", "")),
+            )
+            for item in (limitations or [])
+        ),
+        old_revision=revision_names.get("old"),
+        new_revision=revision_names.get("new"),
+    )
+    return build_comparison_presentation(result, excerpts=excerpts)
 
 
 def _open_comparison(
@@ -1807,4 +1792,80 @@ def test_comparison_hidden_selection_restores_change_emphasis(tmp_path: Path) ->
             "() => window.minotaurVisualizer.cy.getElementById('caller').hasClass('faded')"
         )
         assert _node_opacity(page, "caller") < 0.5
+        browser.close()
+
+
+def _system_comparison_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, system: str | None
+) -> Path:
+    """Generate a real comparison artifact through the public systems command."""
+    root = tmp_path / "focused-repo"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "app" / "api.py").write_text("def receive():\n    return 1\n", encoding="utf-8")
+    (root / "consumer.py").write_text(
+        "from app.api import receive\n\ndef consume():\n    return receive()\n", encoding="utf-8"
+    )
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["app"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "app"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "App"\nfiles = ["app/api.py"]\n', encoding="utf-8"
+    )
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Browser tests"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=root, check=True)
+
+    artifact = tmp_path / "focused-comparison.html"
+    monkeypatch.chdir(root)
+    arguments = ["query", "diff", "--systems", "--html", str(artifact)]
+    if system is not None:
+        arguments[3:3] = ["--system", system]
+    assert cli.main(arguments) == 0
+    return artifact
+
+
+def test_cli_selected_system_focuses_the_saved_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C-08: a `--system NAME --html` artifact opens focused on NAME."""
+    artifact = _system_comparison_artifact(tmp_path, monkeypatch, system="App")
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(artifact.as_uri())
+        page.wait_for_timeout(400)
+
+        assert page.locator("#system-filter option").all_text_contents() == [
+            "All Systems",
+            "App",
+        ]
+        assert page.locator("#system-filter").input_value() == "App"
+
+        # All Systems remains selectable after the focused initial state.
+        page.locator("#system-filter").select_option("")
+        page.wait_for_timeout(200)
+        assert page.locator("#system-filter").input_value() == ""
+        browser.close()
+
+
+def test_unselected_system_leaves_the_comparison_filter_on_all_systems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without `--system` the saved artifact still opens on All Systems."""
+    artifact = _system_comparison_artifact(tmp_path, monkeypatch, system=None)
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(artifact.as_uri())
+        page.wait_for_timeout(400)
+
+        assert page.locator("#system-filter").input_value() == ""
         browser.close()

@@ -1042,7 +1042,12 @@ def test_systems_untracked_source_addition_is_a_detected_change(
         for node in payload["comparison"]["nodes"]
         if node["status"] == "added" and isinstance(node["after"], dict)
     ]
-    assert any(node["after"].get("path") == "app/unrelated.py" for node in added)
+    assert any(node["after"]["node"].get("path") == "app/unrelated.py" for node in added)
+    # Genuinely changed captured content still changes the logical digest.
+    assert (
+        payload["comparison"]["before"]["source_digest"]
+        != payload["comparison"]["after"]["source_digest"]
+    )
     _assert_state(root, before)
 
 
@@ -1338,7 +1343,11 @@ def test_systems_working_tree_after_has_no_commit_identity(
     assert comparison["after"]["kind"] == "working-tree"
     assert comparison["after"]["requested_revision"] is None
     assert comparison["after"]["commit"] is None
-    assert comparison["before"]["source_digest"] != comparison["after"]["source_digest"]
+    # A clean working tree is logically identical to the captured commit, so
+    # the logical manifest digest is identical. The manifest normalizes modes
+    # to the exec/non-exec model, so this no longer varies with the process
+    # umask; a difference here would leak filesystem permission bits.
+    assert comparison["before"]["source_digest"] == comparison["after"]["source_digest"]
 
 
 def test_systems_json_and_html_describe_the_same_comparison(
@@ -1683,6 +1692,64 @@ def test_systems_call_expression_only_change_is_status_one(
     assert any(item["status"] == "changed" for item in payload["comparison"]["call_changes"])
 
 
+def test_systems_moved_call_is_not_a_detected_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-10/V-06: a call that only shifts line is not a structural change."""
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    base = _head_sha(root)
+    # Insert a blank line before the same call: the normalized expression is
+    # byte-identical, only its evidence location moves.
+    (root / "consumer.py").write_text(
+        "from app.api import receive\n\ndef consume():\n\n    return receive()\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "shift only")
+
+    assert cli.main(["query", "diff", "--systems", base, "HEAD", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["changed"] is False
+    assert payload["exit_code"] == 0
+    assert all(node["status"] == "unchanged" for node in payload["comparison"]["nodes"])
+    assert all(
+        relationship["status"] == "unchanged"
+        for relationship in payload["comparison"]["relationships"]
+    )
+    assert payload["comparison"]["call_changes"]
+    assert all(item["status"] == "unchanged" for item in payload["comparison"]["call_changes"])
+
+
+def test_systems_duplicate_call_adds_multiplicity_without_expression_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pure duplicate add is a multiplicity change, not an expression edit."""
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    base = _head_sha(root)
+    (root / "consumer.py").write_text(
+        "from app.api import receive\n\ndef consume():\n    receive()\n    return receive()\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "duplicate call")
+
+    assert cli.main(["query", "diff", "--systems", base, "HEAD", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    changed = [
+        item for item in payload["comparison"]["call_changes"] if item["status"] != "unchanged"
+    ]
+    assert len(changed) == 1
+    assert changed[0]["reasons"] == ["multiplicity_changed"]
+
+
 def test_systems_large_report_warning_keeps_json_stdout_parseable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1911,3 +1978,24 @@ def test_systems_json_and_html_agree_for_one_side_target_admission(
     assert context["before"] == presentation["comparison"]["before"]
     assert context["after"] == presentation["comparison"]["after"]
     assert context["changed"] is True
+
+
+def test_capture_present_admits_only_regular_files_and_directories(tmp_path: Path) -> None:
+    """C-01: a non-regular opposite entry is not evidence of a deletion."""
+    root = tmp_path / "capture"
+    root.mkdir()
+    (root / "file.py").write_text("value = 1\n", encoding="utf-8")
+    (root / "package").mkdir()
+    (root / "link").symlink_to("file.py")
+    (root / "dirlink").symlink_to("package")
+
+    assert cli._capture_present(root, "file.py") is True
+    assert cli._capture_present(root, "package") is True
+    assert cli._capture_present(root, ".") is True
+    assert cli._capture_present(root, "missing.py") is False
+    assert cli._capture_present(root, "link") is False
+    assert cli._capture_present(root, "dirlink") is False
+
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(root / "pipe")
+        assert cli._capture_present(root, "pipe") is False

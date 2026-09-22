@@ -62,6 +62,38 @@ def _empty_repository(tmp_path: Path) -> Path:
     return root
 
 
+def _promisor_clone(tmp_path: Path) -> tuple[Path, str]:
+    """Clone a local origin with blob filtering, leaving the blob promised.
+
+    The origin advertises ``uploadpack.allowFilter`` so the file-transport
+    clone is a real partial clone: the commit and tree are present, the file
+    blob is absent, and the promisor remote is reachable for a lazy fetch.
+    """
+    origin = tmp_path / "promisor-origin"
+    origin.mkdir()
+    _run(origin, "init", "--quiet")
+    _run(origin, "config", "user.email", "tests@example.invalid")
+    _run(origin, "config", "user.name", "Git tests")
+    _run(origin, "config", "uploadpack.allowFilter", "true")
+    (origin / "promised.py").write_bytes(b"print('promised bytes')\n")
+    _run(origin, "add", "--all")
+    _run(origin, "commit", "--quiet", "-m", "initial")
+    sha = _run(origin, "rev-parse", "HEAD").strip()
+
+    clone = tmp_path / "promisor-clone"
+    _run(
+        tmp_path,
+        "clone",
+        "--quiet",
+        "--no-checkout",
+        "--filter=blob:none",
+        "--no-local",
+        origin.as_uri(),
+        str(clone),
+    )
+    return clone, sha
+
+
 def test_run_git_keeps_text_default_and_supports_bytes(tmp_path: Path) -> None:
     root, _ = _repository(tmp_path)
 
@@ -133,6 +165,56 @@ def test_resolve_missing_revision_is_side_specific_and_never_fetches(
     assert "missing-branch" in str(error.value)
     assert all(arguments[0] != "fetch" for arguments in calls)
     assert all(arguments[0] not in {"checkout", "worktree"} for arguments in calls)
+
+
+def test_promisor_clone_reads_refuse_lazy_fetching_missing_objects(tmp_path: Path) -> None:
+    """A promised object is a side-attributed error, never an implicit fetch."""
+    clone, sha = _promisor_clone(tmp_path)
+    pinned = git.PinnedCommit.resolve(clone, sha, side="before")
+
+    # The commit and tree resolve locally; the blob is only promised.
+    assert pinned.commit == sha
+    assert [entry.path for entry in pinned.entries()] == ["promised.py"]
+
+    with pytest.raises(git.GitInputError) as error:
+        pinned.read_blob("promised.py")
+
+    assert error.value.side == "before"
+    assert error.value.commit == sha
+    assert error.value.path == "promised.py"
+    assert "could not fetch" in str(error.value)
+
+    # Control: the same object is genuinely fetchable from the promisor remote,
+    # so the refusal above is the lazy-fetch policy and not an absent object.
+    fetched = subprocess.run(
+        ["git", "show", f"{sha}:promised.py"],
+        cwd=clone,
+        capture_output=True,
+        check=False,
+    )
+    assert fetched.returncode == 0
+    assert fetched.stdout == b"print('promised bytes')\n"
+
+
+def test_run_git_environment_disables_lazy_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every strict Git probe carries the no-lazy-fetch environment."""
+    root, _ = _repository(tmp_path)
+    captured: list[dict[str, str]] = []
+    real_run = subprocess.run
+
+    def recording(*args: object, **kwargs: object):
+        environment = kwargs.get("env")
+        assert isinstance(environment, dict)
+        captured.append(environment)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(git.subprocess, "run", recording)
+    assert git.run_git(root, ("rev-parse", "HEAD")) is not None
+
+    assert captured
+    assert all(environment.get("GIT_NO_LAZY_FETCH") == "1" for environment in captured)
 
 
 def test_resolved_pin_keeps_side_attribution_for_later_input_failures(

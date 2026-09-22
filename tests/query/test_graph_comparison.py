@@ -87,3 +87,33 @@ def test_graph_projection_is_input_order_independent() -> None:
     )
 
     assert first.to_dict() == second.to_dict()
+
+
+def test_per_side_membership_and_eligibility_do_not_collapse_to_the_union() -> None:
+    """C-05 stores each side's own membership; V-21 never combines revisions."""
+    shared = _symbol("shared", "a.py")
+    moved = _symbol("moved", "b.py")
+    relation = _call(shared, moved)
+    old_systems = _systems(("a.toml", "A", ("a.py", "b.py")))
+    new_systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+
+    result = compare_graphs(
+        _snapshot((shared, moved), (relation,), old_systems),
+        _snapshot((shared, moved), (relation,), new_systems),
+    )
+
+    moved_node = next(
+        item for item in result.nodes if item.to_dict()["before"]["node"]["label"] == "moved"
+    )
+    assert moved_node.before["system"] == "A"
+    assert moved_node.after["system"] == "B"
+    assert moved_node.involved_systems == ("A", "B")
+
+    [edge] = result.relationships
+    eligibility = edge.to_dict()["eligibility"]
+    assert eligibility["before"] == {"source_systems": ["A"], "target_systems": ["A"]}
+    assert eligibility["after"] == {"source_systems": ["A"], "target_systems": ["B"]}
+    # A was internal only on the Before side; B is a boundary system, never an
+    # invented A-internal relationship on the After side.
+    assert eligibility["internal_systems"] == ["A"]
+    assert eligibility["boundary_systems"] == ["B"]

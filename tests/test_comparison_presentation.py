@@ -17,7 +17,11 @@ from minotaur.graph_visualizer.source import (
     prepare_comparison_excerpts,
 )
 from minotaur.query.call_diff import CallChange, CallLimitation
-from minotaur.query.graph_comparison import GraphNodeChange, GraphRelationshipChange
+from minotaur.query.graph_comparison import (
+    GraphNodeChange,
+    GraphRelationshipChange,
+    endpoint_eligibility,
+)
 from minotaur.query.system_diff import SystemDiffResult
 
 
@@ -41,6 +45,8 @@ def _comparison() -> SystemDiffResult:
     }
     new_node = {**old_node, "label": "new <label>"}
     relationship_id = "relationship:call"
+    old_side = {"node": old_node, "system": "legacy"}
+    new_side = {"node": new_node, "system": "current"}
     old_relationship = {
         "source": "node:old",
         "target": "node:old",
@@ -71,10 +77,10 @@ def _comparison() -> SystemDiffResult:
                 "changed",
                 ("changed",),
                 ("legacy", "current"),
-                old_node,
-                new_node,
+                old_side,
+                new_side,
             ),
-            GraphNodeChange("node:comparison:removed", "removed", before=old_node),
+            GraphNodeChange("node:comparison:removed", "removed", before=old_side),
         ),
         relationships=(
             GraphRelationshipChange(
@@ -86,6 +92,9 @@ def _comparison() -> SystemDiffResult:
                 before=old_relationship,
                 after=new_relationship,
                 involved_systems=("legacy", "current"),
+                eligibility=endpoint_eligibility(
+                    (("legacy", "legacy"),), (("current", "current"),)
+                ),
             ),
             GraphRelationshipChange(
                 "relationship:comparison:removed",
@@ -94,6 +103,7 @@ def _comparison() -> SystemDiffResult:
                 "calls",
                 "removed",
                 before=old_relationship,
+                eligibility=endpoint_eligibility((("legacy", "legacy"),), ()),
             ),
         ),
         call_changes=(
@@ -153,10 +163,43 @@ def test_comparison_payload_retains_stable_records_and_side_defaults() -> None:
     assert call["default_side"] == "after"
 
 
+def test_production_comparison_payload_retains_per_side_membership_and_eligibility() -> None:
+    """C-05/C-07: the serialized payload keeps side membership, never a union."""
+    payload = build_comparison_presentation(_comparison())
+
+    changed_node = next(
+        item for item in payload["graph"]["nodes"] if item["id"] == "node:comparison:stable"
+    )
+    # The moved node belongs to legacy Before and current After; the flat union
+    # would lose that distinction.
+    assert changed_node["before"]["system"] == "legacy"
+    assert changed_node["after"]["system"] == "current"
+    assert changed_node["involved_systems"] == ["current", "legacy"]
+    assert payload["node_systems"]["node:comparison:stable"] == {
+        "before": "legacy",
+        "after": "current",
+    }
+
+    changed_edge = next(
+        item for item in payload["graph"]["relationships"] if item["id"] == "relationship:call"
+    )
+    eligibility = changed_edge["eligibility"]
+    assert eligibility["before"] == {
+        "source_systems": ["legacy"],
+        "target_systems": ["legacy"],
+    }
+    assert eligibility["after"] == {
+        "source_systems": ["current"],
+        "target_systems": ["current"],
+    }
+    assert eligibility["internal_systems"] == ["current", "legacy"]
+    assert eligibility["boundary_systems"] == []
+
+
 def test_comparison_html_is_inert_and_ordinary_graph_presentation_stays_separate() -> None:
     result = _comparison()
     payload = build_comparison_presentation(result)
-    payload["graph"]["nodes"][0]["before"]["label"] = "</script><script>alert(1)</script>"
+    payload["graph"]["nodes"][0]["before"]["node"]["label"] = "</script><script>alert(1)</script>"
     html = render_html(payload).decode("utf-8")
     assert "</script><script>alert(1)</script>" not in html
     assert "<\\/script>" in html
@@ -172,8 +215,8 @@ def test_comparison_call_site_does_not_use_cross_file_caller_context() -> None:
     caller = nodes[0]
     before = dict(caller.before)
     after = dict(caller.after)
-    before["location"] = _location("caller.py", 40)
-    after["location"] = _location("caller.py", 40)
+    before["node"] = {**dict(before["node"]), "location": _location("caller.py", 40)}
+    after["node"] = {**dict(after["node"]), "location": _location("caller.py", 40)}
     nodes[0] = GraphNodeChange(
         caller.id,
         caller.status,
@@ -201,8 +244,14 @@ def test_comparison_excerpt_includes_same_file_caller_start_in_bounded_span() ->
             caller.status,
             caller.reasons,
             caller.involved_systems,
-            {**dict(caller.before), "location": _location("app.py", 0)},
-            {**dict(caller.after), "location": _location("app.py", 0)},
+            {
+                **dict(caller.before),
+                "node": {**dict(caller.before["node"]), "location": _location("app.py", 0)},
+            },
+            {
+                **dict(caller.after),
+                "node": {**dict(caller.after["node"]), "location": _location("app.py", 0)},
+            },
         ),
         *comparison.nodes[1:],
     )
@@ -249,10 +298,11 @@ def _unchanged_comparison() -> SystemDiffResult:
         "kind": "calls",
         "evidence": [],
     }
+    side = {"node": node, "system": "A"}
     return SystemDiffResult(
         old_system_names=("A",),
         new_system_names=("A",),
-        nodes=(GraphNodeChange("node:same", "unchanged", before=node, after=node),),
+        nodes=(GraphNodeChange("node:same", "unchanged", before=side, after=side),),
         relationships=(
             GraphRelationshipChange(
                 "relationship:same",

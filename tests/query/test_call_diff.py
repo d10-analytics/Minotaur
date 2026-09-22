@@ -79,3 +79,15 @@ def test_same_callee_site_with_multiple_graph_edges_fails_ambiguously() -> None:
 
     with pytest.raises(CallCorrespondenceAmbiguityError):
         compare_call_observations((observation,), (), old_index=index)
+
+
+def test_pure_duplicate_add_reports_multiplicity_without_expression_change() -> None:
+    """A duplicate occurrence is a multiplicity change, not an expression edit."""
+    comparison = compare_call_observations(
+        (_observation("same"),),
+        (_observation("same"), _observation("same")),
+    )
+
+    assert len(comparison.changes) == 1
+    assert comparison.changes[0].status == "changed"
+    assert comparison.changes[0].reasons == ("multiplicity_changed",)
