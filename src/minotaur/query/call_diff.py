@@ -8,11 +8,16 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from minotaur.graph_model.location import Location
 from minotaur.language_interpreter.call_expressions import CallExpressionObservation
 from minotaur.query.correspondence import CorrespondenceIndex
 from minotaur.query.graph_comparison import relationship_display_id
+from minotaur.system import EndpointKind, System, classify_endpoint
+
+if TYPE_CHECKING:
+    from minotaur.query.system import ReportingSnapshot
 
 
 def _location_key(location: Location) -> tuple[object, ...]:
@@ -186,15 +191,54 @@ def _normalize(
     return grouped
 
 
+def _relationship_memberships(
+    index: CorrespondenceIndex | None,
+    *,
+    snapshot: ReportingSnapshot | None,
+    systems: Sequence[System] | None,
+) -> dict[str, frozenset[str]]:
+    """Associate graph relationship IDs with named endpoint systems.
+
+    Call observations identify a relationship through evidence locations, but
+    they do not carry endpoint nodes.  Membership therefore comes from the
+    matched whole-graph relationship occurrences, using the same exact-file
+    endpoint classifier as graph comparison.  Both sides are collected so a
+    relationship added or removed across revisions retains all endpoint names.
+    """
+    if index is None:
+        return {}
+    declared_systems = snapshot.systems if snapshot is not None else (systems or ())
+    result: dict[str, frozenset[str]] = {}
+    for key, occurrences in index.relationship_groups.items():
+        names: set[str] = set()
+        for occurrence in occurrences:
+            for endpoint in (occurrence.source, occurrence.target):
+                membership = classify_endpoint(declared_systems, endpoint)
+                if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
+                    names.add(membership.system.name)
+        result[relationship_display_id(key)] = frozenset(names)
+    return result
+
+
 def compare_call_observations(
     old: Sequence[CallExpressionObservation],
     new: Sequence[CallExpressionObservation],
     *,
     old_index: CorrespondenceIndex | None = None,
     new_index: CorrespondenceIndex | None = None,
+    old_snapshot: ReportingSnapshot | None = None,
+    new_snapshot: ReportingSnapshot | None = None,
+    old_systems: Sequence[System] | None = None,
+    new_systems: Sequence[System] | None = None,
 ) -> CallComparison:
     """Compare observations as multisets; never pair residuals by position."""
     old_groups, new_groups = _normalize(old, old_index), _normalize(new, new_index)
+    old_memberships = _relationship_memberships(
+        old_index, snapshot=old_snapshot, systems=old_systems
+    )
+    new_memberships = _relationship_memberships(
+        new_index, snapshot=new_snapshot, systems=new_systems
+    )
     changes: list[CallChange] = []
     limitations: list[CallLimitation] = []
     for key in sorted(set(old_groups) | set(new_groups), key=repr):
@@ -238,6 +282,12 @@ def compare_call_observations(
                 relationship_id=relation_id,
                 status=status,
                 reasons=reasons,
+                involved_systems=tuple(
+                    sorted(
+                        old_memberships.get(relation_id, frozenset())
+                        | new_memberships.get(relation_id, frozenset())
+                    )
+                ),
                 before=before,
                 after=after,
             )

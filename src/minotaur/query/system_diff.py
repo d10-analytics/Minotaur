@@ -718,11 +718,15 @@ def compare_systems(
     new_observations = new_call_observations if new_call_observations is not None else new_calls
     call_comparison = CallComparison()
     if old_observations is not None or new_observations is not None:
+        old_call_index = prepare_correspondence(old_snapshot.document, side="old", whole_graph=True)
+        new_call_index = prepare_correspondence(new_snapshot.document, side="new", whole_graph=True)
         call_comparison = compare_call_observations(
             tuple(old_observations or ()),
             tuple(new_observations or ()),
-            old_index=prepare_correspondence(old_snapshot.document, side="old", whole_graph=True),
-            new_index=prepare_correspondence(new_snapshot.document, side="new", whole_graph=True),
+            old_index=old_call_index,
+            new_index=new_call_index,
+            old_snapshot=old_snapshot,
+            new_snapshot=new_snapshot,
         )
     return SystemDiffResult(
         old_system_names=old_names,
