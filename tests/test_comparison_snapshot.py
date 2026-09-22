@@ -180,6 +180,28 @@ def test_capture_attributes_unexpected_blob_read_failure_to_side(
     assert "simulated blob read failure" in str(error.value)
 
 
+def test_working_tree_attributes_copy_failure_to_after_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    original = snapshots.shutil.copyfile
+
+    def fail_copy(source: Path, destination: Path) -> str:
+        if source.name == "app.py":
+            raise OSError("simulated working-tree copy failure")
+        return original(source, destination)
+
+    monkeypatch.setattr(snapshots.shutil, "copyfile", fail_copy)
+
+    with pytest.raises(SnapshotError) as error:
+        capture_working_tree(root, side="after")
+
+    assert error.value.side == "after"
+    assert error.value.revision == "WORKTREE"
+    assert error.value.pinned_sha
+    assert "simulated working-tree copy failure" in str(error.value)
+
+
 def test_working_tree_capture_includes_untracked_bytes_without_checkout_identity(
     tmp_path: Path,
 ) -> None:
