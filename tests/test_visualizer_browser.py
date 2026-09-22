@@ -767,6 +767,18 @@ def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_pat
         ]
         page.locator("#system-filter").select_option("A")
         page.wait_for_timeout(500)
+        page.locator("#cross-system-connections").check()
+        page.wait_for_timeout(500)
+        combined_containers = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes('.system-container').map(
+                node => [node.id(), {
+                    visible: node.visible(),
+                    box: node.boundingBox({includeLabels:true}),
+                }]
+            ))"""
+        )
+        assert combined_containers
+        assert all(container["visible"] for container in combined_containers.values())
         drag = page.evaluate(
             """() => {
                 const cy = window.minotaurVisualizer.cy;
@@ -797,6 +809,17 @@ def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_pat
         assert abs(before_switch["positions"]["shared"]["y"] - dragged_position["y"]) < 0.01
         page.locator("#revision-view").select_option("before")
         assert page.evaluate("window.minotaurVisualizer.layoutRuns()") == before_switch["runs"]
+        before_containers = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes('.system-container').map(
+                node => [node.id(), {
+                    visible: node.visible(),
+                    box: node.boundingBox({includeLabels:true}),
+                }]
+            ))"""
+        )
+        assert before_containers.keys() == combined_containers.keys()
+        assert all(container["visible"] for container in before_containers.values())
+        assert before_containers == combined_containers
         assert page.evaluate(
             "window.minotaurVisualizer.cy.nodes(':visible').map(n => n.id()).sort()"
         ) == ["departed", "moved", "shared"]
@@ -805,6 +828,17 @@ def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_pat
         ) == ["edge:departed", "edge:stable"]
         page.locator("#revision-view").select_option("after")
         assert page.evaluate("window.minotaurVisualizer.layoutRuns()") == before_switch["runs"]
+        after_containers = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes('.system-container').map(
+                node => [node.id(), {
+                    visible: node.visible(),
+                    box: node.boundingBox({includeLabels:true}),
+                }]
+            ))"""
+        )
+        assert after_containers.keys() == combined_containers.keys()
+        assert all(container["visible"] for container in after_containers.values())
+        assert after_containers == combined_containers
         assert page.evaluate(
             "window.minotaurVisualizer.cy.nodes(':visible').map(n => n.id()).sort()"
         ) == ["added", "shared"]
