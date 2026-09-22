@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from pathlib import Path
 from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[2]
+SOURCE_ROOT = ROOT / "src"
 EXAMPLE = ROOT / "examples" / "system-walkthrough"
 CONFIG = EXAMPLE / ".minotaur.toml"
 COMPARISON_NAME = "minotaur-comparison.html"
@@ -151,12 +153,25 @@ def _remove_volatile_snapshot_metadata(graph: Path) -> None:
 
 
 def _run_cli(*arguments: str, cwd: Path = ROOT, expected: int = 0) -> None:
-    """Run one documented CLI command, allowing the expected changed status."""
+    """Run one documented CLI command, allowing the expected changed status.
+
+    The command always resolves ``minotaur`` from this checkout's ``src``
+    tree, even though the comparison runs with a temporary repository as its
+    working directory. That keeps the generated report's embedded viewer
+    assets in step with the reviewed sources instead of any other installed
+    copy.
+    """
+    environment = dict(os.environ)
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        str(SOURCE_ROOT) if not existing else str(SOURCE_ROOT) + os.pathsep + existing
+    )
     completed = subprocess.run(
         [sys.executable, "-m", "minotaur", *arguments],
         cwd=cwd,
         check=False,
         capture_output=True,
+        env=environment,
     )
     if completed.returncode != expected:
         raise subprocess.CalledProcessError(

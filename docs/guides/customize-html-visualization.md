@@ -109,12 +109,16 @@ relationship-kind filters, search, and color modes, and adds:
   or emphasis. The excerpt caption names the captured revision, for example
   `Captured Before revision: v1.0 · 134b138`.
 
-The report retains the identities resolved when it was generated. A historical
-report names both requested revisions with their short commit IDs; a
-working-tree report names Before as `HEAD` and labels After
-`Working tree at report generation` without presenting the working tree as a
-commit. A limitation such as unavailable call-expression evidence is shown in a
-notice region and is never drawn as a detected change.
+The report retains the identities resolved when it was generated and shows them
+in a compact header above the graph, for example `Before: v1.0 · 134b138` and
+`After: v2.0 · a2b78dd`. A historical report names both requested revisions with
+their short commit IDs; a working-tree report names Before as `HEAD` and labels
+After `Working tree at report generation` without presenting the working tree
+as a commit. The identical text also appears in the inert presentation payload
+(`revisions.old` and `revisions.new`), so a saved report keeps the identities it
+was generated from even after a branch moves. A limitation such as unavailable
+call-expression evidence is shown in a notice region and is never drawn as a
+detected change.
 
 [![Combined comparison of the v1.0 and v2.0 shop revisions](../assets/system-comparison-demo.png)](../../examples/system-walkthrough/minotaur-comparison.html)
 

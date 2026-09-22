@@ -1484,10 +1484,28 @@
     return lines;
   }
 
+  // The captured revision identities are part of the report itself: a saved
+  // comparison keeps showing the names and resolved commit IDs it was
+  // generated from even after a branch moves. Ordinary graph views have no
+  // comparison payload, so this element stays hidden there.
+  function renderComparisonRevisions() {
+    var container = document.getElementById("comparison-revisions");
+    if (!container) return;
+    var revisions = comparisonPayload.revisions || {};
+    var entries = [];
+    if (revisions.old) entries.push("Before: " + String(revisions.old));
+    if (revisions.new) entries.push("After: " + String(revisions.new));
+    container.innerHTML = entries.map(function (entry) {
+      return '<span class="comparison-revision">' + escHtml(entry) + "</span>";
+    }).join("");
+    container.hidden = entries.length === 0;
+  }
+
   function renderComparisonSummary() {
     if (!comparisonMode || !comparisonPayload) return;
     document.getElementById("comparison-header").hidden = false;
     document.getElementById("comparison-legend").hidden = false;
+    renderComparisonRevisions();
     var lines = comparisonSummaryLines();
     document.getElementById("comparison-summary-body").innerHTML = lines.length
       ? "<ul>" + lines.map(function (line) {

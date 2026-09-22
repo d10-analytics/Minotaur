@@ -134,20 +134,24 @@ two named revisions:
 $ minotaur query diff --systems v1.0 v2.0
 ```
 
-The report retains the requested names and their resolved short commit IDs, so
-moving branch names cannot obscure which revisions the saved report compares:
+Its standard output is byte-for-byte the same as the working-tree report above —
+the same 19 change rows followed by the old and new coverage and selection
+lines — because the same source difference is analyzed on both sides. The
+command line prints no revision header.
+
+The revision identities belong to the saved report, not to standard output.
+Writing the report with `--html` renders a compact header above the graph:
 
 ```text
 Before: v1.0 · 134b138
 After: v2.0 · a2b78dd
 ```
 
-The complete change set is the same as the working-tree report above, because
-the same source difference is analyzed on both sides. A saved historical report
-embeds `revisions.old` and `revisions.new` with those labels plus a `before` and
-`after` record carrying each requested revision, its full resolved commit ID,
-and a source digest. Generating a report from a branch that later moves does
-not change the saved identities.
+The report embeds `revisions.old` and `revisions.new` with those labels, so
+moving branch names cannot obscure which revisions it compares. A `before` and
+`after` record also carries each requested revision, its full resolved commit
+ID, and a source digest. Generating a report from a branch that later moves
+does not change the saved identities.
 
 Focus one system, inspect evidence, or write the report:
 
