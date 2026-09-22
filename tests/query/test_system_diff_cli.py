@@ -1715,3 +1715,87 @@ def test_systems_config_route_keeps_working_directory_meaning_from_nested_cwd(
     captured = capsys.readouterr()
     assert "no system differences" in captured.out
     assert captured.err == ""
+
+
+def _embedded_presentation(html: str) -> dict[str, object]:
+    """Extract the complete inert presentation payload from a rendered report."""
+    prefix = '<script id="minotaur-presentation" type="application/json">'
+    payload = json.loads(html.split(prefix, 1)[1].split("</script>", 1)[0])
+    assert isinstance(payload, dict)
+    return payload
+
+
+def test_systems_per_side_target_present_on_opposite_side_is_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C-01: a target absent on its own side is allowed when the coordinate
+    exists on the opposite captured side, even if only one side declares it.
+
+    ``b.py`` is committed at HEAD but selected only by the After config and
+    deleted from the working tree, so it is a deletion representable from the
+    Before tree rather than an absent-on-both-sides error.
+    """
+    root = _repo(tmp_path)
+    (root / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (root / "b.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["a.py"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / "b.py").unlink()
+    (root / "alt.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["b.py"]\n',
+        encoding="utf-8",
+    )
+
+    assert cli.main(["query", "diff", "--systems", "--after-config", "alt.toml", "--json"]) == 1
+    captured = capsys.readouterr()
+    assert "absent on both comparison sides" not in captured.err
+    assert json.loads(captured.out)["changed"] is True
+
+
+def test_systems_captured_call_excerpts_resolve_under_the_side_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C-07: captured excerpt bytes resolve under each side's configured root.
+
+    With ``root = "src"`` the graph stores root-relative locations, so captured
+    bytes must be read below ``<capture>/src`` or every call excerpt degrades to
+    unavailable even though the exact captured source exists.
+    """
+    root = _repo(tmp_path)
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "src" / "pkg" / "api.py").write_text("def receive():\n    return 1\n", encoding="utf-8")
+    (root / "src" / "consumer.py").write_text(
+        "from pkg.api import receive\n\ndef consume():\n    return receive()\n",
+        encoding="utf-8",
+    )
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "src"\ngraph = "graph.json"\n'
+        'targets = ["pkg", "consumer.py"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / "src" / "consumer.py").write_text(
+        "from pkg.api import receive\n\ndef consume():\n    return receive(2)\n",
+        encoding="utf-8",
+    )
+    report = root / "comparison.html"
+
+    status = cli.main(["query", "diff", "--systems", "--json", "--html", str(report)])
+    capsys.readouterr()
+    assert status == 1
+    excerpts = _embedded_presentation(report.read_text(encoding="utf-8"))["excerpts"]
+    assert isinstance(excerpts, dict)
+    for side in ("before", "after"):
+        rendered = excerpts[side]["paths"]["consumer.py"]
+        assert rendered["status"] == "available"
+        assert "receive" in json.dumps(rendered["spans"])
