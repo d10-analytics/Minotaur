@@ -941,3 +941,609 @@ def test_comparison_empty_filter_view_keeps_controls_safe(tmp_path: Path) -> Non
         browser.close()
 
     assert not errors
+
+
+# --- Comparison emphasis, filters, selection/search priority, and details ---
+
+
+def _comparison_location(path: str, line: int, length: int = 4) -> dict[str, object]:
+    return {
+        "path": path,
+        "range": {
+            "start": {"line": line, "character": 0},
+            "end": {"line": line, "character": length},
+        },
+    }
+
+
+def _comparison_node(
+    node_id: str,
+    *,
+    status: str = "unchanged",
+    label: str | None = None,
+    before: bool = True,
+    after: bool = True,
+    path: str | None = None,
+    line: int = 0,
+) -> dict[str, object]:
+    value = {
+        "node_class": "symbol",
+        "label": label or node_id,
+        "symbol_kind": "function",
+        "location": _comparison_location(path or f"{node_id}.py", line),
+        "systems": ["A"],
+    }
+    return {
+        "id": node_id,
+        "status": status,
+        "reasons": [status] if status != "unchanged" else [],
+        "involved_systems": ["A"],
+        "before": dict(value) if before else None,
+        "after": dict(value) if after else None,
+    }
+
+
+def _comparison_edge(
+    edge_id: str,
+    source: str,
+    target: str,
+    *,
+    status: str = "unchanged",
+    kind: str = "calls",
+    before: bool = True,
+    after: bool = True,
+) -> dict[str, object]:
+    payload = {"source": source, "target": target, "kind": kind, "evidence": []}
+    return {
+        "id": edge_id,
+        "source": source,
+        "target": target,
+        "kind": kind,
+        "status": status,
+        "reasons": [status] if status != "unchanged" else [],
+        "involved_systems": ["A"],
+        "before": dict(payload) if before else None,
+        "after": dict(payload) if after else None,
+        "default_side": "before" if status == "removed" else "after",
+    }
+
+
+def _comparison_presentation(
+    nodes: list[dict[str, object]],
+    relationships: list[dict[str, object]],
+    *,
+    changed: bool,
+    calls: list[dict[str, object]] | None = None,
+    excerpts: dict[str, object] | None = None,
+    added_systems: list[str] | None = None,
+    limitations: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    comparison = {
+        "changed": changed,
+        "exit_code": int(changed),
+        "old_system_names": ["A"],
+        "new_system_names": ["A"],
+        "added_systems": added_systems or [],
+        "removed_systems": [],
+        "membership_changes": [],
+        "surface_changes": [],
+        "consumer_changes": [],
+        "dependency_changes": [],
+        "boundary_changes": [],
+        "nodes": nodes,
+        "relationships": relationships,
+        "calls": calls or [],
+        "limitations": limitations or [],
+        "revisions": {"old": "before-sha", "new": "after-sha"},
+    }
+    return {
+        "graph": {"nodes": nodes, "relationships": relationships},
+        "comparison": comparison,
+        "systems": ["A"],
+        "node_systems": {node["id"]: node["involved_systems"] for node in nodes},
+        "excerpts": excerpts if excerpts is not None else {"paths": {}, "call_sites": {}},
+    }
+
+
+def _open_comparison(
+    page: object, tmp_path: Path, presentation: dict[str, object], name: str
+) -> None:
+    artifact = tmp_path / name
+    artifact.write_bytes(render_html(presentation))
+    page.goto(artifact.as_uri())
+    page.wait_for_timeout(450)
+
+
+def _click_node_by_id(page: object, node_id: str) -> None:
+    point = page.evaluate(
+        """(id) => {
+            const node = window.minotaurVisualizer.cy.getElementById(id);
+            const point = node.renderedPosition();
+            const bounds = window.minotaurVisualizer.cy.container().getBoundingClientRect();
+            return {x: bounds.left + point.x, y: bounds.top + point.y};
+        }""",
+        node_id,
+    )
+    page.mouse.click(point["x"], point["y"])
+
+
+def _click_edge_by_id(page: object, edge_id: str) -> None:
+    point = page.evaluate(
+        """(id) => {
+            const edge = window.minotaurVisualizer.cy.getElementById(id);
+            const point = edge.renderedMidpoint();
+            const bounds = window.minotaurVisualizer.cy.container().getBoundingClientRect();
+            return {x: bounds.left + point.x, y: bounds.top + point.y};
+        }""",
+        edge_id,
+    )
+    page.mouse.click(point["x"], point["y"])
+
+
+def _node_opacity(page: object, node_id: str) -> float:
+    return page.evaluate(
+        "(id) => window.minotaurVisualizer.cy.getElementById(id).pstyle('opacity').pfValue",
+        node_id,
+    )
+
+
+def _comparison_camera(page: object) -> dict[str, object]:
+    return page.evaluate(
+        """() => ({
+            zoom: window.minotaurVisualizer.cy.zoom(),
+            pan: window.minotaurVisualizer.cy.pan(),
+            positions: Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                node => [node.id(), node.position()]
+            )),
+            highlighted: window.minotaurVisualizer.cy.elements('.highlighted').map(
+                element => element.id()
+            ).sort(),
+        })"""
+    )
+
+
+def test_comparison_emphasis_search_and_selection_priority(tmp_path: Path) -> None:
+    """Selection outranks search, search outranks emphasis, and clearing restores."""
+    nodes = [
+        _comparison_node("changed-node", status="changed", label="changed-node"),
+        _comparison_node("steady-node", label="steady-node"),
+        _comparison_node("lonely-node", label="lonely-node"),
+    ]
+    relationships = [
+        _comparison_edge("edge:changed", "changed-node", "steady-node", status="changed"),
+        _comparison_edge(
+            "edge:steady", "steady-node", "lonely-node", status="unchanged", kind="references"
+        ),
+    ]
+    presentation = _comparison_presentation(nodes, relationships, changed=True)
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "priority.html")
+
+        assert page.locator("#emphasis-control").is_visible()
+        assert page.locator("#emphasis-changes").is_checked()
+        assert page.locator("#emphasis-changes").is_enabled()
+
+        # Changed structure and both endpoints keep full opacity; isolated
+        # unchanged structure uses the existing de-emphasis treatment.
+        assert _node_opacity(page, "changed-node") == 1
+        assert _node_opacity(page, "steady-node") == 1
+        assert _node_opacity(page, "lonely-node") < 1
+        assert not page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('edge:changed').hasClass('dimmed')"
+        )
+        assert page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('edge:steady').hasClass('dimmed')"
+        )
+        # Emphasis changes opacity only: node colors keep their class meaning.
+        colors = page.evaluate(
+            """() => ({
+                changed: window.minotaurVisualizer.cy
+                    .getElementById('changed-node').pstyle('background-color').strValue,
+                unchanged: window.minotaurVisualizer.cy
+                    .getElementById('lonely-node').pstyle('background-color').strValue,
+            })"""
+        )
+        assert colors["changed"] == colors["unchanged"]
+
+        # Unchecking the control restores normal opacity.
+        page.locator("#emphasis-changes").uncheck()
+        assert _node_opacity(page, "lonely-node") == 1
+        page.locator("#emphasis-changes").check()
+        assert _node_opacity(page, "lonely-node") < 1
+
+        # A nonempty search temporarily takes priority over change emphasis.
+        page.locator("#search").fill("lonely")
+        page.wait_for_function(
+            "() => window.minotaurVisualizer.cy.getElementById('lonely-node')"
+            ".hasClass('highlighted')"
+        )
+        assert _node_opacity(page, "steady-node") < 1
+
+        # Selection takes priority over an active search.
+        _click_node_by_id(page, "steady-node")
+        page.wait_for_function(
+            "() => window.minotaurVisualizer.cy.getElementById('steady-node')"
+            ".hasClass('highlighted')"
+        )
+        assert not page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('steady-node').hasClass('dimmed')"
+        )
+        assert _node_opacity(page, "steady-node") == 1
+
+        # Clearing selection restores the still-active search.
+        page.keyboard.press("Escape")
+        page.wait_for_function(
+            "() => window.minotaurVisualizer.cy.getElementById('lonely-node')"
+            ".hasClass('highlighted')"
+        )
+        assert page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('steady-node').hasClass('dimmed')"
+        )
+
+        # Clearing search while a selection is active does not override it.
+        _click_node_by_id(page, "steady-node")
+        page.wait_for_function(
+            "() => window.minotaurVisualizer.cy.getElementById('steady-node')"
+            ".hasClass('highlighted')"
+        )
+        page.locator("#search").fill("")
+        page.wait_for_timeout(300)
+        assert page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('steady-node')"
+            ".hasClass('highlighted')"
+        )
+        assert not page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('steady-node').hasClass('dimmed')"
+        )
+
+        # Clearing selection restores change emphasis. The first Escape returns
+        # focus from the search field; the second clears the selection.
+        page.keyboard.press("Escape")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(250)
+        assert _node_opacity(page, "lonely-node") < 1
+        assert _node_opacity(page, "steady-node") == 1
+
+        # A blank search is inactive rather than a match-everything search.
+        page.locator("#search").fill("   ")
+        page.wait_for_timeout(250)
+        assert _node_opacity(page, "lonely-node") < 1
+        assert not page.evaluate(
+            "() => window.minotaurVisualizer.cy.nodes().some(n => n.hasClass('highlighted'))"
+        )
+        browser.close()
+
+
+def test_comparison_no_change_state_disables_emphasis(tmp_path: Path) -> None:
+    """A complete identical comparison shows normal opacity and a disabled control."""
+    nodes = [_comparison_node("again"), _comparison_node("also")]
+    relationships = [_comparison_edge("edge:same", "again", "also")]
+    presentation = _comparison_presentation(nodes, relationships, changed=False)
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "no-change.html")
+
+        assert page.locator("#emphasis-changes").is_disabled()
+        assert not page.locator("#emphasis-changes").is_checked()
+        assert page.locator("#comparison-no-change").is_visible()
+        assert page.locator("#comparison-no-change").inner_text() == "No structural changes found"
+        assert page.evaluate(
+            "() => window.minotaurVisualizer.cy.nodes().every(n => !n.hasClass('dimmed'))"
+        )
+        assert _node_opacity(page, "again") == 1
+        browser.close()
+
+
+def test_comparison_call_only_change_prevents_no_change_state(tmp_path: Path) -> None:
+    """A stored call-expression change is visible even when no structure changed."""
+    nodes = [_comparison_node("again"), _comparison_node("also")]
+    relationships = [_comparison_edge("edge:same", "again", "also")]
+    calls = [
+        {
+            "id": "edge:same",
+            "relationship_id": "edge:same",
+            "status": "changed",
+            "reasons": ["expression_changed"],
+            "involved_systems": ["A"],
+        }
+    ]
+    presentation = _comparison_presentation(nodes, relationships, changed=True, calls=calls)
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "call-only.html")
+
+        assert page.locator("#emphasis-changes").is_enabled()
+        assert page.locator("#emphasis-changes").is_checked()
+        assert not page.locator("#comparison-no-change").is_visible()
+        assert not page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('edge:same').hasClass('dimmed')"
+        )
+        assert _node_opacity(page, "again") == 1
+
+        # Hiding the change with a filter does not imply comparison-wide equality.
+        page.locator('input[data-edgekind="calls"]').uncheck()
+        page.wait_for_timeout(250)
+        assert page.locator("#emphasis-changes").is_enabled()
+        assert not page.locator("#comparison-no-change").is_visible()
+        assert "call Changed: edge:same" in page.locator("#comparison-summary-body").evaluate(
+            "element => element.textContent"
+        )
+        browser.close()
+
+
+def test_comparison_summary_lists_change_without_drawable_node(tmp_path: Path) -> None:
+    """An added empty system stays discoverable through the category summary."""
+    presentation = _comparison_presentation([], [], changed=True, added_systems=["empty-system"])
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "empty-system.html")
+
+        assert page.evaluate("() => window.minotaurVisualizer.cy.nodes().length") == 0
+        assert page.locator("#comparison-header").is_visible()
+        assert page.locator("#comparison-summary").evaluate("e => e.tagName") == "DETAILS"
+        page.locator("#comparison-summary summary").click()
+        assert page.locator("#comparison-summary-body").is_visible()
+        body = page.locator("#comparison-summary-body").inner_text()
+        assert "system added: empty-system" in body
+        assert page.locator("#emphasis-changes").is_enabled()
+        browser.close()
+
+
+def test_comparison_source_revision_keeps_graph_and_per_side_state(tmp_path: Path) -> None:
+    """One excerpt region switches sides without moving the graph or losing state."""
+    nodes = [
+        _comparison_node("caller", path="app.py", line=0),
+        _comparison_node("callee", path="app.py", line=5),
+    ]
+    relationships = [_comparison_edge("edge:call", "caller", "callee", status="changed")]
+    calls = [
+        {
+            "id": "edge:call",
+            "relationship_id": "edge:call",
+            "status": "changed",
+            "reasons": ["expression_changed"],
+            "involved_systems": ["A"],
+        }
+    ]
+    excerpts = {
+        "before": {
+            "paths": {
+                "app.py": {
+                    "status": "available",
+                    "spans": [{"start": 0, "lines": [f"before {i}" for i in range(8)]}],
+                }
+            },
+            "call_sites": {
+                "edge:call": [
+                    {
+                        "location": _comparison_location("app.py", 1),
+                        "provenance": ["old-proof"],
+                    }
+                ]
+            },
+        },
+        "after": {
+            "paths": {
+                "app.py": {
+                    "status": "available",
+                    "spans": [{"start": 0, "lines": [f"after {i}" for i in range(8)]}],
+                }
+            },
+            "call_sites": {
+                "edge:call": [
+                    {
+                        "location": _comparison_location("app.py", 2),
+                        "provenance": ["new-proof"],
+                    },
+                    {
+                        "location": _comparison_location("app.py", 4),
+                        "provenance": ["new-proof"],
+                    },
+                ]
+            },
+        },
+    }
+    presentation = _comparison_presentation(
+        nodes, relationships, changed=True, calls=calls, excerpts=excerpts
+    )
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "source-revision.html")
+
+        _click_edge_by_id(page, "edge:call")
+        page.wait_for_selector("#source-revision")
+        assert page.locator("#source-revision").locator("option").all_text_contents() == [
+            "Before",
+            "After",
+        ]
+        assert page.locator("#source-revision").input_value() == "after"
+        assert page.locator(".code-excerpt").count() == 1
+        assert "after 2" in page.locator("#call-site-detail").inner_text()
+        assert "Captured After revision: after-sha" in (
+            page.locator("#call-site-detail").inner_text()
+        )
+        assert (
+            page.locator(".code-excerpt").evaluate("e => getComputedStyle(e).maxHeight") == "420px"
+        )
+
+        # Each side remembers its own selected call site.
+        page.locator("#call-site-select").select_option("1")
+        assert "after 4" in page.locator("#call-site-detail").inner_text()
+
+        before_state = _comparison_camera(page)
+        page.locator("#source-revision").focus()
+        page.locator("#source-revision").select_option("before")
+        assert page.locator(".code-excerpt").count() == 1
+        assert "before 1" in page.locator("#call-site-detail").inner_text()
+        assert "Captured Before revision: before-sha" in (
+            page.locator("#call-site-detail").inner_text()
+        )
+        # Switching source revision must not steal focus from the control.
+        assert page.evaluate("() => document.activeElement.id") == "source-revision"
+        assert _comparison_camera(page) == before_state
+
+        page.locator("#source-revision").select_option("after")
+        assert page.locator("#call-site-select").input_value() == "1"
+        assert "after 4" in page.locator("#call-site-detail").inner_text()
+        browser.close()
+
+
+def test_comparison_missing_side_and_hidden_selection(tmp_path: Path) -> None:
+    """Removed edges default Before, a missing side reads Not present, and a
+    revision switch that hides the selection restores the empty panel."""
+    nodes = [
+        _comparison_node("caller", path="app.py", line=0),
+        _comparison_node("target", path="app.py", line=5),
+        _comparison_node("after-added", status="added", before=False),
+    ]
+    relationships = [
+        _comparison_edge("edge:call", "caller", "target", status="changed"),
+        _comparison_edge(
+            "edge:removed", "caller", "target", status="removed", before=True, after=False
+        ),
+    ]
+    calls = [
+        {
+            "id": "edge:call",
+            "relationship_id": "edge:call",
+            "status": "changed",
+            "reasons": ["expression_changed"],
+            "involved_systems": ["A"],
+        },
+        {
+            "id": "edge:removed",
+            "relationship_id": "edge:removed",
+            "status": "removed",
+            "reasons": ["removed"],
+            "involved_systems": ["A"],
+        },
+    ]
+    excerpts = {
+        "before": {
+            "paths": {
+                "app.py": {
+                    "status": "available",
+                    "spans": [{"start": 0, "lines": [f"line {i}" for i in range(8)]}],
+                }
+            },
+            "call_sites": {
+                "edge:call": [
+                    {
+                        "location": _comparison_location("app.py", 1),
+                        "provenance": ["old-proof"],
+                    }
+                ],
+                "edge:removed": [
+                    {
+                        "location": _comparison_location("app.py", 1),
+                        "provenance": ["old-proof"],
+                    }
+                ],
+            },
+        },
+        "after": {
+            "paths": {
+                "app.py": {
+                    "status": "unavailable",
+                    "reason": "captured source bytes are unavailable",
+                }
+            },
+            "call_sites": {},
+        },
+    }
+    presentation = _comparison_presentation(
+        nodes, relationships, changed=True, calls=calls, excerpts=excerpts
+    )
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "missing-side.html")
+
+        # An unchanged endpoint of a changed relationship keeps Unchanged status.
+        _click_node_by_id(page, "target")
+        page.wait_for_function(
+            "() => document.querySelector('#detail-content').innerText.includes('Unchanged')"
+        )
+        assert (
+            "Unchanged · Connected to a changed relationship"
+            in page.locator("#detail-content").inner_text()
+        )
+
+        # A present side whose captured bytes are missing says Source unavailable.
+        _click_edge_by_id(page, "edge:call")
+        page.wait_for_selector("#source-revision")
+        assert page.locator("#source-revision").input_value() == "after"
+        assert "Source unavailable" in page.locator("#comparison-side-detail").inner_text()
+        page.locator("#source-revision").select_option("before")
+        assert "line 1" in page.locator("#call-site-detail").inner_text()
+
+        # A removed edge defaults to Before and reports a missing side as absent.
+        _click_edge_by_id(page, "edge:removed")
+        page.wait_for_selector("#source-revision")
+        assert page.locator("#source-revision").input_value() == "before"
+        page.locator("#source-revision").select_option("after")
+        missing = page.locator("#comparison-side-detail").inner_text()
+        assert "Not present" in missing
+        assert "Source unavailable" not in missing
+
+        # A revision switch that hides the selection deselects it and restores
+        # the ordinary empty panel without a special absence message.
+        _click_node_by_id(page, "after-added")
+        page.wait_for_function(
+            "() => document.querySelector('#detail-content').innerText.includes('after-added')"
+        )
+        page.locator("#revision-view").select_option("before")
+        page.wait_for_function(
+            "() => document.querySelector('#detail-content')"
+            ".innerText.includes('Select a node or edge')"
+        )
+        assert page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('after-added')"
+            ".hasClass('revision-hidden')"
+        )
+        assert not page.evaluate(
+            "() => window.minotaurVisualizer.cy.nodes(':visible')"
+            ".some(n => n.id() === 'after-added')"
+        )
+        browser.close()
+
+
+def test_comparison_search_does_not_reveal_revision_hidden_items(tmp_path: Path) -> None:
+    """Search respects the active revision view and cannot reveal absent items."""
+    nodes = [
+        _comparison_node("present"),
+        _comparison_node("after-added", status="added", before=False),
+    ]
+    presentation = _comparison_presentation(nodes, [], changed=True)
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "search-hidden.html")
+
+        page.locator("#revision-view").select_option("before")
+        page.wait_for_timeout(250)
+        page.locator("#search").fill("after-added")
+        page.wait_for_timeout(250)
+        assert page.evaluate(
+            "() => window.minotaurVisualizer.cy.getElementById('after-added')"
+            ".hasClass('revision-hidden')"
+        )
+        assert _node_opacity(page, "after-added") == 0
+        assert not page.evaluate(
+            "() => window.minotaurVisualizer.cy.nodes(':visible')"
+            ".some(n => n.id() === 'after-added')"
+        )
+        browser.close()

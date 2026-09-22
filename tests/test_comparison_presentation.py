@@ -16,7 +16,7 @@ from minotaur.graph_visualizer.source import (
     capture_source_bytes,
     prepare_comparison_excerpts,
 )
-from minotaur.query.call_diff import CallChange
+from minotaur.query.call_diff import CallChange, CallLimitation
 from minotaur.query.graph_comparison import GraphNodeChange, GraphRelationshipChange
 from minotaur.query.system_diff import SystemDiffResult
 
@@ -233,3 +233,108 @@ def test_comparison_excerpt_includes_same_file_caller_start_in_bounded_span() ->
 
     assert excerpts["before"]["paths"]["app.py"]["spans"][0]["start"] == 0
     assert excerpts["after"]["paths"]["app.py"]["spans"][0]["start"] == 0
+
+
+def _unchanged_comparison() -> SystemDiffResult:
+    node = {
+        "id": "node:same",
+        "node_class": "symbol",
+        "label": "same",
+        "symbol_kind": "function",
+        "location": _location("app.py", 0),
+    }
+    relationship = {
+        "source": "node:same",
+        "target": "node:same",
+        "kind": "calls",
+        "evidence": [],
+    }
+    return SystemDiffResult(
+        old_system_names=("A",),
+        new_system_names=("A",),
+        nodes=(GraphNodeChange("node:same", "unchanged", before=node, after=node),),
+        relationships=(
+            GraphRelationshipChange(
+                "relationship:same",
+                "node:same",
+                "node:same",
+                "calls",
+                "unchanged",
+                before=relationship,
+                after=relationship,
+            ),
+        ),
+        old_revision="before-sha",
+        new_revision="after-sha",
+    )
+
+
+def test_comparison_no_change_and_call_only_states_are_data_driven() -> None:
+    """The stored complete boolean drives the disabled control and message."""
+    identical = build_comparison_presentation(_unchanged_comparison())
+    assert identical["comparison"]["changed"] is False
+    assert identical["comparison"]["limitations"] == []
+    html = render_html(identical).decode("utf-8")
+    assert 'id="emphasis-changes"' in html
+    assert 'id="comparison-no-change"' in html
+
+    call_only = replace(
+        _unchanged_comparison(),
+        call_changes=(
+            CallChange(
+                "relationship:same",
+                "changed",
+                reasons=("expression_changed",),
+                before=({"language": "python", "fingerprint": "old"},),
+                after=({"language": "python", "fingerprint": "new"},),
+            ),
+        ),
+    )
+    payload = build_comparison_presentation(call_only)
+    assert payload["comparison"]["changed"] is True
+    assert payload["comparison"]["calls"][0]["status"] == "changed"
+    assert payload["comparison"]["calls"][0]["relationship_id"] == "relationship:same"
+
+
+def test_comparison_unavailable_expression_evidence_is_reported_not_equality() -> None:
+    """Unavailable call evidence is a retained limitation, never a change."""
+    comparison = replace(
+        _unchanged_comparison(),
+        call_changes=(
+            CallChange(
+                "relationship:same",
+                "unavailable",
+                reasons=("unavailable",),
+                before=(
+                    {
+                        "language": "python",
+                        "callee": _location("app.py", 1),
+                        "expression": _location("app.py", 1),
+                        "fingerprint": None,
+                    },
+                ),
+            ),
+        ),
+        limitations=(
+            CallLimitation(
+                "old",
+                "relationship:same",
+                "call-expression-unavailable",
+                "structural call expression was unavailable for one or more observations",
+            ),
+        ),
+    )
+
+    payload = build_comparison_presentation(comparison)
+
+    # Missing expression evidence is neither invented as a change nor presented
+    # as expression equality; the limitation stays explicit for details and the
+    # report-level notice.
+    assert payload["comparison"]["changed"] is False
+    assert payload["comparison"]["calls"][0]["status"] == "unavailable"
+    limitation = payload["comparison"]["limitations"][0]
+    assert limitation["side"] == "old"
+    assert limitation["code"] == "call-expression-unavailable"
+    html = render_html(payload).decode("utf-8")
+    assert "call-expression-unavailable" in html
+    assert "structural call expression was unavailable" in html
