@@ -102,7 +102,7 @@ def _normalize_javascript(value: Any) -> Any:
     if hasattr(value, "type"):
         fields: dict[str, Any] = {"type": str(value.type)}
         for name, child in sorted(vars(value).items()):
-            if name in {"type", "loc", "range", "tokens", "comments", "errors"}:
+            if name in {"type", "loc", "range", "raw", "tokens", "comments", "errors"}:
                 continue
             fields[name] = _normalize_javascript(child)
         return fields
@@ -110,6 +110,6 @@ def _normalize_javascript(value: Any) -> Any:
         return {
             name: _normalize_javascript(child)
             for name, child in sorted(vars(value).items())
-            if name not in {"loc", "range", "tokens", "comments", "errors"}
+            if name not in {"loc", "range", "raw", "tokens", "comments", "errors"}
         }
     raise TypeError(f"unsupported JavaScript AST value: {type(value).__name__}")
