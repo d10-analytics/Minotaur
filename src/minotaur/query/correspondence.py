@@ -494,7 +494,12 @@ def prepare_correspondence(
 
 def prepare_whole_graph(document: GraphDocument, *, side: str = "local") -> CorrespondenceIndex:
     """Prepare all nodes and relationship kinds for complete comparison."""
-    return prepare_correspondence(document, side=side, whole_graph=True)
+    return prepare_correspondence(document, side=side, whole_graph=True).validate_whole_graph(
+        side=side
+    )
+
+
+prepare_whole_graph_correspondence = prepare_whole_graph
 
 
 def validate_required_keys(
@@ -519,5 +524,6 @@ __all__ = [
     "node_key",
     "prepare_correspondence",
     "prepare_whole_graph",
+    "prepare_whole_graph_correspondence",
     "validate_required_keys",
 ]

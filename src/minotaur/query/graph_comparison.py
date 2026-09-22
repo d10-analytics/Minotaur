@@ -382,11 +382,17 @@ def compare_graphs(old: object, new: object) -> GraphComparison:
 
 
 compare_whole_graph = compare_graphs
+compare_graph = compare_graphs
+GraphNodeClassification = GraphNodeChange
+GraphRelationshipClassification = GraphRelationshipChange
 
 __all__ = [
     "GraphComparison",
     "GraphNodeChange",
+    "GraphNodeClassification",
     "GraphRelationshipChange",
+    "GraphRelationshipClassification",
+    "compare_graph",
     "compare_graphs",
     "compare_whole_graph",
     "node_display_id",

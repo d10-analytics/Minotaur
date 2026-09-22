@@ -229,7 +229,10 @@ def compare_call_observations(
             elif before_counts == after_counts:
                 status, reasons = "unchanged", ()
             else:
-                status, reasons = "changed", ("expression_changed", "multiplicity_changed")
+                reason_values = ["expression_changed"]
+                if len(before_values) != len(after_values):
+                    reason_values.append("multiplicity_changed")
+                status, reasons = "changed", tuple(reason_values)
         changes.append(
             CallChange(
                 relationship_id=relation_id,
@@ -245,13 +248,19 @@ def compare_call_observations(
 
 compare_calls = compare_call_observations
 compare_call_diff = compare_call_observations
+compare_call_residuals = compare_call_observations
+CallResidual = CallChange
+ComparisonLimitation = CallLimitation
 
 __all__ = [
     "CallChange",
     "CallComparison",
     "CallCorrespondenceAmbiguityError",
     "CallLimitation",
+    "CallResidual",
+    "ComparisonLimitation",
     "compare_call_diff",
     "compare_call_observations",
+    "compare_call_residuals",
     "compare_calls",
 ]
