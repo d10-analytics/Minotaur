@@ -866,3 +866,74 @@ def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_pat
         page.wait_for_timeout(450)
         assert page.evaluate("window.minotaurVisualizer.layoutRuns()") > before_switch["runs"]
         browser.close()
+
+
+def test_comparison_empty_filter_view_keeps_controls_safe(tmp_path: Path) -> None:
+    """An empty comparison view remains safe for reset, direction, and switches."""
+    def node(node_id: str, *, before: bool, after: bool) -> dict[str, object]:
+        value = {
+            "node_class": "symbol",
+            "label": node_id,
+            "symbol_kind": "function",
+            "systems": ["A"],
+        }
+        return {
+            "id": node_id,
+            "status": "unchanged" if before and after else "removed" if before else "added",
+            "reasons": [],
+            "involved_systems": ["A"],
+            "before": value if before else None,
+            "after": value if after else None,
+        }
+
+    nodes = [node("departed", before=True, after=False), node("added", before=False, after=True)]
+    presentation = {
+        "graph": {"nodes": nodes, "relationships": []},
+        "comparison": {
+            "old_system_names": ["A"],
+            "new_system_names": ["A"],
+            "revisions": {"old": "before", "new": "after"},
+            "nodes": nodes,
+            "relationships": [],
+            "calls": [],
+        },
+        "systems": ["A"],
+        "node_systems": {
+            "departed": {"before": ["A"], "after": []},
+            "added": {"before": [], "after": ["A"]},
+        },
+        "excerpts": {"paths": {}, "call_sites": {}},
+    }
+    artifact = tmp_path / "empty-comparison.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(artifact.as_uri())
+        page.wait_for_timeout(500)
+        page.locator('input[data-kind="symbol"]').uncheck()
+        page.wait_for_timeout(250)
+        camera = page.evaluate(
+            """() => ({
+                zoom: window.minotaurVisualizer.cy.zoom(),
+                pan: window.minotaurVisualizer.cy.pan(),
+            })"""
+        )
+        assert page.evaluate("window.minotaurVisualizer.cy.nodes(':visible').length") == 0
+        page.locator("#btn-fit").click()
+        page.locator("#btn-direction").click()
+        page.locator("#revision-view").select_option("before")
+        page.locator("#revision-view").select_option("after")
+        assert page.evaluate("window.minotaurVisualizer.cy.nodes(':visible').length") == 0
+        assert page.evaluate(
+            """() => ({
+                zoom: window.minotaurVisualizer.cy.zoom(),
+                pan: window.minotaurVisualizer.cy.pan(),
+            })"""
+        ) == camera
+        browser.close()
+
+    assert not errors
