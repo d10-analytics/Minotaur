@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 from minotaur.graph_visualizer.html.render import render_html
@@ -163,3 +164,29 @@ def test_comparison_html_is_inert_and_ordinary_graph_presentation_stays_separate
     ordinary = build_presentation({"nodes": [], "relationships": []})
     assert "comparison" not in ordinary
     assert ordinary["graph"] == {"nodes": [], "relationships": []}
+
+
+def test_comparison_call_site_does_not_use_cross_file_caller_context() -> None:
+    comparison = _comparison()
+    nodes = list(comparison.nodes)
+    caller = nodes[0]
+    before = dict(caller.before)
+    after = dict(caller.after)
+    before["location"] = _location("caller.py", 40)
+    after["location"] = _location("caller.py", 40)
+    nodes[0] = GraphNodeChange(
+        caller.id,
+        caller.status,
+        caller.reasons,
+        caller.involved_systems,
+        before,
+        after,
+    )
+    comparison = replace(comparison, nodes=tuple(nodes))
+
+    excerpts = prepare_comparison_excerpts(comparison, {"before": {}, "after": {}})
+
+    before_site = excerpts["before"]["call_sites"]["relationship:call"][0]
+    after_site = excerpts["after"]["call_sites"]["relationship:call"][0]
+    assert "caller_start" not in before_site
+    assert "caller_start" not in after_site
