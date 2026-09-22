@@ -232,6 +232,26 @@ def test_systems_grammar_requires_zero_or_two_revisions_and_rejects_scope(
     assert "missing-a" in captured.err
 
 
+@pytest.mark.parametrize("override", ("--graph", "--root"))
+def test_systems_route_rejects_unused_graph_and_root_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    override: str,
+) -> None:
+    """AC-07: the systems route never silently accepts an unused graph/root."""
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["query", "diff", "--systems", override, "unused.json"])
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"unrecognized arguments: {override}" in captured.err
+
+
 def test_systems_composes_real_acquisition_comparison_and_rendering_without_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -293,10 +313,16 @@ def test_systems_json_status_is_typed_and_context_is_retained(
 
     status = cli.main(["query", "diff", "--systems", "--json"])
     captured = capsys.readouterr()
+    payload = json.loads(captured.out)
 
     assert status == 0
     assert '"changed":false' in captured.out
     assert '"coverage":{"new":' in captured.out
+    comparison = payload["comparison"]
+    assert comparison["schema_version"] == 1
+    assert comparison["selected_system"] is None
+    assert comparison["before"]["kind"] == "commit"
+    assert comparison["after"]["kind"] == "working-tree"
     assert captured.err == ""
     _assert_state(root, before)
 
@@ -461,6 +487,15 @@ def test_unaffected_system_filter_returns_zero_when_complete_result_changes(
     assert "old coverage:" in captured.out
     assert "new coverage:" in captured.out
     assert captured.err == ""
+
+    # The scoped status is zero while the retained context still reports the
+    # complete comparison as changed.
+    assert cli.main(["query", "diff", "--systems", "--system", "Other", "--json"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["changed"] is False
+    assert payload["selected_system"] == "Other"
+    assert payload["comparison"]["changed"] is True
 
 
 @pytest.mark.parametrize(
@@ -1211,6 +1246,22 @@ def _head_sha(root: Path) -> str:
     ).stdout.strip()
 
 
+_SIDE_RECORD_KEYS = frozenset(
+    {"kind", "requested_revision", "commit", "config_path", "root", "targets", "source_digest"}
+)
+
+
+def _assert_side_record(record: object) -> dict[str, object]:
+    """Require the exact captured-side shape and a hex content digest."""
+    assert isinstance(record, dict)
+    assert set(record) == set(_SIDE_RECORD_KEYS)
+    assert isinstance(record["source_digest"], str)
+    assert len(record["source_digest"]) == 64
+    assert all(character in "0123456789abcdef" for character in record["source_digest"])
+    assert isinstance(record["targets"], list)
+    return record
+
+
 def test_systems_two_revision_grammar_compares_pinned_commits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1238,6 +1289,27 @@ def test_systems_two_revision_grammar_compares_pinned_commits(
     assert identical["changed"] is False
     assert identical["comparison"]["changed"] is False
 
+    # Captured-side records identify both pinned revisions and are stable for
+    # the same repository state.
+    assert cli.main(["query", "diff", "--systems", base, "HEAD", "--json"]) == 1
+    context = json.loads(capsys.readouterr().out)["comparison"]
+    before_record = _assert_side_record(context["before"])
+    after_record = _assert_side_record(context["after"])
+    assert context["schema_version"] == 1
+    assert before_record["kind"] == "commit"
+    assert before_record["requested_revision"] == base
+    assert before_record["commit"] == base
+    assert before_record["config_path"] == ".minotaur.toml"
+    assert before_record["root"] == "."
+    assert before_record["targets"] == ["app", "consumer.py"]
+    assert after_record["kind"] == "commit"
+    assert after_record["requested_revision"] == "HEAD"
+    assert after_record["commit"] == head
+    assert after_record["targets"] == ["app", "consumer.py"]
+    assert before_record["source_digest"] != after_record["source_digest"]
+    assert context["before"] == payload["comparison"]["before"]
+    assert context["after"] == payload["comparison"]["after"]
+
 
 def test_systems_working_tree_after_has_no_commit_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1256,6 +1328,18 @@ def test_systems_working_tree_after_has_no_commit_identity(
     assert head[:7] in payload["revisions"]["old"]
     assert payload["selected_system"] is None
 
+    # The Before side is a real commit; the working-tree After side carries no
+    # invented commit identity, so a fabricated SHA or a dropped field fails.
+    comparison = payload["comparison"]
+    assert comparison["schema_version"] == 1
+    assert comparison["before"]["kind"] == "commit"
+    assert comparison["before"]["requested_revision"] == "HEAD"
+    assert comparison["before"]["commit"] == head
+    assert comparison["after"]["kind"] == "working-tree"
+    assert comparison["after"]["requested_revision"] is None
+    assert comparison["after"]["commit"] is None
+    assert comparison["before"]["source_digest"] != comparison["after"]["source_digest"]
+
 
 def test_systems_json_and_html_describe_the_same_comparison(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1266,6 +1350,7 @@ def test_systems_json_and_html_describe_the_same_comparison(
     assert cli.main(["analyze"]) == 0
     _git(root, "add", ".")
     _git(root, "commit", "-qm", "baseline")
+    head = _head_sha(root)
     (root / "app" / "api.py").write_text(
         "def receive():\n    return 1\n\ndef send():\n    return 2\n", encoding="utf-8"
     )
@@ -1275,7 +1360,11 @@ def test_systems_json_and_html_describe_the_same_comparison(
     )
     report = root / "comparison.html"
 
-    status = cli.main(["query", "diff", "--systems", "--json", "--html", str(report)])
+    # A selected system scopes the top-level status while the complete context
+    # stays in both outputs, so a viewer-side or divergent projection fails.
+    status = cli.main(
+        ["query", "diff", "--systems", "--system", "App", "--json", "--html", str(report)]
+    )
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     embedded = _embedded_comparison_payload(report.read_text(encoding="utf-8"))
@@ -1283,6 +1372,8 @@ def test_systems_json_and_html_describe_the_same_comparison(
 
     assert status == 1
     assert captured.err == ""
+    assert payload["selected_system"] == "App"
+    assert context["selected_system"] == "App"
     assert context["changed"] is True
     assert embedded["changed"] is True
     assert context["revisions"] == embedded["revisions"]
@@ -1294,6 +1385,28 @@ def test_systems_json_and_html_describe_the_same_comparison(
         for record in _comparison_fingerprint(context["nodes"])
         if record["status"] is not None
     )
+
+    # The schema-versioned captured-side records are present and identical in
+    # both public outputs, so a removed or divergent field fails this proof.
+    assert context["schema_version"] == 1
+    assert embedded["schema_version"] == 1
+    assert context["before"] == embedded["before"]
+    assert context["after"] == embedded["after"]
+    before_record = _assert_side_record(context["before"])
+    after_record = _assert_side_record(context["after"])
+    assert before_record["kind"] == "commit"
+    assert before_record["requested_revision"] == "HEAD"
+    assert before_record["commit"] == head
+    assert before_record["config_path"] == ".minotaur.toml"
+    assert before_record["root"] == "."
+    assert before_record["targets"] == ["app", "consumer.py"]
+    assert after_record["kind"] == "working-tree"
+    assert after_record["requested_revision"] is None
+    assert after_record["commit"] is None
+    assert after_record["config_path"] == ".minotaur.toml"
+    assert after_record["root"] == "."
+    assert after_record["targets"] == ["app", "consumer.py"]
+    assert before_record["source_digest"] != after_record["source_digest"]
 
 
 def test_systems_html_unchanged_pair_reports_zero_without_touching_inputs(
@@ -1540,3 +1653,65 @@ def test_systems_config_route_validation(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "repository-relative" in captured.err
+
+
+def test_systems_call_expression_only_change_is_status_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    base = _head_sha(root)
+    (root / "consumer.py").write_text(
+        "from app.api import receive\n\ndef consume():\n    return receive(2)\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "call change")
+
+    assert cli.main(["query", "diff", "--systems", base, "HEAD", "--json"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["changed"] is True
+    assert all(node["status"] == "unchanged" for node in payload["comparison"]["nodes"])
+    assert all(
+        relationship["status"] == "unchanged"
+        for relationship in payload["comparison"]["relationships"]
+    )
+    assert any(item["status"] == "changed" for item in payload["comparison"]["call_changes"])
+
+
+def test_systems_large_report_warning_keeps_json_stdout_parseable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    report = root / "comparison.html"
+    monkeypatch.setattr(cli, "_LARGE_ARTIFACT_BYTES", 10)
+
+    assert cli.main(["query", "diff", "--systems", "--json", "--html", str(report)]) == 0
+    captured = capsys.readouterr()
+    assert "exceeds 10 MiB" in captured.err
+    assert json.loads(captured.out)["changed"] is False
+
+
+def test_systems_config_route_keeps_working_directory_meaning_from_nested_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    nested = root / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+
+    assert cli.main(["query", "diff", "--systems", "--config", "../.minotaur.toml"]) == 0
+    captured = capsys.readouterr()
+    assert "no system differences" in captured.out
+    assert captured.err == ""
