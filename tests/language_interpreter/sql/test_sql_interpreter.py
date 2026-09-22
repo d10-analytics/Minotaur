@@ -309,9 +309,9 @@ def test_qualified_and_unrelated_executes_remain_unsupported(tmp_path: Path) -> 
     assert not _symbols(result)
     assert not result.document.relationships
     assert not any(d.code == DiagnosticCode.AMBIGUOUS_REFERENCE for d in result.diagnostics)
-    assert [d.code for d in result.diagnostics] == [
-        DiagnosticCode.UNSUPPORTED_SYNTAX
-    ] * len(statements)
+    assert [d.code for d in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX] * len(
+        statements
+    )
 
 
 def test_complete_index_neutral_predicate_never_resolves_a_target(
