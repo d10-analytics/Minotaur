@@ -20,8 +20,11 @@ from minotaur.language_interpreter.workspace import Workspace
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
-# Byte comparisons include generated HTML as well as graph facts.
-BASELINE_COMMIT = "ec5e90e5623700c8797e1cdc2f51f27fdc7000f4"
+# Byte comparisons include generated HTML as well as graph facts. The pin is the
+# reviewed single-view artifact commit: across the advance the graph, Drift, and
+# query rows stayed byte-identical and only the intentional viewer-asset HTML
+# changed, which the advance proof below re-checks against the previous pin.
+BASELINE_COMMIT = "2a00c51cfff2183f094ccf48dc4cd60483bc603a"
 # Preserve the historical fixture provenance independently of output revisions.
 FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
 
