@@ -320,55 +320,71 @@ def test_complete_index_neutral_predicate_never_resolves_a_target(
     def fail_resolution(*_args, **_kwargs):
         pytest.fail("index neutrality must not enter declaration resolution")
 
+    positive_indexes = (
+        "CREATE INDEX table_ix ON T(id)",
+        "CREATE NONCLUSTERED INDEX nonclustered_ix ON T(id)",
+        "CREATE CLUSTERED INDEX clustered_ix ON V(id)",
+        "CREATE UNIQUE NONCLUSTERED INDEX unique_nonclustered_ix ON Missing(id)",
+        "CREATE UNIQUE CLUSTERED INDEX unique_clustered_ix ON T(id)",
+    )
+    recognized_kinds = (
+        ("INDEX", "plain"),
+        ("NONCLUSTERED INDEX", "nonclustered"),
+        ("CLUSTERED INDEX", "clustered"),
+        ("UNIQUE NONCLUSTERED INDEX", "unique_nonclustered"),
+        ("UNIQUE CLUSTERED INDEX", "unique_clustered"),
+    )
+    invalid_shapes = (
+        ("local_temp", "#scratch(id)"),
+        ("global_temp", "##scratch(id)"),
+        ("variable", "@scratch(id)"),
+        ("three_part", "db.S.T(id)"),
+        ("empty", "T"),
+    )
+    invalid_indexes = tuple(
+        f"CREATE {kind} {label}_{shape}_ix ON {target}"
+        for kind, label in recognized_kinds
+        for shape, target in invalid_shapes
+    )
+    statements = (
+        "CREATE SCHEMA S",
+        "CREATE TABLE T(id int)",
+        "CREATE TABLE S.Qualified(id int)",
+        "CREATE VIEW V AS SELECT 1",
+        *positive_indexes,
+        "CREATE UNIQUE INDEX qualified_ix ON S.Qualified(id DESC) INCLUDE (id)",
+        "CREATE INDEX qualified_missing_ix ON S.Missing(id) WITH (FILLFACTOR=80)",
+        *invalid_indexes,
+    )
     monkeypatch.setattr(sql_interpreter, "_resolve", fail_resolution)
     result = _analyze(
         tmp_path,
-        **{
-            "indexes.sql": (
-                "CREATE SCHEMA S\nGO\nCREATE TABLE T(id int)\nGO\n"
-                "CREATE TABLE S.Qualified(id int)\nGO\nCREATE VIEW V AS SELECT 1\nGO\n"
-                "CREATE INDEX table_ix ON T(id)\nGO\n"
-                "CREATE INDEX view_ix ON V(id)\nGO\n"
-                "CREATE INDEX missing_ix ON Missing(id)\nGO\n"
-                "CREATE UNIQUE INDEX qualified_ix ON S.Qualified(id DESC) INCLUDE (id)\nGO\n"
-                "CREATE INDEX qualified_missing_ix ON S.Missing(id) WITH (FILLFACTOR=80)\nGO\n"
-                "CREATE NONCLUSTERED INDEX nonclustered_table_ix ON T(id)\nGO\n"
-                "CREATE CLUSTERED INDEX clustered_view_ix ON V(id)\nGO\n"
-                "CREATE UNIQUE NONCLUSTERED INDEX un_missing_ix ON Missing(id)\nGO\n"
-                "CREATE UNIQUE CLUSTERED INDEX unique_clustered_table_ix ON T(id)\nGO\n"
-                "CREATE INDEX local_temp_ix ON #scratch(id)\nGO\n"
-                "CREATE INDEX global_temp_ix ON ##scratch(id)\nGO\n"
-                "CREATE INDEX variable_ix ON @scratch(id)\nGO\n"
-                "CREATE INDEX three_part_ix ON db.S.T(id)\nGO\n"
-                "CREATE INDEX empty_ix ON T\nGO\n"
-                "CREATE NONCLUSTERED INDEX nonclustered_local_temp_ix ON #scratch(id)\nGO\n"
-                "CREATE NONCLUSTERED INDEX nonclustered_global_temp_ix ON ##scratch(id)\nGO\n"
-                "CREATE NONCLUSTERED INDEX nonclustered_variable_ix ON @scratch(id)\nGO\n"
-                "CREATE NONCLUSTERED INDEX nonclustered_three_part_ix ON db.S.T(id)\nGO\n"
-                "CREATE NONCLUSTERED INDEX nonclustered_empty_ix ON T\nGO\n"
-                "CREATE CLUSTERED INDEX clustered_local_temp_ix ON #scratch(id)\nGO\n"
-                "CREATE CLUSTERED INDEX clustered_global_temp_ix ON ##scratch(id)\nGO\n"
-                "CREATE CLUSTERED INDEX clustered_variable_ix ON @scratch(id)\nGO\n"
-                "CREATE CLUSTERED INDEX clustered_three_part_ix ON db.S.T(id)\nGO\n"
-                "CREATE CLUSTERED INDEX clustered_empty_ix ON T\nGO\n"
-                "CREATE UNIQUE NONCLUSTERED INDEX un_local_ix ON #scratch(id)\nGO\n"
-                "CREATE UNIQUE NONCLUSTERED INDEX un_global_ix ON ##scratch(id)\nGO\n"
-                "CREATE UNIQUE NONCLUSTERED INDEX un_variable_ix ON @scratch(id)\nGO\n"
-                "CREATE UNIQUE NONCLUSTERED INDEX un_three_part_ix ON db.S.T(id)\nGO\n"
-                "CREATE UNIQUE NONCLUSTERED INDEX un_empty_ix ON T\nGO\n"
-                "CREATE UNIQUE CLUSTERED INDEX uc_local_ix ON #scratch(id)\nGO\n"
-                "CREATE UNIQUE CLUSTERED INDEX uc_global_ix ON ##scratch(id)\nGO\n"
-                "CREATE UNIQUE CLUSTERED INDEX uc_variable_ix ON @scratch(id)\nGO\n"
-                "CREATE UNIQUE CLUSTERED INDEX uc_three_part_ix ON db.S.T(id)\nGO\n"
-                "CREATE UNIQUE CLUSTERED INDEX uc_empty_ix ON T"
-            )
-        },
+        **{"indexes.sql": "\nGO\n".join(statements)},
     )
     assert set(_symbols(result)) == {"S", "T", "S.Qualified", "V"}
     assert [d.code for d in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX] * 25
+    assert not _edges(result, "sql:reads-from")
+    assert not _edges(result, "sql:foreign-key-to")
     assert not any(
         node.node_class.value == "unresolved-reference" for node in result.document.nodes
     )
+
+    declarations = "CREATE TABLE T(id int)\nGO\nCREATE VIEW V AS SELECT 1"
+    for number, statement in enumerate(positive_indexes):
+        positive = _analyze(
+            tmp_path / f"positive_{number}",
+            **{"index.sql": f"{declarations}\nGO\n{statement}"},
+        )
+        assert not positive.diagnostics, statement
+
+    for number, statement in enumerate(invalid_indexes):
+        invalid = _analyze(
+            tmp_path / f"invalid_{number}",
+            **{"index.sql": statement},
+        )
+        assert [diagnostic.code for diagnostic in invalid.diagnostics] == [
+            DiagnosticCode.UNSUPPORTED_SYNTAX
+        ], statement
 
 
 def test_typed_lookup_is_order_independent_and_ambiguous(tmp_path: Path) -> None:
