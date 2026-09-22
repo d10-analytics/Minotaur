@@ -409,7 +409,11 @@
     containerNodes.forEach(function (node) {
       var name = node.data("system") || "External / Unassigned";
       if (comparisonMode) {
-        var systems = node.data("systems") || [];
+        var systems = sideSystems(node.data("comparison_record"), revisionView);
+        if (!systems.length && revisionView === "combined") {
+          systems = sideSystems(node.data("comparison_record"), "after");
+        }
+        if (!systems.length) systems = node.data("systems") || [];
         name = systems[0] || name;
       }
       if (!groups.has(name)) groups.set(name, cy.collection());
