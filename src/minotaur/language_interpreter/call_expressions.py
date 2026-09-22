@@ -100,6 +100,13 @@ def _normalize_javascript(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_normalize_javascript(item) for item in value]
     if hasattr(value, "type"):
+        if value.type == "Literal" and getattr(value, "regex", None) is not None:
+            regex = value.regex
+            pattern = getattr(regex, "pattern", None)
+            flags = getattr(regex, "flags", None)
+            if not isinstance(pattern, str) or not isinstance(flags, str):
+                raise TypeError("unsupported JavaScript regex literal")
+            return {"type": "Literal", "regex": {"flags": flags, "pattern": pattern}}
         fields: dict[str, Any] = {"type": str(value.type)}
         for name, child in sorted(vars(value).items()):
             if name in {"type", "loc", "range", "raw", "tokens", "comments", "errors"}:
