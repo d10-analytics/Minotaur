@@ -709,11 +709,18 @@ def test_rejected_standalone_alter_is_atomic(tmp_path: Path, alter: str) -> None
     assert set(_symbols(result)) == {"Parent", "Child"}
 
 
-def test_decorated_standalone_fk_emits_payload_free_edge(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "options",
+    [
+        "ON DELETE CASCADE ON UPDATE SET NULL NOT FOR REPLICATION",
+        "on delete cascade on update set null not for replication",
+    ],
+)
+def test_decorated_standalone_fk_emits_payload_free_edge(tmp_path: Path, options: str) -> None:
     sql = (
         "CREATE TABLE Parent (Id int)\nGO\nCREATE TABLE Child (Id int)\nGO\n"
         "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id) "
-        "ON DELETE CASCADE ON UPDATE SET NULL NOT FOR REPLICATION"
+        f"{options}"
     )
     result = _analyze(tmp_path, **{"decorated.sql": sql})
     edges = _sql_edges(result, "sql:foreign-key-to")
@@ -733,6 +740,7 @@ def test_decorated_standalone_fk_emits_payload_free_edge(tmp_path: Path) -> None
         "DEFERRABLE",
         "ON DELETE CASCADE ON DELETE SET NULL",
         "ON UPDATE CASCADE ON UPDATE NO ACTION",
+        "on delete cascade ON DELETE SET NULL",
     ],
 )
 def test_standalone_fk_rejects_unapproved_or_duplicate_reference_options(
