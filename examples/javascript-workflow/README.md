@@ -24,7 +24,7 @@ $ minotaur query definitions greet --graph graph.json --root . --no-refresh
 lib.js:1  lib.greet  function
 exit: 0
 $ minotaur query callers lib.greet --graph graph.json --root . --no-refresh
-app.js:4:5  app.welcome
+app.js:4:5  app.welcome [calls]
 exit: 0
 $ minotaur query callers app.welcome --graph graph.json --root . --no-refresh
 no callers

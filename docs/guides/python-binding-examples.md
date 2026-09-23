@@ -53,8 +53,8 @@ def unknown():
 $ minotaur analyze --root . --output graph.json --force .
 exit: 0
 $ minotaur query callers lib.helper --graph graph.json --root . --no-refresh
-app.py:8:5  app.same
-app.py:15:5  helper [unresolved]
+app.py:8:5  app.same [calls]
+app.py:15:5  helper [references] [unresolved]
 exit: 0
 $ minotaur query impact lib.helper --graph graph.json --root . --no-refresh
 depth 0: lib.helper
@@ -65,8 +65,8 @@ $ minotaur query unreferenced lib.py --graph graph.json --root . --no-refresh
 no unreferenced symbols
 exit: 0
 $ minotaur query callers app.Service.run --graph graph.json --root . --no-refresh
-app.py:25:9  app.Service.known
-app.py:28:5  service.run [unresolved]
+app.py:25:9  app.Service.known [calls]
+app.py:28:5  service.run [references] [unresolved]
 exit: 0
 $ minotaur query callers callback_only.handler --graph graph.json --root . --no-refresh
 no callers
