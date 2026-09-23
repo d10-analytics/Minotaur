@@ -3,7 +3,8 @@
 These three queries report who reaches across a declared system boundary.
 They share one model: a query targets one declared system (D-05, R-04) and
 every relationship of the boundary kinds -- the symbol layer ``calls`` /
-``references`` and the module layer ``imports`` (D-06) -- is attributed by
+``references``, the module layer ``imports``, and the current SQL dependency
+kinds ``sql:reads-from`` / ``sql:foreign-key-to`` (D-06) -- is attributed by
 its endpoint's *file*, through the loader's exact-file membership
 (:func:`minotaur.system.classify_endpoint`).  No package, module, or label
 ever implies membership (AR-03), and records expose only semantic labels,
@@ -16,10 +17,10 @@ Record producers key on the semantic participant, never on the call site
 
 - ``surface(systems, index, target)`` returns one record per *exposed
   in-scope symbol* -- a symbol defined in a file the target system lists and
-  reached by an inbound ``calls`` or ``references`` edge whose source sits
-  outside the system.  Imports are never surface, and an edge between two
-  in-scope endpoints (including a same-file edge) exposes nothing (R-05,
-  AC-05).
+  reached by an inbound ``calls``, ``references``, ``sql:reads-from``, or
+  ``sql:foreign-key-to`` edge whose source sits outside the system.  Imports
+  are never surface, and an edge between two in-scope endpoints (including a
+  same-file edge) exposes nothing (R-05, AC-05).
 - ``consumers(systems, index, target)`` returns one record per *outside
   file* participating in a boundary relationship into the target system,
   carrying the distinct relationship kinds that file contributes and the
@@ -102,8 +103,9 @@ class SurfaceRecord:
 
     ``category`` is the symbol's own membership (``system: <name>``),
     ``path`` the root-relative file defining the symbol, and ``kinds`` the
-    distinct symbol-layer relationship kinds by which outside endpoints
-    reach it, sorted.  A second outside call site never changes this record
+    distinct boundary relationship kinds (including current SQL dependency
+    kinds) by which outside endpoints reach it, sorted.  Imports never produce
+    a surface record.  A second outside call site never changes this record
     set (D-05).
     """
 
@@ -171,12 +173,12 @@ def surface(
 ) -> tuple[SurfaceRecord, ...]:
     """Return one record per exposed in-scope symbol of ``target``.
 
-    An in-scope symbol is exposed when at least one inbound ``calls`` or
-    ``references`` edge reaches it from an endpoint whose derived file the
-    system does not list.  Internal edges between two in-scope endpoints
-    (including same-file edges) and module-layer ``imports`` expose nothing.
-    Rows key on the symbol, so additional outside call sites never add a
-    record (AC-05, D-05).
+    An in-scope symbol is exposed when at least one inbound ``calls``,
+    ``references``, ``sql:reads-from``, or ``sql:foreign-key-to`` edge reaches
+    it from an endpoint whose derived file the system does not list. Internal
+    edges between two in-scope endpoints (including same-file edges) and
+    module-layer ``imports`` expose nothing. Rows key on the symbol, so
+    additional outside call sites never add a record (AC-05, D-05).
     """
     selection = _select_report(systems, index, target, "surface")
     return cast(tuple[SurfaceRecord, ...], selection.records)
@@ -188,11 +190,11 @@ def consumers(
     """Return one record per outside file consuming ``target``.
 
     A boundary relationship into the system (any of ``calls``, ``references``,
-    ``imports``) whose source endpoint's derived file is not listed by the
-    system makes that file a consumer: the row carries the file's distinct
-    relationship kinds and the concrete in-scope targets it reaches as
-    detail.  A path-less source endpoint has no file and so is not a
-    consumer row (R-06, AC-06).
+    ``imports``, ``sql:reads-from``, or ``sql:foreign-key-to``) whose source
+    endpoint's derived file is not listed by the system makes that file a
+    consumer: the row carries the file's distinct relationship kinds and the
+    concrete in-scope targets it reaches as detail.  A path-less source
+    endpoint has no file and so is not a consumer row (R-06, AC-06).
     """
     selection = _select_report(systems, index, target, "consumers")
     return cast(tuple[ConsumersRecord, ...], selection.records)
@@ -203,13 +205,14 @@ def system_deps(
 ) -> tuple[SystemDepsRecord, ...]:
     """Return one record per target category of ``target``'s dependencies.
 
-    Every outgoing ``calls``, ``references``, or ``imports`` edge whose
-    source endpoint lies inside the system classifies its target endpoint:
-    a target a *different* declared system lists makes a ``system: <name>``
-    row, a path-carrying target in no declared system a ``no_system`` row,
-    and a path-less upstream target an ``external`` row.  Same-system and
-    same-file edges are internal and never a dependency; no target is
-    silently attributed to a system or dropped (R-07, D-13, AC-07).
+    Every outgoing ``calls``, ``references``, ``imports``, ``sql:reads-from``,
+    or ``sql:foreign-key-to`` edge whose source endpoint lies inside the
+    system classifies its target endpoint: a target a *different* declared
+    system lists makes a ``system: <name>`` row, a path-carrying target in no
+    declared system a ``no_system`` row, and a path-less upstream target an
+    ``external`` row.  Same-system and same-file edges are internal and never
+    a dependency; no target is silently attributed to a system or dropped
+    (R-07, D-13, AC-07).
     """
     selection = _select_report(systems, index, target, "system-deps")
     return cast(tuple[SystemDepsRecord, ...], selection.records)
