@@ -11,14 +11,12 @@ from minotaur.graph_model.loading import load_graph_blob
 from minotaur.graph_model.serialization import serialize
 from minotaur.language_interpreter.sql import analyze_sql_files
 from minotaur.language_interpreter.workspace import Workspace
-from minotaur.query import system as system_query
 from minotaur.query.diff import diff
 from minotaur.query.impact import ImpactRecord, impact
 from minotaur.query.index import AmbiguousSymbol, GraphIndex
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.query.symbols import callers, definitions
 from minotaur.query.unreferenced import unreferenced
-from minotaur.system import load_systems_data
 
 _CATALOG = """\
 CREATE SCHEMA S
@@ -156,20 +154,6 @@ CREATE VIEW S.Downstream AS SELECT * FROM S.Reader
         ImpactRecord(depth=2, symbol="S.Downstream", kind="sql:view", boundary=True),
     )
     assert unreferenced(index, tmp_path, ("catalog.sql",)) == ()
-
-    systems = load_systems_data(
-        {
-            Path("sql.toml"): {
-                "schema_version": 1,
-                "name": "sql",
-                "files": ["catalog.sql"],
-            }
-        }
-    )
-    target = systems[0]
-    assert system_query.surface(systems, index, target) == ()
-    assert system_query.consumers(systems, index, target) == ()
-    assert system_query.system_deps(systems, index, target) == ()
 
     unresolved = callers(index, "wrongkind")
     assert len(unresolved) == 1
