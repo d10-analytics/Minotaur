@@ -753,7 +753,9 @@ ALTER TABLE Child ADD CONSTRAINT fk_missing_target FOREIGN KEY (a) REFERENCES Mi
         edge[0].label == "MissingChild" or edge[1].label == "MissingParent"
         for edge in _sql_edges(result, "sql:foreign-key-to")
     )
-    assert len(_sql_edges(result, "references")) == 2
+    unresolved_edges = _sql_edges(result, "references")
+    assert len(unresolved_edges) == 2
+    assert all(item.extensions is None for _, _, edge in unresolved_edges for item in edge.evidence)
 
 
 @pytest.mark.parametrize("qualified", [False, True])
