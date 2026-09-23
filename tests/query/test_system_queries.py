@@ -2155,7 +2155,9 @@ def test_reporting_snapshot_reassignment_updates_inventory_and_connections_toget
 
 
 def test_sql_relationships_cross_system_reports_and_overview_connections(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Current SQL edges use exact declared-file membership everywhere."""
     root = _repo(tmp_path, "sql-boundaries")
@@ -2200,6 +2202,7 @@ CREATE VIEW scratch.Reader AS SELECT * FROM billing.Invoice
     _declare(root, "orders", ["orders.sql"])
     _declare(root, "billing", ["billing.sql"])
     graph = _analyze(root)
+    monkeypatch.chdir(root)
 
     def named_query(name: str, system_name: str, *extra: str) -> tuple[int, str, str]:
         status = cli.main(
@@ -2302,9 +2305,7 @@ CREATE VIEW scratch.Reader AS SELECT * FROM billing.Invoice
     assert compact_text.err == ""
     assert "connections" not in compact_text.out
     assert compact_text.out.startswith("coverage ")
-    compact_coverage = json.loads(
-        compact_text.out.splitlines()[0].removeprefix("coverage ")
-    )
+    compact_coverage = json.loads(compact_text.out.splitlines()[0].removeprefix("coverage "))
     assert compact_coverage["graph_files"] == {
         "scope": "final_graph_file_nodes",
         "count": 3,
@@ -2354,8 +2355,9 @@ CREATE VIEW scratch.Reader AS SELECT * FROM billing.Invoice
     assert status == 0
     assert details_text.err == ""
     details_connections = json.loads(
-        next(line for line in details_text.out.splitlines() if line.startswith("connections "))
-        .removeprefix("connections ")
+        next(
+            line for line in details_text.out.splitlines() if line.startswith("connections ")
+        ).removeprefix("connections ")
     )
     assert [
         (row["source_category"], row["target_category"], row["kinds"])
@@ -2367,10 +2369,7 @@ CREATE VIEW scratch.Reader AS SELECT * FROM billing.Invoice
         ("system: orders", "system: billing", ["sql:foreign-key-to", "sql:reads-from"]),
     ]
     assert all(row["relationships"] for row in details_connections)
-    assert [
-        [detail["kind"] for detail in row["relationships"]]
-        for row in details_connections
-    ] == [
+    assert [[detail["kind"] for detail in row["relationships"]] for row in details_connections] == [
         ["sql:reads-from"],
         ["sql:reads-from"],
         ["sql:reads-from"],
@@ -2416,7 +2415,7 @@ CREATE VIEW scratch.Reader AS SELECT * FROM billing.Invoice
         (
             detail["source"]["label"],
             detail["target"]["label"],
-            detail["target"]["path"],
+            detail["target"]["path"]["value"],
             detail["kind"],
         )
         for row in details_payload["connections"]
