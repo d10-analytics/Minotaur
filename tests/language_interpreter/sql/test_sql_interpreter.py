@@ -724,3 +724,31 @@ def test_decorated_standalone_fk_emits_payload_free_edge(tmp_path: Path) -> None
     assert _evidence_locations(edges[0][2]) == {
         ("decorated.sql", 4, sql.splitlines()[4].index("Parent"))
     }
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "MATCH FULL",
+        "DEFERRABLE",
+        "ON DELETE CASCADE ON DELETE SET NULL",
+        "ON UPDATE CASCADE ON UPDATE NO ACTION",
+    ],
+)
+def test_standalone_fk_rejects_unapproved_or_duplicate_reference_options(
+    tmp_path: Path, option: str
+) -> None:
+    alter = f"ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id) {option}"
+    result = _analyze(
+        tmp_path,
+        **{
+            "tables.sql": "CREATE TABLE Parent (Id int)\nGO\nCREATE TABLE Child (Id int)",
+            "alter.sql": alter,
+        },
+    )
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
+    assert not _sql_edges(result, "sql:foreign-key-to")
+    assert not _sql_edges(result, "references")
+    assert set(_symbols(result)) == {"Parent", "Child"}
