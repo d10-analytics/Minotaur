@@ -21,10 +21,10 @@ ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
 # Byte comparisons include generated HTML as well as graph facts. The pin is the
-# reviewed single-view artifact commit: across the advance the graph, Drift, and
+# reviewed viewer behavior commit: across the advance the graph, Drift, and
 # query rows stayed byte-identical and only the intentional viewer-asset HTML
 # changed, which the advance proof below re-checks against the previous pin.
-BASELINE_COMMIT = "4cb9bef4246d1461b48e27c908c812d39f946ff4"
+BASELINE_COMMIT = "52a8b29d376e99c582d686dbead579acc438de37"
 # Preserve the historical fixture provenance independently of output revisions.
 FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
 
