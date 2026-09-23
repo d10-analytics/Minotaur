@@ -39,7 +39,8 @@ NAMESPACE = "minotaur-sql"
 _PRODUCER = Producer(name=NAMESPACE)
 _GO_RE = re.compile(r"[ \t]*GO(?:[ \t]+([0-9]+))?[ \t]*(?:--[^\r\n]*)?\Z", re.IGNORECASE)
 _FK_ACTION_RE = re.compile(
-    r"ON (DELETE|UPDATE) (?:CASCADE|SET NULL|SET DEFAULT|NO ACTION|RESTRICT)\Z"
+    r"ON (DELETE|UPDATE) (?:CASCADE|SET NULL|SET DEFAULT|NO ACTION|RESTRICT)\Z",
+    re.IGNORECASE,
 )
 _PROPERTY_PROCEDURES = frozenset(
     {"sp_addextendedproperty", "sp_updateextendedproperty", "sp_dropextendedproperty"}
@@ -517,9 +518,9 @@ def _valid_fk_options(reference: exp.Reference) -> bool:
         if not isinstance(option, str):
             return False
         match = _FK_ACTION_RE.fullmatch(option)
-        if match is None or match.group(1) in seen:
+        if match is None or match.group(1).upper() in seen:
             return False
-        seen.add(match.group(1))
+        seen.add(match.group(1).upper())
     return True
 
 
