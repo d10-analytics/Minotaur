@@ -225,8 +225,9 @@ def test_unsupported_query_and_near_miss_do_not_emit_partial_facts(tmp_path: Pat
         },
     )
     assert not _symbols(result)
-    assert len(result.diagnostics) == 3
+    assert len(result.diagnostics) == 2
     assert all(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics)
+    assert _edges(result, "references") == {("unsupported.sql", "T")}
 
 
 def test_recursive_and_temporary_ctes_are_rejected_whole(tmp_path: Path) -> None:
@@ -576,3 +577,150 @@ def test_quoted_at_identifier_uses_parser_marker_not_text_prefix(tmp_path: Path)
     )
     assert "@Persistent" in _symbols(result)
     assert not result.diagnostics
+
+
+def _sql_edges(result, kind: str):
+    nodes = {node.id: node for node in result.document.nodes}
+    return [
+        (nodes[edge.source], nodes[edge.target], edge)
+        for edge in result.document.relationships
+        if edge.kind == kind
+    ]
+
+
+def _evidence_locations(edge):
+    return {
+        (location.path, location.range.start.line, location.range.start.character)
+        for item in edge.evidence
+        for location in item.locations
+    }
+
+
+@pytest.mark.parametrize("qualified", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_standalone_fk_resolves_after_all_files_case_insensitively(
+    tmp_path: Path, qualified: bool, reverse: bool
+) -> None:
+    prefix = "dbo." if qualified else ""
+    declaration = (
+        f"CREATE TABLE {prefix}Parent (Id int)\nGO\nCREATE TABLE {prefix}Child (ParentId int)"
+    )
+    alter = (
+        f"ALTER TABLE {prefix.lower()}child ADD CONSTRAINT FK_child_parent "
+        f"FOREIGN KEY (ParentId) REFERENCES {prefix.lower()}parent(Id)"
+    )
+    files = [("declarations.sql", declaration), ("alter.sql", alter)]
+    if reverse:
+        files.reverse()
+    result = _analyze(tmp_path, **dict(files))
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    assert not result.diagnostics
+    assert len(edges) == 1
+    assert (edges[0][0].label, edges[0][1].label) == (f"{prefix}Child", f"{prefix}Parent")
+    assert _evidence_locations(edges[0][2]) == {
+        ("alter.sql", 0, alter.rindex(f"{prefix.lower()}parent"))
+    }
+
+
+def test_standalone_fks_coalesce_and_retain_both_references(tmp_path: Path) -> None:
+    sql = (
+        "CREATE TABLE Parent (Id int)\nGO\nCREATE TABLE Child (A int, B int)\nGO\n"
+        "ALTER TABLE Child ADD CONSTRAINT FK_A FOREIGN KEY (A) REFERENCES Parent(Id), "
+        "CONSTRAINT FK_B FOREIGN KEY (B) REFERENCES Parent(Id)"
+    )
+    result = _analyze(tmp_path, **{"fks.sql": sql})
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    assert not result.diagnostics
+    assert len(edges) == 1
+    assert (edges[0][0].label, edges[0][1].label) == ("Child", "Parent")
+    assert _evidence_locations(edges[0][2]) == {
+        ("fks.sql", 4, sql.splitlines()[4].index("Parent")),
+        ("fks.sql", 4, sql.splitlines()[4].rindex("Parent")),
+    }
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_standalone_fk_missing_or_ambiguous_source_is_file_origin(
+    tmp_path: Path, ambiguous: bool
+) -> None:
+    declarations = "CREATE TABLE Parent (Id int)"
+    if ambiguous:
+        declarations += "\nGO\nCREATE TABLE Child (Id int)\nGO\nCREATE TABLE Child (Id int)"
+    sql = "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id)"
+    result = _analyze(tmp_path, **{"declarations.sql": declarations, "alter.sql": sql})
+    unresolved = _sql_edges(result, "references")
+    assert len(unresolved) == 1
+    assert unresolved[0][0].id == next(
+        node.id for node in result.document.nodes if node.path == "alter.sql"
+    )
+    assert unresolved[0][1].label == "Child"
+    assert _evidence_locations(unresolved[0][2]) == {("alter.sql", 0, 12)}
+    assert not _sql_edges(result, "sql:foreign-key-to")
+    assert [d.code for d in result.diagnostics].count(DiagnosticCode.AMBIGUOUS_REFERENCE) == int(
+        ambiguous
+    )
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_standalone_fk_missing_or_ambiguous_target_is_table_origin(
+    tmp_path: Path, ambiguous: bool
+) -> None:
+    declarations = "CREATE TABLE Child (Id int)"
+    if ambiguous:
+        declarations += "\nGO\nCREATE TABLE Parent (Id int)\nGO\nCREATE TABLE Parent (Id int)"
+    sql = "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id)"
+    result = _analyze(tmp_path, **{"declarations.sql": declarations, "alter.sql": sql})
+    unresolved = _sql_edges(result, "references")
+    assert len(unresolved) == 1
+    assert unresolved[0][0].label == "Child"
+    assert unresolved[0][1].label == "Parent"
+    assert _evidence_locations(unresolved[0][2]) == {("alter.sql", 0, sql.index("Parent"))}
+    assert not _sql_edges(result, "sql:foreign-key-to")
+    assert [d.code for d in result.diagnostics].count(DiagnosticCode.AMBIGUOUS_REFERENCE) == int(
+        ambiguous
+    )
+
+
+@pytest.mark.parametrize(
+    "alter",
+    [
+        "ALTER TABLE #Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id)",
+        "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES #Parent(Id)",
+        "ALTER TABLE db.dbo.Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id)",
+        "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES db.dbo.Parent(Id)",
+        "ALTER TABLE Child ADD FOREIGN KEY (Id) REFERENCES Parent(Id)",
+        "IF 1 = 1 ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id)",
+        "ALTER TABLE Child ADD CONSTRAINT PK_Child PRIMARY KEY (Id)",
+        "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id), "
+        "CONSTRAINT PK_Child PRIMARY KEY (Id)",
+    ],
+)
+def test_rejected_standalone_alter_is_atomic(tmp_path: Path, alter: str) -> None:
+    result = _analyze(
+        tmp_path,
+        **{
+            "tables.sql": "CREATE TABLE Parent (Id int)\nGO\nCREATE TABLE Child (Id int)",
+            "alter.sql": alter,
+        },
+    )
+    assert [d.code for d in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+    assert not _sql_edges(result, "sql:foreign-key-to")
+    assert not _sql_edges(result, "references")
+    assert set(_symbols(result)) == {"Parent", "Child"}
+
+
+def test_decorated_standalone_fk_emits_payload_free_edge(tmp_path: Path) -> None:
+    sql = (
+        "CREATE TABLE Parent (Id int)\nGO\nCREATE TABLE Child (Id int)\nGO\n"
+        "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id) "
+        "ON DELETE CASCADE ON UPDATE SET NULL NOT FOR REPLICATION"
+    )
+    result = _analyze(tmp_path, **{"decorated.sql": sql})
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    assert not result.diagnostics
+    assert len(edges) == 1
+    assert (edges[0][0].label, edges[0][1].label) == ("Child", "Parent")
+    assert edges[0][2].extensions is None
+    assert _evidence_locations(edges[0][2]) == {
+        ("decorated.sql", 4, sql.splitlines()[4].index("Parent"))
+    }
