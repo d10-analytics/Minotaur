@@ -38,6 +38,9 @@ from minotaur.language_interpreter.workspace import Workspace
 NAMESPACE = "minotaur-sql"
 _PRODUCER = Producer(name=NAMESPACE)
 _GO_RE = re.compile(r"[ \t]*GO(?:[ \t]+([0-9]+))?[ \t]*(?:--[^\r\n]*)?\Z", re.IGNORECASE)
+_FK_ACTION_RE = re.compile(
+    r"ON (DELETE|UPDATE) (?:CASCADE|SET NULL|SET DEFAULT|NO ACTION|RESTRICT)\Z"
+)
 _PROPERTY_PROCEDURES = frozenset(
     {"sp_addextendedproperty", "sp_updateextendedproperty", "sp_dropextendedproperty"}
 )
@@ -508,6 +511,18 @@ def _reference_target(
     return tuple(part.casefold() for part in parts), ".".join(parts), location
 
 
+def _valid_fk_options(reference: exp.Reference) -> bool:
+    seen: set[str] = set()
+    for option in reference.args.get("options") or []:
+        if not isinstance(option, str):
+            return False
+        match = _FK_ACTION_RE.fullmatch(option)
+        if match is None or match.group(1) in seen:
+            return False
+        seen.add(match.group(1))
+    return True
+
+
 def _interpret_alter(tree: exp.Alter, item: _File, batch: _Batch) -> _Observation | None:
     target = tree.this
     if not isinstance(target, exp.Table) or str(tree.args.get("kind") or "").upper() != "TABLE":
@@ -557,7 +572,7 @@ def _interpret_alter(tree: exp.Alter, item: _File, batch: _Batch) -> _Observatio
             ):
                 return None
             reference = expressions[0].args.get("reference")
-            if not isinstance(reference, exp.Reference):
+            if not isinstance(reference, exp.Reference) or not _valid_fk_options(reference):
                 return None
             endpoint = _reference_target(reference, item, batch)
             if endpoint is None:
