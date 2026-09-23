@@ -134,7 +134,8 @@ case-insensitively; non-SQL names retain exact matching.
 
 ### Trace inbound impact
 
-`impact` follows inbound `calls` and `imports` relationships:
+`impact` follows inbound `calls`, `imports`, and the SQL dependency
+relationships `sql:reads-from` and `sql:foreign-key-to`:
 
 ```bash
 minotaur query impact package.api.handle --depth 2 \
@@ -152,11 +153,12 @@ depth 1: package.routes.dispatch
 With `--depth N`, symbols one step beyond the limit are shown as boundary
 records. JSON records contain `depth`, `symbol`, `kind`, and `boundary`.
 
-`impact` resolves its symbol exactly as `callers` does: an unknown name exits
-`2` with nearest labels, and a name shared by two definitions exits `2` listing
-the candidate `path:line` sites. Neither is ever reported as `no impact`.
-Containment and callback-only `references` edges are intentionally not part of
-this call-chain impact query.
+`impact` resolves its symbol exactly as `callers` does: SQL qualified names are
+matched case-insensitively after an exact label match, while non-SQL labels
+remain case-sensitive. An unknown name exits `2` with nearest labels, and a
+name shared by two definitions exits `2` listing the candidate `path:line`
+sites. Neither is ever reported as `no impact`. Containment and callback-only
+`references` edges are intentionally not part of this impact query.
 
 Module-level callers appear as `module` symbols: if a target is called at
 module scope (`handle()` written directly in a module body, not inside a

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from minotaur.graph_model.provenance import NodeClass, RelationshipKind
 from minotaur.graph_model.slicing import bfs
 from minotaur.query.index import GraphIndex
+from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +35,7 @@ def impact(
     qualified_name: str,
     max_depth: int | None = None,
 ) -> tuple[ImpactRecord, ...]:
-    """Return inbound ``calls``/``imports`` impact records by shortest depth.
+    """Return inbound core and SQL dependency impact records by shortest depth.
 
     Like ``callers``, an unresolvable name raises ``SymbolResolutionError``
     rather than returning an empty result: ``no impact`` would read as "safe
@@ -45,7 +46,11 @@ def impact(
         raise ValueError(f"depth must be non-negative, got {max_depth}")
     target_id = index.resolve(qualified_name).id
     adjacency: dict[str, set[str]] = defaultdict(set)
-    for kind in (RelationshipKind.CALLS.value, RelationshipKind.IMPORTS.value):
+    for kind in (
+        RelationshipKind.CALLS.value,
+        RelationshipKind.IMPORTS.value,
+        *CURRENT_SQL_DEPENDENCY_KINDS,
+    ):
         for relationship in index.relationships(kind):
             # Inverting source -> target makes the BFS from the queried symbol
             # walk inbound dependencies while retaining the selected kinds.
