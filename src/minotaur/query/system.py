@@ -55,18 +55,20 @@ from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.graph_model.relationship import Relationship
 from minotaur.query.freshness import recorded_selection_view
 from minotaur.query.index import GraphIndex
+from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.system import EndpointKind, System, classify_endpoint, resolve_system, system_for_file
 
 _CALLS = RelationshipKind.CALLS.value
 _REFERENCES = RelationshipKind.REFERENCES.value
 _IMPORTS = RelationshipKind.IMPORTS.value
 
-#: Surface only ever reports the symbol layer (R-05): imports of a system
-#: module are a consumer fact, never an exposed boundary.
-_SURFACE_KINDS = (_CALLS, _REFERENCES)
+#: Surface reports symbol-layer and current SQL dependency relationships;
+#: imports of a system module are a consumer fact, never an exposed boundary.
+_SURFACE_KINDS = (_CALLS, _REFERENCES, *CURRENT_SQL_DEPENDENCY_KINDS)
 
-#: Consumers and dependencies report both consumption layers (D-06).
-_BOUNDARY_KINDS = (_CALLS, _REFERENCES, _IMPORTS)
+#: Consumers, dependencies, and overview connections report all current
+#: boundary relationships (D-06).
+_BOUNDARY_KINDS = (_CALLS, _REFERENCES, _IMPORTS, *CURRENT_SQL_DEPENDENCY_KINDS)
 
 RowKey = tuple[str, ...]
 _ResolvedRelationship = tuple[Relationship, Node, Node]
