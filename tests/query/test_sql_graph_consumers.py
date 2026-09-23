@@ -133,8 +133,27 @@ def test_sql_relationships_feed_callers_and_core_recall_remains(
         ("S.Child", "sql:foreign-key-to", False),
         ("S.Reader", "sql:reads-from", False),
     }
-    assert impact(index, "S.Parent", max_depth=1) == (
+    impact_index = _persisted_index(
+        tmp_path / "impact",
+        """\
+CREATE SCHEMA S
+GO
+CREATE TABLE S.Parent (id int)
+GO
+CREATE VIEW S.Reader AS SELECT * FROM S.Parent
+GO
+CREATE VIEW S.Downstream AS SELECT * FROM S.Reader
+""",
+    )
+    assert impact(impact_index, "s.parent") == (
         ImpactRecord(depth=0, symbol="S.Parent", kind="sql:table"),
+        ImpactRecord(depth=1, symbol="S.Reader", kind="sql:view"),
+        ImpactRecord(depth=2, symbol="S.Downstream", kind="sql:view"),
+    )
+    assert impact(impact_index, "s.parent", max_depth=1) == (
+        ImpactRecord(depth=0, symbol="S.Parent", kind="sql:table"),
+        ImpactRecord(depth=1, symbol="S.Reader", kind="sql:view"),
+        ImpactRecord(depth=2, symbol="S.Downstream", kind="sql:view", boundary=True),
     )
     assert unreferenced(index, tmp_path, ("catalog.sql",)) == ()
 
@@ -222,6 +241,7 @@ ALTER TABLE Child ADD CONSTRAINT FK_child_parent FOREIGN KEY (a,b) REFERENCES Pa
     ]
     assert impact(index, "Parent", max_depth=1) == (
         ImpactRecord(depth=0, symbol="Parent", kind="sql:table"),
+        ImpactRecord(depth=1, symbol="Child", kind="sql:table"),
     )
 
     changes = diff(old_document, new_document)
