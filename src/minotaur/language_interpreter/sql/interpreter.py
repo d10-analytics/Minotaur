@@ -509,10 +509,10 @@ def _foreign_keys(
             column = parent.parent.this
             local_columns = (str(column.this),) if isinstance(column, exp.Identifier) else ()
         elif isinstance(parent, exp.ForeignKey):
-            local_columns = tuple(
-                str(column.this)
-                for column in parent.expressions
-                if isinstance(column, exp.Identifier)
+            local_columns = (
+                tuple(str(column.this) for column in parent.expressions)
+                if all(isinstance(column, exp.Identifier) for column in parent.expressions)
+                else ()
             )
         else:
             local_columns = ()
@@ -644,10 +644,10 @@ def _interpret_alter(tree: exp.Alter, item: _File, batch: _Batch) -> _Observatio
             reference = expressions[0].args.get("reference")
             if not isinstance(reference, exp.Reference) or not _valid_fk_options(reference):
                 return None
-            local_columns = tuple(
-                str(column.this)
-                for column in expressions[0].expressions
-                if isinstance(column, exp.Identifier)
+            local_columns = (
+                tuple(str(column.this) for column in expressions[0].expressions)
+                if all(isinstance(column, exp.Identifier) for column in expressions[0].expressions)
+                else ()
             )
             foreign_key = _foreign_key_details(reference, local_columns, item, batch)
             if foreign_key is None:
