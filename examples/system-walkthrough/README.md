@@ -261,9 +261,9 @@ required before using the visual map or the comparison scenario.
 
 ### `surface`: what outside files reach into the system
 
-`surface` answers: which in-scope symbols do files outside the system
-reach, through the symbol layer — `calls` or `references`? Importing the
-system's module is a consumer fact, never an exposed boundary, so an outside
+`surface` answers: which in-scope symbols do files outside the system reach
+through `calls`, `references`, `sql:reads-from`, or `sql:foreign-key-to`?
+Importing the system's module is a consumer fact, never an exposed boundary, so an outside
 file that only imports `shop.orders` would expose nothing.
 
 ```console
@@ -301,7 +301,8 @@ relationships [{"evidence":[{"evidence_extensions":{"status":"unavailable"},"pro
 
 `consumers` answers: one record per outside file participating in a
 boundary-crossing relationship, carrying the distinct relationship kinds that
-file contributes (`calls`, `references`, and `imports`) and the concrete
+file contributes (`calls`, `references`, `imports`, `sql:reads-from`, and
+`sql:foreign-key-to`) and the concrete
 in-scope targets it reaches:
 
 ```console
@@ -340,9 +341,10 @@ shop/orders.py (system: orders)  calls: shop.billing.charge (shop/billing.py); i
 ### `system-deps`: what the system itself reaches
 
 `system-deps` answers: which target categories the system's own files reach
-through outgoing `calls`, `references`, and `imports` — other named systems,
-plus the explicit `no_system` category for path-carrying targets in no
-declared system and `external` for path-less upstream targets. The orders
+through outgoing `calls`, `references`, `imports`, `sql:reads-from`, and
+`sql:foreign-key-to` — other named systems, plus the explicit `no_system`
+category for path-carrying targets in no declared system and `external` for
+path-less upstream targets. The orders
 subsystem charges orders through billing and appends to the shared ledger:
 
 ```console
