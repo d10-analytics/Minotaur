@@ -566,7 +566,7 @@ def _interpret_alter(tree: exp.Alter, item: _File, batch: _Batch) -> _Observatio
             expressions = constraint.args.get("expressions") or []
             if not expressions or not isinstance(expressions[0], exp.ForeignKey):
                 return None
-            if not all(
+            if len(expressions) > 2 or not all(
                 isinstance(extra, exp.NotForReplicationColumnConstraint)
                 for extra in expressions[1:]
             ):
