@@ -197,6 +197,7 @@ def test_sql_resolution_is_exact_first_and_ambiguous_after_casefold_fallback(
     loaded = load_graph_blob(serialize(result.document))
     ambiguous = GraphIndex.build(loaded.document)
 
+    assert ambiguous.resolve("S.Parent").label == "S.Parent"
     with pytest.raises(AmbiguousSymbol) as excinfo:
         ambiguous.resolve("S.pArEnT")
     assert excinfo.value.candidates == ("catalog.sql:1", "catalog.sql:3")

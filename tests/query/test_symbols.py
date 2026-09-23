@@ -139,10 +139,40 @@ def test_unknown_callers_name_suggests_labels_and_lonely_is_success(
     assert lonely.out == "no callers\n"
 
 
-def test_non_sql_qualified_names_remain_case_sensitive(tmp_path: Path, capsys: object) -> None:
+def test_non_sql_names_remain_case_sensitive(tmp_path: Path, capsys: object) -> None:
     _write(tmp_path, "mod.py", "def target():\n    pass\n")
     graph = tmp_path / "graph.json"
     assert _analyze(tmp_path, graph) == 0
+
+    exact_definitions_status = cli.main(
+        [
+            "query",
+            "definitions",
+            "target",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    exact_definitions = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exact_definitions_status == 0
+    assert exact_definitions.out == "mod.py:1  mod.target  function\n"
+
+    wrong_case_definitions_status = cli.main(
+        [
+            "query",
+            "definitions",
+            "TARGET",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    wrong_case_definitions = capsys.readouterr()  # type: ignore[attr-defined]
+    assert wrong_case_definitions_status == 0
+    assert wrong_case_definitions.out == "no definitions\n"
 
     status = cli.main(
         [
