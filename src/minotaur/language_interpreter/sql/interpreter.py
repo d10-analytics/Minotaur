@@ -82,9 +82,10 @@ class _Declaration:
 
 @dataclass(frozen=True, slots=True)
 class _Observation:
-    owner: _Declaration
+    owner: _Declaration | None
     reads: tuple[tuple[tuple[str, ...], str, Location], ...] = ()
     foreign_keys: tuple[tuple[tuple[str, ...], str, Location], ...] = ()
+    source: tuple[tuple[str, ...], str, Location, str] | None = None
 
 
 def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
@@ -169,9 +170,27 @@ def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> Analysis
 
     emitter = NodeEmitter(NAMESPACE, "sql")
     for observation in observations:
+        owner = observation.owner
+        if observation.source is not None:
+            source_key, source_text, source_location, file_id = observation.source
+            candidates = table_index.get(source_key, [])
+            if len(candidates) != 1:
+                if len(candidates) > 1:
+                    diagnostics.append(
+                        Diagnostic(
+                            DiagnosticCode.AMBIGUOUS_REFERENCE,
+                            source_location.path,
+                            "ambiguous SQL reference",
+                            source_location,
+                        )
+                    )
+                emitter.unresolved(file_id, source_text, source_location, nodes, relationships)
+                continue
+            owner = candidates[0]
+        assert owner is not None
         for key, text, location in observation.reads:
             _resolve(
-                observation.owner,
+                owner,
                 key,
                 text,
                 location,
@@ -186,7 +205,7 @@ def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> Analysis
             )
         for key, text, location in observation.foreign_keys:
             _resolve(
-                observation.owner,
+                owner,
                 key,
                 text,
                 location,
@@ -294,6 +313,10 @@ def _interpret_statement(
 ) -> _Observation | None:
     if isinstance(tree, exp.Create):
         return _interpret_create(tree, item, batch, diagnostics, declarations, nodes)
+    if isinstance(tree, exp.Alter):
+        observation = _interpret_alter(tree, item, batch)
+        if observation is not None:
+            return observation
     if _neutral_statement(tree):
         return None
     _unsupported(tree, item, batch, diagnostics)
@@ -460,20 +483,92 @@ def _foreign_keys(
         return []
     result: list[tuple[tuple[str, ...], str, Location]] = []
     for reference in target.find_all(exp.Reference):
-        referenced = reference.this.this if isinstance(reference.this, exp.Schema) else None
-        if not isinstance(referenced, exp.Table):
+        endpoint = _reference_target(reference, item, batch)
+        if endpoint is None:
             return None
-        parts = _parts(referenced)
-        location = _table_location(referenced, item, batch)
-        if (
-            parts is None
-            or len(parts) not in {1, 2}
-            or _nonpersistent_table(referenced)
-            or location is None
-        ):
-            return None
-        result.append((tuple(part.casefold() for part in parts), ".".join(parts), location))
+        result.append(endpoint)
     return result
+
+
+def _reference_target(
+    reference: exp.Reference, item: _File, batch: _Batch
+) -> tuple[tuple[str, ...], str, Location] | None:
+    referenced = reference.this.this if isinstance(reference.this, exp.Schema) else None
+    if not isinstance(referenced, exp.Table):
+        return None
+    parts = _parts(referenced)
+    location = _table_location(referenced, item, batch)
+    if (
+        parts is None
+        or len(parts) not in {1, 2}
+        or _nonpersistent_table(referenced)
+        or location is None
+    ):
+        return None
+    return tuple(part.casefold() for part in parts), ".".join(parts), location
+
+
+def _interpret_alter(tree: exp.Alter, item: _File, batch: _Batch) -> _Observation | None:
+    target = tree.this
+    if not isinstance(target, exp.Table) or str(tree.args.get("kind") or "").upper() != "TABLE":
+        return None
+    if any(
+        tree.args.get(option)
+        for option in (
+            "exists",
+            "only",
+            "options",
+            "cluster",
+            "not_valid",
+            "check",
+            "cascade",
+            "iceberg",
+        )
+    ):
+        return None
+    parts = _parts(target)
+    location = _table_location(target, item, batch)
+    if (
+        parts is None
+        or len(parts) not in {1, 2}
+        or _nonpersistent_table(target)
+        or location is None
+    ):
+        return None
+    actions = tree.args.get("actions") or []
+    if not actions or not all(isinstance(action, exp.AddConstraint) for action in actions):
+        return None
+    foreign_keys: list[tuple[tuple[str, ...], str, Location]] = []
+    for action in actions:
+        constraints = action.args.get("expressions") or []
+        if not constraints:
+            return None
+        for constraint in constraints:
+            if not isinstance(constraint, exp.Constraint) or not isinstance(
+                constraint.this, exp.Identifier
+            ):
+                return None
+            expressions = constraint.args.get("expressions") or []
+            if not expressions or not isinstance(expressions[0], exp.ForeignKey):
+                return None
+            if not all(
+                isinstance(extra, exp.NotForReplicationColumnConstraint)
+                for extra in expressions[1:]
+            ):
+                return None
+            reference = expressions[0].args.get("reference")
+            if not isinstance(reference, exp.Reference):
+                return None
+            endpoint = _reference_target(reference, item, batch)
+            if endpoint is None:
+                return None
+            foreign_keys.append(endpoint)
+    return _Observation(
+        None,
+        (),
+        tuple(foreign_keys),
+        (tuple(part.casefold() for part in parts), ".".join(parts), location, item.file_id),
+    )
 
 
 def _query_reads(
