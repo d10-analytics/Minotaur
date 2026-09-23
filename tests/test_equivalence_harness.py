@@ -20,11 +20,9 @@ from minotaur.language_interpreter.workspace import Workspace
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
-# Byte comparisons include generated HTML as well as graph facts. The pin is the
-# reviewed viewer behavior commit: across the advance the graph, Drift, and
-# query rows stayed byte-identical and only the intentional viewer-asset HTML
-# changed, which the advance proof below re-checks against the previous pin.
-BASELINE_COMMIT = "52a8b29d376e99c582d686dbead579acc438de37"
+# Byte comparisons include the relationship kind in caller results.
+BASELINE_COMMIT = "9ea5f5a9543b51c6e38a987523dd88f051154d82"
+VIEWER_ADVANCE_COMMIT = "52a8b29d376e99c582d686dbead579acc438de37"
 # Preserve the historical fixture provenance independently of output revisions.
 FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
 
@@ -410,6 +408,25 @@ def test_fixture_pin_is_a_full_sha_and_fixture_commit_is_its_immediate_child() -
     assert ancestor.returncode == 0
 
 
+def _non_diff_workload(
+    tmp_path: Path, *, exclude_names: frozenset[str] = frozenset()
+) -> tuple[Path, dict[str, object]]:
+    """Keep the deliberate diff exit-status change outside byte comparisons."""
+
+    source_workload = json.loads(
+        (ROOT / "scripts" / "equivalence_queries.json").read_text(encoding="utf-8")
+    )
+    fixture_workload = source_workload[FIXTURE_ROOT.name]
+    fixture_workload["queries"] = [
+        item
+        for item in fixture_workload["queries"]
+        if item.get("command") != "diff" and item.get("name") not in exclude_names
+    ]
+    workload_path = tmp_path / "equivalence-without-diff.json"
+    workload_path.write_text(json.dumps(source_workload), encoding="utf-8")
+    return workload_path, fixture_workload
+
+
 def test_every_non_control_query_answers_on_the_committed_fixture_root(
     baseline_src: Path, tmp_path: Path
 ) -> None:
@@ -420,15 +437,7 @@ def test_every_non_control_query_answers_on_the_committed_fixture_root(
     cross-version equivalence workload and prove it directly below.
     """
 
-    source_workload = json.loads(
-        (ROOT / "scripts" / "equivalence_queries.json").read_text(encoding="utf-8")
-    )
-    fixture_workload = source_workload[FIXTURE_ROOT.name]
-    fixture_workload["queries"] = [
-        item for item in fixture_workload["queries"] if item.get("command") != "diff"
-    ]
-    workload_path = tmp_path / "equivalence-without-diff.json"
-    workload_path.write_text(json.dumps(source_workload), encoding="utf-8")
+    workload_path, fixture_workload = _non_diff_workload(tmp_path)
 
     result = _run(
         "--baseline-src",
@@ -1225,28 +1234,18 @@ def _remove_worktree(src: Path) -> None:
 def test_equivalence_baseline_advance_is_necessary_and_sufficient(tmp_path: Path) -> None:
     """``C-10``: the reviewed viewer change is the only reason the pin moved.
 
-    Reverting only ``BASELINE_COMMIT`` must reproduce the intentional
+    Reverting only ``VIEWER_ADVANCE_COMMIT`` must reproduce the intentional
     ``visualize HTML`` difference while the graph, Drift, and query rows stay
     identical, and the advanced pin must compare cleanly. The pair makes the
     advance falsifiable instead of an unreviewed normalization.
     """
 
-    assert _is_ancestor(PRE_ADVANCE_BASELINE, BASELINE_COMMIT)
+    assert _is_ancestor(PRE_ADVANCE_BASELINE, VIEWER_ADVANCE_COMMIT)
 
-    source_workload = json.loads(
-        (ROOT / "scripts" / "equivalence_queries.json").read_text(encoding="utf-8")
-    )
-    fixture_workload = source_workload[FIXTURE_ROOT.name]
-    # The deliberate D-08 ``query diff`` exit-status change is proven directly
-    # elsewhere; it is not part of this reviewed-baseline advance.
-    fixture_workload["queries"] = [
-        item for item in fixture_workload["queries"] if item.get("command") != "diff"
-    ]
-    workload_path = tmp_path / "advance-workload.json"
-    workload_path.write_text(json.dumps(source_workload), encoding="utf-8")
+    workload_path, _ = _non_diff_workload(tmp_path, exclude_names=frozenset({"callers-qualified"}))
 
     reverted_side = _worktree_side(tmp_path, "reverted", PRE_ADVANCE_BASELINE)
-    advanced_side = _worktree_side(tmp_path, "advanced", BASELINE_COMMIT)
+    advanced_side = _worktree_side(tmp_path, "advanced", VIEWER_ADVANCE_COMMIT)
     try:
         reverted = _run(
             "--baseline-src",
@@ -1283,3 +1282,43 @@ def test_equivalence_baseline_advance_is_necessary_and_sufficient(tmp_path: Path
     finally:
         _remove_worktree(reverted_side)
         _remove_worktree(advanced_side)
+
+
+def test_navigation_baseline_advance_preserves_exact_query_comparison(tmp_path: Path) -> None:
+    """The pin accounts for caller kinds while other query bytes stay equal."""
+
+    assert _is_ancestor(VIEWER_ADVANCE_COMMIT, BASELINE_COMMIT)
+    workload_path, _ = _non_diff_workload(tmp_path)
+    old_side = _worktree_side(tmp_path, "old-navigation", VIEWER_ADVANCE_COMMIT)
+    new_side = _worktree_side(tmp_path, "new-navigation", BASELINE_COMMIT)
+    try:
+        old = _run(
+            "--baseline-src",
+            str(old_side),
+            "--branch-src",
+            str(ROOT / "src"),
+            "--queries",
+            str(workload_path),
+            "--root",
+            str(FIXTURE_ROOT),
+        )
+        assert old.returncode == 1, old.stdout + old.stderr
+        differing = [line for line in old.stdout.splitlines() if line.endswith(": DIFFERENT")]
+        assert len(differing) == 4
+        assert all("query=callers-qualified" in line for line in differing), differing
+
+        current = _run(
+            "--baseline-src",
+            str(new_side),
+            "--branch-src",
+            str(ROOT / "src"),
+            "--queries",
+            str(workload_path),
+            "--root",
+            str(FIXTURE_ROOT),
+        )
+        assert current.returncode == 0, current.stdout + current.stderr
+        assert "DIFFERENT" not in current.stdout
+    finally:
+        _remove_worktree(old_side)
+        _remove_worktree(new_side)
