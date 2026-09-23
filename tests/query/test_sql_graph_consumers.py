@@ -22,7 +22,9 @@ CREATE SCHEMA S
 GO
 CREATE TABLE S.Parent (id int)
 GO
-CREATE TABLE S.Child (parent_id int REFERENCES S.Parent(id))
+CREATE TABLE S.Child (parent_id int)
+GO
+ALTER TABLE S.Child ADD CONSTRAINT FK_child_parent FOREIGN KEY (parent_id) REFERENCES S.Parent(id)
 GO
 CREATE VIEW S.Reader AS SELECT * FROM S.Parent
 GO
@@ -90,7 +92,9 @@ CREATE SCHEMA S
 GO
 CREATE TABLE S.Parent (id int)
 GO
-CREATE TABLE S.Child (parent_id int REFERENCES S.Parent(id))
+CREATE TABLE S.Child (parent_id int)
+GO
+ALTER TABLE S.Child ADD CONSTRAINT FK_child_parent FOREIGN KEY (parent_id) REFERENCES S.Parent(id)
 GO
 CREATE VIEW S.Reader AS SELECT * FROM S.Parent
 """,

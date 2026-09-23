@@ -752,3 +752,27 @@ def test_standalone_fk_rejects_unapproved_or_duplicate_reference_options(
     assert not _sql_edges(result, "sql:foreign-key-to")
     assert not _sql_edges(result, "references")
     assert set(_symbols(result)) == {"Parent", "Child"}
+
+
+def test_standalone_fk_parse_failure_discards_batch_and_later_batch_recovers(
+    tmp_path: Path,
+) -> None:
+    sql = (
+        "CREATE TABLE Parent (Id int)\nGO\n"
+        "CREATE TABLE Child (Id int)\nGO\n"
+        "ALTER TABLE Child ADD CONSTRAINT FK_lost FOREIGN KEY (Id) REFERENCES Parent(Id);\n"
+        "CREATE TABLE Broken (\nGO\n"
+        "ALTER TABLE Child ADD CONSTRAINT FK_kept FOREIGN KEY (Id) REFERENCES Parent(Id)\nGO\n"
+        "ALTER TABLE Child ADD ExtraColumn int"
+    )
+    result = _analyze(tmp_path, **{"catalog.sql": sql})
+
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [DiagnosticCode.PARSE_ERROR]
+    assert set(_symbols(result)) == {"Parent", "Child"}
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    assert len(edges) == 1
+    assert (edges[0][0].label, edges[0][1].label) == ("Child", "Parent")
+    assert _evidence_locations(edges[0][2]) == {
+        ("catalog.sql", 7, sql.splitlines()[7].index("Parent"))
+    }
+    assert not _sql_edges(result, "references")
