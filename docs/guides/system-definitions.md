@@ -96,7 +96,9 @@ including zero.
 
 `--details` puts each system's sorted declared paths beside its
 `declared_files` object, puts sorted unassigned paths beside
-`coverage.unassigned_files`, and adds top-level `connections`. The compact
+`coverage.unassigned_files`, and adds top-level `connections`. Connection
+rows include the current SQL relationship kinds `sql:reads-from` and
+`sql:foreign-key-to` alongside the established Python boundary kinds. The compact
 answer omits these keys entirely. A connection is retained only when at least
 one endpoint is a named system and the two endpoints are not the same named
 system. Thus named-to-named (different names), named-to-`no_system`,
@@ -139,7 +141,8 @@ Boundary relationships come from two consumption layers, each reported with
 explicit kinds:
 
 * **Symbol layer** — `calls` and `references`: outside code invokes or refers
-  to the system's symbols.
+  to the system's symbols. SQL `sql:reads-from` and `sql:foreign-key-to` edges
+  participate in the same named-boundary reports and overview connections.
 * **Module layer** — `imports`: outside code links against the system's
   modules, even when no call into the system resolves.
 
@@ -154,8 +157,8 @@ boundary.
 symbol defined in a file the system lists and reached by an inbound `calls`
 or `references` edge whose source sits outside the system.
 
-* Only the symbol layer counts. A file that merely imports the system's
-  module exposes nothing.
+* Symbol-layer and current SQL dependency edges count. A file that merely
+  imports the system's module exposes nothing.
 * An edge between two in-scope endpoints — including a same-file edge — is
   internal and exposes nothing.
 * Records key on the exposed symbol, never on the call site: two outside files
@@ -189,9 +192,10 @@ detail.
 system's own outgoing boundary relationships: each named target system the
 system reaches, plus explicit `no_system` and `external` rows.
 
-* Every outgoing `calls`, `references`, or `imports` edge whose source
-  endpoint lies inside the system classifies its target endpoint into exactly
-  one category; a row exists only for categories with at least one target.
+* Every outgoing `calls`, `references`, `imports`, `sql:reads-from`, or
+  `sql:foreign-key-to` edge whose source endpoint lies inside the system
+  classifies its target endpoint into exactly one category; a row exists only
+  for categories with at least one target.
 * Same-system and same-file edges are internal and never a dependency.
 * No target is silently attributed to a system: a path-carrying target in no
   declared system is `no_system`, a path-less upstream target is `external`,

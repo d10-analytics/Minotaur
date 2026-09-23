@@ -22,6 +22,7 @@ from minotaur import cli
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.evidence import Evidence, Producer
 from minotaur.graph_model.identity import IdentityBasis, NodeIdentity, compute_node_id
+from minotaur.graph_model.loading import load_graph_file
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.node import Node, NodeClass
 from minotaur.graph_model.provenance import CoordinateEncoding, Provenance
@@ -2151,3 +2152,314 @@ def test_reporting_snapshot_reassignment_updates_inventory_and_connections_toget
         "scope": "final_graph_file_node_derived_paths",
     }
     assert after.connections == ()
+
+
+def test_sql_relationships_cross_system_reports_and_overview_connections(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current SQL edges use exact declared-file membership everywhere."""
+    root = _repo(tmp_path, "sql-boundaries")
+    _write(
+        root,
+        "orders.sql",
+        """\
+CREATE SCHEMA orders
+GO
+CREATE TABLE orders.Child (billing_id int)
+GO
+ALTER TABLE orders.Child ADD CONSTRAINT fk_billing
+FOREIGN KEY (billing_id) REFERENCES billing.Invoice(id)
+GO
+CREATE VIEW orders.Reader AS SELECT * FROM billing.Invoice
+GO
+CREATE VIEW orders.StagingReader AS SELECT * FROM scratch.Staging
+""",
+    )
+    _write(
+        root,
+        "billing.sql",
+        """\
+CREATE SCHEMA billing
+GO
+CREATE TABLE billing.Invoice (id int)
+GO
+CREATE VIEW billing.StagingReader AS SELECT * FROM scratch.Staging
+""",
+    )
+    _write(
+        root,
+        "scratch.sql",
+        """\
+CREATE SCHEMA scratch
+GO
+CREATE TABLE scratch.Staging (id int)
+GO
+CREATE VIEW scratch.Reader AS SELECT * FROM billing.Invoice
+""",
+    )
+    _declare(root, "orders", ["orders.sql"])
+    _declare(root, "billing", ["billing.sql"])
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    def named_query(name: str, system_name: str, *extra: str) -> tuple[int, str, str]:
+        status = cli.main(
+            [
+                "query",
+                name,
+                system_name,
+                "--graph",
+                str(graph),
+                "--root",
+                str(root),
+                *extra,
+            ]
+        )
+        captured = capsys.readouterr()
+        return status, captured.out, captured.err
+
+    status, out, err = named_query("surface", "billing", "--json", "--no-refresh")
+    assert status == 0
+    assert err == ""
+    surface_payload = json.loads(out)
+    assert surface_payload["results"] == [
+        {
+            "category": "system: billing",
+            "kinds": ["sql:foreign-key-to", "sql:reads-from"],
+            "path": "billing.sql",
+            "symbol": "billing.Invoice",
+        }
+    ]
+    status, out, err = named_query("surface", "billing", "--no-refresh")
+    assert status == 0
+    assert err == ""
+    assert out.endswith("billing.sql  billing.Invoice  sql:foreign-key-to, sql:reads-from\n")
+
+    status, out, err = named_query("consumers", "billing", "--json", "--no-refresh")
+    assert status == 0
+    assert err == ""
+    consumers_payload = json.loads(out)
+    assert consumers_payload["results"] == [
+        {
+            "category": "system: orders",
+            "file": "orders.sql",
+            "kinds": ["sql:foreign-key-to", "sql:reads-from"],
+            "targets": [
+                {"kind": "sql:foreign-key-to", "label": "billing.Invoice", "path": "billing.sql"},
+                {"kind": "sql:reads-from", "label": "billing.Invoice", "path": "billing.sql"},
+            ],
+        },
+        {
+            "category": "no_system",
+            "file": "scratch.sql",
+            "kinds": ["sql:reads-from"],
+            "targets": [
+                {"kind": "sql:reads-from", "label": "billing.Invoice", "path": "billing.sql"}
+            ],
+        },
+    ]
+    status, out, err = named_query("consumers", "billing", "--no-refresh")
+    assert status == 0
+    assert err == ""
+    assert out.endswith(
+        "orders.sql (system: orders)  sql:foreign-key-to: billing.Invoice (billing.sql); "
+        "sql:reads-from: billing.Invoice (billing.sql)\n"
+        "scratch.sql (no_system)  sql:reads-from: billing.Invoice (billing.sql)\n"
+    )
+
+    status, out, err = named_query("system-deps", "orders", "--json", "--no-refresh")
+    assert status == 0
+    assert err == ""
+    dependencies_payload = json.loads(out)
+    assert dependencies_payload["results"] == [
+        {
+            "category": "no_system",
+            "targets": [
+                {"kind": "sql:reads-from", "label": "scratch.Staging", "path": "scratch.sql"}
+            ],
+        },
+        {
+            "category": "system: billing",
+            "targets": [
+                {"kind": "sql:foreign-key-to", "label": "billing.Invoice", "path": "billing.sql"},
+                {"kind": "sql:reads-from", "label": "billing.Invoice", "path": "billing.sql"},
+            ],
+        },
+    ]
+    status, out, err = named_query("system-deps", "orders", "--no-refresh")
+    assert status == 0
+    assert err == ""
+    assert out.endswith(
+        "no_system  sql:reads-from: scratch.Staging (scratch.sql)\n"
+        "system: billing  sql:foreign-key-to: billing.Invoice (billing.sql); "
+        "sql:reads-from: billing.Invoice (billing.sql)\n"
+    )
+
+    status = cli.main(
+        ["query", "systems", "--graph", str(graph), "--root", str(root), "--no-refresh"]
+    )
+    compact_text = capsys.readouterr()
+    assert status == 0
+    assert compact_text.err == ""
+    assert "connections" not in compact_text.out
+    assert compact_text.out.startswith("coverage ")
+    compact_coverage = json.loads(compact_text.out.splitlines()[0].removeprefix("coverage "))
+    assert compact_coverage["graph_files"] == {
+        "scope": "final_graph_file_nodes",
+        "count": 3,
+    }
+
+    status = cli.main(
+        [
+            "query",
+            "systems",
+            "--graph",
+            str(graph),
+            "--root",
+            str(root),
+            "--json",
+            "--no-refresh",
+        ]
+    )
+    compact_json = capsys.readouterr()
+    assert status == 0
+    compact_payload = json.loads(compact_json.out)
+    assert "connections" not in compact_payload
+    assert compact_payload["coverage"]["graph_files"] == {
+        "scope": "final_graph_file_nodes",
+        "count": 3,
+    }
+    assert compact_payload["coverage"]["declared_files"] == {
+        "scope": "all_declared_system_files",
+        "total": 2,
+        "represented": 2,
+        "absent": 0,
+    }
+    assert compact_payload["coverage"]["unassigned_files"]["count"] == 1
+
+    status = cli.main(
+        [
+            "query",
+            "systems",
+            "--graph",
+            str(graph),
+            "--root",
+            str(root),
+            "--details",
+            "--no-refresh",
+        ]
+    )
+    details_text = capsys.readouterr()
+    assert status == 0
+    assert details_text.err == ""
+    details_connections = json.loads(
+        next(
+            line for line in details_text.out.splitlines() if line.startswith("connections ")
+        ).removeprefix("connections ")
+    )
+    assert [
+        (row["source_category"], row["target_category"], row["kinds"])
+        for row in details_connections
+    ] == [
+        ("no_system", "system: billing", ["sql:reads-from"]),
+        ("system: billing", "no_system", ["sql:reads-from"]),
+        ("system: orders", "no_system", ["sql:reads-from"]),
+        ("system: orders", "system: billing", ["sql:foreign-key-to", "sql:reads-from"]),
+    ]
+    assert all(row["relationships"] for row in details_connections)
+    assert [[detail["kind"] for detail in row["relationships"]] for row in details_connections] == [
+        ["sql:reads-from"],
+        ["sql:reads-from"],
+        ["sql:reads-from"],
+        ["sql:foreign-key-to", "sql:reads-from"],
+    ]
+
+    status = cli.main(
+        [
+            "query",
+            "systems",
+            "--graph",
+            str(graph),
+            "--root",
+            str(root),
+            "--details",
+            "--json",
+            "--no-refresh",
+        ]
+    )
+    details_json = capsys.readouterr()
+    assert status == 0
+    details_payload = json.loads(details_json.out)
+    assert [
+        (row["source_category"], row["target_category"], row["kinds"])
+        for row in details_payload["connections"]
+    ] == [
+        ("no_system", "system: billing", ["sql:reads-from"]),
+        ("system: billing", "no_system", ["sql:reads-from"]),
+        ("system: orders", "no_system", ["sql:reads-from"]),
+        ("system: orders", "system: billing", ["sql:foreign-key-to", "sql:reads-from"]),
+    ]
+    assert all(row["relationships"] for row in details_payload["connections"])
+    assert [
+        [detail["kind"] for detail in row["relationships"]]
+        for row in details_payload["connections"]
+    ] == [
+        ["sql:reads-from"],
+        ["sql:reads-from"],
+        ["sql:reads-from"],
+        ["sql:foreign-key-to", "sql:reads-from"],
+    ]
+    assert {
+        (
+            detail["source"]["label"],
+            detail["target"]["label"],
+            detail["target"]["path"]["value"],
+            detail["kind"],
+        )
+        for row in details_payload["connections"]
+        for detail in row["relationships"]
+    } == {
+        ("scratch.Reader", "billing.Invoice", "billing.sql", "sql:reads-from"),
+        ("billing.StagingReader", "scratch.Staging", "scratch.sql", "sql:reads-from"),
+        ("orders.StagingReader", "scratch.Staging", "scratch.sql", "sql:reads-from"),
+        ("orders.Child", "billing.Invoice", "billing.sql", "sql:foreign-key-to"),
+        ("orders.Reader", "billing.Invoice", "billing.sql", "sql:reads-from"),
+    }
+
+    loaded = load_graph_file(graph).document
+    nodes = {node.label: node for node in loaded.nodes}
+    unsupported = Relationship(
+        source=nodes["orders.Child"].id,
+        target=nodes["billing.Invoice"].id,
+        kind="contains",
+        evidence=(Evidence(provenance=Provenance.STATIC_ANALYSIS),),
+    )
+    synthetic = dataclasses.replace(loaded, relationships=loaded.relationships + (unsupported,))
+    systems = load_systems(root / _DOCS)
+    snapshot = system_query.ReportingSnapshot.prepare(synthetic, systems)
+    for report_name, system_name in (
+        ("surface", "billing"),
+        ("consumers", "billing"),
+        ("system-deps", "orders"),
+    ):
+        assert all(
+            target["kind"] != "contains"
+            for record in snapshot.report(report_name, system_name).results
+            for target in record.to_dict().get("targets", ())
+        )
+        assert all(
+            kind != "contains"
+            for record in snapshot.report(report_name, system_name).results
+            for kind in record.to_dict().get("kinds", ())
+        )
+    assert all(
+        "contains" not in kind
+        for row in snapshot.all_systems_report(details=True).connections or ()
+        for kind in row.kinds
+    )
+    assert sorted(root.glob("docs/systems/*/system.toml")) == [
+        root / "docs/systems/billing/system.toml",
+        root / "docs/systems/orders/system.toml",
+    ]

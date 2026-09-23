@@ -299,11 +299,13 @@ minotaur query system-deps orders --graph GRAPH.json --root ROOT
 ```
 
 The three queries report two consumption layers with explicit kinds —
-symbol-layer `calls`/`references` and module-layer `imports`:
+symbol-layer `calls`/`references` and module-layer `imports` — plus the
+current SQL dependency kinds `sql:reads-from` and `sql:foreign-key-to`:
 
 * `surface` lists the in-scope symbols that files outside the system reach
-  through `calls` or `references`. An import of the system's module is never
-  surface; the module is not an implicit callable boundary. Text output is
+  through `calls`, `references`, `sql:reads-from`, or
+  `sql:foreign-key-to`. An import of the system's module is never surface;
+  the module is not an implicit callable boundary. Text output is
   `path  symbol  kinds` per record; an empty result prints
   `no exposed symbols`.
 * `consumers` lists the outside files participating in boundary relationships,
@@ -312,9 +314,10 @@ symbol-layer `calls`/`references` and module-layer `imports`:
   module is a consumer through `imports` even when no call resolves. An empty
   result prints `no consumers`.
 * `system-deps` lists the target categories of the system's own outgoing
-  boundary relationships: each named target system plus explicit `no_system`
-  and `external` rows, with per-target endpoint detail. Same-system and
-  same-file edges are internal and never a dependency. An empty result prints
+  boundary relationships, including `sql:reads-from` and
+  `sql:foreign-key-to`: each named target system plus explicit `no_system` and
+  `external` rows, with per-target endpoint detail. Same-system and same-file
+  edges are internal and never a dependency. An empty result prints
   `no dependencies`.
 
 All three key records on the semantic participant — the exposed symbol, the
