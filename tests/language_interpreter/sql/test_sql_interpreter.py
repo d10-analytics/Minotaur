@@ -596,6 +596,168 @@ def _evidence_locations(edge):
     }
 
 
+def test_fk_column_details_preserve_ast_forms_order_and_irregular_locations(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE [S].[Parent] ([X Col] int, [Y Col] int)
+GO
+CREATE TABLE [S].[Child] (
+ [Local A] int,
+ [Local B] int,
+ [R] int,
+ CONSTRAINT fk_table FOREIGN KEY ([Local A],[Local B]) REFERENCES [S].[Parent]([X Col],[Y Col]),
+ CONSTRAINT fk_reverse FOREIGN KEY ([Local B],[Local A]) REFERENCES [S].[Parent]([Y Col],[X Col]),
+ CONSTRAINT fk_duplicate FOREIGN KEY ([Local A],[Local B]) REFERENCES [S].[Parent]([X Col],[Y Col]),
+ CONSTRAINT fk_repeat FOREIGN KEY ([R],[R]) REFERENCES [S].[Parent]([X Col],[X Col]),
+ CONSTRAINT fk_empty FOREIGN KEY () REFERENCES [S].[Parent](),
+ CONSTRAINT fk_unequal FOREIGN KEY ([R],[R]) REFERENCES [S].[Parent]([X Col])
+)
+GO
+CREATE TABLE [S].[InlineChild] ([Local A] int REFERENCES [S].[Parent]([X Col]))
+"""
+    result = _analyze(tmp_path, **{"tables.sql": sql})
+
+    assert not result.diagnostics
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    child_edge = next(
+        edge for edge in edges if edge[0].label == "S.Child" and edge[1].label == "S.Parent"
+    )[2]
+    assert len(child_edge.evidence) == 4
+    extensions = [
+        item.to_dict()["extensions"] for item in child_edge.evidence if item.extensions is not None
+    ]
+    assert extensions == [
+        {
+            "minotaur-sql": {
+                "foreign_key_columns": [
+                    {"local": "Local A", "referenced": "X Col"},
+                    {"local": "Local B", "referenced": "Y Col"},
+                ]
+            }
+        },
+        {
+            "minotaur-sql": {
+                "foreign_key_columns": [
+                    {"local": "Local B", "referenced": "Y Col"},
+                    {"local": "Local A", "referenced": "X Col"},
+                ]
+            }
+        },
+        {
+            "minotaur-sql": {
+                "foreign_key_columns": [
+                    {"local": "R", "referenced": "X Col"},
+                    {"local": "R", "referenced": "X Col"},
+                ]
+            }
+        },
+    ]
+    assert all(set(extension) == {"minotaur-sql"} for extension in extensions)
+    payload_free = [item for item in child_edge.evidence if item.extensions is None]
+    assert len(payload_free) == 1
+    assert {
+        (location.path, location.range.start.line, location.range.start.character)
+        for location in payload_free[0].locations
+    } == {
+        ("tables.sql", 10, sql.splitlines()[10].index("[S].[Parent]")),
+        ("tables.sql", 11, sql.splitlines()[11].index("[S].[Parent]")),
+    }
+    inline_edge = next(
+        edge for edge in edges if edge[0].label == "S.InlineChild" and edge[1].label == "S.Parent"
+    )[2]
+    assert [item.to_dict()["extensions"] for item in inline_edge.evidence] == [
+        {"minotaur-sql": {"foreign_key_columns": [{"local": "Local A", "referenced": "X Col"}]}}
+    ]
+
+
+def test_standalone_fk_details_exclude_names_and_modifiers(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE Parent (x int, y int)
+GO
+CREATE TABLE Child (a int, b int)
+GO
+ALTER TABLE Child ADD CONSTRAINT [fk decorated] FOREIGN KEY (a,b)
+REFERENCES Parent(x,y) ON DELETE CASCADE ON UPDATE SET NULL NOT FOR REPLICATION
+"""
+    result = _analyze(tmp_path, **{"standalone.sql": sql})
+
+    assert not result.diagnostics
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    assert len(edges) == 1
+    edge = edges[0][2]
+    assert [item.to_dict()["extensions"] for item in edge.evidence] == [
+        {
+            "minotaur-sql": {
+                "foreign_key_columns": [
+                    {"local": "a", "referenced": "x"},
+                    {"local": "b", "referenced": "y"},
+                ]
+            }
+        }
+    ]
+    assert "fk decorated" not in str(edge.to_dict())
+    assert "ON DELETE" not in str(edge.to_dict())
+    assert "ON UPDATE" not in str(edge.to_dict())
+    assert "NOT FOR REPLICATION" not in str(edge.to_dict())
+
+
+def test_equal_fk_mappings_merge_locations_across_selected_files(tmp_path: Path) -> None:
+    declaration = "CREATE TABLE Parent (x int, y int)\nGO\nCREATE TABLE Child (a int, b int)"
+    alter = "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (a,b) REFERENCES Parent(x,y)"
+    result = _analyze(
+        tmp_path,
+        **{"declarations.sql": declaration, "first.sql": alter, "second.sql": alter},
+    )
+
+    assert not result.diagnostics
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    assert len(edges) == 1
+    evidence = edges[0][2].evidence
+    assert len(evidence) == 1
+    assert evidence[0].to_dict()["extensions"] == {
+        "minotaur-sql": {
+            "foreign_key_columns": [
+                {"local": "a", "referenced": "x"},
+                {"local": "b", "referenced": "y"},
+            ]
+        }
+    }
+    assert {location.path for location in evidence[0].locations} == {"first.sql", "second.sql"}
+
+
+def test_irregular_and_unresolved_fk_evidence_has_no_mapping_payload(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE Parent (x int, y int)
+GO
+CREATE TABLE Child (a int, b int)
+GO
+ALTER TABLE Child ADD CONSTRAINT fk_empty FOREIGN KEY () REFERENCES Parent()
+GO
+ALTER TABLE Child ADD CONSTRAINT fk_unequal FOREIGN KEY (a,b) REFERENCES Parent(x)
+GO
+ALTER TABLE MissingChild ADD CONSTRAINT fk_missing FOREIGN KEY (a) REFERENCES Parent(x)
+GO
+ALTER TABLE Child ADD CONSTRAINT fk_missing_target FOREIGN KEY (a) REFERENCES MissingParent(x)
+"""
+    result = _analyze(tmp_path, **{"irregular.sql": sql})
+
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    assert len(edges) == 1
+    assert all(item.extensions is None for item in edges[0][2].evidence)
+    assert _evidence_locations(edges[0][2]) == {
+        ("irregular.sql", 4, sql.splitlines()[4].index("Parent")),
+        ("irregular.sql", 6, sql.splitlines()[6].index("Parent")),
+    }
+    assert not any(
+        edge[0].label == "MissingChild" or edge[1].label == "MissingParent"
+        for edge in _sql_edges(result, "sql:foreign-key-to")
+    )
+    unresolved_edges = _sql_edges(result, "references")
+    assert len(unresolved_edges) == 2
+    assert all(item.extensions is None for _, _, edge in unresolved_edges for item in edge.evidence)
+
+
 @pytest.mark.parametrize("qualified", [False, True])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_standalone_fk_resolves_after_all_files_case_insensitively(

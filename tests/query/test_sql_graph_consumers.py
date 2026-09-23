@@ -143,3 +143,47 @@ def test_sql_relationships_are_fenced_from_generic_consumers_but_core_recall_rem
     assert unresolved[0].caller == "ChildRef"
     assert unresolved[0].reference == "WrongKind"
     assert unresolved[0].unresolved is True
+
+
+def test_fk_mapping_survives_roundtrip_without_changing_query_or_diff_identity(
+    tmp_path: Path,
+) -> None:
+    old_content = """\
+CREATE TABLE Parent (x int, y int)
+GO
+CREATE TABLE Child (a int, b int)
+GO
+ALTER TABLE Child ADD CONSTRAINT FK_child_parent FOREIGN KEY (a,b) REFERENCES Parent(x,y)
+"""
+    new_content = old_content.replace(
+        "FOREIGN KEY (a,b) REFERENCES Parent(x,y)",
+        "FOREIGN KEY (b,a) REFERENCES Parent(y,x)",
+    )
+    old_document = _persisted_document(tmp_path / "old", old_content)
+    new_document = _persisted_document(tmp_path / "new", new_content)
+    index = GraphIndex.build(new_document)
+
+    edge = next(
+        relationship
+        for relationship in new_document.relationships
+        if relationship.kind == "sql:foreign-key-to"
+    )
+    assert edge.evidence[0].to_dict()["extensions"] == {
+        "minotaur-sql": {
+            "foreign_key_columns": [
+                {"local": "b", "referenced": "y"},
+                {"local": "a", "referenced": "x"},
+            ]
+        }
+    }
+    assert [(record.symbol, record.kind) for record in definitions(index, "Parent")] == [
+        ("Parent", "sql:table")
+    ]
+    assert callers(index, "Parent") == ()
+    assert impact(index, "Parent", max_depth=1) == (
+        ImpactRecord(depth=0, symbol="Parent", kind="sql:table"),
+    )
+
+    changes = diff(old_document, new_document)
+    assert changes.relationships_added == ()
+    assert changes.relationships_removed == ()

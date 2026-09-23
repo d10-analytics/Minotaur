@@ -2175,6 +2175,55 @@ var Xr=function(e){if(!(this instanceof Xr))return new Xr(e);this.id="Thenable/1
     return locs;
   }
 
+  function sqlForeignKeyRecords(evidence) {
+    return evidence.map(function (record) {
+      var extensions = record.extensions || {};
+      var sqlExtension = extensions["minotaur-sql"] || {};
+      var pairs = Array.isArray(sqlExtension.foreign_key_columns)
+        ? sqlExtension.foreign_key_columns : [];
+      return { locations: record.locations || [], pairs: pairs };
+    });
+  }
+
+  function sqlForeignKeyDetails(evidence) {
+    var records = sqlForeignKeyRecords(evidence);
+    var html = '<div class="sql-fk-records">';
+    records.forEach(function (record, index) {
+      html += '<div class="field sql-fk-record"><div class="field-label">Evidence record '
+        + (index + 1) + '</div>';
+      if (record.pairs.length > 0) {
+        html += '<div class="field-label">Column mappings</div><ul class="sql-fk-pairs">';
+        record.pairs.forEach(function (pair) {
+          html += '<li><span class="sql-fk-local">' + escHtml(pair.local)
+            + '</span> → <span class="sql-fk-referenced">' + escHtml(pair.referenced)
+            + '</span></li>';
+        });
+        html += '</ul>';
+      }
+      html += '<div class="field-label">Locations</div>';
+      if (record.locations.length === 0) {
+        html += '<div class="field-value">No source location available</div>';
+      } else {
+        html += '<ul class="sql-fk-locations">';
+        record.locations.forEach(function (location) {
+          html += '<li>' + escHtml(locationLabel(location)) + '</li>';
+        });
+        html += '</ul>';
+      }
+      html += '</div>';
+    });
+    return html + '</div>';
+  }
+
+  function hasSqlForeignKeyPayload(evidence) {
+    return evidence.some(function (record) {
+      var extensions = record.extensions || {};
+      var sqlExtension = extensions["minotaur-sql"] || {};
+      return Array.isArray(sqlExtension.foreign_key_columns)
+        && sqlExtension.foreign_key_columns.length > 0;
+    });
+  }
+
   function physicalLocationKey(loc) {
     var r = loc.range;
     return loc.path + "|" + r.start.line + ":" + r.start.character + "-" + r.end.line + ":" + r.end.character;
@@ -2426,7 +2475,9 @@ var Xr=function(e){if(!(this instanceof Xr))return new Xr(e);this.id="Thenable/1
     html += '<div class="field"><div class="field-label">Provenance</div>';
     html += '<div class="field-value">' + escHtml(d.provenance) + '</div></div>';
 
-    if (d.kind === "calls" && sites.length > 0) {
+    if (d.kind === "sql:foreign-key-to" && hasSqlForeignKeyPayload(d.evidence)) {
+      html += sqlForeignKeyDetails(d.evidence);
+    } else if (d.kind === "calls" && sites.length > 0) {
       html += '<div class="field"><div class="field-label">Call sites (' + sites.length + ')</div>';
       html += '<select id="call-site-select" aria-label="Call sites">';
       sites.forEach(function (site, i) {

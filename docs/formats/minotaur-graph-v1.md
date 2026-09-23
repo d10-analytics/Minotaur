@@ -182,6 +182,21 @@ symbols use the payload-free namespaced kinds `sql:schema`, `sql:table`, and
 `sql:view`, while SQL relationships use `sql:reads-from` and
 `sql:foreign-key-to`. These namespaced extensions remain ordinary graph facts
 and do not alter the core query vocabularies.
+
+For each `sql:foreign-key-to` relationship, a mapped evidence record may carry
+the exact extension object
+`extensions["minotaur-sql"] = {"foreign_key_columns": [...]}`. The
+`foreign_key_columns` array is nonempty and each item has exactly the string
+fields `local` and `referenced`. Its order is semantic: item position pairs a
+local column with the referenced column at the same position, so reversing
+composite pairs produces different evidence and different attribution. The
+relationship identity remains the table-edge tuple `(source, target, kind)`;
+the mapping is evidence detail, not a new node or relationship kind. Every
+evidence record keeps its own supporting locations. A record without a mapping
+payload still contributes its locations and must not be given an invented pair.
+Constraint names and modifiers such as `ON DELETE`, `ON UPDATE`, and
+`NOT FOR REPLICATION` are absent, as are SQL execution results, catalog
+metadata, and migration history.
 Extension values use a recursive grammar: an extension object maps non-empty
 BMP keys to strings, integers, booleans, null, arrays of extension values, or
 nested extension objects. Fractional values are not part of the v1 format; use
