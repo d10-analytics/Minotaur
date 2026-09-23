@@ -451,14 +451,50 @@ def test_sql_fk_pointer_details_keep_mapping_and_payload_free_records_separate(
         assert records.count() == 2
         mapped = records.nth(0).inner_text()
         payload_free = records.nth(1).inner_text()
-        assert "order_id → id" in mapped
-        assert "store_id → id" in mapped
+        assert records.nth(0).locator(".sql-fk-pairs li").all_text_contents() == [
+            "order_id → id",
+            "store_id → id",
+        ]
         assert "src/checkout.py:5:12" in mapped
+        assert "tables.sql:13:1" not in mapped
         assert "Column mappings" not in payload_free
         assert "order_id" not in payload_free
         assert "store_id" not in payload_free
         assert "src/checkout.py:5:12" in payload_free
         assert "tables.sql:13:1" in payload_free
+        browser.close()
+
+
+def test_extension_free_sql_fk_keeps_generic_location_tabs(
+    tmp_path: Path,
+) -> None:
+    """An extension-free SQL edge remains on the generic detail path."""
+    graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+    relationship = graph["relationships"][0]
+    relationship["kind"] = "sql:foreign-key-to"
+    relationship["evidence"][0]["locations"].append(
+        {
+            "path": "tables.sql",
+            "range": {
+                "start": {"line": 12, "character": 0},
+                "end": {"line": 12, "character": 10},
+            },
+        }
+    )
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    output = tmp_path / "view.html"
+    assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        edge = _click_visible_edge_and_show_details(page)
+        assert edge["kind"] == "sql:foreign-key-to"
+        assert page.locator(".sql-fk-record").count() == 0
+        assert page.locator("#site-tabs").count() == 1
+        assert page.locator("#site-location").inner_text() == "src/checkout.py:5:12"
         browser.close()
 
 
