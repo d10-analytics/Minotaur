@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.loading import load_graph_blob
 from minotaur.graph_model.serialization import serialize
@@ -12,7 +14,8 @@ from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query import system as system_query
 from minotaur.query.diff import diff
 from minotaur.query.impact import ImpactRecord, impact
-from minotaur.query.index import GraphIndex
+from minotaur.query.index import AmbiguousSymbol, GraphIndex
+from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.query.symbols import callers, definitions
 from minotaur.query.unreferenced import unreferenced
 from minotaur.system import load_systems_data
@@ -31,6 +34,8 @@ GO
 CREATE VIEW WrongKind AS SELECT 1
 GO
 CREATE TABLE ChildRef (id int REFERENCES WrongKind(id))
+GO
+CREATE TABLE UnrelatedRef (id int REFERENCES WrongKindish(id))
 GO
 CREATE VIEW MissingReader AS SELECT * FROM MissingSchema.Target
 """
@@ -113,12 +118,21 @@ CREATE VIEW S.Reader AS SELECT * FROM S.Parent
     }
 
 
-def test_sql_relationships_are_fenced_from_generic_consumers_but_core_recall_remains(
+def test_sql_relationships_feed_callers_and_core_recall_remains(
     tmp_path: Path,
 ) -> None:
     index = _persisted_index(tmp_path / "current")
 
-    assert callers(index, "S.Parent") == ()
+    assert CURRENT_SQL_DEPENDENCY_KINDS == ("sql:reads-from", "sql:foreign-key-to")
+    assert [(record.symbol, record.kind) for record in definitions(index, "parent")] == [
+        ("S.Parent", "sql:table")
+    ]
+    assert {
+        (record.caller, record.kind, record.unresolved) for record in callers(index, "s.parent")
+    } == {
+        ("S.Child", "sql:foreign-key-to", False),
+        ("S.Reader", "sql:reads-from", False),
+    }
     assert impact(index, "S.Parent", max_depth=1) == (
         ImpactRecord(depth=0, symbol="S.Parent", kind="sql:table"),
     )
@@ -141,8 +155,32 @@ def test_sql_relationships_are_fenced_from_generic_consumers_but_core_recall_rem
     unresolved = callers(index, "WrongKind")
     assert len(unresolved) == 1
     assert unresolved[0].caller == "ChildRef"
+    assert unresolved[0].kind == "references"
     assert unresolved[0].reference == "WrongKind"
     assert unresolved[0].unresolved is True
+
+
+def test_sql_resolution_is_exact_first_and_ambiguous_after_casefold_fallback(
+    tmp_path: Path,
+) -> None:
+    index = _persisted_index(tmp_path / "current")
+    assert index.resolve("S.Parent").label == "S.Parent"
+    assert index.resolve("s.parent").label == "S.Parent"
+
+    root = tmp_path / "ambiguous"
+    root.mkdir()
+    path = root / "catalog.sql"
+    path.write_text(
+        "CREATE TABLE S.Parent (id int)\nGO\nCREATE TABLE s.PARENT (id int)\n",
+        encoding="utf-8",
+    )
+    result = analyze_sql_files(Workspace(root), (path,))
+    loaded = load_graph_blob(serialize(result.document))
+    ambiguous = GraphIndex.build(loaded.document)
+
+    with pytest.raises(AmbiguousSymbol) as excinfo:
+        ambiguous.resolve("S.pArEnT")
+    assert excinfo.value.candidates == ("catalog.sql:1", "catalog.sql:3")
 
 
 def test_fk_mapping_survives_roundtrip_without_changing_query_or_diff_identity(
@@ -179,7 +217,9 @@ ALTER TABLE Child ADD CONSTRAINT FK_child_parent FOREIGN KEY (a,b) REFERENCES Pa
     assert [(record.symbol, record.kind) for record in definitions(index, "Parent")] == [
         ("Parent", "sql:table")
     ]
-    assert callers(index, "Parent") == ()
+    assert [(record.caller, record.kind) for record in callers(index, "parent")] == [
+        ("Child", "sql:foreign-key-to")
+    ]
     assert impact(index, "Parent", max_depth=1) == (
         ImpactRecord(depth=0, symbol="Parent", kind="sql:table"),
     )

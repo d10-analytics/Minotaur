@@ -32,7 +32,8 @@ def test_callers_prints_each_call_site_and_matching_unresolved_reference(
         "    unknown.target()\n"
         "    callback = unknown.target\n"
         "    target()\n"
-        "    target()\n",
+        "    target()\n"
+        "    unknown.TARGET()\n",
     )
     graph = tmp_path / "graph.json"
     assert _analyze(tmp_path, graph) == 0
@@ -68,10 +69,10 @@ def test_callers_prints_each_call_site_and_matching_unresolved_reference(
 
     assert status == 0
     assert captured.out.splitlines() == [
-        "use.py:5:5  use.caller",
-        "use.py:6:5  use.caller",
-        "use.py:3:5  unknown.target [unresolved]",
-        "use.py:4:16  unknown.target [unresolved]",
+        "use.py:5:5  use.caller [calls]",
+        "use.py:6:5  use.caller [calls]",
+        "use.py:3:5  unknown.target [references] [unresolved]",
+        "use.py:4:16  unknown.target [references] [unresolved]",
     ]
 
 
@@ -136,6 +137,31 @@ def test_unknown_callers_name_suggests_labels_and_lonely_is_success(
     lonely = capsys.readouterr()
     assert lonely_status == 0
     assert lonely.out == "no callers\n"
+
+
+def test_non_sql_qualified_names_remain_case_sensitive(tmp_path: Path, capsys: object) -> None:
+    _write(tmp_path, "mod.py", "def target():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "callers",
+            "MOD.target",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "minotaur: error: unknown symbol: MOD.target; nearest labels: mod.target\n"
+    )
 
 
 def test_symbol_queries_json_uses_same_records_without_graph_internals(
@@ -271,6 +297,7 @@ def test_all_query_renderers_hide_graph_internals_in_text_and_json(
         if query_name == "callers":
             for item in payload["results"]:
                 expected = {"caller", "column", "line", "path", "unresolved"}
+                expected.add("kind")
                 if item["unresolved"]:
                     expected.add("reference")
                 assert set(item) == expected
@@ -376,7 +403,7 @@ def test_dotted_import_call_graph_drives_exact_callers(
     captured = capsys.readouterr()
 
     assert status == 0
-    assert captured.out == "caller.py:3:12  caller.owner\n"
+    assert captured.out == "caller.py:3:12  caller.owner [calls]\n"
 
 
 def test_conditional_call_graph_drives_exact_callers_with_location(
@@ -414,7 +441,7 @@ def test_conditional_call_graph_drives_exact_callers_with_location(
     captured = capsys.readouterr()
 
     assert status == 0
-    assert captured.out == "caller.py:6:12  caller.owner\n"
+    assert captured.out == "caller.py:6:12  caller.owner [calls]\n"
 
 
 def test_ambiguous_conditional_continuation_is_callers_recall_only(
@@ -453,7 +480,7 @@ def test_ambiguous_conditional_continuation_is_callers_recall_only(
     captured = capsys.readouterr()
 
     assert status == 0
-    assert captured.out == "caller.py:6:12  pkg.sub.go [unresolved]\n"
+    assert captured.out == "caller.py:6:12  pkg.sub.go [references] [unresolved]\n"
 
 
 def test_lost_import_route_callers_keep_unresolved_text_without_stale_call(
@@ -487,4 +514,4 @@ def test_lost_import_route_callers_keep_unresolved_text_without_stale_call(
     captured = capsys.readouterr()
 
     assert status == 0
-    assert captured.out == "caller.py:4:12  sub.go [unresolved]\n"
+    assert captured.out == "caller.py:4:12  sub.go [references] [unresolved]\n"
