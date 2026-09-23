@@ -100,7 +100,7 @@ $ minotaur query definitions greeting --graph graph.json --root . --no-refresh
 app.py:4  app.greeting  function
 exit: 0
 $ minotaur query callers app.greeting --graph graph.json --root . --no-refresh
-app.py:11:12  app.welcome
+app.py:11:12  app.welcome [calls]
 exit: 0
 $ minotaur visualize --input graph.json --output graph.html --source-root .
 exit: 0
