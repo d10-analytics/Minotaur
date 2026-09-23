@@ -85,10 +85,19 @@ class _Declaration:
 
 
 @dataclass(frozen=True, slots=True)
+class _ForeignKey:
+    key: tuple[str, ...]
+    text: str
+    location: Location
+    local_columns: tuple[str, ...]
+    referenced_columns: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _Observation:
     owner: _Declaration | None
     reads: tuple[tuple[tuple[str, ...], str, Location], ...] = ()
-    foreign_keys: tuple[tuple[tuple[str, ...], str, Location], ...] = ()
+    foreign_keys: tuple[_ForeignKey, ...] = ()
     source: tuple[tuple[str, ...], str, Location, str] | None = None
 
 
@@ -207,12 +216,12 @@ def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> Analysis
                 "sql:reads-from",
                 "read",
             )
-        for key, text, location in observation.foreign_keys:
+        for foreign_key in observation.foreign_keys:
             _resolve(
                 owner,
-                key,
-                text,
-                location,
+                foreign_key.key,
+                foreign_key.text,
+                foreign_key.location,
                 table_index,
                 {},
                 relationships,
@@ -221,6 +230,7 @@ def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> Analysis
                 emitter,
                 "sql:foreign-key-to",
                 "foreign-key",
+                _foreign_key_extensions(foreign_key),
             )
 
     # Replace the generic references kind for reads with the SQL extension.
@@ -287,10 +297,17 @@ def _resolve(
     emitter: NodeEmitter,
     relationship_kind: str,
     relation: str,
+    extensions: dict[str, dict[str, object]] | None = None,
 ) -> None:
     candidates = primary.get(key, []) + secondary.get(key, [])
     if len(candidates) == 1:
-        relationships.add(owner.node.id, candidates[0].node.id, relationship_kind, location)
+        relationships.add(
+            owner.node.id,
+            candidates[0].node.id,
+            relationship_kind,
+            location,
+            extensions,
+        )
         return
     if len(candidates) > 1:
         diagnostics.append(
@@ -482,15 +499,27 @@ def _table_location(table: exp.Table, item: _File, batch: _Batch) -> Location | 
 
 def _foreign_keys(
     target: exp.Expression, item: _File, batch: _Batch, diagnostics: list[Diagnostic]
-) -> list[tuple[tuple[str, ...], str, Location]] | None:
+) -> list[_ForeignKey] | None:
     if not isinstance(target, exp.Schema):
         return []
-    result: list[tuple[tuple[str, ...], str, Location]] = []
+    result: list[_ForeignKey] = []
     for reference in target.find_all(exp.Reference):
-        endpoint = _reference_target(reference, item, batch)
-        if endpoint is None:
+        parent = reference.parent
+        if isinstance(parent, exp.ColumnConstraint) and isinstance(parent.parent, exp.ColumnDef):
+            column = parent.parent.this
+            local_columns = (str(column.this),) if isinstance(column, exp.Identifier) else ()
+        elif isinstance(parent, exp.ForeignKey):
+            local_columns = tuple(
+                str(column.this)
+                for column in parent.expressions
+                if isinstance(column, exp.Identifier)
+            )
+        else:
+            local_columns = ()
+        foreign_key = _foreign_key_details(reference, local_columns, item, batch)
+        if foreign_key is None:
             return None
-        result.append(endpoint)
+        result.append(foreign_key)
     return result
 
 
@@ -510,6 +539,46 @@ def _reference_target(
     ):
         return None
     return tuple(part.casefold() for part in parts), ".".join(parts), location
+
+
+def _foreign_key_details(
+    reference: exp.Reference,
+    local_columns: tuple[str, ...],
+    item: _File,
+    batch: _Batch,
+) -> _ForeignKey | None:
+    endpoint = _reference_target(reference, item, batch)
+    if endpoint is None:
+        return None
+    referenced = reference.this
+    referenced_columns = (
+        tuple(str(column.this) for column in referenced.expressions)
+        if isinstance(referenced, exp.Schema)
+        and all(isinstance(column, exp.Identifier) for column in referenced.expressions)
+        else ()
+    )
+    return _ForeignKey(*endpoint, local_columns, referenced_columns)
+
+
+def _foreign_key_extensions(
+    foreign_key: _ForeignKey,
+) -> dict[str, dict[str, object]] | None:
+    if not foreign_key.local_columns or len(foreign_key.local_columns) != len(
+        foreign_key.referenced_columns
+    ):
+        return None
+    return {
+        NAMESPACE: {
+            "foreign_key_columns": [
+                {"local": local, "referenced": referenced}
+                for local, referenced in zip(
+                    foreign_key.local_columns,
+                    foreign_key.referenced_columns,
+                    strict=True,
+                )
+            ]
+        }
+    }
 
 
 def _valid_fk_options(reference: exp.Reference) -> bool:
@@ -554,7 +623,7 @@ def _interpret_alter(tree: exp.Alter, item: _File, batch: _Batch) -> _Observatio
     actions = tree.args.get("actions") or []
     if not actions or not all(isinstance(action, exp.AddConstraint) for action in actions):
         return None
-    foreign_keys: list[tuple[tuple[str, ...], str, Location]] = []
+    foreign_keys: list[_ForeignKey] = []
     for action in actions:
         constraints = action.args.get("expressions") or []
         if not constraints:
@@ -575,10 +644,15 @@ def _interpret_alter(tree: exp.Alter, item: _File, batch: _Batch) -> _Observatio
             reference = expressions[0].args.get("reference")
             if not isinstance(reference, exp.Reference) or not _valid_fk_options(reference):
                 return None
-            endpoint = _reference_target(reference, item, batch)
-            if endpoint is None:
+            local_columns = tuple(
+                str(column.this)
+                for column in expressions[0].expressions
+                if isinstance(column, exp.Identifier)
+            )
+            foreign_key = _foreign_key_details(reference, local_columns, item, batch)
+            if foreign_key is None:
                 return None
-            foreign_keys.append(endpoint)
+            foreign_keys.append(foreign_key)
     return _Observation(
         None,
         (),
