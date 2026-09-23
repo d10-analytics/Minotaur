@@ -1012,6 +1012,15 @@
     return html + '</div>';
   }
 
+  function hasSqlForeignKeyPayload(evidence) {
+    return evidence.some(function (record) {
+      var extensions = record.extensions || {};
+      var sqlExtension = extensions["minotaur-sql"] || {};
+      return Array.isArray(sqlExtension.foreign_key_columns)
+        && sqlExtension.foreign_key_columns.length > 0;
+    });
+  }
+
   function physicalLocationKey(loc) {
     var r = loc.range;
     return loc.path + "|" + r.start.line + ":" + r.start.character + "-" + r.end.line + ":" + r.end.character;
@@ -1263,7 +1272,7 @@
     html += '<div class="field"><div class="field-label">Provenance</div>';
     html += '<div class="field-value">' + escHtml(d.provenance) + '</div></div>';
 
-    if (d.kind === "sql:foreign-key-to") {
+    if (d.kind === "sql:foreign-key-to" && hasSqlForeignKeyPayload(d.evidence)) {
       html += sqlForeignKeyDetails(d.evidence);
     } else if (d.kind === "calls" && sites.length > 0) {
       html += '<div class="field"><div class="field-label">Call sites (' + sites.length + ')</div>';
