@@ -106,6 +106,13 @@ class GraphIndex:
         """
         matches = self.symbols_by_label.get(label, ())
         if not matches:
+            folded_label = label.casefold()
+            matches = tuple(
+                node
+                for node in self.symbols()
+                if node.language == "sql" and node.label.casefold() == folded_label
+            )
+        if not matches:
             # The default cutoff (0.6) is intentional: a lower cutoff, or 0.0,
             # always returns ``n`` labels regardless of similarity, so an
             # unrelated name like ``nope`` would suggest an unrelated label

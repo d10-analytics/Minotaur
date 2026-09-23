@@ -51,7 +51,7 @@ selected file. Its result identifies the exact call site.
 ```console
 $ minotaur query callers minotaur.language_interpreter.selection._resolve_target \
     --graph examples/python-workflow/minotaur-graph.json --root src --no-refresh
-minotaur/language_interpreter/selection.py:46:20  minotaur.language_interpreter.selection.select_sources
+minotaur/language_interpreter/selection.py:46:20  minotaur.language_interpreter.selection.select_sources [calls]
 ```
 
 ## 4. Trace impact

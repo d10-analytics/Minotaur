@@ -9,6 +9,7 @@ from minotaur.graph_model.location import Location
 from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.graph_model.relationship import Relationship
 from minotaur.query.index import GraphIndex
+from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +18,7 @@ class CallerRecord:
     line: int
     column: int
     caller: str
+    kind: str
     unresolved: bool = False
     reference: str | None = None
 
@@ -24,6 +26,7 @@ class CallerRecord:
         result: dict[str, object] = {
             "caller": self.caller,
             "column": self.column,
+            "kind": self.kind,
             "line": self.line,
             "path": self.path,
             "unresolved": self.unresolved,
@@ -65,26 +68,33 @@ def callers(index: GraphIndex, qualified_name: str) -> tuple[CallerRecord, ...]:
     """
     target_id = index.resolve(qualified_name).id
     resolved_records: list[CallerRecord] = []
-    for relationship in index.incoming(RelationshipKind.CALLS.value, target_id):
-        caller = index.nodes.get(relationship.source)
-        if caller is None:
-            continue
-        for location in _locations(relationship):
-            resolved_records.append(_caller_record(location, caller.label))
+    for kind in (RelationshipKind.CALLS.value, *CURRENT_SQL_DEPENDENCY_KINDS):
+        for relationship in index.incoming(kind, target_id):
+            caller = index.nodes.get(relationship.source)
+            if caller is None:
+                continue
+            for location in _locations(relationship):
+                resolved_records.append(_caller_record(location, caller.label, relationship.kind))
 
     bare_name = qualified_name.rsplit(".", 1)[-1]
     unresolved_records: list[CallerRecord] = []
     for unresolved in index.unresolved_nodes:
         reference = unresolved.reference_text or unresolved.label
-        if reference != bare_name and not reference.endswith(f".{bare_name}"):
-            continue
         for relationship in index.incoming(RelationshipKind.REFERENCES.value, unresolved.id):
             caller = index.nodes.get(relationship.source)
             if caller is None:
                 continue
+            if not _matches_reference(reference, bare_name, sql=unresolved.language == "sql"):
+                continue
             for location in _locations(relationship):
                 unresolved_records.append(
-                    _caller_record(location, caller.label, unresolved=True, reference=reference)
+                    _caller_record(
+                        location,
+                        caller.label,
+                        relationship.kind,
+                        unresolved=True,
+                        reference=reference,
+                    )
                 )
     # Keep the high-confidence resolved hits together. Unresolved matches are
     # a recall tail, even when their source location sorts before a resolved
@@ -100,7 +110,16 @@ def definitions(index: GraphIndex, bare_name: str) -> tuple[DefinitionRecord, ..
     matches = [
         node
         for node in index.symbols()
-        if label_bare_name(node.label) == bare_name and node.location is not None
+        if (
+            node.location is not None
+            and (
+                label_bare_name(node.label) == bare_name
+                or (
+                    node.language == "sql"
+                    and label_bare_name(node.label).casefold() == bare_name.casefold()
+                )
+            )
+        )
     ]
     duplicate = len(matches) > 1
     records: list[DefinitionRecord] = []
@@ -135,6 +154,7 @@ def _locations(relationship: Relationship) -> tuple[Location, ...]:
 def _caller_record(
     location: Location,
     caller: str,
+    kind: str,
     *,
     unresolved: bool = False,
     reference: str | None = None,
@@ -144,13 +164,21 @@ def _caller_record(
         line=location.range.start.line + 1,
         column=location.range.start.character + 1,
         caller=caller,
+        kind=kind,
         unresolved=unresolved,
         reference=reference,
     )
 
 
 def _caller_sort_key(record: CallerRecord) -> tuple[object, ...]:
-    return (record.path, record.line, record.column, record.caller, record.reference or "")
+    return (
+        record.path,
+        record.line,
+        record.column,
+        record.caller,
+        record.kind,
+        record.reference or "",
+    )
 
 
 def render_callers_text(records: Sequence[CallerRecord]) -> str:
@@ -168,11 +196,24 @@ def render_definitions_text(records: Sequence[DefinitionRecord]) -> str:
 
 
 def _caller_text(record: CallerRecord) -> str:
-    suffix = " [unresolved]" if record.unresolved else ""
+    suffix = f" [{record.kind}]"
+    if record.unresolved:
+        suffix += " [unresolved]"
     label = (
         record.reference if record.unresolved and record.reference is not None else record.caller
     )
     return f"{record.path}:{record.line}:{record.column}  {label}{suffix}\n"
+
+
+def _matches_reference(reference: str, bare_name: str, *, sql: bool) -> bool:
+    """Match a recall reference, case-folding only SQL-produced nodes."""
+    if reference == bare_name or reference.endswith(f".{bare_name}"):
+        return True
+    if not sql:
+        return False
+    folded_reference = reference.casefold()
+    folded_bare_name = bare_name.casefold()
+    return folded_reference == folded_bare_name or folded_reference.endswith(f".{folded_bare_name}")
 
 
 def _definition_text(record: DefinitionRecord) -> str:

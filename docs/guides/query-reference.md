@@ -59,12 +59,9 @@ full validation once, on the first graph-reading command that touches it; see
 ["First-read validation cost"](../concepts/freshness.md#first-read-validation-cost)
 for the exact command list and the sidecar it writes.
 
-SQL symbols are visible to generic `definitions` and structural `diff` under
-the `sql:schema`, `sql:table`, and `sql:view` kinds. Their resolved
-`sql:reads-from` and `sql:foreign-key-to` relationships remain namespaced
-facts: they do not become inputs to `callers`, `impact`, `unreferenced`,
-`surface`, `consumers`, or `system-deps`. Unresolved core references retain
-the generic unresolved-reference behavior. See the [bounded T-SQL guide](analyze-sql.md)
+SQL symbols and namespaced relationships are stored as graph facts. Graph
+presence alone does not establish query support; each query section states the
+relationship kinds it consumes. See the [bounded T-SQL guide](analyze-sql.md)
 for the language boundary and examples.
 
 ## Query commands
@@ -80,14 +77,21 @@ minotaur query callers pkg.mod.target --graph GRAPH.json --root ROOT
 Text output has one line per resolved call site:
 
 ```text
-use.py:3:5  use.caller
+use.py:3:5  use.caller [calls]
 ```
+
+Callers consumes `calls` and the SQL dependency kinds `sql:reads-from` and
+`sql:foreign-key-to`. SQL qualified names are resolved case-insensitively after
+an exact label match; non-SQL labels remain case-sensitive. The relationship
+kind appears in every text and JSON result so a caller can distinguish a call,
+a view read, and a foreign-key reference. SQL unresolved-reference recall uses
+the same case-insensitive bare-name matching; non-SQL recall remains exact.
 
 Matching unresolved references whose text ends in the target's bare name are
 included after resolved calls and marked explicitly:
 
 ```text
-use.py:5:5  unknown.target [unresolved]
+use.py:5:5  unknown.target [references] [unresolved]
 ```
 
 An unknown qualified name exits `2` and lists up to five nearest graph labels
@@ -108,10 +112,11 @@ Re-run against a single definition once the duplicate is resolved, or use
 JSON uses the same records:
 
 ```json
-{"query":"callers","refreshed":false,"results":[{"caller":"use.caller","column":5,"line":3,"path":"use.py","unresolved":false}],"stale":[]}
+{"query":"callers","refreshed":false,"results":[{"caller":"use.caller","column":5,"kind":"calls","line":3,"path":"use.py","unresolved":false}],"stale":[]}
 ```
 
-Unresolved records additionally contain a `reference` field.
+Every caller record contains `caller`, `column`, `kind`, `line`, `path`, and
+`unresolved`; unresolved records additionally contain a `reference` field.
 
 ### Find definitions
 
@@ -124,11 +129,13 @@ minotaur query definitions parse --graph GRAPH.json --root ROOT
 The text form is `path:line  qualified.name  kind`. If more than one
 definition has that bare name, every matching line is marked
 `[duplicate-name]`. JSON result objects contain `path`, `line`, `symbol`,
-`kind`, and the boolean `duplicate`.
+`kind`, and the boolean `duplicate`. SQL bare names are matched
+case-insensitively; non-SQL names retain exact matching.
 
 ### Trace inbound impact
 
-`impact` follows inbound `calls` and `imports` relationships:
+`impact` follows inbound `calls`, `imports`, and the SQL dependency
+relationships `sql:reads-from` and `sql:foreign-key-to`:
 
 ```bash
 minotaur query impact package.api.handle --depth 2 \
@@ -146,11 +153,12 @@ depth 1: package.routes.dispatch
 With `--depth N`, symbols one step beyond the limit are shown as boundary
 records. JSON records contain `depth`, `symbol`, `kind`, and `boundary`.
 
-`impact` resolves its symbol exactly as `callers` does: an unknown name exits
-`2` with nearest labels, and a name shared by two definitions exits `2` listing
-the candidate `path:line` sites. Neither is ever reported as `no impact`.
-Containment and callback-only `references` edges are intentionally not part of
-this call-chain impact query.
+`impact` resolves its symbol exactly as `callers` does: SQL qualified names are
+matched case-insensitively after an exact label match, while non-SQL labels
+remain case-sensitive. An unknown name exits `2` with nearest labels, and a
+name shared by two definitions exits `2` listing the candidate `path:line`
+sites. Neither is ever reported as `no impact`. Containment and callback-only
+`references` edges are intentionally not part of this impact query.
 
 Module-level callers appear as `module` symbols: if a target is called at
 module scope (`handle()` written directly in a module body, not inside a

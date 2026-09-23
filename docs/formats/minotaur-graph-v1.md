@@ -180,8 +180,9 @@ The bounded SQL analyzer emits
 digest covers the original bytes, including a BOM and line endings. SQL
 symbols use the payload-free namespaced kinds `sql:schema`, `sql:table`, and
 `sql:view`, while SQL relationships use `sql:reads-from` and
-`sql:foreign-key-to`. These namespaced extensions remain ordinary graph facts
-and do not alter the core query vocabularies.
+`sql:foreign-key-to`. These namespaced extensions remain ordinary graph facts.
+The graph format remains stable while supported query commands declare which
+SQL relationship kinds they consume.
 
 For each `sql:foreign-key-to` relationship, a mapped evidence record may carry
 the exact extension object

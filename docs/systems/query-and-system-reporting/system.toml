@@ -11,6 +11,7 @@ files = [
   "minotaur/query/impact.py",
   "minotaur/query/index.py",
   "minotaur/query/render.py",
+  "minotaur/query/sql.py",
   "minotaur/query/symbols.py",
   "minotaur/query/system.py",
   "minotaur/query/system_diff.py",
