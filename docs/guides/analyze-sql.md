@@ -25,6 +25,11 @@ relationships described by its AST-authoritative implementation:
   `sql:view` symbols;
 - table and view reads become the namespaced `sql:reads-from` relationship;
 - foreign-key references become `sql:foreign-key-to` relationships;
+- a top-level, unconditional `ALTER TABLE` can add one or more named
+  `CONSTRAINT ... FOREIGN KEY (...) REFERENCES ...` clauses when the entire
+  statement contains only those additions. The altered and referenced tables
+  must have persistent one- or two-part names. Optional `ON DELETE`,
+  `ON UPDATE`, and `NOT FOR REPLICATION` modifiers are accepted;
 - `CREATE OR ALTER VIEW` and `CREATE OR REPLACE VIEW` use SQLGlot's equivalent
   `replace=True` AST and therefore produce identical facts;
 - `GO` batch boundaries are recognized without treating text scanning as SQL
@@ -36,6 +41,18 @@ decoding, and unterminated-batch failures are file-atomic. A failure in one
 file, batch, or statement therefore does not discard eligible facts from its
 sibling scope. Diagnostics distinguish source-read, parse, unsupported,
 duplicate-declaration, and ambiguous-reference conditions.
+
+Standalone foreign-key additions do not include conditional statements,
+unnamed constraints, temporary or three-part table names, or ALTER statements
+that add `PRIMARY KEY`, `UNIQUE`, or `CHECK` constraints, drop constraints,
+alter columns, or mix foreign-key and other actions. An unsupported ALTER
+statement contributes no partial foreign-key facts. A malformed batch yields
+no facts from that batch, even when an earlier statement in it was valid;
+later `GO` batches remain eligible. The graph records table-level dependencies
+only: it does not retain constraint names, column mappings or ordering,
+referential-action values, replication modifiers, or separate edges for
+multiple constraints between the same table pair. Accepted modifiers add no
+edge payload.
 
 ## Graph and query meaning
 
