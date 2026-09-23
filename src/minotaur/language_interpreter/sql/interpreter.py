@@ -505,6 +505,7 @@ def _foreign_keys(
     result: list[_ForeignKey] = []
     for reference in target.find_all(exp.Reference):
         parent = reference.parent
+        local_columns: tuple[str, ...]
         if isinstance(parent, exp.ColumnConstraint) and isinstance(parent.parent, exp.ColumnDef):
             column = parent.parent.this
             local_columns = (str(column.this),) if isinstance(column, exp.Identifier) else ()
