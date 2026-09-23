@@ -702,6 +702,30 @@ REFERENCES Parent(x,y) ON DELETE CASCADE ON UPDATE SET NULL NOT FOR REPLICATION
     assert "NOT FOR REPLICATION" not in str(edge.to_dict())
 
 
+def test_equal_fk_mappings_merge_locations_across_selected_files(tmp_path: Path) -> None:
+    declaration = "CREATE TABLE Parent (x int, y int)\nGO\nCREATE TABLE Child (a int, b int)"
+    alter = "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (a,b) REFERENCES Parent(x,y)"
+    result = _analyze(
+        tmp_path,
+        **{"declarations.sql": declaration, "first.sql": alter, "second.sql": alter},
+    )
+
+    assert not result.diagnostics
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    assert len(edges) == 1
+    evidence = edges[0][2].evidence
+    assert len(evidence) == 1
+    assert evidence[0].to_dict()["extensions"] == {
+        "minotaur-sql": {
+            "foreign_key_columns": [
+                {"local": "a", "referenced": "x"},
+                {"local": "b", "referenced": "y"},
+            ]
+        }
+    }
+    assert {location.path for location in evidence[0].locations} == {"first.sql", "second.sql"}
+
+
 def test_irregular_and_unresolved_fk_evidence_has_no_mapping_payload(tmp_path: Path) -> None:
     sql = """\
 CREATE TABLE Parent (x int, y int)
