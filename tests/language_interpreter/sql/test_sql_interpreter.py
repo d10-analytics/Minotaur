@@ -776,3 +776,23 @@ def test_standalone_fk_parse_failure_discards_batch_and_later_batch_recovers(
         ("catalog.sql", 7, sql.splitlines()[7].index("Parent"))
     }
     assert not _sql_edges(result, "references")
+
+
+def test_standalone_fk_rejects_duplicate_replication_modifier_atomically(tmp_path: Path) -> None:
+    alter = (
+        "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id) "
+        "NOT FOR REPLICATION NOT FOR REPLICATION"
+    )
+    result = _analyze(
+        tmp_path,
+        **{
+            "tables.sql": "CREATE TABLE Parent (Id int)\nGO\nCREATE TABLE Child (Id int)",
+            "alter.sql": alter,
+        },
+    )
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
+    assert not _sql_edges(result, "sql:foreign-key-to")
+    assert not _sql_edges(result, "references")
+    assert set(_symbols(result)) == {"Parent", "Child"}
