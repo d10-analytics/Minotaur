@@ -152,7 +152,7 @@ def test_sql_relationships_feed_callers_and_core_recall_remains(
     assert system_query.consumers(systems, index, target) == ()
     assert system_query.system_deps(systems, index, target) == ()
 
-    unresolved = callers(index, "WrongKind")
+    unresolved = callers(index, "wrongkind")
     assert len(unresolved) == 1
     assert unresolved[0].caller == "ChildRef"
     assert unresolved[0].kind == "references"
