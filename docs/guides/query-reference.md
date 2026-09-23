@@ -84,7 +84,8 @@ Callers consumes `calls` and the SQL dependency kinds `sql:reads-from` and
 `sql:foreign-key-to`. SQL qualified names are resolved case-insensitively after
 an exact label match; non-SQL labels remain case-sensitive. The relationship
 kind appears in every text and JSON result so a caller can distinguish a call,
-a view read, and a foreign-key reference.
+a view read, and a foreign-key reference. SQL unresolved-reference recall uses
+the same case-insensitive bare-name matching; non-SQL recall remains exact.
 
 Matching unresolved references whose text ends in the target's bare name are
 included after resolved calls and marked explicitly:
