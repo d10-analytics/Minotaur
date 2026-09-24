@@ -67,12 +67,10 @@ def test_view_cycle_warnings_are_canonical_and_order_independent(tmp_path: Path)
         },
     )
     expected = [
-        (item.code, item.severity, item.extensions, item.message)
-        for item in first.diagnostics
+        (item.code, item.severity, item.extensions, item.message) for item in first.diagnostics
     ]
     assert expected == [
-        (item.code, item.severity, item.extensions, item.message)
-        for item in second.diagnostics
+        (item.code, item.severity, item.extensions, item.message) for item in second.diagnostics
     ]
     assert len(first.warnings) == 1
     assert first.warnings[0].code is DiagnosticCode.CIRCULAR_DEPENDENCY
@@ -106,9 +104,7 @@ def test_view_depth_warning_keeps_fk_and_path_metadata(tmp_path: Path) -> None:
     assert len(components) == 1
     assert components[0]["id"] == 0
     assert components[0]["size"] == 2
-    table_ids = sorted(
-        node.id for node in result.document.nodes if node.symbol_kind == "sql:table"
-    )
+    table_ids = sorted(node.id for node in result.document.nodes if node.symbol_kind == "sql:table")
     assert components[0]["members"] == tuple(table_ids)
     assert all(
         node.extensions["minotaur-sql"]["fk_component"] == 0

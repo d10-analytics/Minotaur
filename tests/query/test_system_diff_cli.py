@@ -56,12 +56,9 @@ def _configured_repo(tmp_path: Path) -> Path:
 def _configured_sql_repo(tmp_path: Path) -> Path:
     root = _repo(tmp_path)
     (root / "src").mkdir()
-    (root / "src" / "schema.sql").write_text(
-        "CREATE TABLE base (id int)\n", encoding="utf-8"
-    )
+    (root / "src" / "schema.sql").write_text("CREATE TABLE base (id int)\n", encoding="utf-8")
     (root / ".minotaur.toml").write_text(
-        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
-        'targets = ["src"]\n',
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["src"]\n',
         encoding="utf-8",
     )
     definition = root / "docs" / "systems" / "sql"
