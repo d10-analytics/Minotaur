@@ -1060,13 +1060,17 @@ def test_sql_system_query_refresh_reports_warning_and_mixed_error_counts(
     _declare(root, "sql", ["schema.sql"])
     graph = _analyze(root)
     monkeypatch.chdir(root)
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["."]\n[minotaur.sql]\nview_depth_threshold = 1\n',
+    )
 
     warning_source = (
         "CREATE TABLE base (id int)\nGO\n"
         "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
-        "CREATE VIEW v2 AS SELECT * FROM v1\nGO\n"
-        "CREATE VIEW v3 AS SELECT * FROM v2\nGO\n"
-        "CREATE VIEW v4 AS SELECT * FROM v3\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\n"
     )
     _write(root, "schema.sql", warning_source)
     status, out, _ = _query(capsys, graph, root, "surface", "sql", "--json")

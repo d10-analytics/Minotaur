@@ -405,6 +405,11 @@ def test_committed_mode_renders_sql_warning_and_keeps_structural_exit(
 ) -> None:
     root = _repo(tmp_path)
     _write_config(root, targets='targets = ["schema.sql"]')
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["schema.sql"]\n[minotaur.sql]\nview_depth_threshold = 1\n',
+        encoding="utf-8",
+    )
     source = root / "schema.sql"
     source.write_text("CREATE TABLE base (id int)\n", encoding="utf-8")
     monkeypatch.chdir(root)
@@ -414,9 +419,7 @@ def test_committed_mode_renders_sql_warning_and_keeps_structural_exit(
     source.write_text(
         "CREATE TABLE base (id int)\nGO\n"
         "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
-        "CREATE VIEW v2 AS SELECT * FROM v1\nGO\n"
-        "CREATE VIEW v3 AS SELECT * FROM v2\nGO\n"
-        "CREATE VIEW v4 AS SELECT * FROM v3\n",
+        "CREATE VIEW v2 AS SELECT * FROM v1\n",
         encoding="utf-8",
     )
     status = cli.main(["query", "diff", "--json"])

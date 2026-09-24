@@ -261,6 +261,32 @@ def test_sql_warning_only_analysis_succeeds_and_preserves_shared_metadata(
     ) == [0, 0]
 
 
+def test_configured_sql_view_threshold_reaches_direct_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "configured"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["schema.sql"]\n[minotaur.sql]\nview_depth_threshold = 1\n',
+    )
+    _write(
+        root,
+        "schema.sql",
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\n",
+    )
+    monkeypatch.chdir(root)
+
+    status = cli.main(["analyze"])
+    captured = capsys.readouterr()
+    assert status == 0
+    assert "view-depth-warning" in captured.err
+    assert '"depth":2' in captured.err
+
+
 @pytest.mark.parametrize(
     "suffixes",
     [
