@@ -59,9 +59,7 @@ def unreferenced(
     candidates = [
         node
         for node in index.symbols()
-        if _is_candidate(node)
-        and node.location is not None
-        and node.location.path in selected
+        if _is_candidate(node) and node.location is not None and node.location.path in selected
     ]
     suspects = [
         node
@@ -218,9 +216,7 @@ def _text_mentions(
     return (
         frozenset(token for token, count in counts.items() if count > definitions.get(token, 0)),
         frozenset(
-            token
-            for token, count in folded_counts.items()
-            if count > sql_definitions.get(token, 0)
+            token for token, count in folded_counts.items() if count > sql_definitions.get(token, 0)
         ),
     )
 
