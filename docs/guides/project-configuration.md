@@ -119,6 +119,39 @@ automatic stale-source refresh, committed `query diff`, and both captured
 sides of historical/system comparison, so a route cannot silently apply a
 different pattern.
 
+SQL foreign-key ownership can also be recorded with an exact target-to-file
+mapping:
+
+```toml
+[minotaur.sql]
+foreign_key_target_files = { "dbo.Parent" = "schema/parent.sql", "Audit" = "schema/audit.sql" }
+```
+
+Mapping keys must be quoted SQL target names with one or two non-empty,
+dot-separated identifier parts. Keys are matched case-insensitively, so
+`"dbo.Parent"` and `"DBO.PARENT"` cannot both appear. Mapping values are
+literal, root-relative POSIX paths ending in `.sql`; they cannot be absolute,
+contain `.` or `..` path components, use backslashes, or contain glob
+characters. A mapping is not a glob and does not infer ownership from a
+filename.
+
+Invalid `foreign_key_target_files` syntax or values are rejected before source
+analysis, graph loading, or graph writing with status `2` and an error naming
+the offending field or entry. No graph or stamp sidecar is produced by that
+failure. During analysis, an exact mapping establishes an `extraction-gap`
+only when its path is selected and readable but the analyzed file does not
+declare the target. Multiple declarations take precedence and produce
+`ambiguous`; an absent, unreadable, or unselected mapped path produces
+`undeclared` instead.
+
+The SQL analyzer reports each unresolved foreign-key observation with the
+stable warning code `orphaned-foreign-key` and ordered `minotaur-sql` payload
+fields `source_table`, `constraint_name`, `target`, and `reason`. These warning
+details do not alter the existing generic unresolved graph identity,
+source-selection scope, or graph schema, and repeated observations for one
+source table and target text remain one coalesced generic `references`
+relationship.
+
 ## Locating a configuration file
 
 `analyze`, `visualize`, and the config-consuming `query` subcommands look for
