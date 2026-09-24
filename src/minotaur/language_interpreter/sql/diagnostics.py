@@ -24,9 +24,7 @@ def analyze_view_warnings(
     """Return cycle and depth warnings from one fully resolved SQL graph."""
     threshold = (settings or SqlSettings()).view_depth_threshold
     nodes = {node.id: node for node in document.nodes}
-    views = {
-        node.id: node for node in document.nodes if node.symbol_kind == "sql:view"
-    }
+    views = {node.id: node for node in document.nodes if node.symbol_kind == "sql:view"}
     view_edges: dict[str, tuple[str, ...]] = {}
     terminal_edges: dict[str, tuple[str, ...]] = {}
     unresolved_edges: dict[str, tuple[str, ...]] = {}
@@ -38,19 +36,13 @@ def analyze_view_warnings(
         if relationship.kind == _READS:
             if target.id in views:
                 view_edges.setdefault(source.id, tuple())
-                view_edges[source.id] = tuple(
-                    sorted((*view_edges[source.id], target.id))
-                )
+                view_edges[source.id] = tuple(sorted((*view_edges[source.id], target.id)))
             elif target.symbol_kind == "sql:table":
                 terminal_edges.setdefault(source.id, tuple())
-                terminal_edges[source.id] = tuple(
-                    sorted((*terminal_edges[source.id], target.id))
-                )
+                terminal_edges[source.id] = tuple(sorted((*terminal_edges[source.id], target.id)))
         elif relationship.kind == _REFERENCES and target.node_class.value == "unresolved-reference":
             unresolved_edges.setdefault(source.id, tuple())
-            unresolved_edges[source.id] = tuple(
-                sorted((*unresolved_edges[source.id], target.id))
-            )
+            unresolved_edges[source.id] = tuple(sorted((*unresolved_edges[source.id], target.id)))
 
     cycles = _elementary_cycles(view_edges, views)
     cyclic = {node_id for cycle in cycles for node_id in cycle[:-1]}
@@ -122,9 +114,8 @@ def _elementary_cycles(
     """Enumerate directed simple cycles, canonicalized by node ID rotation."""
     found: set[tuple[str, ...]] = set()
     for start in sorted(views):
-        def visit(
-            current: str, path: tuple[str, ...], cycle_start: str = start
-        ) -> None:
+
+        def visit(current: str, path: tuple[str, ...], cycle_start: str = start) -> None:
             for target in edges.get(current, ()):
                 if target == cycle_start:
                     cycle = path + (cycle_start,)
