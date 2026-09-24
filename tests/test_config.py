@@ -277,7 +277,8 @@ def test_sql_foreign_key_target_files_are_normalized_and_immutable(tmp_path: Pat
         tmp_path,
         ".minotaur.toml",
         '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
-        '[minotaur.sql]\nforeign_key_target_files = { "Parent" = "schema/parent.sql", '
+        '["minotaur"."sql"]\n"foreign_key_target_files" = '
+        '{ "Parent" = "schema/parent.sql", '
         '"DBO.Child" = "schema/child.sql" }\n',
     )
 
@@ -322,6 +323,17 @@ def test_invalid_sql_foreign_key_target_files_are_rejected_before_resolution(
 
     with pytest.raises(ConfigError, match="foreign_key_target_files"):
         resolve_config(tmp_path)
+
+
+def test_dotted_sql_foreign_key_target_file_mapping_still_requires_quoted_keys() -> None:
+    """The supported dotted spelling reaches the same lexical SQL-key check."""
+    data = (
+        b'[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        b'sql.foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+    )
+
+    with pytest.raises(ConfigError, match="target keys must be quoted"):
+        config.parse_config_bytes(data, source="dotted.toml")
 
 
 @pytest.mark.parametrize(
@@ -658,6 +670,33 @@ def test_disk_config_lexical_validation_ignores_mapping_syntax_inside_toml_value
 
     assert resolved.config_file == cfg.resolve()
     assert resolved.systems_dir == (tmp_path / systems_dir).resolve()
+
+
+def test_capture_config_ignores_foreign_key_mapping_in_an_unrelated_table() -> None:
+    """A similarly named mapping outside Minotaur SQL settings remains ordinary TOML."""
+    data = (
+        b'[metadata]\nforeign_key_target_files = { Parent = "schema/p.sql" }\n'
+        b'[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+    )
+
+    parsed = config.parse_config_bytes(data, source="captured.toml")
+
+    assert parsed.sql.foreign_key_target_files == {}
+
+
+def test_disk_config_ignores_foreign_key_mapping_in_an_unrelated_table(tmp_path: Path) -> None:
+    """A located unrelated mapping does not invoke Minotaur SQL-key validation."""
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[metadata]\nforeign_key_target_files = { Parent = "schema/p.sql" }\n'
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n',
+    )
+
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.config_file == cfg.resolve()
+    assert resolved.sql.foreign_key_target_files == {}
 
 
 @pytest.mark.parametrize(
