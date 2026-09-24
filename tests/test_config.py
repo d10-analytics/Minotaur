@@ -663,7 +663,7 @@ def test_disk_config_lexical_validation_ignores_mapping_syntax_inside_toml_value
         '# foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
         'systems_dir = """\n'
         f"{systems_dir}"
-        '\"\"\"\n',
+        '"""\n',
     )
 
     resolved = resolve_config(tmp_path)
