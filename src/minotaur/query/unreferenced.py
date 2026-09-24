@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 import re
+from bisect import bisect_left
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlglot import exp, parse_one
+
+from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
+from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.query.index import GraphIndex
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.query.symbols import label_bare_name
@@ -61,16 +66,23 @@ def unreferenced(
         for node in index.symbols()
         if _is_candidate(node) and node.location is not None and node.location.path in selected
     ]
+    sql_bare_names = _sql_bare_names(candidates, root) if text_fallback or excluded_names else {}
     suspects = [
         node
         for node in candidates
-        if _eligible(node, excluded_names, excluded_patterns) and _is_unreferenced(index, node)
+        if _eligible(
+            node,
+            excluded_names,
+            excluded_patterns,
+            bare_name=_bare_name(node, sql_bare_names),
+        )
+        and _is_unreferenced(index, node)
     ]
 
     core_mentions: frozenset[str] = frozenset()
     sql_mentions: frozenset[str] = frozenset()
     if text_fallback:
-        core_mentions, sql_mentions = _text_mentions(index, root, selected)
+        core_mentions, sql_mentions = _text_mentions(index, root, selected, sql_bare_names)
 
     records: list[UnreferencedRecord] = []
     for node in suspects:
@@ -84,7 +96,7 @@ def unreferenced(
                 symbol=node.label,
                 kind=node.symbol_kind or "unknown",
                 text_mention=(
-                    label_bare_name(node.label).casefold() in sql_mentions
+                    _bare_name(node, sql_bare_names).casefold() in sql_mentions
                     if _is_sql_candidate(node)
                     else label_bare_name(node.label) in core_mentions
                 ),
@@ -143,8 +155,10 @@ def _eligible(
     node: Node,
     excluded_names: frozenset[str],
     excluded_patterns: tuple[re.Pattern[str], ...] = (),
+    *,
+    bare_name: str | None = None,
 ) -> bool:
-    name = label_bare_name(node.label)
+    name = bare_name if bare_name is not None else label_bare_name(node.label)
     if name in excluded_names:
         return False
     # Patterns are searched against the qualified label so a caller can
@@ -193,7 +207,10 @@ def _is_candidate(node: Node) -> bool:
 
 
 def _text_mentions(
-    index: GraphIndex, root: Path, selected: frozenset[str]
+    index: GraphIndex,
+    root: Path,
+    selected: frozenset[str],
+    sql_bare_names: dict[str, str],
 ) -> tuple[frozenset[str], frozenset[str]]:
     counts: dict[str, int] = {}
     folded_counts: dict[str, int] = {}
@@ -212,7 +229,7 @@ def _text_mentions(
     # definitions may be a string, comment, getattr, or another syntax the graph
     # cannot resolve, so it keeps the suspect in the result.
     definitions = _definition_counts(index, selected)
-    sql_definitions = _sql_definition_counts(index, selected)
+    sql_definitions = _sql_definition_counts(index, selected, sql_bare_names)
     return (
         frozenset(token for token, count in counts.items() if count > definitions.get(token, 0)),
         frozenset(
@@ -240,13 +257,83 @@ def _definition_counts(index: GraphIndex, selected: frozenset[str]) -> dict[str,
     return counts
 
 
-def _sql_definition_counts(index: GraphIndex, selected: frozenset[str]) -> dict[str, int]:
+def _sql_definition_counts(
+    index: GraphIndex, selected: frozenset[str], sql_bare_names: dict[str, str]
+) -> dict[str, int]:
     """Count selected SQL table/view declarations by case-insensitive bare name."""
     counts: dict[str, int] = {}
     for node in index.symbols():
         location = node.location
         if not _is_sql_candidate(node) or location is None or location.path not in selected:
             continue
-        name = label_bare_name(node.label).casefold()
+        name = _bare_name(node, sql_bare_names).casefold()
         counts[name] = counts.get(name, 0) + 1
     return counts
+
+
+def _bare_name(node: Node, sql_bare_names: dict[str, str]) -> str:
+    """Return a final name, retaining dots inside a quoted SQL identifier."""
+    return sql_bare_names.get(node.id, label_bare_name(node.label))
+
+
+def _sql_bare_names(nodes: Iterable[Node], root: Path) -> dict[str, str]:
+    """Recover final SQL identifier segments from their analyzed declaration spans."""
+    source_by_path: dict[str, str] = {}
+    names: dict[str, str] = {}
+    for node in nodes:
+        location = node.location
+        if not _is_sql_candidate(node) or location is None:
+            continue
+        source = source_by_path.get(location.path)
+        if source is None:
+            try:
+                source = (root / location.path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                # A stale graph remains queryable without its source. Its flattened
+                # label is the best information available in that snapshot.
+                continue
+            source_by_path[location.path] = source
+        name = _sql_final_identifier(source, location)
+        if name is not None:
+            names[node.id] = name
+    return names
+
+
+def _sql_final_identifier(source: str, location: Location) -> str | None:
+    """Parse an SQL declaration span and return its final identifier segment."""
+    span = _source_span(source, location)
+    if span is None:
+        return None
+    try:
+        statement = parse_one(f"CREATE TABLE {span} (id int)", read="tsql")
+    except Exception:
+        return None
+    if not isinstance(statement, exp.Create):
+        return None
+    table = statement.this
+    if isinstance(table, exp.Schema):
+        table = table.this
+    if not isinstance(table, exp.Table):
+        return None
+    identifier = table.args.get("this")
+    return str(identifier.this) if isinstance(identifier, exp.Identifier) else None
+
+
+def _source_span(source: str, location: Location) -> str | None:
+    """Return one UTF-8 graph location from decoded source text."""
+    index = LineIndex(source)
+    try:
+        start = _source_offset(index, location.range.start.line, location.range.start.character)
+        end = _source_offset(index, location.range.end.line, location.range.end.character)
+    except (IndexError, ValueError):
+        return None
+    return source[start:end] if start < end else None
+
+
+def _source_offset(index: LineIndex, line: int, character: int) -> int:
+    line_start = index.line_starts[line]
+    target = index.byte_prefix[line_start] + character
+    offset = bisect_left(index.byte_prefix, target, lo=line_start)
+    if offset == len(index.byte_prefix) or index.byte_prefix[offset] != target:
+        raise ValueError("position is not at a UTF-8 character boundary")
+    return offset
