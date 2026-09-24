@@ -178,8 +178,11 @@ core graph facts.
 The bounded SQL analyzer emits
 `extensions["minotaur-sql"]["content_sha256"]` on each SQL `file` node; the
 digest covers the original bytes, including a BOM and line endings. SQL
-symbols use the payload-free namespaced kinds `sql:schema`, `sql:table`, and
-`sql:view`, while SQL relationships use `sql:reads-from` and
+symbols use the namespaced kinds `sql:schema`, `sql:table`, and `sql:view`.
+Each such symbol carries `extensions["minotaur-sql"]["name"]`, its final
+parsed identifier segment. This preserves dots within quoted identifiers for
+`unreferenced` bare-name matching after graph serialization without changing
+node identity. SQL relationships use `sql:reads-from` and
 `sql:foreign-key-to`. These namespaced extensions remain ordinary graph facts.
 The graph format remains stable while supported query commands declare which
 SQL relationship kinds they consume.

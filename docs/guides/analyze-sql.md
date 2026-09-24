@@ -58,9 +58,12 @@ edge payload.
 
 Every readable SQL file contributes a file node with the
 `minotaur-sql.content_sha256` digest of its original bytes, including any BOM
-and line endings. SQL symbols and relationships are payload-free namespaced
-extensions to the graph vocabulary. Generic `definitions` and `diff` observe
-supported SQL facts. `callers`, `impact`, `surface`, `consumers`,
+and line endings. SQL symbols and relationships are namespaced extensions to
+the graph vocabulary. Each SQL schema, table, or view symbol records its final
+parsed identifier in `extensions["minotaur-sql"]["name"]`, preserving quoted
+identifier segments that contain dots for `unreferenced` exclusions and text
+fallback on saved graphs. Generic `definitions` and `diff` observe supported
+SQL facts. `callers`, `impact`, `surface`, `consumers`,
 `system-deps`, and `unreferenced` consume resolved `sql:reads-from` and
 `sql:foreign-key-to` edges; their [query-reference sections](query-reference.md)
 define the exact contracts. `unreferenced` uses those edges for current SQL
