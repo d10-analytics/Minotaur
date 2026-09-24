@@ -290,7 +290,7 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
         "status": "recorded",
         "targets": sorted(_TARGETS),
     }
-    assert coverage["graph_files"] == {"scope": "final_graph_file_nodes", "count": 62}
+    assert coverage["graph_files"] == {"scope": "final_graph_file_nodes", "count": 63}
     assert coverage["declared_files"] == {
         "scope": "all_declared_system_files",
         "total": 62,
@@ -344,7 +344,7 @@ def test_configured_analysis_without_output_writes_only_isolated_root_artifacts(
     assert sidecar.is_file()
     graph_bytes = graph.read_bytes()
     loaded = load_graph_file(graph)
-    assert sum(node.node_class is NodeClass.FILE for node in loaded.document.nodes) == 62
+    assert sum(node.node_class is NodeClass.FILE for node in loaded.document.nodes) == 63
     assert sidecar.read_text(encoding="ascii").strip() == graph_digest(graph_bytes)
     checkout_after = tuple(
         path.read_bytes() if path.exists() else None for path in (checkout_graph, checkout_sidecar)
@@ -416,7 +416,7 @@ def test_declaration_omission_reports_the_graph_file_as_unassigned(
     assert status == 0
     assert error == ""
     payload = json.loads(output)
-    assert payload["coverage"]["graph_files"]["count"] == 62
+    assert payload["coverage"]["graph_files"]["count"] == 63
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",
         "total": 61,
@@ -464,7 +464,7 @@ def test_target_omission_reports_one_declared_file_absent(
     payload = json.loads(output)
     assert payload["coverage"]["graph_files"] == {
         "scope": "final_graph_file_nodes",
-        "count": 61,
+        "count": 62,
     }
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",

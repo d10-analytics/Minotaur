@@ -392,7 +392,7 @@ def test_diagnostic_is_stderr_only_and_does_not_change_structure_exit(
     _commit_all(root)
     status = cli.main(["query", "diff", "--json"])
     captured = capsys.readouterr()
-    assert status == 0
+    assert status == 1
     assert "parse-error" in captured.err
     payload = json.loads(captured.out)
     assert payload["added"] == []
