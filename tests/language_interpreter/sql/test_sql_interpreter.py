@@ -78,6 +78,98 @@ def test_view_cycle_warnings_are_canonical_and_order_independent(tmp_path: Path)
     assert first.warnings[0].extensions["minotaur-sql"]["path"] == ("a", "b", "a")
 
 
+def test_self_and_overlapping_view_cycles_are_complete_and_order_independent(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "self.sql": "CREATE VIEW self_view AS SELECT * FROM self_view\n",
+        "a.sql": "CREATE VIEW a AS SELECT * FROM b\n",
+        "b.sql": ("CREATE VIEW b AS SELECT * FROM a UNION ALL SELECT * FROM c\n"),
+        "c.sql": "CREATE VIEW c AS SELECT * FROM a\n",
+    }
+    first = _analyze(tmp_path / "first", **files)
+    second = _analyze(
+        tmp_path / "second",
+        **{name: files[name] for name in reversed(files)},
+    )
+
+    def cycle_paths(result) -> list[tuple[str, ...]]:
+        return [
+            item.extensions["minotaur-sql"]["path"]
+            for item in result.warnings
+            if item.code is DiagnosticCode.CIRCULAR_DEPENDENCY
+        ]
+
+    expected = [
+        ("a", "b", "a"),
+        ("a", "b", "c", "a"),
+        ("self_view", "self_view"),
+    ]
+    assert cycle_paths(first) == expected
+    assert cycle_paths(second) == expected
+    assert [item.code for item in first.warnings] == [
+        DiagnosticCode.CIRCULAR_DEPENDENCY,
+        DiagnosticCode.CIRCULAR_DEPENDENCY,
+        DiagnosticCode.CIRCULAR_DEPENDENCY,
+    ]
+    assert all(item.severity is DiagnosticSeverity.WARNING for item in first.warnings)
+
+
+def test_default_view_depth_boundary_reports_only_the_full_depth_four_path(
+    tmp_path: Path,
+) -> None:
+    result = _analyze(
+        tmp_path,
+        **{
+            "depth.sql": (
+                "CREATE TABLE base (id int)\nGO\n"
+                "CREATE VIEW depth_one AS SELECT * FROM base\nGO\n"
+                "CREATE VIEW depth_two AS SELECT * FROM depth_one\nGO\n"
+                "CREATE VIEW depth_three AS SELECT * FROM depth_two\nGO\n"
+                "CREATE VIEW depth_four AS SELECT * FROM depth_three\n"
+            )
+        },
+    )
+
+    depth_warnings = [
+        item for item in result.warnings if item.code is DiagnosticCode.VIEW_DEPTH_WARNING
+    ]
+    assert len(depth_warnings) == 1
+    assert depth_warnings[0].severity is DiagnosticSeverity.WARNING
+    assert depth_warnings[0].extensions["minotaur-sql"] == {
+        "depth": 4,
+        "path": ("depth_four", "depth_three", "depth_two", "depth_one", "base"),
+    }
+    assert "depth_three" not in {
+        item.extensions["minotaur-sql"]["path"][0] for item in depth_warnings
+    }
+
+
+def test_cyclic_views_and_branches_entering_cycles_have_no_depth_warning(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "cycles.sql"
+    source.write_text(
+        "CREATE VIEW cycle_a AS SELECT * FROM cycle_b\nGO\n"
+        "CREATE VIEW cycle_b AS SELECT * FROM cycle_a\nGO\n"
+        "CREATE VIEW enters_cycle AS SELECT * FROM cycle_a\nGO\n"
+        "CREATE VIEW root_view AS SELECT * FROM enters_cycle\n",
+        encoding="utf-8",
+    )
+    result = analyze_sql_files(
+        Workspace(tmp_path),
+        (source,),
+        SqlSettings(view_depth_threshold=1),
+    )
+
+    assert [
+        item.extensions["minotaur-sql"]["path"]
+        for item in result.warnings
+        if item.code is DiagnosticCode.CIRCULAR_DEPENDENCY
+    ] == [("cycle_a", "cycle_b", "cycle_a")]
+    assert not [item for item in result.warnings if item.code is DiagnosticCode.VIEW_DEPTH_WARNING]
+
+
 def test_view_depth_warning_keeps_fk_and_path_metadata(tmp_path: Path) -> None:
     result = _analyze(
         tmp_path,

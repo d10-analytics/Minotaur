@@ -261,6 +261,35 @@ def test_sql_warning_only_analysis_succeeds_and_preserves_shared_metadata(
     ) == [0, 0]
 
 
+def test_sql_warning_and_parse_error_fail_after_writing_partial_graph(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    valid = _write(
+        root,
+        "views.sql",
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW depth_one AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW depth_two AS SELECT * FROM depth_one\nGO\n"
+        "CREATE VIEW depth_three AS SELECT * FROM depth_two\nGO\n"
+        "CREATE VIEW depth_four AS SELECT * FROM depth_three\n",
+    )
+    broken = _write(root, "broken.sql", "CREATE TABLE Broken (id int\n")
+    output = tmp_path / "partial.json"
+
+    completed = _run(root, output, valid, broken)
+
+    assert completed.returncode == 1
+    assert completed.stderr.count("view-depth-warning") == 1
+    assert completed.stderr.count("parse-error") == 1
+    graph = load_graph_file(output).document
+    assert {node.path for node in graph.nodes if node.path is not None} == {
+        "broken.sql",
+        "views.sql",
+    }
+    assert {
+        node.label for node in graph.nodes if node.symbol_kind in {"sql:table", "sql:view"}
+    } == {"base", "depth_one", "depth_two", "depth_three", "depth_four"}
+
+
 def test_configured_sql_view_threshold_reaches_direct_analysis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
