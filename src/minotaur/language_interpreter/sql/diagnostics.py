@@ -69,8 +69,10 @@ def analyze_view_warnings(
             )
         )
 
-    reaches_cycle = _views_reaching_cycle(view_edges, cyclic)
-    excluded = cyclic | reaches_cycle
+    # A branch entering a cycle is discarded while walking that branch. A
+    # view with another complete terminal branch can still report the longest
+    # valid path on that other branch.
+    excluded = cyclic
     for root_id in sorted(views):
         if root_id in excluded:
             continue
@@ -138,21 +140,6 @@ def _elementary_cycles(
 
         visit(start, (start,))
     return tuple(sorted(found))
-
-
-def _views_reaching_cycle(
-    edges: Mapping[str, tuple[str, ...]], cyclic: set[str]
-) -> set[str]:
-    """Return views whose dependency branches enter a cyclic view."""
-    result = set(cyclic)
-    changed = True
-    while changed:
-        changed = False
-        for source, targets in edges.items():
-            if source not in result and any(target in result for target in targets):
-                result.add(source)
-                changed = True
-    return result - cyclic
 
 
 def _longest_path(
