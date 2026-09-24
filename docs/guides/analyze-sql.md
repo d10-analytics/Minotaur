@@ -54,7 +54,9 @@ The optional SQL setting `view_depth_threshold` in `[minotaur.sql]` controls the
 view path depth before a `view-depth-warning` is emitted. The default is `3`.
 View cycles are reported once per elementary cycle after all references have
 resolved. Procedure and function reads, ordinary diamonds, and unrelated
-generic references do not create view warnings.
+generic references do not create view warnings. A direct core `references`
+edge from a view to an unresolved reference is the final permitted depth-path
+hop; generic references from any other owner do not extend that path.
 
 Standalone foreign-key additions do not include conditional statements,
 unnamed constraints, temporary or three-part table names, or ALTER statements
