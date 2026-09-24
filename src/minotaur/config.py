@@ -430,9 +430,7 @@ def _validate_foreign_key_target_file_key_quotes(
     if not isinstance(raw, _TomlDocument):
         return
     for path, value_start in _toml_code_assignments(raw.text):
-        if path != ("minotaur", "sql", "foreign_key_target_files") or raw.text[
-            value_start
-        ] != "{":
+        if path != ("minotaur", "sql", "foreign_key_target_files") or raw.text[value_start] != "{":
             continue
         contents = _inline_table_contents(raw.text, value_start)
         if contents is None:
@@ -463,9 +461,11 @@ def _toml_code_assignments(text: str) -> tuple[tuple[tuple[str, ...], int], ...]
             key_path, value_start = assignment
             assignments.append((table_path + key_path, offset + value_start))
             delimiter = _opening_multiline_delimiter(content, value_start)
-            if delimiter is not None and _find_multiline_delimiter(
-                content, delimiter, value_start + len(delimiter)
-            ) is None:
+            if (
+                delimiter is not None
+                and _find_multiline_delimiter(content, delimiter, value_start + len(delimiter))
+                is None
+            ):
                 multiline_delimiter = delimiter
         else:
             header = _toml_table_header(content)
@@ -497,9 +497,7 @@ def _toml_table_header(line: str) -> tuple[str, ...] | None:
     array_table = line.startswith("[[", index)
     opening_length = 2 if array_table else 1
     closing = "]]" if array_table else "]"
-    key_path, index = _toml_key_path(
-        line, _skip_toml_whitespace(line, index + opening_length)
-    )
+    key_path, index = _toml_key_path(line, _skip_toml_whitespace(line, index + opening_length))
     if key_path is None:
         return None
     index = _skip_toml_whitespace(line, index)
