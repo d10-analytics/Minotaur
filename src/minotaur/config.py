@@ -490,17 +490,22 @@ def _toml_line_assignment(line: str) -> tuple[tuple[str, ...], int] | None:
 
 
 def _toml_table_header(line: str) -> tuple[str, ...] | None:
-    """Recognize one standard TOML table header outside values and comments."""
+    """Recognize one TOML table or array-table header outside values and comments."""
     index = _skip_toml_whitespace(line, 0)
-    if index == len(line) or line[index] != "[" or line.startswith("[[", index):
+    if index == len(line) or line[index] != "[":
         return None
-    key_path, index = _toml_key_path(line, _skip_toml_whitespace(line, index + 1))
+    array_table = line.startswith("[[", index)
+    opening_length = 2 if array_table else 1
+    closing = "]]" if array_table else "]"
+    key_path, index = _toml_key_path(
+        line, _skip_toml_whitespace(line, index + opening_length)
+    )
     if key_path is None:
         return None
     index = _skip_toml_whitespace(line, index)
-    if index == len(line) or line[index] != "]":
+    if not line.startswith(closing, index):
         return None
-    index = _skip_toml_whitespace(line, index + 1)
+    index = _skip_toml_whitespace(line, index + len(closing))
     if index != len(line) and line[index] != "#":
         return None
     return key_path
