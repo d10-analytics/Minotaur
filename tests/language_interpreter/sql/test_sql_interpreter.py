@@ -98,6 +98,7 @@ def test_fk_components_partition_tables_and_exclude_other_edges(tmp_path: Path) 
     assert sorted(component["size"] for component in components) == [1, 3]
     labels = {node.id: node.label for node in result.document.nodes}
     chain = next(component for component in components if component["size"] == 3)
+    assert list(chain["members"]) == sorted(chain["members"])
     assert {labels[node_id] for node_id in chain["members"]} == {
         "S.Root",
         "S.Middle",
@@ -110,9 +111,18 @@ def test_fk_components_partition_tables_and_exclude_other_edges(tmp_path: Path) 
         for node in result.document.nodes
         if node.node_class.value == "unresolved-reference"
     }
+    summary_by_member = {
+        member: component for component in components for member in component["members"]
+    }
     for node in result.document.nodes:
-        if node.symbol_kind != "sql:table":
+        if node.symbol_kind == "sql:table":
+            component = summary_by_member[node.id]
+            assert node.extensions["minotaur-sql"]["fk_component"] == component["id"]
+        else:
             assert "fk_component" not in (node.extensions or {}).get("minotaur-sql", {})
+    assert all(
+        list(component["members"]) == sorted(component["members"]) for component in components
+    )
 
 
 def test_fk_component_order_is_stable_for_equal_groups_and_selection_order(tmp_path: Path) -> None:
@@ -135,7 +145,7 @@ def test_fk_component_order_is_stable_for_equal_groups_and_selection_order(tmp_p
     assert _fk_component_ids(forward) == _fk_component_ids(reverse)
     components = _fk_components(forward)
     assert [component["id"] for component in components] == list(range(len(components)))
-    assert components == sorted(components, key=lambda item: (-item["size"], item["members"]))
+    assert list(components) == sorted(components, key=lambda item: (-item["size"], item["members"]))
 
 
 def test_or_alter_and_or_replace_views_have_the_same_ast_authorized_facts(tmp_path: Path) -> None:
@@ -1064,5 +1074,8 @@ def test_declaration_final_identifier_survives_graph_serialization(
     result = _analyze(tmp_path, **{"names.sql": declaration})
     node = next(iter(_symbols(result).values()))
     restored = Node.from_dict(node.to_dict())
-    assert restored.extensions == {"minotaur-sql": {"name": name}}
+    expected = {"minotaur-sql": {"name": name}}
+    if node.symbol_kind == "sql:table":
+        expected["minotaur-sql"]["fk_component"] = 0
+    assert restored.extensions == expected
     assert restored.id == node.id

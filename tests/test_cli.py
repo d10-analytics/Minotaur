@@ -197,7 +197,7 @@ def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
     assert graph.generated_by.name == "minotaur-sql"
     assert {node.path for node in graph.nodes if node.path is not None} == {"schema.SQL"}
     assert graph.extensions is not None
-    assert graph.extensions["minotaur"]["selection"] == ["schema.SQL"]
+    assert graph.extensions["minotaur"]["selection"] == ("schema.SQL",)
     components = graph.extensions["minotaur-sql"]["fk_components"]
     assert len(components) == 1
     assert components[0]["size"] == 2
