@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import types
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -202,6 +203,99 @@ def test_sql_view_depth_setting_is_validated_and_resolved(tmp_path: Path) -> Non
         )
         with pytest.raises(ConfigError, match="view_depth_threshold"):
             resolve_config(tmp_path)
+
+
+def test_sql_migration_patterns_are_immutable_and_match_whole_components(
+    tmp_path: Path,
+) -> None:
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        '[minotaur.sql]\nmigration_patterns = ["migrations/**/*.sql"]\n',
+    )
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.sql.migration_patterns == ("migrations/**/*.sql",)
+    assert resolved.sql.matches_migration("migrations/001.sql")
+    assert resolved.sql.matches_migration("migrations/nested/002.sql")
+    assert not config.SqlSettings(migration_patterns=("migrations/*.sql",)).matches_migration(
+        "migrations/nested/002.sql"
+    )
+    assert not config.SqlSettings(migration_patterns=("*.sql",)).matches_migration(
+        "migrations/001.sql"
+    )
+    assert not config.SqlSettings(migration_patterns=("*.sql",)).matches_migration(
+        "migrations/nested/002.sql"
+    )
+    with pytest.raises(FrozenInstanceError):
+        resolved.sql.migration_patterns = ()  # type: ignore[misc]
+    assert cfg.exists()
+
+
+def test_sql_migration_pattern_matching_visits_repeated_recursive_states_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_parts = tuple([*(f"part{index}" for index in range(6)), "other.sql"])
+    pattern = "/".join([*("**" for _ in range(6)), "target.sql"])
+    calls: list[tuple[str, str]] = []
+    real_fnmatchcase = config.fnmatchcase
+
+    def observed_fnmatchcase(name: str, candidate: str) -> bool:
+        calls.append((name, candidate))
+        return real_fnmatchcase(name, candidate)
+
+    monkeypatch.setattr(config, "fnmatchcase", observed_fnmatchcase)
+
+    assert not config.SqlSettings(migration_patterns=(pattern,)).matches_migration(
+        "/".join(path_parts)
+    )
+    assert len(calls) == len(path_parts)
+    assert {name for name, _ in calls} == set(path_parts)
+    assert {candidate for _, candidate in calls} == {"target.sql"}
+
+
+def test_sql_migration_pattern_matching_does_not_depend_on_recursion_depth() -> None:
+    pattern = "/".join([*("**" for _ in range(1_500)), "target.sql"])
+    settings = config.SqlSettings(migration_patterns=(pattern,))
+
+    assert settings.matches_migration("target.sql")
+    assert settings.matches_migration("nested/target.sql")
+    assert not settings.matches_migration("nested/other.sql")
+
+
+def test_omitted_sql_migration_patterns_default_to_empty(tmp_path: Path) -> None:
+    _write(tmp_path, ".minotaur.toml", _CONFIG)
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.sql.migration_patterns == ()
+    assert not resolved.sql.matches_migration("migrations/001.sql")
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        'migration_patterns = "migrations/**/*.sql"',
+        'migration_patterns = ["migrations/**/*.sql", 1]',
+        'migration_patterns = ["migrations\\\\**/*.sql"]',
+        'migration_patterns = ["/migrations/**/*.sql"]',
+        'migration_patterns = ["migrations//**/*.sql"]',
+        'migration_patterns = ["migrations/./**/*.sql"]',
+        'migration_patterns = ["migrations/../**/*.sql"]',
+        'migration_patterns = ["migrations/{unknown}.sql"]',
+    ],
+)
+def test_invalid_sql_migration_patterns_are_rejected_before_resolution(
+    tmp_path: Path, declaration: str
+) -> None:
+    _write(
+        tmp_path,
+        ".minotaur.toml",
+        f'[minotaur]\nschema_version = 1\ntargets = ["src"]\n[minotaur.sql]\n{declaration}\n',
+    )
+
+    with pytest.raises(ConfigError, match="migration_patterns"):
+        resolve_config(tmp_path)
 
 
 def test_unknown_sql_setting_is_rejected(tmp_path: Path) -> None:

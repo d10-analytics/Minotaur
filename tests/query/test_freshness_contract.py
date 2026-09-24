@@ -10,6 +10,7 @@ from minotaur import cli
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.loading import graph_digest, load_graph_file, stamp_path
 from minotaur.graph_model.provenance import CoordinateEncoding
+from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 from minotaur.query.freshness import drift, recorded_selection, recorded_selection_view
 
 
@@ -228,6 +229,47 @@ def test_pure_sql_refresh_replaces_graph_then_matching_sidecar(tmp_path: Path, c
     assert graph_after != graph_before
     assert stamp_path(output).read_text(encoding="ascii").strip() == graph_digest(graph_after)
     assert any(result["symbol"] == "T" for result in payload["results"])
+
+
+def test_configured_sql_migration_patterns_reach_owner_on_natural_refresh(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    root = tmp_path / "source"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        'migration_patterns = ["migrations/**/*.sql"]\n',
+    )
+    direct = _write(root, "migrations/001.sql", "CREATE TABLE base (id int)\n")
+    _write(root, "migrations/nested/002.sql", "CREATE TABLE nested (id int)\n")
+    observed = []
+    original = sql_interpreter.analyze_view_warnings
+
+    def observe(document, settings):
+        observed.append(settings)
+        return original(document, settings)
+
+    monkeypatch.setattr(sql_interpreter, "analyze_view_warnings", observe)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    observed.clear()
+    direct.write_text("CREATE TABLE base (id int, name varchar(10))\n", encoding="utf-8")
+
+    assert cli.main(["query", "definitions", "base", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["refreshed"] is True
+    assert observed
+    settings = observed[-1]
+    assert settings.matches_migration("migrations/001.sql")
+    assert settings.matches_migration("migrations/nested/002.sql")
+    assert not settings.__class__(migration_patterns=("migrations/*.sql",)).matches_migration(
+        "migrations/nested/002.sql"
+    )
+    assert not settings.__class__(migration_patterns=("*.sql",)).matches_migration(
+        "migrations/001.sql"
+    )
 
 
 def test_unsupported_extension_edit_is_not_detected(tmp_path: Path) -> None:

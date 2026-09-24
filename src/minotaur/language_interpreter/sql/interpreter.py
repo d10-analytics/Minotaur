@@ -31,7 +31,12 @@ from minotaur.graph_model.provenance import (
 )
 from minotaur.graph_model.relationship import Relationship
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
-from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.contract import (
+    AnalysisResult,
+    Diagnostic,
+    DiagnosticCode,
+    DiagnosticSeverity,
+)
 from minotaur.language_interpreter.emission import NodeEmitter, file_node
 from minotaur.language_interpreter.reading import RawSource, read_sources
 from minotaur.language_interpreter.source_text import LineIndex
@@ -115,6 +120,7 @@ def analyze_sql_files(
     if sql_settings is not None and settings is not None:
         raise ValueError("pass only one SQL settings value")
     sql_settings = settings if settings is not None else sql_settings
+    effective_settings = sql_settings if sql_settings is not None else SqlSettings()
     sources, diagnostics = read_sources(workspace, files)
     file_data = tuple(_make_file(source) for source in sources)
     nodes: list[Node] = [item.node for item in file_data]
@@ -155,6 +161,15 @@ def analyze_sql_files(
         by_key.setdefault(declaration.key, []).append(declaration)
     for _key, values in by_key.items():
         if len(values) > 1:
+            migration_count = sum(
+                effective_settings.matches_migration(value.location.path) for value in values
+            )
+            if migration_count == len(values):
+                category = "multi-migration"
+            elif migration_count == 0:
+                category = "multi-canonical"
+            else:
+                category = "canonical-and-migration"
             for value in values:
                 diagnostics.append(
                     Diagnostic(
@@ -162,6 +177,8 @@ def analyze_sql_files(
                         value.location.path,
                         "duplicate SQL declaration",
                         value.location,
+                        DiagnosticSeverity.WARNING,
+                        {NAMESPACE: {"category": category}},
                     )
                 )
 

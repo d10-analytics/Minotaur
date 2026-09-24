@@ -32,8 +32,10 @@ uses the standard-library ``tomllib`` and the conditional dependency installs
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from minotaur import git
@@ -49,8 +51,9 @@ _SCHEMA_VERSION = 1
 _DEFAULT_GRAPH_FILENAME = "minotaur-graph.json"
 _DEFAULT_SYSTEMS_DIR = "docs/systems"
 _KNOWN_FIELDS = frozenset({"schema_version", "root", "graph", "targets", "systems_dir", "sql"})
-_SQL_KNOWN_FIELDS = frozenset({"view_depth_threshold"})
+_SQL_KNOWN_FIELDS = frozenset({"view_depth_threshold", "migration_patterns"})
 _DEFAULT_VIEW_DEPTH_THRESHOLD = 3
+_DEFAULT_MIGRATION_PATTERNS: tuple[str, ...] = ()
 
 
 class ConfigError(ValueError):
@@ -66,6 +69,7 @@ class SqlSettings:
     """Immutable SQL analysis settings resolved for one invocation."""
 
     view_depth_threshold: int = _DEFAULT_VIEW_DEPTH_THRESHOLD
+    migration_patterns: tuple[str, ...] = _DEFAULT_MIGRATION_PATTERNS
 
     def __post_init__(self) -> None:
         if isinstance(self.view_depth_threshold, bool) or not isinstance(
@@ -74,6 +78,24 @@ class SqlSettings:
             raise ValueError("view_depth_threshold must be an integer")
         if self.view_depth_threshold <= 0:
             raise ValueError("view_depth_threshold must be positive")
+        if not isinstance(self.migration_patterns, (list, tuple)):
+            raise ValueError("migration_patterns must be a list of strings")
+        patterns = tuple(self.migration_patterns)
+        for pattern in patterns:
+            _validate_migration_pattern(pattern)
+        object.__setattr__(self, "migration_patterns", patterns)
+
+    def matches_migration(self, path: Path | str) -> bool:
+        """Return whether a root-relative POSIX path matches a migration glob.
+
+        Matching is performed component by component.  Ordinary wildcards stay
+        within one component, while a component consisting of ``**`` spans
+        zero or more complete path components.
+        """
+        path_parts = _path_components(path)
+        if path_parts is None:
+            return False
+        return any(_match_pattern(pattern, path_parts) for pattern in self.migration_patterns)
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,12 +373,82 @@ def _validate_sql_settings(raw: object, source: Path | str) -> SqlSettings:
         if name not in _SQL_KNOWN_FIELDS:
             raise ConfigError(f"unknown SQL config field: {name} (in {source})")
     threshold = raw.get("view_depth_threshold", _DEFAULT_VIEW_DEPTH_THRESHOLD)
-    try:
-        return SqlSettings(threshold)
-    except ValueError as error:
+    migration_patterns = raw.get("migration_patterns", [])
+    if not isinstance(migration_patterns, list) or any(
+        not isinstance(item, str) for item in migration_patterns
+    ):
         raise ConfigError(
-            f"invalid minotaur.sql.view_depth_threshold: {error} (in {source})"
-        ) from error
+            f"invalid minotaur.sql.migration_patterns: must be a list of strings (in {source})"
+        )
+    try:
+        return SqlSettings(threshold, tuple(migration_patterns))
+    except ValueError as error:
+        field = (
+            "migration_patterns" if "migration_patterns" in str(error) else "view_depth_threshold"
+        )
+        raise ConfigError(f"invalid minotaur.sql.{field}: {error} (in {source})") from error
+
+
+def _validate_migration_pattern(pattern: object) -> None:
+    """Validate one nonempty root-relative POSIX glob pattern."""
+    if not isinstance(pattern, str):
+        raise ValueError("migration_patterns must be a list of strings")
+    if not pattern:
+        raise ValueError("migration_patterns entries must not be empty")
+    if "\\" in pattern:
+        raise ValueError("migration_patterns must use POSIX '/' separators")
+    if pattern.startswith("/") or re.match(r"^[A-Za-z]:/", pattern):
+        raise ValueError("migration_patterns must be root-relative")
+    components = pattern.split("/")
+    if any(component in {"", ".", ".."} for component in components):
+        raise ValueError("migration_patterns cannot contain empty, '.', or '..' components")
+    if "{" in pattern or "}" in pattern:
+        raise ValueError("migration_patterns cannot contain replacement fields")
+    for component in components:
+        if component.count("[") != component.count("]"):
+            raise ValueError("migration_patterns contains an unterminated bracket expression")
+
+
+def _path_components(path: Path | str) -> tuple[str, ...] | None:
+    """Return validated root-relative POSIX components, or ``None``."""
+    value = path.as_posix() if isinstance(path, Path) else path
+    if not isinstance(value, str) or not value or "\\" in value or value.startswith("/"):
+        return None
+    components = tuple(value.split("/"))
+    if any(component in {"", ".", ".."} for component in components):
+        return None
+    return components
+
+
+def _match_pattern(pattern: str, path_parts: tuple[str, ...]) -> bool:
+    """Match one validated pattern against root-relative path components."""
+    pattern_parts = tuple(pattern.split("/"))
+    pending = [(0, 0)]
+    visited = {(0, 0)}
+
+    while pending:
+        pattern_index, path_index = pending.pop()
+        if pattern_index == len(pattern_parts):
+            if path_index == len(path_parts):
+                return True
+            continue
+
+        component = pattern_parts[pattern_index]
+        if component == "**":
+            next_states = [(pattern_index + 1, path_index)]
+            if path_index < len(path_parts):
+                next_states.append((pattern_index, path_index + 1))
+        elif path_index < len(path_parts) and fnmatchcase(path_parts[path_index], component):
+            next_states = [(pattern_index + 1, path_index + 1)]
+        else:
+            continue
+
+        for state in next_states:
+            if state not in visited:
+                visited.add(state)
+                pending.append(state)
+
+    return False
 
 
 def _validate_schema_version(section: Mapping[object, object], path: Path | str) -> None:

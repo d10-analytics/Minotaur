@@ -18,11 +18,12 @@ from test_comparison_history import (
     _write,
 )
 
-from minotaur import config, git
+from minotaur import cli, config, git
 from minotaur.cli import _produce_selection
 from minotaur.comparison import CurrentInputError, prepare_comparison
 from minotaur.comparison_snapshot import SnapshotMutationError
 from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 
 
 def test_prepare_comparison_publishes_both_snapshots_from_real_repository(
@@ -43,6 +44,52 @@ def test_prepare_comparison_publishes_both_snapshots_from_real_repository(
     assert not hasattr(prepared.current, "graph_bytes")
     with pytest.raises(FrozenInstanceError):
         prepared.current.selection = ("other.py",)  # type: ignore[misc]
+
+
+def test_prepare_comparison_preserves_each_captured_sql_pattern(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        'migration_patterns = ["migrations/**/*.sql"]\n',
+    )
+    _write(root, "migrations/001.sql", "CREATE TABLE base (id int)\n")
+    _write(root, "migrations/nested/002.sql", "CREATE TABLE nested (id int)\n")
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _commit(root, "sql baseline")
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        'migration_patterns = ["migrations/*.sql"]\n',
+    )
+
+    observed = []
+    original = sql_interpreter.analyze_view_warnings
+
+    def observe(document, settings):
+        observed.append(settings)
+        return original(document, settings)
+
+    monkeypatch.setattr(sql_interpreter, "analyze_view_warnings", observe)
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    assert prepared.new_snapshot.document.nodes
+    assert [settings.migration_patterns for settings in observed] == [
+        ("migrations/**/*.sql",),
+        ("migrations/*.sql",),
+    ]
+    recursive, direct_only = observed
+    assert recursive.matches_migration("migrations/001.sql")
+    assert recursive.matches_migration("migrations/nested/002.sql")
+    assert direct_only.matches_migration("migrations/001.sql")
+    assert not direct_only.matches_migration("migrations/nested/002.sql")
 
 
 def test_prepare_comparison_rejects_lexical_config_traversal_before_producer(

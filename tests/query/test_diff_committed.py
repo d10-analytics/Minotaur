@@ -12,6 +12,7 @@ import pytest
 from minotaur import cli
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import stamp_path
+from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 
 
 def _git(root: Path, *args: str) -> None:
@@ -435,3 +436,46 @@ def test_committed_mode_renders_sql_warning_and_keeps_structural_exit(
     assert payload["removed"] == []
     assert payload["relationships_added"] == []
     assert payload["relationships_removed"] == []
+
+
+def test_committed_mode_preserves_configured_sql_migration_patterns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path)
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        'migration_patterns = ["migrations/**/*.sql"]\n',
+        encoding="utf-8",
+    )
+    direct = root / "migrations" / "001.sql"
+    direct.parent.mkdir(parents=True)
+    direct.write_text("CREATE TABLE base (id int)\n", encoding="utf-8")
+    nested = root / "migrations" / "nested" / "002.sql"
+    nested.parent.mkdir()
+    nested.write_text("CREATE TABLE nested (id int)\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _commit_all(root, "baseline")
+    direct.write_text("CREATE TABLE base (id int)\nCREATE TABLE added (id int)\n", encoding="utf-8")
+
+    observed = []
+    original = sql_interpreter.analyze_view_warnings
+
+    def observe(document, settings):
+        observed.append(settings)
+        return original(document, settings)
+
+    monkeypatch.setattr(sql_interpreter, "analyze_view_warnings", observe)
+    assert cli.main(["query", "diff", "--json"]) == 1
+    assert observed
+    settings = observed[-1]
+    assert settings.migration_patterns == ("migrations/**/*.sql",)
+    assert settings.matches_migration("migrations/001.sql")
+    assert settings.matches_migration("migrations/nested/002.sql")
+    assert not settings.__class__(migration_patterns=("migrations/*.sql",)).matches_migration(
+        "migrations/nested/002.sql"
+    )
+    assert not settings.__class__(migration_patterns=("*.sql",)).matches_migration(
+        "migrations/001.sql"
+    )
