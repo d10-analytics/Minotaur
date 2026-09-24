@@ -423,22 +423,32 @@ def _path_components(path: Path | str) -> tuple[str, ...] | None:
 def _match_pattern(pattern: str, path_parts: tuple[str, ...]) -> bool:
     """Match one validated pattern against root-relative path components."""
     pattern_parts = tuple(pattern.split("/"))
+    pending = [(0, 0)]
+    visited = {(0, 0)}
 
-    def match(pattern_index: int, path_index: int) -> bool:
+    while pending:
+        pattern_index, path_index = pending.pop()
         if pattern_index == len(pattern_parts):
-            return path_index == len(path_parts)
+            if path_index == len(path_parts):
+                return True
+            continue
+
         component = pattern_parts[pattern_index]
         if component == "**":
-            return match(pattern_index + 1, path_index) or (
-                path_index < len(path_parts) and match(pattern_index, path_index + 1)
-            )
-        return (
-            path_index < len(path_parts)
-            and fnmatchcase(path_parts[path_index], component)
-            and match(pattern_index + 1, path_index + 1)
-        )
+            next_states = [(pattern_index + 1, path_index)]
+            if path_index < len(path_parts):
+                next_states.append((pattern_index, path_index + 1))
+        elif path_index < len(path_parts) and fnmatchcase(path_parts[path_index], component):
+            next_states = [(pattern_index + 1, path_index + 1)]
+        else:
+            continue
 
-    return match(0, 0)
+        for state in next_states:
+            if state not in visited:
+                visited.add(state)
+                pending.append(state)
+
+    return False
 
 
 def _validate_schema_version(section: Mapping[object, object], path: Path | str) -> None:
