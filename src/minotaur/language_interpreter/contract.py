@@ -81,6 +81,11 @@ class Diagnostic:
     def is_warning(self) -> bool:
         return self.severity is DiagnosticSeverity.WARNING
 
+    @property
+    def metadata(self) -> Mapping[str, Mapping[str, object]] | None:
+        """Alias for namespaced structured diagnostic extensions."""
+        return self.extensions
+
 
 @dataclass(frozen=True, slots=True)
 class AnalysisResult:
