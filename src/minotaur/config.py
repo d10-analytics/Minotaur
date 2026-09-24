@@ -57,14 +57,6 @@ _SQL_KNOWN_FIELDS = frozenset(
 )
 _DEFAULT_VIEW_DEPTH_THRESHOLD = 3
 _DEFAULT_MIGRATION_PATTERNS: tuple[str, ...] = ()
-_FOREIGN_KEY_TARGET_FILES_ASSIGNMENT = re.compile(
-    r"""(?mx)
-    ^[ \t]*
-    (?:(?:minotaur[ \t]*\.[ \t]*)?(?:sql[ \t]*\.[ \t]*)?)
-    (?:foreign_key_target_files|"foreign_key_target_files"|
-    'foreign_key_target_files')[ \t]*=[ \t]*\{
-    """
-)
 
 
 class ConfigError(ValueError):
@@ -437,8 +429,10 @@ def _validate_foreign_key_target_file_key_quotes(
     """
     if not isinstance(raw, _TomlDocument):
         return
-    for match in _FOREIGN_KEY_TARGET_FILES_ASSIGNMENT.finditer(raw.text):
-        contents = _inline_table_contents(raw.text, match.end() - 1)
+    for name, value_start in _toml_code_assignments(raw.text):
+        if name != "foreign_key_target_files" or raw.text[value_start] != "{":
+            continue
+        contents = _inline_table_contents(raw.text, value_start)
         if contents is None:
             continue
         for entry in _split_inline_table_entries(contents):
@@ -447,6 +441,107 @@ def _validate_foreign_key_target_file_key_quotes(
                     "invalid minotaur.sql.foreign_key_target_files: "
                     f"target keys must be quoted (in {source})"
                 )
+
+
+def _toml_code_assignments(text: str) -> tuple[tuple[str, int], ...]:
+    """Return TOML assignments whose keys occur outside comments and strings."""
+    assignments: list[tuple[str, int]] = []
+    multiline_delimiter: str | None = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        if multiline_delimiter is not None:
+            if _find_multiline_delimiter(content, multiline_delimiter, 0) is not None:
+                multiline_delimiter = None
+            offset += len(line)
+            continue
+        assignment = _toml_line_assignment(content)
+        if assignment is not None:
+            name, value_start = assignment
+            assignments.append((name, offset + value_start))
+            delimiter = _opening_multiline_delimiter(content, value_start)
+            if delimiter is not None and _find_multiline_delimiter(
+                content, delimiter, value_start + len(delimiter)
+            ) is None:
+                multiline_delimiter = delimiter
+        offset += len(line)
+    return tuple(assignments)
+
+
+def _toml_line_assignment(line: str) -> tuple[str, int] | None:
+    """Recognize one ordinary TOML key/value line without interpreting values."""
+    index = _skip_toml_whitespace(line, 0)
+    if index == len(line) or line[index] == "#":
+        return None
+    name, index = _toml_key_segment(line, index)
+    if name is None:
+        return None
+    while True:
+        index = _skip_toml_whitespace(line, index)
+        if index == len(line) or line[index] != ".":
+            break
+        name, index = _toml_key_segment(line, _skip_toml_whitespace(line, index + 1))
+        if name is None:
+            return None
+    index = _skip_toml_whitespace(line, index)
+    if index == len(line) or line[index] != "=":
+        return None
+    return name, _skip_toml_whitespace(line, index + 1)
+
+
+def _toml_key_segment(line: str, index: int) -> tuple[str | None, int]:
+    """Read one bare or quoted TOML key segment from a code position."""
+    if index == len(line):
+        return None, index
+    quote = line[index]
+    if quote in {"'", '"'}:
+        end = _find_toml_quote(line, quote, index + 1)
+        if end is None:
+            return None, index
+        return line[index + 1 : end], end + 1
+    start = index
+    while index < len(line) and (line[index].isalnum() or line[index] in {"_", "-"}):
+        index += 1
+    return (line[start:index] or None), index
+
+
+def _skip_toml_whitespace(value: str, index: int) -> int:
+    while index < len(value) and value[index] in {" ", "\t"}:
+        index += 1
+    return index
+
+
+def _opening_multiline_delimiter(line: str, value_start: int) -> str | None:
+    for delimiter in ('"""', "'''"):
+        if line.startswith(delimiter, value_start):
+            return delimiter
+    return None
+
+
+def _find_multiline_delimiter(value: str, delimiter: str, start: int) -> int | None:
+    index = value.find(delimiter, start)
+    while index != -1:
+        if delimiter == "'''" or _backslash_count(value, index) % 2 == 0:
+            return index
+        index = value.find(delimiter, index + 1)
+    return None
+
+
+def _find_toml_quote(value: str, quote: str, start: int) -> int | None:
+    index = start
+    while index < len(value):
+        if value[index] == quote and (quote == "'" or _backslash_count(value, index) % 2 == 0):
+            return index
+        index += 1
+    return None
+
+
+def _backslash_count(value: str, index: int) -> int:
+    count = 0
+    while index > 0 and value[index - 1] == "\\":
+        count += 1
+        index -= 1
+    return count
 
 
 def _inline_table_contents(text: str, opening_brace: int) -> str | None:
