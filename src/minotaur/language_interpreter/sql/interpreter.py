@@ -478,9 +478,7 @@ def _resolve_foreign_key(
             },
         )
     )
-    _emit_coalesced_fk_unresolved(
-        owner, text, location, nodes, relationships, unresolved_fk_nodes
-    )
+    _emit_coalesced_fk_unresolved(owner, text, location, nodes, relationships, unresolved_fk_nodes)
     _ = relation
 
 

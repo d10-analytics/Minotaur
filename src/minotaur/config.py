@@ -57,7 +57,6 @@ _SQL_KNOWN_FIELDS = frozenset(
 )
 _DEFAULT_VIEW_DEPTH_THRESHOLD = 3
 _DEFAULT_MIGRATION_PATTERNS: tuple[str, ...] = ()
-_DEFAULT_FOREIGN_KEY_TARGET_FILES: Mapping[str, str] = MappingProxyType({})
 
 
 class ConfigError(ValueError):
@@ -74,7 +73,7 @@ class SqlSettings:
 
     view_depth_threshold: int = _DEFAULT_VIEW_DEPTH_THRESHOLD
     migration_patterns: tuple[str, ...] = _DEFAULT_MIGRATION_PATTERNS
-    foreign_key_target_files: Mapping[str, str] = _DEFAULT_FOREIGN_KEY_TARGET_FILES
+    foreign_key_target_files: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.view_depth_threshold, bool) or not isinstance(
@@ -393,8 +392,7 @@ def _validate_sql_settings(raw: object, source: Path | str) -> SqlSettings:
     foreign_key_target_files = raw.get("foreign_key_target_files", {})
     if not isinstance(foreign_key_target_files, Mapping):
         raise ConfigError(
-            "invalid minotaur.sql.foreign_key_target_files: must be a mapping (in "
-            f"{source})"
+            f"invalid minotaur.sql.foreign_key_target_files: must be a mapping (in {source})"
         )
     try:
         return SqlSettings(threshold, tuple(migration_patterns), foreign_key_target_files)
