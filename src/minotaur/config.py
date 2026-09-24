@@ -61,7 +61,8 @@ _FOREIGN_KEY_TARGET_FILES_ASSIGNMENT = re.compile(
     r"""(?mx)
     ^[ \t]*
     (?:(?:minotaur[ \t]*\.[ \t]*)?(?:sql[ \t]*\.[ \t]*)?)
-    foreign_key_target_files[ \t]*=[ \t]*\{
+    (?:foreign_key_target_files|"foreign_key_target_files"|
+    'foreign_key_target_files')[ \t]*=[ \t]*\{
     """
 )
 
