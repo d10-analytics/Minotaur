@@ -294,8 +294,8 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
     assert coverage["graph_files"] == {"scope": "final_graph_file_nodes", "count": 63}
     assert coverage["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 62,
-        "represented": 62,
+        "total": 63,
+        "represented": 63,
         "absent": 0,
     }
     assert coverage["unassigned_files"] == {
