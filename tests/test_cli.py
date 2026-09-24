@@ -181,7 +181,12 @@ def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "source"
-    valid = _write(root, "schema.SQL", "CREATE TABLE T (id int)\n")
+    valid = _write(
+        root,
+        "schema.SQL",
+        "CREATE TABLE Parent (id int)\nGO\n"
+        "CREATE TABLE Child (parent_id int REFERENCES Parent(id))\n",
+    )
     output = tmp_path / "sql.json"
 
     completed = _run(root, output, valid)
@@ -191,6 +196,16 @@ def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
     assert graph.generated_by is not None
     assert graph.generated_by.name == "minotaur-sql"
     assert {node.path for node in graph.nodes if node.path is not None} == {"schema.SQL"}
+    assert graph.extensions is not None
+    assert graph.extensions["minotaur"]["selection"] == ["schema.SQL"]
+    components = graph.extensions["minotaur-sql"]["fk_components"]
+    assert len(components) == 1
+    assert components[0]["size"] == 2
+    assert {
+        node.extensions["minotaur-sql"]["fk_component"]
+        for node in graph.nodes
+        if node.symbol_kind == "sql:table"
+    } == {0}
 
     _write(root, "broken.sql", "CREATE TABLE Broken (id int\n")
     partial = _run(root, tmp_path / "partial.json", root)
@@ -203,7 +218,7 @@ def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
         "schema.SQL",
     }
     assert any(
-        node.label == "T" and node.symbol_kind == "sql:table" for node in partial_graph.nodes
+        node.label == "Parent" and node.symbol_kind == "sql:table" for node in partial_graph.nodes
     )
 
 

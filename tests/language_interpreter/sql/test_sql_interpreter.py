@@ -38,6 +38,18 @@ def _edges(result, kind: str):
     }
 
 
+def _fk_components(result):
+    return result.document.extensions["minotaur-sql"]["fk_components"]
+
+
+def _fk_component_ids(result):
+    return {
+        node.label: node.extensions["minotaur-sql"]["fk_component"]
+        for node in result.document.nodes
+        if node.symbol_kind == "sql:table"
+    }
+
+
 def test_runtime_dependency_is_exact_and_parser_is_real() -> None:
     assert sqlglot.__version__ == "30.18.0"
 
@@ -61,6 +73,69 @@ def test_declarations_fks_reads_and_raw_digest_preserve_source_coordinates(tmp_p
     assert file_node.extensions == {
         "minotaur-sql": {"content_sha256": hashlib.sha256(content.encode()).hexdigest()}
     }
+
+
+def test_fk_components_partition_tables_and_exclude_other_edges(tmp_path: Path) -> None:
+    result = _analyze(
+        tmp_path,
+        **{
+            "schema.sql": (
+                "CREATE SCHEMA S\nGO\n"
+                "CREATE TABLE S.Root (id int)\nGO\n"
+                "CREATE TABLE S.Middle (root_id int REFERENCES S.Root(id))\nGO\n"
+                "CREATE TABLE S.Leaf (middle_id int REFERENCES S.Middle(id))\nGO\n"
+                "CREATE TABLE S.Solo (id int)\nGO\n"
+                "CREATE VIEW S.V AS SELECT * FROM S.Leaf\nGO\n"
+                "ALTER TABLE S.Middle ADD CONSTRAINT missing_fk FOREIGN KEY (id) "
+                "REFERENCES S.Missing(id)"
+            )
+        },
+    )
+
+    assert not result.diagnostics
+    components = _fk_components(result)
+    assert all(set(component) == {"id", "size", "members"} for component in components)
+    assert sorted(component["size"] for component in components) == [1, 3]
+    labels = {node.id: node.label for node in result.document.nodes}
+    chain = next(component for component in components if component["size"] == 3)
+    assert {labels[node_id] for node_id in chain["members"]} == {
+        "S.Root",
+        "S.Middle",
+        "S.Leaf",
+    }
+    assert _fk_component_ids(result)["S.Solo"] != _fk_component_ids(result)["S.Root"]
+    assert _edges(result, "sql:reads-from") == {("S.V", "S.Leaf")}
+    assert "S.Missing" in {
+        node.label
+        for node in result.document.nodes
+        if node.node_class.value == "unresolved-reference"
+    }
+    for node in result.document.nodes:
+        if node.symbol_kind != "sql:table":
+            assert "fk_component" not in (node.extensions or {}).get("minotaur-sql", {})
+
+
+def test_fk_component_order_is_stable_for_equal_groups_and_selection_order(tmp_path: Path) -> None:
+    files = {
+        "a.sql": (
+            "CREATE TABLE A1 (id int)\nGO\n"
+            "CREATE TABLE A2 (parent_id int REFERENCES A1(id))\nGO\n"
+            "CREATE TABLE SoloA (id int)"
+        ),
+        "b.sql": (
+            "CREATE TABLE B1 (id int)\nGO\n"
+            "CREATE TABLE B2 (parent_id int REFERENCES B1(id))\nGO\n"
+            "CREATE TABLE SoloB (id int)"
+        ),
+    }
+    forward = _analyze(tmp_path, **files)
+    reverse = _analyze(tmp_path, **{"b.sql": files["b.sql"], "a.sql": files["a.sql"]})
+
+    assert _fk_components(forward) == _fk_components(reverse)
+    assert _fk_component_ids(forward) == _fk_component_ids(reverse)
+    components = _fk_components(forward)
+    assert [component["id"] for component in components] == list(range(len(components)))
+    assert components == sorted(components, key=lambda item: (-item["size"], item["members"]))
 
 
 def test_or_alter_and_or_replace_views_have_the_same_ast_authorized_facts(tmp_path: Path) -> None:
@@ -946,6 +1021,10 @@ def test_standalone_fk_parse_failure_discards_batch_and_later_batch_recovers(
         ("catalog.sql", 7, sql.splitlines()[7].index("Parent"))
     }
     assert not _sql_edges(result, "references")
+    components = _fk_components(result)
+    assert len(components) == 1
+    assert components[0]["size"] == 2
+    assert _fk_component_ids(result)["Parent"] == _fk_component_ids(result)["Child"]
 
 
 def test_standalone_fk_rejects_duplicate_replication_modifier_atomically(tmp_path: Path) -> None:
