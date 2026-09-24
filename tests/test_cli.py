@@ -222,6 +222,37 @@ def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
     )
 
 
+def test_sql_warning_only_analysis_succeeds_and_preserves_shared_metadata(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    source = _write(
+        root,
+        "schema.sql",
+        "CREATE TABLE parent (id int)\nGO\n"
+        "CREATE TABLE child (parent_id int REFERENCES parent(id))\nGO\n"
+        "CREATE VIEW middle AS SELECT * FROM child\nGO\n"
+        "CREATE VIEW upper AS SELECT * FROM middle\nGO\n"
+        "CREATE VIEW top_view AS SELECT * FROM upper\nGO\n"
+        "CREATE VIEW highest AS SELECT * FROM top_view\n",
+    )
+    output = tmp_path / "sql.json"
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(source)])
+
+    assert status == 0
+    captured = capsys.readouterr()
+    assert "severity=warning" in captured.err
+    graph = load_graph_file(output).document
+    assert graph.extensions["minotaur"]["selection"] == ("schema.sql",)
+    assert graph.extensions["minotaur-sql"]["fk_components"]
+    assert all(
+        "fk_component" in node.extensions["minotaur-sql"]
+        for node in graph.nodes
+        if node.symbol_kind == "sql:table"
+    )
+
+
 @pytest.mark.parametrize(
     "suffixes",
     [

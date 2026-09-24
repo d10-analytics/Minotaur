@@ -1037,7 +1037,8 @@ def test_system_cli_refresh_composes_zero_and_positive_diagnostics(
     assert payload["refreshed"] is True
     assert payload["coverage"]["source_diagnostics"] == {
         "status": "observed_on_refresh",
-        "count": 0,
+        "warnings": 0,
+        "errors": 0,
     }
 
     _write(root, "broken.py", "def broken(\n")
@@ -1047,7 +1048,8 @@ def test_system_cli_refresh_composes_zero_and_positive_diagnostics(
     payload = json.loads(out)
     assert payload["refreshed"] is True
     assert payload["coverage"]["source_diagnostics"]["status"] == "observed_on_refresh"
-    assert payload["coverage"]["source_diagnostics"]["count"] > 0
+    assert payload["coverage"]["source_diagnostics"]["warnings"] == 0
+    assert payload["coverage"]["source_diagnostics"]["errors"] > 0
 
 
 def test_system_cli_no_refresh_keeps_saved_coverage_and_unavailable_diagnostics(
@@ -1243,7 +1245,8 @@ def test_reporting_snapshot_direct_query_variants_and_invocation_errors() -> Non
     assert composed.invocation.stale == ("a.py", "z.py")
     assert composed.to_dict()["coverage"]["source_diagnostics"] == {
         "status": "observed_on_refresh",
-        "count": 0,
+        "warnings": 0,
+        "errors": 0,
     }
 
     observed = dataclasses.replace(
@@ -1897,7 +1900,8 @@ def test_reporting_snapshot_all_systems_preserves_file_universes_and_detaches_js
     assert composed.to_dict()["query"] == "systems"
     assert composed.to_dict()["coverage"]["source_diagnostics"] == {
         "status": "observed_on_refresh",
-        "count": 0,
+        "warnings": 0,
+        "errors": 0,
     }
     assert "connections" in composed.to_dict()
 

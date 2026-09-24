@@ -325,7 +325,7 @@ def test_query_reference_documents_system_query_shared_option_behavior() -> None
 def test_query_reference_documents_system_coverage_and_exit_semantics() -> None:
     text = _collapsed(QUERY_REFERENCE)
     assert "Coverage distinguishes the saved selection, final graph file count" in text
-    assert "an observed refresh with no diagnostics is recorded as count `0`" in text
+    assert "an observed refresh reports separate `warnings` and `errors` counts" in text
     assert "`relationships` text line containing the same deterministic evidence array" in text
     assert "For system queries, `coverage` is the composed coverage of the final graph" in text
 

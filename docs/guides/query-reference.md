@@ -356,8 +356,10 @@ Coverage distinguishes the saved selection, final graph file count, declared
 files represented or absent in that graph, recorded unresolved references
 within the selected system's declared files, and source diagnostics. Selection
 and diagnostic history use tagged `recorded`/`unavailable` values; an observed
-refresh with no diagnostics is recorded as count `0`. A clean or `--no-refresh`
-answer keeps diagnostic history unavailable. `--details` adds one
+refresh reports separate `warnings` and `errors` counts, including zero for
+each. A clean or `--no-refresh` answer keeps diagnostic history unavailable.
+Warning-only refreshes keep exit status `0`; any error keeps the existing
+nonzero source-analysis status. `--details` adds one
 `relationships` text line containing the same deterministic evidence array
 that appears in JSON.
 

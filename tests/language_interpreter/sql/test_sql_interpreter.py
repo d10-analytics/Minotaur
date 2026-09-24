@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 import sqlglot
 
-from minotaur.language_interpreter.contract import DiagnosticCode
+from minotaur.config import SqlSettings
+from minotaur.language_interpreter.contract import DiagnosticCode, DiagnosticSeverity
 from minotaur.language_interpreter.sql import analyze_sql_files
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 from minotaur.language_interpreter.workspace import Workspace
@@ -48,6 +49,88 @@ def _fk_component_ids(result):
         for node in result.document.nodes
         if node.symbol_kind == "sql:table"
     }
+
+
+def test_view_cycle_warnings_are_canonical_and_order_independent(tmp_path: Path) -> None:
+    first = _analyze(
+        tmp_path / "first",
+        **{
+            "b.sql": "CREATE VIEW b AS SELECT * FROM a\n",
+            "a.sql": "CREATE VIEW a AS SELECT * FROM b\n",
+        },
+    )
+    second = _analyze(
+        tmp_path / "second",
+        **{
+            "a.sql": "CREATE VIEW a AS SELECT * FROM b\n",
+            "b.sql": "CREATE VIEW b AS SELECT * FROM a\n",
+        },
+    )
+    expected = [
+        (item.code, item.severity, item.extensions, item.message)
+        for item in first.diagnostics
+    ]
+    assert expected == [
+        (item.code, item.severity, item.extensions, item.message)
+        for item in second.diagnostics
+    ]
+    assert len(first.warnings) == 1
+    assert first.warnings[0].code is DiagnosticCode.CIRCULAR_DEPENDENCY
+    assert first.warnings[0].severity is DiagnosticSeverity.WARNING
+    assert first.warnings[0].extensions["minotaur-sql"]["path"] == ("a", "b", "a")
+
+
+def test_view_depth_warning_keeps_fk_and_path_metadata(tmp_path: Path) -> None:
+    result = _analyze(
+        tmp_path,
+        **{
+            "schema.sql": (
+                "CREATE TABLE parent (id int)\nGO\n"
+                "CREATE TABLE child (parent_id int REFERENCES parent(id))\nGO\n"
+                "CREATE VIEW middle AS SELECT * FROM child\nGO\n"
+                "CREATE VIEW top_view AS SELECT * FROM middle\n"
+            )
+        },
+    )
+    result = analyze_sql_files(
+        Workspace(tmp_path), (tmp_path / "schema.sql",), SqlSettings(view_depth_threshold=1)
+    )
+    warning = next(
+        item for item in result.warnings if item.code is DiagnosticCode.VIEW_DEPTH_WARNING
+    )
+    assert warning.extensions["minotaur-sql"] == {
+        "depth": 2,
+        "path": ("top_view", "middle", "child"),
+    }
+    assert result.document.extensions["minotaur-sql"]["fk_components"]
+    assert all(
+        "fk_component" in node.extensions["minotaur-sql"]
+        for node in result.document.nodes
+        if node.symbol_kind == "sql:table"
+    )
+
+
+def test_unresolved_view_terminal_is_one_final_generic_hop(tmp_path: Path) -> None:
+    result = _analyze(
+        tmp_path,
+        **{
+            "views.sql": (
+                "CREATE VIEW root_view AS SELECT * FROM leaf_view\nGO\n"
+                "CREATE VIEW leaf_view AS SELECT * FROM missing_table\n"
+            )
+        },
+    )
+    result = analyze_sql_files(
+        Workspace(tmp_path), (tmp_path / "views.sql",), SqlSettings(view_depth_threshold=1)
+    )
+    warning = next(
+        item for item in result.warnings if item.code is DiagnosticCode.VIEW_DEPTH_WARNING
+    )
+    assert warning.extensions["minotaur-sql"]["path"] == (
+        "root_view",
+        "leaf_view",
+        "missing_table",
+    )
 
 
 def test_runtime_dependency_is_exact_and_parser_is_real() -> None:

@@ -42,6 +42,20 @@ file, batch, or statement therefore does not discard eligible facts from its
 sibling scope. Diagnostics distinguish source-read, parse, unsupported,
 duplicate-declaration, and ambiguous-reference conditions.
 
+Existing source diagnostics are errors by default. Completed SQL graphs also
+emit warning diagnostics for view cycles (`circular-dependency`) and overlong
+noncyclic view paths (`view-depth-warning`); warnings include namespaced
+`minotaur-sql` metadata with the canonical path and, for depth findings, the
+measured depth. Warnings are printed with severity and do not fail `analyze`;
+parse or other error diagnostics still produce the existing nonzero status
+while the partial graph is written.
+
+The optional SQL setting `view_depth_threshold` in `[minotaur.sql]` controls the maximum
+view path depth before a `view-depth-warning` is emitted. The default is `3`.
+View cycles are reported once per elementary cycle after all references have
+resolved. Procedure and function reads, ordinary diamonds, and unrelated
+generic references do not create view warnings.
+
 Standalone foreign-key additions do not include conditional statements,
 unnamed constraints, temporary or three-part table names, or ALTER statements
 that add `PRIMARY KEY`, `UNIQUE`, or `CHECK` constraints, drop constraints,

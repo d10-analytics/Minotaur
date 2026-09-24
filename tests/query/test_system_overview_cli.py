@@ -235,7 +235,8 @@ def test_systems_refresh_and_no_refresh_report_distinct_diagnostics(
     assert "minotaur: stale: orders/mod.py" in err
     assert json.loads(out)["coverage"]["source_diagnostics"] == {
         "status": "observed_on_refresh",
-        "count": 0,
+        "warnings": 0,
+        "errors": 0,
     }
 
     graph.write_bytes(original_graph)
@@ -261,7 +262,8 @@ def test_systems_refresh_reports_source_diagnostics_in_overview_json(
     assert payload["refreshed"] is True
     assert payload["stale"] == ["orders/mod.py"]
     assert payload["coverage"]["source_diagnostics"]["status"] == "observed_on_refresh"
-    assert payload["coverage"]["source_diagnostics"]["count"] > 0
+    assert payload["coverage"]["source_diagnostics"]["warnings"] == 0
+    assert payload["coverage"]["source_diagnostics"]["errors"] > 0
     assert "minotaur: refreshing graph" in err
     assert "minotaur: stale: orders/mod.py" in err
 
