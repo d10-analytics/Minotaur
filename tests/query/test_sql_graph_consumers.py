@@ -153,7 +153,16 @@ CREATE VIEW S.Downstream AS SELECT * FROM S.Reader
         ImpactRecord(depth=1, symbol="S.Reader", kind="sql:view"),
         ImpactRecord(depth=2, symbol="S.Downstream", kind="sql:view", boundary=True),
     )
-    assert unreferenced(index, tmp_path, ("catalog.sql",)) == ()
+    assert [
+        (record.symbol, record.kind) for record in unreferenced(index, tmp_path, ("catalog.sql",))
+    ] == [
+        ("S.Child", "sql:table"),
+        ("S.Reader", "sql:view"),
+        ("WrongKind", "sql:view"),
+        ("ChildRef", "sql:table"),
+        ("UnrelatedRef", "sql:table"),
+        ("MissingReader", "sql:view"),
+    ]
 
     unresolved = callers(index, "wrongkind")
     assert len(unresolved) == 1
