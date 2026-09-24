@@ -17,6 +17,7 @@ import pytest
 from minotaur import cli, config, git
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import load_graph_file, stamp_path
+from minotaur.language_interpreter import registry
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 
 
@@ -405,22 +406,51 @@ def test_invalid_sql_migration_pattern_writes_no_output_before_analysis(
     assert not stamp_path(root / "graph.json").exists()
 
 
-def test_sql_settings_do_not_change_python_registration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("source_name", "source", "producer_name"),
+    [
+        ("app.py", "def app():\n    return 1\n", "minotaur-python"),
+        ("app.js", "export const app = () => 1;\n", "minotaur-javascript"),
+    ],
+)
+def test_sql_settings_do_not_change_sibling_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_name: str,
+    source: str,
+    producer_name: str,
 ) -> None:
     root = tmp_path / "configured"
     _write(
         root,
         ".minotaur.toml",
         '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
-        'targets = ["app.py"]\n[minotaur.sql]\n'
+        f'targets = ["{source_name}"]\n[minotaur.sql]\n'
         'migration_patterns = ["migrations/**/*.sql"]\n',
     )
-    _write(root, "app.py", "def app():\n    return 1\n")
+    _write(root, source_name, source)
+    calls: list[tuple[object, ...]] = []
+    original = (
+        registry.analyze_python_files
+        if source_name.endswith(".py")
+        else registry.analyze_javascript_files
+    )
+
+    def observe(*args: object) -> object:
+        calls.append(args)
+        return original(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        registry,
+        "analyze_python_files" if source_name.endswith(".py") else "analyze_javascript_files",
+        observe,
+    )
     monkeypatch.chdir(root)
 
     assert cli.main(["analyze"]) == 0
-    assert load_graph_file(root / "graph.json").document.generated_by.name == "minotaur-python"
+    assert load_graph_file(root / "graph.json").document.generated_by.name == producer_name
+    assert len(calls) == 1
+    assert len(calls[0]) == 2
 
 
 @pytest.mark.parametrize(
