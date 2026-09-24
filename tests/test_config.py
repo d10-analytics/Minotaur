@@ -277,16 +277,21 @@ def test_sql_foreign_key_target_files_are_normalized_and_immutable(tmp_path: Pat
         tmp_path,
         ".minotaur.toml",
         '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
-        '[minotaur.sql]\nforeign_key_target_files = { "DBO.Parent" = "schema/parent.sql" }\n',
+        '[minotaur.sql]\nforeign_key_target_files = { "Parent" = "schema/parent.sql", '
+        '"DBO.Child" = "schema/child.sql" }\n',
     )
 
     resolved = resolve_config(tmp_path)
 
-    assert resolved.sql.foreign_key_target_files == {"dbo.parent": "schema/parent.sql"}
-    assert resolved.sql.foreign_key_target_files["dbo.parent"] == "schema/parent.sql"
+    assert resolved.sql.foreign_key_target_files == {
+        "parent": "schema/parent.sql",
+        "dbo.child": "schema/child.sql",
+    }
+    assert resolved.sql.foreign_key_target_files["parent"] == "schema/parent.sql"
+    assert resolved.sql.foreign_key_target_files["dbo.child"] == "schema/child.sql"
     with pytest.raises(TypeError):
-        resolved.sql.foreign_key_target_files["dbo.parent"] = "other.sql"  # type: ignore[index]
-    assert resolved.sql.foreign_key_target_files["dbo.parent"] == "schema/parent.sql"
+        resolved.sql.foreign_key_target_files["parent"] = "other.sql"  # type: ignore[index]
+    assert resolved.sql.foreign_key_target_files["parent"] == "schema/parent.sql"
     assert config.SqlSettings().foreign_key_target_files == {}
 
 
@@ -301,6 +306,7 @@ def test_sql_foreign_key_target_files_are_normalized_and_immutable(tmp_path: Pat
         'foreign_key_target_files = { "dbo.Parent" = "schema/../parent.sql" }',
         'foreign_key_target_files = { "dbo.Parent" = "schema/parent.txt" }',
         'foreign_key_target_files = { "a.b.c" = "schema/parent.sql" }',
+        'foreign_key_target_files = { Parent = "schema/parent.sql" }',
         'foreign_key_target_files = { "dbo.Parent" = "schema/parent.sql", '
         '"DBO.parent" = "other.sql" }',
     ],

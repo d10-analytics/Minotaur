@@ -466,6 +466,26 @@ def test_invalid_configured_sql_foreign_key_mapping_writes_no_output(
     assert not stamp_path(root / "graph.json").exists()
 
 
+def test_bare_sql_foreign_key_target_mapping_key_exits_two_without_output(tmp_path: Path) -> None:
+    """A bare target key is rejected before configured analysis can write output."""
+    root = _config_repo(tmp_path)
+    _write(root, "schema.sql", "CREATE TABLE Parent (id int)\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG
+        + 'root = "."\ngraph = "graph.json"\ntargets = ["schema.sql"]\n[minotaur.sql]\n'
+        'foreign_key_target_files = { Parent = "schema.sql" }\n',
+    )
+
+    completed = _run_in(root, "analyze")
+
+    assert completed.returncode == 2
+    assert "foreign_key_target_files" in completed.stderr
+    assert "quoted" in completed.stderr
+    assert not (root / "graph.json").exists()
+    assert not stamp_path(root / "graph.json").exists()
+
+
 def test_sql_orphan_diagnostic_renderer_preserves_payload_order() -> None:
     diagnostic = Diagnostic(
         DiagnosticCode.ORPHANED_FOREIGN_KEY,
