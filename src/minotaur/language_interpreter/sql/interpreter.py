@@ -108,8 +108,13 @@ def analyze_sql_files(
     workspace: Workspace,
     files: tuple[Path, ...],
     sql_settings: SqlSettings | None = None,
+    *,
+    settings: SqlSettings | None = None,
 ) -> AnalysisResult:
     """Analyze selected SQL files through the shared final registry entry."""
+    if sql_settings is not None and settings is not None:
+        raise ValueError("pass only one SQL settings value")
+    sql_settings = settings if settings is not None else sql_settings
     sources, diagnostics = read_sources(workspace, files)
     file_data = tuple(_make_file(source) for source in sources)
     nodes: list[Node] = [item.node for item in file_data]
