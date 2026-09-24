@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from minotaur import cli
 
 
@@ -168,3 +170,45 @@ def test_sql_quoted_dot_identifier_preserves_final_name_for_fallback_and_exclusi
         }
     ]
     assert _query_json(graph, root, capsys, "--exclude", "table.with.dot") == []
+
+
+@pytest.mark.parametrize(
+    ("declaration", "old_name", "label"),
+    [
+        ("CREATE TABLE S.Old (id int)", "Old", "S.Old"),
+        (
+            "CREATE TABLE [schema.with.dot].[table.with.dot] (id int)",
+            "table.with.dot",
+            "schema.with.dot.table.with.dot",
+        ),
+        (
+            'CREATE VIEW "schema.with.dot"."view.with.dot" AS SELECT 1 AS id',
+            "view.with.dot",
+            "schema.with.dot.view.with.dot",
+        ),
+    ],
+)
+@pytest.mark.parametrize("missing_source", [False, True])
+def test_sql_saved_names_survive_source_changes_without_refresh(
+    tmp_path: Path,
+    capsys: object,
+    declaration: str,
+    old_name: str,
+    label: str,
+    missing_source: bool,
+) -> None:
+    root = tmp_path / "sql"
+    _write(root, "schema.sql", declaration + "\n")
+    graph = tmp_path / "sql.json"
+    _analyze(root, graph)
+    assert _query_json(graph, root, capsys, "--exclude", old_name) == []
+    if missing_source:
+        (root / "schema.sql").unlink()
+    else:
+        _write(root, "schema.sql", "CREATE TABLE S.New (id int)\n")
+
+    records = _query_json(
+        graph, root, capsys, "--no-refresh", "--exclude", "New", "--text-fallback"
+    )
+    assert [(record["symbol"], record["text_mention"]) for record in records] == [(label, False)]
+    assert _query_json(graph, root, capsys, "--no-refresh", "--exclude", old_name) == []

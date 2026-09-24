@@ -966,3 +966,24 @@ def test_standalone_fk_rejects_duplicate_replication_modifier_atomically(tmp_pat
     assert not _sql_edges(result, "sql:foreign-key-to")
     assert not _sql_edges(result, "references")
     assert set(_symbols(result)) == {"Parent", "Child"}
+
+
+@pytest.mark.parametrize(
+    ("declaration", "name"),
+    [
+        ("CREATE SCHEMA [schema.with.dot]", "schema.with.dot"),
+        ("CREATE TABLE [schema.with.dot].[table.with.dot] (id int)", "table.with.dot"),
+        ('CREATE VIEW "S"."view.with.dot" AS SELECT 1 AS id', "view.with.dot"),
+        ("CREATE TABLE S.MixedCase (id int)", "MixedCase"),
+    ],
+)
+def test_declaration_final_identifier_survives_graph_serialization(
+    tmp_path: Path, declaration: str, name: str
+) -> None:
+    from minotaur.graph_model.node import Node
+
+    result = _analyze(tmp_path, **{"names.sql": declaration})
+    node = next(iter(_symbols(result).values()))
+    restored = Node.from_dict(node.to_dict())
+    assert restored.extensions == {"minotaur-sql": {"name": name}}
+    assert restored.id == node.id
