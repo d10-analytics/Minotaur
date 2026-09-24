@@ -11,10 +11,12 @@ from pathlib import Path
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.query.index import GraphIndex
+from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.query.symbols import label_bare_name
 
 _TOKEN_PATTERN = re.compile(r"\w+")
 _CANDIDATE_KINDS = frozenset({"class", "function", "method"})
+_SQL_CANDIDATE_KINDS = frozenset({"sql:table", "sql:view"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +48,7 @@ def unreferenced(
     excluded_patterns: tuple[re.Pattern[str], ...] = (),
     text_fallback: bool = False,
 ) -> tuple[UnreferencedRecord, ...]:
-    """Return selected function, method, and class symbols without inbound use.
+    """Return selected code and SQL symbols without inbound use.
 
     ``source_paths`` is the graph's selected file set after any command-path
     filtering.  Only relationships whose source is the symbol itself are
@@ -57,7 +59,7 @@ def unreferenced(
     candidates = [
         node
         for node in index.symbols()
-        if node.symbol_kind in _CANDIDATE_KINDS
+        if _is_candidate(node)
         and node.location is not None
         and node.location.path in selected
     ]
@@ -67,9 +69,10 @@ def unreferenced(
         if _eligible(node, excluded_names, excluded_patterns) and _is_unreferenced(index, node)
     ]
 
-    mentions: frozenset[str] = frozenset()
+    core_mentions: frozenset[str] = frozenset()
+    sql_mentions: frozenset[str] = frozenset()
     if text_fallback:
-        mentions = _text_mentions(index, root, selected)
+        core_mentions, sql_mentions = _text_mentions(index, root, selected)
 
     records: list[UnreferencedRecord] = []
     for node in suspects:
@@ -82,7 +85,11 @@ def unreferenced(
                 line=location.range.start.line + 1,
                 symbol=node.label,
                 kind=node.symbol_kind or "unknown",
-                text_mention=label_bare_name(node.label) in mentions,
+                text_mention=(
+                    label_bare_name(node.label).casefold() in sql_mentions
+                    if _is_sql_candidate(node)
+                    else label_bare_name(node.label) in core_mentions
+                ),
             )
         )
     return tuple(sorted(records, key=lambda record: (record.path, record.line, record.symbol)))
@@ -148,6 +155,8 @@ def _eligible(
     # hard-coding any language or framework.
     if any(pattern.search(node.label) for pattern in excluded_patterns):
         return False
+    if _is_sql_candidate(node):
+        return True
     if name.startswith("test_"):
         return False
     return not (name.startswith("__") and name.endswith("__"))
@@ -164,7 +173,12 @@ def _is_unreferenced(index: GraphIndex, node: Node) -> bool:
     # discarded `app = create_app()`, `register(handler)`, and callback tables
     # as if they were part of the definition, and reported live functions dead.
     own_sources = {node.id}
-    for kind in (RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value):
+    kinds = (
+        CURRENT_SQL_DEPENDENCY_KINDS
+        if _is_sql_candidate(node)
+        else (RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value)
+    )
+    for kind in kinds:
         if any(
             relationship.source not in own_sources for relationship in index.incoming(kind, node.id)
         ):
@@ -172,12 +186,25 @@ def _is_unreferenced(index: GraphIndex, node: Node) -> bool:
     return True
 
 
-def _text_mentions(index: GraphIndex, root: Path, selected: frozenset[str]) -> frozenset[str]:
+def _is_sql_candidate(node: Node) -> bool:
+    return node.language == "sql" and node.symbol_kind in _SQL_CANDIDATE_KINDS
+
+
+def _is_candidate(node: Node) -> bool:
+    return node.symbol_kind in _CANDIDATE_KINDS or _is_sql_candidate(node)
+
+
+def _text_mentions(
+    index: GraphIndex, root: Path, selected: frozenset[str]
+) -> tuple[frozenset[str], frozenset[str]]:
     counts: dict[str, int] = {}
+    folded_counts: dict[str, int] = {}
     for relative in selected:
         path = root / relative
         for token in _TOKEN_PATTERN.findall(path.read_text(encoding="utf-8")):
             counts[token] = counts.get(token, 0) + 1
+            folded = token.casefold()
+            folded_counts[folded] = folded_counts.get(folded, 0) + 1
     # Every definition of the name contributes one occurrence -- its own ``def``
     # or ``class`` line -- so the baseline to beat is the number of definitions,
     # not one. Comparing against a fixed 1 made same-name definitions vouch for
@@ -187,7 +214,15 @@ def _text_mentions(index: GraphIndex, root: Path, selected: frozenset[str]) -> f
     # definitions may be a string, comment, getattr, or another syntax the graph
     # cannot resolve, so it keeps the suspect in the result.
     definitions = _definition_counts(index, selected)
-    return frozenset(token for token, count in counts.items() if count > definitions.get(token, 0))
+    sql_definitions = _sql_definition_counts(index, selected)
+    return (
+        frozenset(token for token, count in counts.items() if count > definitions.get(token, 0)),
+        frozenset(
+            token
+            for token, count in folded_counts.items()
+            if count > sql_definitions.get(token, 0)
+        ),
+    )
 
 
 def _definition_counts(index: GraphIndex, selected: frozenset[str]) -> dict[str, int]:
@@ -205,5 +240,17 @@ def _definition_counts(index: GraphIndex, selected: frozenset[str]) -> dict[str,
         if location.path not in selected:
             continue
         name = label_bare_name(node.label)
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _sql_definition_counts(index: GraphIndex, selected: frozenset[str]) -> dict[str, int]:
+    """Count selected SQL table/view declarations by case-insensitive bare name."""
+    counts: dict[str, int] = {}
+    for node in index.symbols():
+        location = node.location
+        if not _is_sql_candidate(node) or location is None or location.path not in selected:
+            continue
+        name = label_bare_name(node.label).casefold()
         counts[name] = counts.get(name, 0) + 1
     return counts
