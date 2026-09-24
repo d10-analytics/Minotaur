@@ -11,7 +11,7 @@ import logging
 import re
 import threading
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from minotaur.graph_model.provenance import (
     NodeClass,
     RelationshipKind,
 )
+from minotaur.graph_model.relationship import Relationship
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.emission import NodeEmitter, file_node
@@ -233,14 +234,18 @@ def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> Analysis
                 _foreign_key_extensions(foreign_key),
             )
 
+    relationship_documents = relationships.documents(_PRODUCER)
+    nodes, fk_components = _with_fk_components(nodes, relationship_documents)
+
     # Replace the generic references kind for reads with the SQL extension.
     # Resolution above uses the shared emitter only for unresolved nodes; the
     # successful edge is written directly with the requested SQL meaning.
     document = GraphDocument(
         coordinate_encoding=CoordinateEncoding.UTF_8,
         nodes=tuple(nodes),
-        relationships=relationships.documents(_PRODUCER),
+        relationships=relationship_documents,
         generated_by=_PRODUCER,
+        extensions={NAMESPACE: {"fk_components": fk_components}},
     )
     diagnostics.sort(
         key=lambda item: (
@@ -251,6 +256,61 @@ def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> Analysis
         )
     )
     return AnalysisResult(document, tuple(diagnostics))
+
+
+def _with_fk_components(
+    nodes: list[Node], relationships: tuple[Relationship, ...]
+) -> tuple[list[Node], list[dict[str, object]]]:
+    """Attach deterministic FK component metadata to SQL table nodes."""
+    table_ids = {node.id for node in nodes if node.symbol_kind == "sql:table"}
+    parent = {node_id: node_id for node_id in table_ids}
+
+    def find(node_id: str) -> str:
+        root = node_id
+        while parent[root] != root:
+            root = parent[root]
+        while parent[node_id] != node_id:
+            next_node = parent[node_id]
+            parent[node_id] = root
+            node_id = next_node
+        return root
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for relationship in relationships:
+        if relationship.kind != "sql:foreign-key-to":
+            continue
+        if relationship.source in table_ids and relationship.target in table_ids:
+            union(relationship.source, relationship.target)
+
+    members_by_root: dict[str, list[str]] = {}
+    for node_id in sorted(table_ids):
+        members_by_root.setdefault(find(node_id), []).append(node_id)
+    members = [tuple(group) for group in members_by_root.values()]
+    members.sort(key=lambda group: (-len(group), group))
+    summaries = [
+        {"id": component_id, "size": len(group), "members": list(group)}
+        for component_id, group in enumerate(members)
+    ]
+    component_by_node = {
+        node_id: component_id for component_id, group in enumerate(members) for node_id in group
+    }
+    replaced: list[Node] = []
+    for node in nodes:
+        component_id = component_by_node.get(node.id)
+        if component_id is None:
+            replaced.append(node)
+            continue
+        extensions = {name: dict(value) for name, value in (node.extensions or {}).items()}
+        sql_extensions = dict(extensions.get(NAMESPACE, {}))
+        sql_extensions["fk_component"] = component_id
+        extensions[NAMESPACE] = sql_extensions
+        replaced.append(replace(node, extensions=extensions))
+    return replaced, summaries
 
 
 def _make_file(source: RawSource) -> _File:

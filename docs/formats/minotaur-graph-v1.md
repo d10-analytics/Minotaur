@@ -187,6 +187,16 @@ node identity. SQL relationships use `sql:reads-from` and
 The graph format remains stable while supported query commands declare which
 SQL relationship kinds they consume.
 
+For each SQL `sql:table` symbol, `extensions["minotaur-sql"]["fk_component"]`
+is a dense integer identifying its undirected foreign-key component. The
+document extension `extensions["minotaur-sql"]["fk_components"]` is an array
+of objects with exactly `id`, `size`, and `members`; `members` is the ascending
+list of member table node IDs and `size` equals its length. Components are
+ordered by descending size and then lexicographically by their sorted member
+IDs, so IDs are deterministic. Only resolved `sql:foreign-key-to` relationships
+between SQL table nodes participate; reads-from edges, unresolved references,
+and non-table nodes do not create membership.
+
 For each `sql:foreign-key-to` relationship, a mapped evidence record may carry
 the exact extension object
 `extensions["minotaur-sql"] = {"foreign_key_columns": [...]}`. The
