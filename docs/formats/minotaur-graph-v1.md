@@ -155,8 +155,8 @@ selectable call sites.
 Core objects reject unknown fields. Each supported object may instead carry an
 `extensions` object whose non-empty keys conventionally identify a producer
 namespace and whose values are objects. The detailed extension-key grammar is
-intentionally deferred; consumers must not treat extension data as a core
-fact.
+intentionally deferred; consumers may use a documented producer-specific
+extension, but must not treat other extension data as a core fact.
 
 The Python analyzer currently emits these producer extensions. On each `file`
 node, `extensions["minotaur-python"]["content_sha256"]` is the lowercase
@@ -178,8 +178,11 @@ core graph facts.
 The bounded SQL analyzer emits
 `extensions["minotaur-sql"]["content_sha256"]` on each SQL `file` node; the
 digest covers the original bytes, including a BOM and line endings. SQL
-symbols use the payload-free namespaced kinds `sql:schema`, `sql:table`, and
-`sql:view`, while SQL relationships use `sql:reads-from` and
+symbols use the namespaced kinds `sql:schema`, `sql:table`, and `sql:view`.
+Each such symbol carries `extensions["minotaur-sql"]["name"]`, its final
+parsed identifier segment. This preserves dots within quoted identifiers for
+`unreferenced` bare-name matching after graph serialization without changing
+node identity. SQL relationships use `sql:reads-from` and
 `sql:foreign-key-to`. These namespaced extensions remain ordinary graph facts.
 The graph format remains stable while supported query commands declare which
 SQL relationship kinds they consume.

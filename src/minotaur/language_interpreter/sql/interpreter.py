@@ -384,7 +384,7 @@ def _interpret_create(
         _unsupported(tree, item, batch, diagnostics)
         return None
     key = tuple(part.casefold() for part in parts)
-    node = _sql_symbol_node(".".join(parts), f"sql:{kind.casefold()}", location)
+    node = _sql_symbol_node(parts, f"sql:{kind.casefold()}", location)
     declaration = _Declaration(kind.casefold(), key, ".".join(parts), location, node, item.file_id)
     declarations.append(declaration)
     nodes.append(node)
@@ -410,7 +410,7 @@ def _interpret_create(
     return _Observation(declaration)
 
 
-def _sql_symbol_node(label: str, kind: str, location: Location) -> Node:
+def _sql_symbol_node(parts: tuple[str, ...], kind: str, location: Location) -> Node:
     identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
     return Node(
         id=compute_node_id(
@@ -418,10 +418,11 @@ def _sql_symbol_node(label: str, kind: str, location: Location) -> Node:
         ),
         identity=identity,
         node_class=NodeClass.SYMBOL,
-        label=label,
+        label=".".join(parts),
         symbol_kind=kind,
         language="sql",
         location=location,
+        extensions={NAMESPACE: {"name": parts[-1]}},
     )
 
 

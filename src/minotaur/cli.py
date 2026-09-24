@@ -1518,7 +1518,9 @@ def _add_query_subparsers(
     impact_parser.add_argument("symbol", metavar="QUALIFIED_NAME")
     impact_parser.add_argument("--depth", type=int, help="maximum inbound traversal depth")
     unreferenced_parser = commands.add_parser(
-        "unreferenced", help="find symbols without inbound calls or references"
+        "unreferenced",
+        help="find symbols without inbound use",
+        description="Find symbols without inbound use.",
     )
     unreferenced_parser.add_argument("paths", nargs="*", metavar="PATH")
     unreferenced_parser.add_argument("--exclude", action="append", default=[])

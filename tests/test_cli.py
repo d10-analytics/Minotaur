@@ -2203,6 +2203,18 @@ def test_ordinary_diff_help_does_not_advertise_systems_options(
         assert option not in out
 
 
+def test_unreferenced_help_describes_inbound_use(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["query", "unreferenced", "--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "Find symbols without inbound use." in out
+    assert "inbound calls or references" not in out
+
+
 def test_systems_diff_output_preflight_failure_reports_without_stdout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
