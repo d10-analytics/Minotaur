@@ -677,23 +677,31 @@ def test_systems_diff_renders_sql_warning_and_rejects_sql_error(
 ) -> None:
     root = _configured_sql_repo(tmp_path)
     monkeypatch.chdir(root)
-    assert cli.main(["analyze"]) == 0
-    _git(root, "add", ".")
-    _git(root, "commit", "-qm", "baseline")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["src"]\n[minotaur.sql]\nview_depth_threshold = 3\n',
+        encoding="utf-8",
+    )
     warning_source = (
         "CREATE TABLE base (id int)\nGO\n"
         "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
-        "CREATE VIEW v2 AS SELECT * FROM v1\nGO\n"
-        "CREATE VIEW v3 AS SELECT * FROM v2\nGO\n"
-        "CREATE VIEW v4 AS SELECT * FROM v3\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\n"
     )
     (root / "src" / "schema.sql").write_text(warning_source, encoding="utf-8")
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["src"]\n[minotaur.sql]\nview_depth_threshold = 1\n',
+        encoding="utf-8",
+    )
 
     status = cli.main(["query", "diff", "--systems", "--json"])
     captured = capsys.readouterr()
-    assert status == 1
+    assert status == 0
     assert "view-depth-warning" in captured.err
-    assert json.loads(captured.out)["changed"] is True
+    assert json.loads(captured.out)["changed"] is False
 
     (root / "src" / "schema.sql").write_text(
         warning_source + "\nGO\nCREATE TABLE broken (\n", encoding="utf-8"
