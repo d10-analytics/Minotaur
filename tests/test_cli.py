@@ -245,12 +245,20 @@ def test_sql_warning_only_analysis_succeeds_and_preserves_shared_metadata(
     assert "severity=warning" in captured.err
     graph = load_graph_file(output).document
     assert graph.extensions["minotaur"]["selection"] == ("schema.sql",)
-    assert graph.extensions["minotaur-sql"]["fk_components"]
+    components = graph.extensions["minotaur-sql"]["fk_components"]
+    assert len(components) == 1
+    assert [item["id"] for item in components] == [0]
+    assert [item["size"] for item in components] == [2]
     assert all(
-        "fk_component" in node.extensions["minotaur-sql"]
+        isinstance(node.extensions["minotaur-sql"]["fk_component"], int)
         for node in graph.nodes
         if node.symbol_kind == "sql:table"
     )
+    assert sorted(
+        node.extensions["minotaur-sql"]["fk_component"]
+        for node in graph.nodes
+        if node.symbol_kind == "sql:table"
+    ) == [0, 0]
 
 
 @pytest.mark.parametrize(

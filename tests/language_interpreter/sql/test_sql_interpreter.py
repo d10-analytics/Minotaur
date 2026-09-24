@@ -102,9 +102,16 @@ def test_view_depth_warning_keeps_fk_and_path_metadata(tmp_path: Path) -> None:
         "depth": 2,
         "path": ("top_view", "middle", "child"),
     }
-    assert result.document.extensions["minotaur-sql"]["fk_components"]
+    components = result.document.extensions["minotaur-sql"]["fk_components"]
+    assert len(components) == 1
+    assert components[0]["id"] == 0
+    assert components[0]["size"] == 2
+    table_ids = sorted(
+        node.id for node in result.document.nodes if node.symbol_kind == "sql:table"
+    )
+    assert components[0]["members"] == tuple(table_ids)
     assert all(
-        "fk_component" in node.extensions["minotaur-sql"]
+        node.extensions["minotaur-sql"]["fk_component"] == 0
         for node in result.document.nodes
         if node.symbol_kind == "sql:table"
     )
