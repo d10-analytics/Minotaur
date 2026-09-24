@@ -293,7 +293,7 @@ def test_fk_components_partition_tables_and_exclude_other_edges(tmp_path: Path) 
         },
     )
 
-    assert not result.diagnostics
+    assert [item.code for item in result.warnings] == [DiagnosticCode.ORPHANED_FOREIGN_KEY]
     components = _fk_components(result)
     assert all(set(component) == {"id", "size", "members"} for component in components)
     assert sorted(component["size"] for component in components) == [1, 3]
@@ -400,6 +400,89 @@ def test_foreign_key_names_actions_and_replication_modifiers_do_not_change_facts
         ("InlineChild", "Parent"),
         ("TableChild", "Parent"),
     }
+
+
+def test_orphan_fk_warnings_retain_create_alter_and_unnamed_constraint_identity(
+    tmp_path: Path,
+) -> None:
+    result = _analyze(
+        tmp_path,
+        **{
+            "schema.sql": (
+                "CREATE TABLE Child (id int, other_id int REFERENCES Missing(id), "
+                "CONSTRAINT fk_create FOREIGN KEY (id) REFERENCES Missing(id))\nGO\n"
+                "ALTER TABLE Child ADD CONSTRAINT fk_alter FOREIGN KEY (id) "
+                "REFERENCES Missing(id)\nGO\n"
+                "CREATE TABLE Other (id int)\n"
+            )
+        },
+    )
+
+    warnings = [
+        item for item in result.warnings if item.code is DiagnosticCode.ORPHANED_FOREIGN_KEY
+    ]
+    assert [item.extensions["minotaur-sql"] for item in warnings] == [
+        {
+            "source_table": "Child",
+            "constraint_name": "unnamed",
+            "target": "Missing",
+            "reason": "undeclared",
+        },
+        {
+            "source_table": "Child",
+            "constraint_name": "fk_create",
+            "target": "Missing",
+            "reason": "undeclared",
+        },
+        {
+            "source_table": "Child",
+            "constraint_name": "fk_alter",
+            "target": "Missing",
+            "reason": "undeclared",
+        },
+    ]
+    assert len(_sql_edges(result, "references")) == 1
+
+
+def test_orphan_fk_reason_precedence_and_mapping_scope(tmp_path: Path) -> None:
+    result = _analyze(
+        tmp_path,
+        settings=SqlSettings(foreign_key_target_files={"Missing": "mapped.sql"}),
+        **{
+            "child.sql": "CREATE TABLE Child (id int REFERENCES Missing(id))",
+            "mapped.sql": "CREATE TABLE Wrong (id int)",
+            "duplicate.sql": "CREATE TABLE Missing (id int)",
+            "another.sql": "CREATE TABLE Missing (id int)",
+        },
+    )
+
+    warning = next(
+        item for item in result.warnings if item.code is DiagnosticCode.ORPHANED_FOREIGN_KEY
+    )
+    assert warning.extensions["minotaur-sql"]["reason"] == "ambiguous"
+
+    extraction_gap = _analyze(
+        tmp_path / "gap",
+        settings=SqlSettings(foreign_key_target_files={"Missing": "mapped.sql"}),
+        **{
+            "child.sql": "CREATE TABLE Child (id int REFERENCES Missing(id))",
+            "mapped.sql": "CREATE TABLE Wrong (id int)",
+        },
+    )
+    warning = next(
+        item for item in extraction_gap.warnings if item.code is DiagnosticCode.ORPHANED_FOREIGN_KEY
+    )
+    assert warning.extensions["minotaur-sql"]["reason"] == "extraction-gap"
+
+    undeclared = _analyze(
+        tmp_path / "unmapped",
+        settings=SqlSettings(foreign_key_target_files={"Missing": "unselected.sql"}),
+        **{"child.sql": "CREATE TABLE Child (id int REFERENCES Missing(id))"},
+    )
+    warning = next(
+        item for item in undeclared.warnings if item.code is DiagnosticCode.ORPHANED_FOREIGN_KEY
+    )
+    assert warning.extensions["minotaur-sql"]["reason"] == "undeclared"
 
 
 def test_go_scanner_ignores_strings_identifiers_and_nested_comments(tmp_path: Path) -> None:
@@ -741,7 +824,7 @@ def test_wrong_kind_and_qualified_missing_targets_remain_typed_unresolved(
     assert unresolved == {"WrongKind", "MissingSchema.Target"}
     assert references == {("Child", "WrongKind"), ("Reader", "MissingSchema.Target")}
     assert ("Namespace", "Namespace.Member") not in containment
-    assert not result.diagnostics
+    assert [item.code for item in result.warnings] == [DiagnosticCode.ORPHANED_FOREIGN_KEY]
 
 
 def test_duplicate_declarations_keep_their_own_outgoing_dependencies(tmp_path: Path) -> None:
@@ -1230,9 +1313,7 @@ def test_standalone_fk_missing_or_ambiguous_target_is_table_origin(
     assert unresolved[0][1].label == "Parent"
     assert _evidence_locations(unresolved[0][2]) == {("alter.sql", 0, sql.index("Parent"))}
     assert not _sql_edges(result, "sql:foreign-key-to")
-    assert [d.code for d in result.diagnostics].count(DiagnosticCode.AMBIGUOUS_REFERENCE) == int(
-        ambiguous
-    )
+    assert [d.code for d in result.diagnostics].count(DiagnosticCode.ORPHANED_FOREIGN_KEY) == 1
 
 
 @pytest.mark.parametrize(

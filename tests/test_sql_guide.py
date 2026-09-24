@@ -41,3 +41,27 @@ def test_sql_guide_documents_duplicate_categories_payload_and_exclusions() -> No
     assert "live catalog" in text
     assert "execute SQL" in text
     assert "replay migrations" in text
+
+
+def test_sql_guide_documents_orphan_fk_warning_boundaries() -> None:
+    text = _text()
+    assert "warning with code `orphaned-foreign-key`" in text
+    assert (
+        "ordered `minotaur-sql` payload always contains `source_table`, `constraint_name`, "
+        "`target`, and `reason`"
+    ) in text
+    assert "`ambiguous` — more than one selected declaration matches the target" in text
+    assert "This reason takes precedence over every mapping result" in text
+    assert (
+        "`extraction-gap` — the target has an exact configured mapping and that root-relative "
+        "`.sql` path was both selected and readable"
+    ) in text
+    assert (
+        "`undeclared` — there is no qualifying declaration and the mapped file is absent, "
+        "unreadable, or outside the selected source scope"
+    ) in text
+    assert 'foreign_key_target_files = { "dbo.Parent" = "schema/parent.sql" }' in text
+    assert "A filename, directory name, Git history" in text
+    assert "does not establish that an extraction gap exists" in text
+    assert "does not change the resolved `sql:foreign-key-to` edge" in text
+    assert "coalesced to one unresolved target per source table and target text" in text

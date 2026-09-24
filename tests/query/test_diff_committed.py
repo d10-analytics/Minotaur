@@ -445,7 +445,8 @@ def test_committed_mode_preserves_configured_sql_migration_patterns(
     (root / ".minotaur.toml").write_text(
         '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
         'targets = ["migrations"]\n[minotaur.sql]\n'
-        'migration_patterns = ["migrations/**/*.sql"]\n',
+        'migration_patterns = ["migrations/**/*.sql"]\n'
+        'foreign_key_target_files = { "Parent" = "schema/parent.sql" }\n',
         encoding="utf-8",
     )
     direct = root / "migrations" / "001.sql"
@@ -471,6 +472,7 @@ def test_committed_mode_preserves_configured_sql_migration_patterns(
     assert observed
     settings = observed[-1]
     assert settings.migration_patterns == ("migrations/**/*.sql",)
+    assert settings.foreign_key_target_files == {"parent": "schema/parent.sql"}
     assert settings.matches_migration("migrations/001.sql")
     assert settings.matches_migration("migrations/nested/002.sql")
     assert not settings.__class__(migration_patterns=("migrations/*.sql",)).matches_migration(

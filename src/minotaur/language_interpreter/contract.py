@@ -25,6 +25,7 @@ class DiagnosticCode(str, Enum):
     UNSUPPORTED_SYNTAX = "unsupported-syntax"
     DUPLICATE_DECLARATION = "duplicate-declaration"
     AMBIGUOUS_REFERENCE = "ambiguous-reference"
+    ORPHANED_FOREIGN_KEY = "orphaned-foreign-key"
     CIRCULAR_DEPENDENCY = "circular-dependency"
     VIEW_DEPTH_WARNING = "view-depth-warning"
 

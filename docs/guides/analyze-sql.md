@@ -63,6 +63,38 @@ This classification does not inspect Git history or timestamps, query a live
 catalog, execute SQL, or replay migrations. It describes only duplicate
 declarations found in the selected source files.
 
+### Orphaned foreign-key findings
+
+When a foreign-key target is not resolved to exactly one declared SQL table,
+the analyzer emits a warning with code `orphaned-foreign-key`. Its ordered
+`minotaur-sql` payload always contains `source_table`, `constraint_name`,
+`target`, and `reason`. The constraint name is the declared name, or
+`unnamed` when the constraint has no name. The warning reasons are:
+
+* `ambiguous` — more than one selected declaration matches the target. This
+  reason takes precedence over every mapping result.
+* `extraction-gap` — the target has an exact configured mapping and that
+  root-relative `.sql` path was both selected and readable, but the analyzed
+  file did not declare the target.
+* `undeclared` — there is no qualifying declaration and the mapped file is
+  absent, unreadable, or outside the selected source scope. A filename,
+  directory name, Git history, or a mapped file that was not selected does not
+  establish that an extraction gap exists.
+
+For example, this mapping establishes which file should contain `dbo.Parent`:
+
+```toml
+[minotaur.sql]
+foreign_key_target_files = { "dbo.Parent" = "schema/parent.sql" }
+```
+
+The mapping is an exact target-to-file association. It does not change the
+resolved `sql:foreign-key-to` edge, generic unresolved identity, source
+selection, or graph schema. An orphaned observation keeps the existing generic
+unresolved `references` relationship, coalesced to one unresolved target per
+source table and target text; the warning adds finding details without turning
+that generic graph fact into a typed edge.
+
 The optional SQL setting `view_depth_threshold` in `[minotaur.sql]` controls the maximum
 view path depth before a `view-depth-warning` is emitted. The default is `3`.
 View cycles are reported once per elementary cycle after all references have

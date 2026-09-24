@@ -48,6 +48,7 @@ from minotaur.language_interpreter.contract import (
     IMPORTS_UNRESOLVED,
     AnalysisResult,
     Diagnostic,
+    DiagnosticCode,
 )
 from minotaur.language_interpreter.registry import InterpreterRegistration, default_registry
 from minotaur.language_interpreter.selection import SelectionError, SourceSelection, select_sources
@@ -2009,10 +2010,11 @@ def _format_diagnostic(diagnostic: Diagnostic) -> str:
     """Render stable, editor-friendly diagnostics without inventing locations."""
     suffix = f" [severity={diagnostic.severity.value}"
     if diagnostic.extensions is not None:
+        metadata = _thaw_diagnostic_metadata(diagnostic.extensions)
         suffix += " metadata=" + json.dumps(
-            _thaw_diagnostic_metadata(diagnostic.extensions),
-            sort_keys=True,
+            metadata,
             separators=(",", ":"),
+            sort_keys=diagnostic.code is not DiagnosticCode.ORPHANED_FOREIGN_KEY,
         )
     suffix += "]"
     if diagnostic.location is None:

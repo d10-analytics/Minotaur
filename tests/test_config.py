@@ -272,6 +272,70 @@ def test_omitted_sql_migration_patterns_default_to_empty(tmp_path: Path) -> None
     assert not resolved.sql.matches_migration("migrations/001.sql")
 
 
+def test_sql_foreign_key_target_files_are_normalized_and_immutable(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        '["minotaur"."sql"]\n"foreign_key_target_files" = '
+        '{ "Parent" = "schema/parent.sql", '
+        '"DBO.Child" = "schema/child.sql" }\n',
+    )
+
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.sql.foreign_key_target_files == {
+        "parent": "schema/parent.sql",
+        "dbo.child": "schema/child.sql",
+    }
+    assert resolved.sql.foreign_key_target_files["parent"] == "schema/parent.sql"
+    assert resolved.sql.foreign_key_target_files["dbo.child"] == "schema/child.sql"
+    with pytest.raises(TypeError):
+        resolved.sql.foreign_key_target_files["parent"] = "other.sql"  # type: ignore[index]
+    assert resolved.sql.foreign_key_target_files["parent"] == "schema/parent.sql"
+    assert config.SqlSettings().foreign_key_target_files == {}
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        'foreign_key_target_files = ["schema/parent.sql"]',
+        'foreign_key_target_files = { "dbo.Parent" = 1 }',
+        "foreign_key_target_files = { \"dbo.Parent\" = 'schema\\\\parent.sql' }",
+        'foreign_key_target_files = { "dbo.Parent" = "/schema/parent.sql" }',
+        'foreign_key_target_files = { "dbo.Parent" = "schema/*.sql" }',
+        'foreign_key_target_files = { "dbo.Parent" = "schema/../parent.sql" }',
+        'foreign_key_target_files = { "dbo.Parent" = "schema/parent.txt" }',
+        'foreign_key_target_files = { "a.b.c" = "schema/parent.sql" }',
+        'foreign_key_target_files = { Parent = "schema/parent.sql" }',
+        'foreign_key_target_files = { "dbo.Parent" = "schema/parent.sql", '
+        '"DBO.parent" = "other.sql" }',
+    ],
+)
+def test_invalid_sql_foreign_key_target_files_are_rejected_before_resolution(
+    tmp_path: Path, declaration: str
+) -> None:
+    _write(
+        tmp_path,
+        ".minotaur.toml",
+        f'[minotaur]\nschema_version = 1\ntargets = ["src"]\n[minotaur.sql]\n{declaration}\n',
+    )
+
+    with pytest.raises(ConfigError, match="foreign_key_target_files"):
+        resolve_config(tmp_path)
+
+
+def test_dotted_sql_foreign_key_target_file_mapping_still_requires_quoted_keys() -> None:
+    """The supported dotted spelling reaches the same lexical SQL-key check."""
+    data = (
+        b'[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        b'sql.foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+    )
+
+    with pytest.raises(ConfigError, match="target keys must be quoted"):
+        config.parse_config_bytes(data, source="dotted.toml")
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
@@ -569,6 +633,99 @@ def test_parse_config_bytes_preserves_raw_values_without_source_access(
     assert first.systems_dir == "raw-systems"
     with pytest.raises(AttributeError):
         first.root = "changed"  # type: ignore[misc]
+
+
+def test_config_lexical_validation_ignores_mapping_syntax_inside_toml_values() -> None:
+    """Captured configs keep multiline values and comments outside the mapping grammar."""
+    systems_dir = 'foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+    data = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        '# foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+        'systems_dir = """\n'
+        f"{systems_dir}"
+        '"""\n'
+    ).encode()
+
+    parsed = config.parse_config_bytes(data, source="captured.toml")
+
+    assert parsed.systems_dir == systems_dir
+
+
+def test_disk_config_lexical_validation_ignores_mapping_syntax_inside_toml_values(
+    tmp_path: Path,
+) -> None:
+    """Located configs keep multiline values and comments outside the mapping grammar."""
+    systems_dir = 'foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        '# foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+        'systems_dir = """\n'
+        f"{systems_dir}"
+        '"""\n',
+    )
+
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.config_file == cfg.resolve()
+    assert resolved.systems_dir == (tmp_path / systems_dir).resolve()
+
+
+def test_capture_config_ignores_foreign_key_mapping_in_an_unrelated_table() -> None:
+    """A similarly named mapping outside Minotaur SQL settings remains ordinary TOML."""
+    data = (
+        b'[metadata]\nforeign_key_target_files = { Parent = "schema/p.sql" }\n'
+        b'[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+    )
+
+    parsed = config.parse_config_bytes(data, source="captured.toml")
+
+    assert parsed.sql.foreign_key_target_files == {}
+
+
+def test_disk_config_ignores_foreign_key_mapping_in_an_unrelated_table(tmp_path: Path) -> None:
+    """A located unrelated mapping does not invoke Minotaur SQL-key validation."""
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[metadata]\nforeign_key_target_files = { Parent = "schema/p.sql" }\n'
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n',
+    )
+
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.config_file == cfg.resolve()
+    assert resolved.sql.foreign_key_target_files == {}
+
+
+def test_capture_config_ignores_foreign_key_mapping_in_an_unrelated_array_table() -> None:
+    """An array-table header replaces the preceding SQL table's lexical context."""
+    data = (
+        b'[minotaur]\nschema_version = 1\ntargets = ["src"]\n[minotaur.sql]\n'
+        b'[[metadata]]\nforeign_key_target_files = { Parent = "schema/p.sql" }\n'
+    )
+
+    parsed = config.parse_config_bytes(data, source="captured.toml")
+
+    assert parsed.sql.foreign_key_target_files == {}
+
+
+def test_disk_config_ignores_foreign_key_mapping_in_an_unrelated_array_table(
+    tmp_path: Path,
+) -> None:
+    """A located array-table mapping does not inherit SQL-key validation."""
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n[minotaur.sql]\n'
+        '[[metadata]]\nforeign_key_target_files = { Parent = "schema/p.sql" }\n',
+    )
+
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.config_file == cfg.resolve()
+    assert resolved.sql.foreign_key_target_files == {}
 
 
 @pytest.mark.parametrize(

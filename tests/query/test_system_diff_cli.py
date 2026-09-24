@@ -723,7 +723,8 @@ def test_systems_diff_preserves_each_captured_sql_migration_pattern(
     (root / ".minotaur.toml").write_text(
         '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
         'targets = ["migrations"]\n[minotaur.sql]\n'
-        'migration_patterns = ["migrations/**/*.sql"]\n',
+        'migration_patterns = ["migrations/**/*.sql"]\n'
+        'foreign_key_target_files = { "Parent" = "schema/parent.sql" }\n',
         encoding="utf-8",
     )
     definition = root / "docs" / "systems" / "sql"
@@ -740,7 +741,8 @@ def test_systems_diff_preserves_each_captured_sql_migration_pattern(
     (root / ".minotaur.toml").write_text(
         '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
         'targets = ["migrations"]\n[minotaur.sql]\n'
-        'migration_patterns = ["migrations/*.sql"]\n',
+        'migration_patterns = ["migrations/*.sql"]\n'
+        'foreign_key_target_files = { "Parent" = "schema/parent-after.sql" }\n',
         encoding="utf-8",
     )
 
@@ -757,6 +759,10 @@ def test_systems_diff_preserves_each_captured_sql_migration_pattern(
     assert [settings.migration_patterns for settings in observed] == [
         ("migrations/**/*.sql",),
         ("migrations/*.sql",),
+    ]
+    assert [dict(settings.foreign_key_target_files) for settings in observed] == [
+        {"parent": "schema/parent.sql"},
+        {"parent": "schema/parent-after.sql"},
     ]
     recursive, direct_only = observed
     assert recursive.matches_migration("migrations/nested/002.sql")

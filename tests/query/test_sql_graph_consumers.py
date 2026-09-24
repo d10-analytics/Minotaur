@@ -9,6 +9,7 @@ import pytest
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.loading import load_graph_blob
 from minotaur.graph_model.serialization import serialize
+from minotaur.language_interpreter.contract import DiagnosticCode
 from minotaur.language_interpreter.sql import analyze_sql_files
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.diff import diff
@@ -48,7 +49,31 @@ def _persisted_document(root: Path, content: str = _CATALOG) -> GraphDocument:
     path = root / "catalog.sql"
     path.write_text(content, encoding="utf-8")
     result = analyze_sql_files(Workspace(root), (path,))
-    assert result.diagnostics == ()
+    assert result.errors == ()
+    expected_orphans = (
+        [
+            {
+                "source_table": "ChildRef",
+                "constraint_name": "unnamed",
+                "target": "WrongKind",
+                "reason": "undeclared",
+            },
+            {
+                "source_table": "UnrelatedRef",
+                "constraint_name": "unnamed",
+                "target": "WrongKindish",
+                "reason": "undeclared",
+            },
+        ]
+        if content == _CATALOG
+        else []
+    )
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.ORPHANED_FOREIGN_KEY
+    ] * len(expected_orphans)
+    assert [diagnostic.extensions["minotaur-sql"] for diagnostic in result.diagnostics] == (
+        expected_orphans
+    )
 
     encoded = serialize(result.document)
     loaded = load_graph_blob(encoded)

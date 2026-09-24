@@ -18,6 +18,7 @@ from minotaur import cli, config, git
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import load_graph_file, stamp_path
 from minotaur.language_interpreter import registry
+from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode, DiagnosticSeverity
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 
 
@@ -300,6 +301,33 @@ def test_configured_sql_duplicate_warnings_write_graph_and_succeed(
     ]
 
 
+def test_configured_sql_orphan_warning_writes_graph_and_preserves_generic_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "configured"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["child.sql", "mapped.sql"]\n[minotaur.sql]\n'
+        'foreign_key_target_files = { "Parent" = "mapped.sql" }\n',
+    )
+    _write(root, "child.sql", "CREATE TABLE Child (parent_id int REFERENCES Parent(id))\n")
+    _write(root, "mapped.sql", "CREATE TABLE Wrong (id int)\n")
+    monkeypatch.chdir(root)
+
+    assert cli.main(["analyze"]) == 0
+    captured = capsys.readouterr()
+    assert (
+        "orphaned-foreign-key: orphaned foreign key [severity=warning "
+        'metadata={"minotaur-sql":{"source_table":"Child","constraint_name":"unnamed",'
+        '"target":"Parent","reason":"extraction-gap"}}]'
+    ) in captured.err
+    graph = load_graph_file(root / "graph.json").document
+    assert any(edge.kind == "references" for edge in graph.relationships)
+    assert stamp_path(root / "graph.json").is_file()
+
+
 def test_sql_warning_and_parse_error_fail_after_writing_partial_graph(tmp_path: Path) -> None:
     root = tmp_path / "source"
     valid = _write(
@@ -408,6 +436,76 @@ def test_invalid_configured_sql_migration_pattern_writes_no_output(tmp_path: Pat
     assert status == 2
     assert not (root / "graph.json").exists()
     assert not stamp_path(root / "graph.json").exists()
+
+
+def test_invalid_configured_sql_foreign_key_mapping_writes_no_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "configured"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["schema.sql"]\n[minotaur.sql]\n'
+        'foreign_key_target_files = { "Parent" = "schema/*.sql" }\n',
+    )
+    _write(root, "schema.sql", "CREATE TABLE Child (parent_id int REFERENCES Parent(id))\n")
+    analyzed = False
+
+    def fail_if_analyzed(*args: object, **kwargs: object) -> object:
+        nonlocal analyzed
+        analyzed = True
+        raise AssertionError("invalid configuration reached source analysis")
+
+    monkeypatch.setattr(sql_interpreter, "analyze_view_warnings", fail_if_analyzed)
+    monkeypatch.chdir(root)
+
+    assert cli.main(["analyze"]) == 2
+    assert not analyzed
+    assert not (root / "graph.json").exists()
+    assert not stamp_path(root / "graph.json").exists()
+
+
+def test_bare_sql_foreign_key_target_mapping_key_exits_two_without_output(tmp_path: Path) -> None:
+    """A bare target key is rejected before configured analysis can write output."""
+    root = _config_repo(tmp_path)
+    _write(root, "schema.sql", "CREATE TABLE Parent (id int)\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG
+        + 'root = "."\ngraph = "graph.json"\ntargets = ["schema.sql"]\n[minotaur.sql]\n'
+        'foreign_key_target_files = { Parent = "schema.sql" }\n',
+    )
+
+    completed = _run_in(root, "analyze")
+
+    assert completed.returncode == 2
+    assert "foreign_key_target_files" in completed.stderr
+    assert "quoted" in completed.stderr
+    assert not (root / "graph.json").exists()
+    assert not stamp_path(root / "graph.json").exists()
+
+
+def test_sql_orphan_diagnostic_renderer_preserves_payload_order() -> None:
+    diagnostic = Diagnostic(
+        DiagnosticCode.ORPHANED_FOREIGN_KEY,
+        "schema.sql",
+        "orphaned foreign key",
+        severity=DiagnosticSeverity.WARNING,
+        extensions={
+            "minotaur-sql": {
+                "source_table": "Child",
+                "constraint_name": "fk_child_parent",
+                "target": "Parent",
+                "reason": "undeclared",
+            }
+        },
+    )
+
+    assert cli._format_diagnostic(diagnostic).endswith(
+        '[severity=warning metadata={"minotaur-sql":{"source_table":"Child",'
+        '"constraint_name":"fk_child_parent","target":"Parent","reason":"undeclared"}}]'
+    )
 
 
 @pytest.mark.parametrize(

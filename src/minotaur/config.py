@@ -37,6 +37,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
+from types import MappingProxyType
 
 from minotaur import git
 
@@ -51,7 +52,9 @@ _SCHEMA_VERSION = 1
 _DEFAULT_GRAPH_FILENAME = "minotaur-graph.json"
 _DEFAULT_SYSTEMS_DIR = "docs/systems"
 _KNOWN_FIELDS = frozenset({"schema_version", "root", "graph", "targets", "systems_dir", "sql"})
-_SQL_KNOWN_FIELDS = frozenset({"view_depth_threshold", "migration_patterns"})
+_SQL_KNOWN_FIELDS = frozenset(
+    {"view_depth_threshold", "migration_patterns", "foreign_key_target_files"}
+)
 _DEFAULT_VIEW_DEPTH_THRESHOLD = 3
 _DEFAULT_MIGRATION_PATTERNS: tuple[str, ...] = ()
 
@@ -64,12 +67,21 @@ class ConfigError(ValueError):
     """
 
 
+class _TomlDocument(dict[str, object]):
+    """A generic parsed TOML table retaining its text for config-only checks."""
+
+    def __init__(self, values: Mapping[str, object], text: str) -> None:
+        super().__init__(values)
+        self.text = text
+
+
 @dataclass(frozen=True, slots=True)
 class SqlSettings:
     """Immutable SQL analysis settings resolved for one invocation."""
 
     view_depth_threshold: int = _DEFAULT_VIEW_DEPTH_THRESHOLD
     migration_patterns: tuple[str, ...] = _DEFAULT_MIGRATION_PATTERNS
+    foreign_key_target_files: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.view_depth_threshold, bool) or not isinstance(
@@ -84,6 +96,11 @@ class SqlSettings:
         for pattern in patterns:
             _validate_migration_pattern(pattern)
         object.__setattr__(self, "migration_patterns", patterns)
+        object.__setattr__(
+            self,
+            "foreign_key_target_files",
+            _normalize_foreign_key_target_files(self.foreign_key_target_files),
+        )
 
     def matches_migration(self, path: Path | str) -> bool:
         """Return whether a root-relative POSIX path matches a migration glob.
@@ -269,12 +286,14 @@ def read_toml_bytes(data: bytes, *, source: Path | str) -> dict[str, object]:
         raise ConfigError(f"invalid TOML in {source}: {error}") from error
     if not isinstance(raw, dict):
         raise ConfigError(f"TOML document must be a table: {source}")
-    return raw
+    return _TomlDocument(raw, text)
 
 
 def parse_config_bytes(data: bytes, *, source: Path | str) -> ValidatedConfig:
     """Validate a supplied config blob without consulting its path or disk."""
-    return _validate_config(read_toml_bytes(data, source=source), source=source)
+    raw = read_toml_bytes(data, source=source)
+    _validate_foreign_key_target_file_key_quotes(raw, source=source)
+    return _validate_config(raw, source=source)
 
 
 def _parse_config(path: Path) -> _ParsedConfig:
@@ -285,6 +304,7 @@ def _parse_config(path: Path) -> _ParsedConfig:
     violation has been rejected.
     """
     raw = read_toml_file(path)
+    _validate_foreign_key_target_file_key_quotes(raw, source=path)
     validated = _validate_config(raw, source=path)
     return _anchor_config(validated, source=path)
 
@@ -380,13 +400,239 @@ def _validate_sql_settings(raw: object, source: Path | str) -> SqlSettings:
         raise ConfigError(
             f"invalid minotaur.sql.migration_patterns: must be a list of strings (in {source})"
         )
-    try:
-        return SqlSettings(threshold, tuple(migration_patterns))
-    except ValueError as error:
-        field = (
-            "migration_patterns" if "migration_patterns" in str(error) else "view_depth_threshold"
+    foreign_key_target_files = raw.get("foreign_key_target_files", {})
+    if not isinstance(foreign_key_target_files, Mapping):
+        raise ConfigError(
+            f"invalid minotaur.sql.foreign_key_target_files: must be a mapping (in {source})"
         )
+    try:
+        return SqlSettings(threshold, tuple(migration_patterns), foreign_key_target_files)
+    except ValueError as error:
+        message = str(error)
+        if "foreign_key_target_files" in message:
+            field = "foreign_key_target_files"
+        else:
+            field = (
+                "migration_patterns" if "migration_patterns" in message else "view_depth_threshold"
+            )
         raise ConfigError(f"invalid minotaur.sql.{field}: {error} (in {source})") from error
+
+
+def _validate_foreign_key_target_file_key_quotes(
+    raw: Mapping[str, object], *, source: Path | str
+) -> None:
+    """Require quoted keys in the one config field whose names are SQL targets.
+
+    TOML parsing intentionally turns bare and quoted keys into the same string.
+    The generic reader therefore retains the original text, and only project
+    configuration validation inspects that text for this documented grammar.
+    """
+    if not isinstance(raw, _TomlDocument):
+        return
+    for path, value_start in _toml_code_assignments(raw.text):
+        if path != ("minotaur", "sql", "foreign_key_target_files") or raw.text[value_start] != "{":
+            continue
+        contents = _inline_table_contents(raw.text, value_start)
+        if contents is None:
+            continue
+        for entry in _split_inline_table_entries(contents):
+            if entry.strip() and not entry.lstrip().startswith(("'", '"')):
+                raise ConfigError(
+                    "invalid minotaur.sql.foreign_key_target_files: "
+                    f"target keys must be quoted (in {source})"
+                )
+
+
+def _toml_code_assignments(text: str) -> tuple[tuple[tuple[str, ...], int], ...]:
+    """Return TOML assignments whose keys occur outside comments and strings."""
+    assignments: list[tuple[tuple[str, ...], int]] = []
+    multiline_delimiter: str | None = None
+    table_path: tuple[str, ...] = ()
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        if multiline_delimiter is not None:
+            if _find_multiline_delimiter(content, multiline_delimiter, 0) is not None:
+                multiline_delimiter = None
+            offset += len(line)
+            continue
+        assignment = _toml_line_assignment(content)
+        if assignment is not None:
+            key_path, value_start = assignment
+            assignments.append((table_path + key_path, offset + value_start))
+            delimiter = _opening_multiline_delimiter(content, value_start)
+            if (
+                delimiter is not None
+                and _find_multiline_delimiter(content, delimiter, value_start + len(delimiter))
+                is None
+            ):
+                multiline_delimiter = delimiter
+        else:
+            header = _toml_table_header(content)
+            if header is not None:
+                table_path = header
+        offset += len(line)
+    return tuple(assignments)
+
+
+def _toml_line_assignment(line: str) -> tuple[tuple[str, ...], int] | None:
+    """Recognize one ordinary TOML key/value line without interpreting values."""
+    index = _skip_toml_whitespace(line, 0)
+    if index == len(line) or line[index] == "#":
+        return None
+    key_path, index = _toml_key_path(line, index)
+    if key_path is None:
+        return None
+    index = _skip_toml_whitespace(line, index)
+    if index == len(line) or line[index] != "=":
+        return None
+    return key_path, _skip_toml_whitespace(line, index + 1)
+
+
+def _toml_table_header(line: str) -> tuple[str, ...] | None:
+    """Recognize one TOML table or array-table header outside values and comments."""
+    index = _skip_toml_whitespace(line, 0)
+    if index == len(line) or line[index] != "[":
+        return None
+    array_table = line.startswith("[[", index)
+    opening_length = 2 if array_table else 1
+    closing = "]]" if array_table else "]"
+    key_path, index = _toml_key_path(line, _skip_toml_whitespace(line, index + opening_length))
+    if key_path is None:
+        return None
+    index = _skip_toml_whitespace(line, index)
+    if not line.startswith(closing, index):
+        return None
+    index = _skip_toml_whitespace(line, index + len(closing))
+    if index != len(line) and line[index] != "#":
+        return None
+    return key_path
+
+
+def _toml_key_path(line: str, index: int) -> tuple[tuple[str, ...] | None, int]:
+    """Read a dotted TOML key path with bare or quoted components."""
+    name, index = _toml_key_segment(line, index)
+    if name is None:
+        return None, index
+    names = [name]
+    while True:
+        index = _skip_toml_whitespace(line, index)
+        if index == len(line) or line[index] != ".":
+            return tuple(names), index
+        name, index = _toml_key_segment(line, _skip_toml_whitespace(line, index + 1))
+        if name is None:
+            return None, index
+        names.append(name)
+
+
+def _toml_key_segment(line: str, index: int) -> tuple[str | None, int]:
+    """Read one bare or quoted TOML key segment from a code position."""
+    if index == len(line):
+        return None, index
+    quote = line[index]
+    if quote in {"'", '"'}:
+        end = _find_toml_quote(line, quote, index + 1)
+        if end is None:
+            return None, index
+        return line[index + 1 : end], end + 1
+    start = index
+    while index < len(line) and (line[index].isalnum() or line[index] in {"_", "-"}):
+        index += 1
+    return (line[start:index] or None), index
+
+
+def _skip_toml_whitespace(value: str, index: int) -> int:
+    while index < len(value) and value[index] in {" ", "\t"}:
+        index += 1
+    return index
+
+
+def _opening_multiline_delimiter(line: str, value_start: int) -> str | None:
+    for delimiter in ('"""', "'''"):
+        if line.startswith(delimiter, value_start):
+            return delimiter
+    return None
+
+
+def _find_multiline_delimiter(value: str, delimiter: str, start: int) -> int | None:
+    index = value.find(delimiter, start)
+    while index != -1:
+        if delimiter == "'''" or _backslash_count(value, index) % 2 == 0:
+            return index
+        index = value.find(delimiter, index + 1)
+    return None
+
+
+def _find_toml_quote(value: str, quote: str, start: int) -> int | None:
+    index = start
+    while index < len(value):
+        if value[index] == quote and (quote == "'" or _backslash_count(value, index) % 2 == 0):
+            return index
+        index += 1
+    return None
+
+
+def _backslash_count(value: str, index: int) -> int:
+    count = 0
+    while index > 0 and value[index - 1] == "\\":
+        count += 1
+        index -= 1
+    return count
+
+
+def _inline_table_contents(text: str, opening_brace: int) -> str | None:
+    """Return one inline table's contents while preserving quoted values."""
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(opening_brace, len(text)):
+        character = text[index]
+        if quote is not None:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[opening_brace + 1 : index]
+    return None
+
+
+def _split_inline_table_entries(contents: str) -> tuple[str, ...]:
+    """Split an inline table on its top-level commas without parsing values."""
+    entries: list[str] = []
+    start = 0
+    nested = 0
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(contents):
+        if quote is not None:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character in "[{":
+            nested += 1
+        elif character in "]}":
+            nested -= 1
+        elif character == "," and nested == 0:
+            entries.append(contents[start:index])
+            start = index + 1
+    entries.append(contents[start:])
+    return tuple(entries)
 
 
 def _validate_migration_pattern(pattern: object) -> None:
@@ -407,6 +653,42 @@ def _validate_migration_pattern(pattern: object) -> None:
     for component in components:
         if component.count("[") != component.count("]"):
             raise ValueError("migration_patterns contains an unterminated bracket expression")
+
+
+def _normalize_foreign_key_target_files(raw: object) -> Mapping[str, str]:
+    """Validate and freeze exact SQL target to source path mappings."""
+    if not isinstance(raw, Mapping):
+        raise ValueError("foreign_key_target_files must be a mapping")
+    normalized: dict[str, str] = {}
+    for target, path in raw.items():
+        if not isinstance(target, str):
+            raise ValueError("foreign_key_target_files keys must be strings")
+        target_parts = target.split(".")
+        if (
+            len(target_parts) not in {1, 2}
+            or any(not part or part in {".", ".."} for part in target_parts)
+            or any(char in target for char in "\\/[]{}*?!")
+        ):
+            raise ValueError(f"foreign_key_target_files has invalid target key: {target!r}")
+        normalized_target = ".".join(part.casefold() for part in target_parts)
+        if normalized_target in normalized:
+            raise ValueError(
+                f"foreign_key_target_files has duplicate normalized target: {target!r}"
+            )
+        if not isinstance(path, str):
+            raise ValueError("foreign_key_target_files values must be strings")
+        if (
+            not path
+            or "\\" in path
+            or path.startswith("/")
+            or re.match(r"^[A-Za-z]:[/\\]", path)
+            or any(char in path for char in "*?[]{}")
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or not path.casefold().endswith(".sql")
+        ):
+            raise ValueError(f"foreign_key_target_files has invalid SQL path: {path!r}")
+        normalized[normalized_target] = path
+    return MappingProxyType(normalized)
 
 
 def _path_components(path: Path | str) -> tuple[str, ...] | None:
