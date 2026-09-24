@@ -14,9 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from minotaur import cli, git
+from minotaur import cli, config, git
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import load_graph_file, stamp_path
+from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 
 
 def _write(root: Path, path: str, source: str) -> Path:
@@ -314,6 +315,79 @@ def test_configured_sql_view_threshold_reaches_direct_analysis(
     assert status == 0
     assert "view-depth-warning" in captured.err
     assert '"depth":2' in captured.err
+
+
+def test_configured_sql_migration_patterns_reach_analyzer_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "configured"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        'migration_patterns = ["migrations/**/*.sql"]\n',
+    )
+    _write(root, "migrations/001.sql", "CREATE TABLE base (id int)\n")
+    _write(root, "migrations/nested/002.sql", "CREATE TABLE nested (id int)\n")
+    observed = []
+    original = sql_interpreter.analyze_view_warnings
+
+    def observe(document, settings):
+        observed.append(settings)
+        return original(document, settings)
+
+    monkeypatch.setattr(sql_interpreter, "analyze_view_warnings", observe)
+    monkeypatch.chdir(root)
+
+    assert cli.main(["analyze"]) == 0
+    assert observed
+    settings = observed[-1]
+    assert settings.migration_patterns == ("migrations/**/*.sql",)
+    assert settings.matches_migration("migrations/001.sql")
+    assert settings.matches_migration("migrations/nested/002.sql")
+    assert not config.SqlSettings(migration_patterns=("migrations/*.sql",)).matches_migration(
+        "migrations/nested/002.sql"
+    )
+    assert not config.SqlSettings(migration_patterns=("*.sql",)).matches_migration(
+        "migrations/001.sql"
+    )
+
+
+def test_invalid_configured_sql_migration_pattern_writes_no_output(tmp_path: Path) -> None:
+    root = tmp_path / "configured"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        'migration_patterns = ["/migrations/**/*.sql"]\n',
+    )
+    _write(root, "migrations/001.sql", "CREATE TABLE base (id int)\n")
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(root / "graph.json")])
+
+    assert status == 2
+    assert not (root / "graph.json").exists()
+    assert not stamp_path(root / "graph.json").exists()
+
+
+def test_sql_settings_do_not_change_python_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "configured"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app.py"]\n[minotaur.sql]\n'
+        'migration_patterns = ["migrations/**/*.sql"]\n',
+    )
+    _write(root, "app.py", "def app():\n    return 1\n")
+    monkeypatch.chdir(root)
+
+    assert cli.main(["analyze"]) == 0
+    assert load_graph_file(root / "graph.json").document.generated_by.name == "minotaur-python"
 
 
 @pytest.mark.parametrize(

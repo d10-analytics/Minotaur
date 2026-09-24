@@ -15,6 +15,7 @@ from minotaur.graph_model.evidence import Evidence, Rule
 from minotaur.graph_model.loading import graph_digest, stamp_path
 from minotaur.graph_model.provenance import NodeClass, Provenance
 from minotaur.language_interpreter.contract import AnalysisResult
+from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 
 
 def _git(root: Path, *args: str) -> None:
@@ -708,6 +709,58 @@ def test_systems_diff_renders_sql_warning_and_rejects_sql_error(
     assert status == 2
     assert captured.out == ""
     assert "captured source analysis produced diagnostics" in captured.err
+
+
+def test_systems_diff_preserves_each_captured_sql_migration_pattern(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path)
+    (root / "migrations" / "nested").mkdir(parents=True)
+    (root / "migrations" / "001.sql").write_text("CREATE TABLE base (id int)\n", encoding="utf-8")
+    (root / "migrations" / "nested" / "002.sql").write_text(
+        "CREATE TABLE nested (id int)\n", encoding="utf-8"
+    )
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        'migration_patterns = ["migrations/**/*.sql"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "sql"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "sql"\n'
+        'files = ["migrations/001.sql", "migrations/nested/002.sql"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        'migration_patterns = ["migrations/*.sql"]\n',
+        encoding="utf-8",
+    )
+
+    observed = []
+    original = sql_interpreter.analyze_view_warnings
+
+    def observe(document, settings):
+        observed.append(settings)
+        return original(document, settings)
+
+    monkeypatch.setattr(sql_interpreter, "analyze_view_warnings", observe)
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 0
+    capsys.readouterr()
+    assert [settings.migration_patterns for settings in observed] == [
+        ("migrations/**/*.sql",),
+        ("migrations/*.sql",),
+    ]
+    recursive, direct_only = observed
+    assert recursive.matches_migration("migrations/nested/002.sql")
+    assert not direct_only.matches_migration("migrations/nested/002.sql")
 
 
 @pytest.mark.parametrize("route", ("root", "target", "systems"))

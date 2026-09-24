@@ -44,7 +44,8 @@ The known fields inside `[minotaur]` are:
   system definitions. It defaults to `docs/systems` inside the declared
   project root.
 * `sql` — optional table containing SQL analysis settings. Its supported
-  `view_depth_threshold` integer defaults to `3` and must be positive.
+  `view_depth_threshold` integer defaults to `3` and must be positive, and its
+  optional `migration_patterns` list defaults to empty.
 
 Any other field is unknown to the current contract and is rejected, so a
 configuration can never silently carry fields the shipped commands do not
@@ -76,6 +77,8 @@ systems_dir = "docs/systems"
 
 [minotaur.sql]
 view_depth_threshold = 3
+# Optional root-relative POSIX globs for migration files.
+migration_patterns = ["migrations/**/*.sql"]
 ```
 
 Here, `root = "."` means the directory containing `.minotaur.toml`. The graph
@@ -93,6 +96,28 @@ The same configured directory is used by system queries and by the HTML
 visualizer. This keeps the command-line answers and the picture in agreement.
 Without a governing configuration, the visualizer can still display the graph
 and source evidence, but it has no project-selected system directory to load.
+
+`migration_patterns` belongs inside `[minotaur.sql]` and is a list of
+root-relative POSIX glob strings. An omitted field or an empty list means that
+no SQL file is a migration. A pattern uses `/` separators and cannot be
+absolute or contain an empty, `.` or `..` component; backslash spellings and
+unknown replacement fields are rejected before analysis or graph output.
+Patterns match the complete root-relative path one component at a time:
+`*`, `?`, and bracket expressions stay within one component, while a complete
+`**` component spans zero or more components. For example:
+
+```toml
+[minotaur.sql]
+migration_patterns = ["migrations/**/*.sql"]
+```
+
+This selects both `migrations/001.sql` and
+`migrations/nested/002.sql`. `migrations/*.sql` selects only the direct file,
+and `*.sql` selects neither path because both are below `migrations/`.
+The same immutable SQL settings value is passed through normal analysis,
+automatic stale-source refresh, committed `query diff`, and both captured
+sides of historical/system comparison, so a route cannot silently apply a
+different pattern.
 
 ## Locating a configuration file
 
