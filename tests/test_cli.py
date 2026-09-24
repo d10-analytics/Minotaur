@@ -372,6 +372,39 @@ def test_invalid_configured_sql_migration_pattern_writes_no_output(tmp_path: Pat
     assert not stamp_path(root / "graph.json").exists()
 
 
+@pytest.mark.parametrize(
+    "pattern",
+    ["migrations/../**/*.sql", r"migrations\\**/*.sql"],
+)
+def test_invalid_sql_migration_pattern_writes_no_output_before_analysis(
+    tmp_path: Path, pattern: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "configured"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        f"migration_patterns = [{pattern!r}]\n",
+    )
+    _write(root, "migrations/001.sql", "CREATE TABLE base (id int)\n")
+    called = False
+
+    def fail_if_analyzed(*args: object, **kwargs: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("invalid configuration reached source analysis")
+
+    monkeypatch.setattr(sql_interpreter, "analyze_view_warnings", fail_if_analyzed)
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(root / "graph.json")])
+
+    assert status == 2
+    assert not called
+    assert not (root / "graph.json").exists()
+    assert not stamp_path(root / "graph.json").exists()
+
+
 def test_sql_settings_do_not_change_python_registration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
