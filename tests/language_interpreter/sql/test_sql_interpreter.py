@@ -16,14 +16,14 @@ from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 from minotaur.language_interpreter.workspace import Workspace
 
 
-def _analyze(tmp_path: Path, **files: bytes | str):
+def _analyze(tmp_path: Path, *, settings: SqlSettings | None = None, **files: bytes | str):
     paths: list[Path] = []
     for name, content in files.items():
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content.encode() if isinstance(content, str) else content)
         paths.append(path)
-    return analyze_sql_files(Workspace(tmp_path), tuple(paths))
+    return analyze_sql_files(Workspace(tmp_path), tuple(paths), settings=settings)
 
 
 def _symbols(result):
@@ -781,6 +781,94 @@ def test_duplicate_declarations_keep_their_own_outgoing_dependencies(tmp_path: P
                 ("b.sql", DiagnosticCode.DUPLICATE_DECLARATION),
             ),
         )
+    )
+
+
+def test_duplicate_declaration_categories_are_complete_and_order_independent(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "canonical/mixed.sql": "CREATE TABLE Mixed (id int)\n",
+        "migrations/mixed.sql": "CREATE TABLE Mixed (id int)\n",
+        "migrations/001.sql": "CREATE TABLE Migrated (id int)\n",
+        "migrations/nested/002.sql": "CREATE TABLE Migrated (id int)\n",
+        "ordinary/one.sql": "CREATE TABLE Canonical (id int)\n",
+        "ordinary/two.sql": "CREATE TABLE Canonical (id int)\n",
+    }
+    settings = SqlSettings(migration_patterns=("migrations/**/*.sql",))
+
+    first = _analyze(tmp_path / "first", settings=settings, **files)
+    second = _analyze(
+        tmp_path / "second",
+        settings=settings,
+        **dict(reversed(tuple(files.items()))),
+    )
+
+    expected_categories = {
+        "canonical/mixed.sql": "canonical-and-migration",
+        "migrations/mixed.sql": "canonical-and-migration",
+        "migrations/001.sql": "multi-migration",
+        "migrations/nested/002.sql": "multi-migration",
+        "ordinary/one.sql": "multi-canonical",
+        "ordinary/two.sql": "multi-canonical",
+    }
+
+    def duplicate_warnings(result):
+        return [
+            item for item in result.warnings if item.code is DiagnosticCode.DUPLICATE_DECLARATION
+        ]
+
+    first_duplicates = duplicate_warnings(first)
+    assert not first.errors
+    assert not second.errors
+    assert len(first_duplicates) == len(expected_categories)
+    assert first.diagnostics == second.diagnostics
+    assert first.document == second.document
+    assert [(item.path, item.location.sort_key) for item in first_duplicates] == sorted(
+        (item.path, item.location.sort_key) for item in first_duplicates
+    )
+    assert [(item.path, item.extensions) for item in first_duplicates] == [
+        (path, {"minotaur-sql": {"category": expected_categories[path]}})
+        for path in sorted(expected_categories)
+    ]
+    assert all(item.severity is DiagnosticSeverity.WARNING for item in first_duplicates)
+
+    malformed = _analyze(
+        tmp_path / "malformed",
+        settings=settings,
+        **{**files, "broken.sql": "CREATE TABLE Broken ("},
+    )
+    assert [item.code for item in malformed.errors] == [DiagnosticCode.PARSE_ERROR]
+    assert len(duplicate_warnings(malformed)) == len(expected_categories)
+    assert any(node.label == "Mixed" for node in malformed.document.nodes)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("migrations/*.sql", "canonical-and-migration"),
+        ("*.sql", "multi-canonical"),
+    ],
+)
+def test_duplicate_categories_use_whole_path_component_matching(
+    tmp_path: Path, pattern: str, expected: str
+) -> None:
+    result = _analyze(
+        tmp_path,
+        settings=SqlSettings(migration_patterns=(pattern,)),
+        **{
+            "migrations/001.sql": "CREATE TABLE Shared (id int)\n",
+            "migrations/nested/002.sql": "CREATE TABLE Shared (id int)\n",
+        },
+    )
+
+    assert not result.errors
+    duplicate_warnings = [
+        item for item in result.warnings if item.code is DiagnosticCode.DUPLICATE_DECLARATION
+    ]
+    assert len(duplicate_warnings) == 2
+    assert all(
+        item.extensions == {"minotaur-sql": {"category": expected}} for item in duplicate_warnings
     )
 
 

@@ -50,6 +50,19 @@ measured depth. Warnings are printed with severity and do not fail `analyze`;
 parse or other error diagnostics still produce the existing nonzero status
 while the partial graph is written.
 
+Duplicate declarations are warning-only diagnostics. Every declaration in a
+duplicate group keeps its source location and receives the exact structured
+payload `{"minotaur-sql":{"category":<category>}}`. The category is
+`canonical-and-migration` when the group contains both migration and ordinary
+files, `multi-migration` when every file matches `migration_patterns`, and
+`multi-canonical` when none match. A nonmatching file is canonical regardless
+of its directory, and classification uses each file's root-relative POSIX
+path.
+
+This classification does not inspect Git history or timestamps, query a live
+catalog, execute SQL, or replay migrations. It describes only duplicate
+declarations found in the selected source files.
+
 The optional SQL setting `view_depth_threshold` in `[minotaur.sql]` controls the maximum
 view path depth before a `view-depth-warning` is emitted. The default is `3`.
 View cycles are reported once per elementary cycle after all references have
