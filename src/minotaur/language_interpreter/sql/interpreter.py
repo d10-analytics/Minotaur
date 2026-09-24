@@ -99,6 +99,7 @@ class _ForeignKey:
     location: Location
     local_columns: tuple[str, ...]
     referenced_columns: tuple[str, ...]
+    constraint_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +123,7 @@ def analyze_sql_files(
     sql_settings = settings if settings is not None else sql_settings
     effective_settings = sql_settings if sql_settings is not None else SqlSettings()
     sources, diagnostics = read_sources(workspace, files)
+    readable_paths = frozenset(source.relative for source in sources)
     file_data = tuple(_make_file(source) for source in sources)
     nodes: list[Node] = [item.node for item in file_data]
     declarations: list[_Declaration] = []
@@ -211,6 +213,7 @@ def analyze_sql_files(
                 )
 
     emitter = NodeEmitter(NAMESPACE, "sql")
+    unresolved_fk_nodes: dict[tuple[str, str], str] = {}
     for observation in observations:
         owner = observation.owner
         if observation.source is not None:
@@ -246,13 +249,12 @@ def analyze_sql_files(
                 "read",
             )
         for foreign_key in observation.foreign_keys:
-            _resolve(
+            _resolve_foreign_key(
                 owner,
                 foreign_key.key,
                 foreign_key.text,
                 foreign_key.location,
                 table_index,
-                {},
                 relationships,
                 nodes,
                 diagnostics,
@@ -260,6 +262,10 @@ def analyze_sql_files(
                 "sql:foreign-key-to",
                 "foreign-key",
                 _foreign_key_extensions(foreign_key),
+                effective_settings,
+                readable_paths,
+                foreign_key.constraint_name,
+                unresolved_fk_nodes,
             )
 
     relationship_documents = relationships.documents(_PRODUCER)
@@ -419,6 +425,101 @@ def _resolve(
     # ``NodeEmitter`` always uses core references, which is exactly the
     # unresolved-target contract; successful SQL relationships remain typed.
     _ = unresolved, relation
+
+
+def _resolve_foreign_key(
+    owner: _Declaration,
+    key: tuple[str, ...],
+    text: str,
+    location: Location,
+    primary: dict[tuple[str, ...], list[_Declaration]],
+    relationships: RelationshipAccumulator,
+    nodes: list[Node],
+    diagnostics: list[Diagnostic],
+    emitter: NodeEmitter,
+    relationship_kind: str,
+    relation: str,
+    extensions: dict[str, dict[str, object]] | None,
+    settings: SqlSettings,
+    readable_paths: frozenset[str],
+    constraint_name: str,
+    unresolved_fk_nodes: dict[tuple[str, str], str],
+) -> None:
+    """Resolve one FK while retaining a per-observation orphan diagnostic."""
+    candidates = primary.get(key, [])
+    if len(candidates) == 1:
+        relationships.add(
+            owner.node.id,
+            candidates[0].node.id,
+            relationship_kind,
+            location,
+            extensions,
+        )
+        return
+    reason = "ambiguous" if len(candidates) > 1 else "undeclared"
+    if reason == "undeclared":
+        mapped_path = settings.foreign_key_target_files.get(".".join(key))
+        if mapped_path in readable_paths:
+            reason = "extraction-gap"
+    diagnostics.append(
+        Diagnostic(
+            DiagnosticCode.ORPHANED_FOREIGN_KEY,
+            location.path,
+            "orphaned foreign key",
+            location,
+            DiagnosticSeverity.WARNING,
+            {
+                NAMESPACE: {
+                    "source_table": owner.label,
+                    "constraint_name": constraint_name,
+                    "target": text,
+                    "reason": reason,
+                }
+            },
+        )
+    )
+    _emit_coalesced_fk_unresolved(
+        owner, text, location, nodes, relationships, unresolved_fk_nodes
+    )
+    _ = relation
+
+
+def _emit_coalesced_fk_unresolved(
+    owner: _Declaration,
+    text: str,
+    location: Location,
+    nodes: list[Node],
+    relationships: RelationshipAccumulator,
+    unresolved_nodes: dict[tuple[str, str], str],
+) -> None:
+    """Keep one generic unresolved FK target per source and target text."""
+    key = (owner.node.id, text)
+    node_id = unresolved_nodes.get(key)
+    if node_id is None:
+        identity = NodeIdentity(
+            IdentityBasis.UNRESOLVED_REFERENCE,
+            NAMESPACE,
+            originating_node=owner.node.id,
+        )
+        node_id = compute_node_id(
+            identity,
+            node_class=NodeClass.UNRESOLVED_REFERENCE.value,
+            location=location,
+            reference_text=text,
+        )
+        unresolved_nodes[key] = node_id
+        nodes.append(
+            Node(
+                id=node_id,
+                identity=identity,
+                node_class=NodeClass.UNRESOLVED_REFERENCE,
+                label=text,
+                reference_text=text,
+                language="sql",
+                location=location,
+            )
+        )
+    relationships.add(owner.node.id, node_id, RelationshipKind.REFERENCES.value, location)
 
 
 def _interpret_statement(
@@ -607,15 +708,28 @@ def _foreign_keys(
         if isinstance(parent, exp.ColumnConstraint) and isinstance(parent.parent, exp.ColumnDef):
             column = parent.parent.this
             local_columns = (str(column.this),) if isinstance(column, exp.Identifier) else ()
+            constraint_name = (
+                str(parent.this.this) if isinstance(parent.this, exp.Identifier) else "unnamed"
+            )
         elif isinstance(parent, exp.ForeignKey):
             local_columns = (
                 tuple(str(column.this) for column in parent.expressions)
                 if all(isinstance(column, exp.Identifier) for column in parent.expressions)
                 else ()
             )
+            constraint = parent.parent
+            constraint_name = (
+                str(constraint.this.this)
+                if isinstance(constraint, exp.Constraint)
+                and isinstance(constraint.this, exp.Identifier)
+                else "unnamed"
+            )
         else:
             local_columns = ()
-        foreign_key = _foreign_key_details(reference, local_columns, item, batch)
+            constraint_name = "unnamed"
+        foreign_key = _foreign_key_details(
+            reference, local_columns, item, batch, constraint_name=constraint_name
+        )
         if foreign_key is None:
             return None
         result.append(foreign_key)
@@ -645,6 +759,8 @@ def _foreign_key_details(
     local_columns: tuple[str, ...],
     item: _File,
     batch: _Batch,
+    *,
+    constraint_name: str = "unnamed",
 ) -> _ForeignKey | None:
     endpoint = _reference_target(reference, item, batch)
     if endpoint is None:
@@ -656,7 +772,7 @@ def _foreign_key_details(
         and all(isinstance(column, exp.Identifier) for column in referenced.expressions)
         else ()
     )
-    return _ForeignKey(*endpoint, local_columns, referenced_columns)
+    return _ForeignKey(*endpoint, local_columns, referenced_columns, constraint_name)
 
 
 def _foreign_key_extensions(
@@ -748,7 +864,9 @@ def _interpret_alter(tree: exp.Alter, item: _File, batch: _Batch) -> _Observatio
                 if all(isinstance(column, exp.Identifier) for column in expressions[0].expressions)
                 else ()
             )
-            foreign_key = _foreign_key_details(reference, local_columns, item, batch)
+            foreign_key = _foreign_key_details(
+                reference, local_columns, item, batch, constraint_name=str(constraint.this.this)
+            )
             if foreign_key is None:
                 return None
             foreign_keys.append(foreign_key)

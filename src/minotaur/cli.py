@@ -2011,7 +2011,6 @@ def _format_diagnostic(diagnostic: Diagnostic) -> str:
     if diagnostic.extensions is not None:
         suffix += " metadata=" + json.dumps(
             _thaw_diagnostic_metadata(diagnostic.extensions),
-            sort_keys=True,
             separators=(",", ":"),
         )
     suffix += "]"

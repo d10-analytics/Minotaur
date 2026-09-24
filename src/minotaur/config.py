@@ -37,6 +37,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
+from types import MappingProxyType
 
 from minotaur import git
 
@@ -51,9 +52,12 @@ _SCHEMA_VERSION = 1
 _DEFAULT_GRAPH_FILENAME = "minotaur-graph.json"
 _DEFAULT_SYSTEMS_DIR = "docs/systems"
 _KNOWN_FIELDS = frozenset({"schema_version", "root", "graph", "targets", "systems_dir", "sql"})
-_SQL_KNOWN_FIELDS = frozenset({"view_depth_threshold", "migration_patterns"})
+_SQL_KNOWN_FIELDS = frozenset(
+    {"view_depth_threshold", "migration_patterns", "foreign_key_target_files"}
+)
 _DEFAULT_VIEW_DEPTH_THRESHOLD = 3
 _DEFAULT_MIGRATION_PATTERNS: tuple[str, ...] = ()
+_DEFAULT_FOREIGN_KEY_TARGET_FILES: Mapping[str, str] = MappingProxyType({})
 
 
 class ConfigError(ValueError):
@@ -70,6 +74,7 @@ class SqlSettings:
 
     view_depth_threshold: int = _DEFAULT_VIEW_DEPTH_THRESHOLD
     migration_patterns: tuple[str, ...] = _DEFAULT_MIGRATION_PATTERNS
+    foreign_key_target_files: Mapping[str, str] = _DEFAULT_FOREIGN_KEY_TARGET_FILES
 
     def __post_init__(self) -> None:
         if isinstance(self.view_depth_threshold, bool) or not isinstance(
@@ -84,6 +89,11 @@ class SqlSettings:
         for pattern in patterns:
             _validate_migration_pattern(pattern)
         object.__setattr__(self, "migration_patterns", patterns)
+        object.__setattr__(
+            self,
+            "foreign_key_target_files",
+            _normalize_foreign_key_target_files(self.foreign_key_target_files),
+        )
 
     def matches_migration(self, path: Path | str) -> bool:
         """Return whether a root-relative POSIX path matches a migration glob.
@@ -380,12 +390,22 @@ def _validate_sql_settings(raw: object, source: Path | str) -> SqlSettings:
         raise ConfigError(
             f"invalid minotaur.sql.migration_patterns: must be a list of strings (in {source})"
         )
-    try:
-        return SqlSettings(threshold, tuple(migration_patterns))
-    except ValueError as error:
-        field = (
-            "migration_patterns" if "migration_patterns" in str(error) else "view_depth_threshold"
+    foreign_key_target_files = raw.get("foreign_key_target_files", {})
+    if not isinstance(foreign_key_target_files, Mapping):
+        raise ConfigError(
+            "invalid minotaur.sql.foreign_key_target_files: must be a mapping (in "
+            f"{source})"
         )
+    try:
+        return SqlSettings(threshold, tuple(migration_patterns), foreign_key_target_files)
+    except ValueError as error:
+        message = str(error)
+        if "foreign_key_target_files" in message:
+            field = "foreign_key_target_files"
+        else:
+            field = (
+                "migration_patterns" if "migration_patterns" in message else "view_depth_threshold"
+            )
         raise ConfigError(f"invalid minotaur.sql.{field}: {error} (in {source})") from error
 
 
@@ -407,6 +427,42 @@ def _validate_migration_pattern(pattern: object) -> None:
     for component in components:
         if component.count("[") != component.count("]"):
             raise ValueError("migration_patterns contains an unterminated bracket expression")
+
+
+def _normalize_foreign_key_target_files(raw: object) -> Mapping[str, str]:
+    """Validate and freeze exact SQL target to source path mappings."""
+    if not isinstance(raw, Mapping):
+        raise ValueError("foreign_key_target_files must be a mapping")
+    normalized: dict[str, str] = {}
+    for target, path in raw.items():
+        if not isinstance(target, str):
+            raise ValueError("foreign_key_target_files keys must be strings")
+        target_parts = target.split(".")
+        if (
+            len(target_parts) not in {1, 2}
+            or any(not part or part in {".", ".."} for part in target_parts)
+            or any(char in target for char in "\\/[]{}*?!")
+        ):
+            raise ValueError(f"foreign_key_target_files has invalid target key: {target!r}")
+        normalized_target = ".".join(part.casefold() for part in target_parts)
+        if normalized_target in normalized:
+            raise ValueError(
+                f"foreign_key_target_files has duplicate normalized target: {target!r}"
+            )
+        if not isinstance(path, str):
+            raise ValueError("foreign_key_target_files values must be strings")
+        if (
+            not path
+            or "\\" in path
+            or path.startswith("/")
+            or re.match(r"^[A-Za-z]:[/\\]", path)
+            or any(char in path for char in "*?[]{}")
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or not path.casefold().endswith(".sql")
+        ):
+            raise ValueError(f"foreign_key_target_files has invalid SQL path: {path!r}")
+        normalized[normalized_target] = path
+    return MappingProxyType(normalized)
 
 
 def _path_components(path: Path | str) -> tuple[str, ...] | None:
