@@ -699,6 +699,35 @@ def test_disk_config_ignores_foreign_key_mapping_in_an_unrelated_table(tmp_path:
     assert resolved.sql.foreign_key_target_files == {}
 
 
+def test_capture_config_ignores_foreign_key_mapping_in_an_unrelated_array_table() -> None:
+    """An array-table header replaces the preceding SQL table's lexical context."""
+    data = (
+        b'[minotaur]\nschema_version = 1\ntargets = ["src"]\n[minotaur.sql]\n'
+        b'[[metadata]]\nforeign_key_target_files = { Parent = "schema/p.sql" }\n'
+    )
+
+    parsed = config.parse_config_bytes(data, source="captured.toml")
+
+    assert parsed.sql.foreign_key_target_files == {}
+
+
+def test_disk_config_ignores_foreign_key_mapping_in_an_unrelated_array_table(
+    tmp_path: Path,
+) -> None:
+    """A located array-table mapping does not inherit SQL-key validation."""
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n[minotaur.sql]\n'
+        '[[metadata]]\nforeign_key_target_files = { Parent = "schema/p.sql" }\n',
+    )
+
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.config_file == cfg.resolve()
+    assert resolved.sql.foreign_key_target_files == {}
+
+
 @pytest.mark.parametrize(
     ("data", "message"),
     [
