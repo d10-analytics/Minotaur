@@ -450,9 +450,18 @@ def test_invalid_configured_sql_foreign_key_mapping_writes_no_output(
         'foreign_key_target_files = { "Parent" = "schema/*.sql" }\n',
     )
     _write(root, "schema.sql", "CREATE TABLE Child (parent_id int REFERENCES Parent(id))\n")
+    analyzed = False
+
+    def fail_if_analyzed(*args: object, **kwargs: object) -> object:
+        nonlocal analyzed
+        analyzed = True
+        raise AssertionError("invalid configuration reached source analysis")
+
+    monkeypatch.setattr(sql_interpreter, "analyze_view_warnings", fail_if_analyzed)
     monkeypatch.chdir(root)
 
     assert cli.main(["analyze"]) == 2
+    assert not analyzed
     assert not (root / "graph.json").exists()
     assert not stamp_path(root / "graph.json").exists()
 
