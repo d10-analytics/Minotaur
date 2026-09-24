@@ -64,6 +64,7 @@ _SYSTEM_FILES = {
     ],
     "analysis-sql": [
         "minotaur/language_interpreter/sql/__init__.py",
+        "minotaur/language_interpreter/sql/diagnostics.py",
         "minotaur/language_interpreter/sql/interpreter.py",
     ],
     "command-interface": [
@@ -419,8 +420,8 @@ def test_declaration_omission_reports_the_graph_file_as_unassigned(
     assert payload["coverage"]["graph_files"]["count"] == 63
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 61,
-        "represented": 61,
+        "total": 62,
+        "represented": 62,
         "absent": 0,
     }
     assert payload["coverage"]["unassigned_files"] == {
@@ -468,8 +469,8 @@ def test_target_omission_reports_one_declared_file_absent(
     }
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 62,
-        "represented": 61,
+        "total": 63,
+        "represented": 62,
         "absent": 1,
     }
     assert payload["coverage"]["unassigned_files"] == {
