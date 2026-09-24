@@ -319,7 +319,7 @@ def test_configured_sql_orphan_warning_writes_graph_and_preserves_generic_refere
     assert cli.main(["analyze"]) == 0
     captured = capsys.readouterr()
     assert (
-        'orphaned-foreign-key: orphaned foreign key [severity=warning '
+        "orphaned-foreign-key: orphaned foreign key [severity=warning "
         'metadata={"minotaur-sql":{"source_table":"Child","constraint_name":"unnamed",'
         '"target":"Parent","reason":"extraction-gap"}}]'
     ) in captured.err
