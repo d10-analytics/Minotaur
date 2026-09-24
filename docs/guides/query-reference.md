@@ -170,8 +170,8 @@ the same node class as unstable scaffolding.
 
 ### Find unreferenced symbols
 
-Find graph-clean functions, methods, and classes, optionally narrowing the
-source paths:
+Find graph-clean functions, methods, classes, SQL tables, and SQL views,
+optionally narrowing the source paths:
 
 ```bash
 minotaur query unreferenced src/package tests \
@@ -180,36 +180,42 @@ minotaur query unreferenced src/package tests \
   --graph GRAPH.json --root ROOT
 ```
 
-The query excludes dunder names and `test_*` names. `--exclude` may be
-repeated; `--exclude-file` accepts a JSON list/object of names or one name per
-line. Both match a symbol's bare name exactly. `--exclude-pattern` takes a
-regular expression searched against the qualified label and may be repeated;
-an invalid expression exits `2`. Patterns are how a caller encodes framework
-conventions Minotaur does not know about — pytest's `Test*` classes, Qt or
-other overrides that are called by a framework rather than by analyzed code,
-generated modules — without Minotaur hard-coding any language or framework. By
-default only graph relationships count: a symbol is reported when the only
-inbound call or reference comes from the symbol itself (for example, a
-recursive call). A decorator is attributed to the enclosing module or class as
-a reference to the decorated symbol, so decoration counts as a use; a
+Automatic dunder and `test_*` exclusions apply to core code symbols. SQL table
+and view candidates use the same explicit `--exclude`, `--exclude-file`, and
+`--exclude-pattern` controls, but ordinary SQL names are not filtered by those
+core naming heuristics. `--exclude` may be repeated; `--exclude-file` accepts a
+JSON list/object of names or one name per line. Both match a symbol's bare name
+exactly. `--exclude-pattern` takes a regular expression searched against the
+qualified label and may be repeated; an invalid expression exits `2`. Patterns
+are how a caller encodes framework conventions Minotaur does not know about —
+pytest's `Test*` classes, Qt or other overrides that are called by a framework
+rather than by analyzed code, generated modules — without Minotaur hard-coding
+any language or framework. By default only graph relationships count. Core
+symbols are reported when the only inbound call or reference comes from the
+symbol itself (for example, a recursive call). SQL tables and views are
+reported when they have no inbound resolved `sql:reads-from` or
+`sql:foreign-key-to` relationship; an outgoing SQL relationship alone does not
+make its source used. A decorator is attributed to the enclosing module or
+class as a reference to the decorated symbol, so decoration counts as a use; a
 never-called symbol wrapped by a decorator is therefore not listed. Use
-recorded anywhere else keeps it out of the result, including module-scope use
-such as `app = create_app()` or `register(handler)`, which the graph attributes
-to the module. Add `--text-fallback` for a
-conservative hygiene pass that retains a suspect when its bare name appears
-elsewhere in source text (including strings or comments), marking it
-`[text-mention]`:
+recorded anywhere else keeps a core symbol out of the result, including
+module-scope use such as `app = create_app()` or `register(handler)`, which the
+graph attributes to the module. Add `--text-fallback` for a conservative
+hygiene pass that retains a suspect when its bare name appears elsewhere in
+source text (including strings or comments), marking it `[text-mention]`:
 
 ```text
 src/package/helpers.py:18  package.helpers.orphan  function [text-mention]
 ```
 
-The fallback counts occurrences of the bare name and subtracts the definitions
-of that name in the scanned files, so definitions of the same name no longer
-vouch for each other. It is keyed by the bare name, not by the symbol: when two
-classes both define `render` and `'render'` appears once in a string, both
-`A.render` and `B.render` are marked `[text-mention]`, because source text
-cannot say which one was meant.
+For core symbols, the fallback counts case-sensitive occurrences of the bare
+name and subtracts the definitions of that name in the scanned files. For SQL
+tables and views, it counts the bare name case-insensitively and subtracts
+case-insensitive SQL table/view declarations. In both cases, definitions of
+the same name no longer vouch for each other. The fallback is keyed by bare
+name, not by symbol: when two classes both define `render` and `'render'`
+appears once in a string, both `A.render` and `B.render` are marked
+`[text-mention]`, because source text cannot say which one was meant.
 
 JSON records contain `path`, `line`, `symbol`, `kind`, and `text_mention`.
 An empty result prints `no unreferenced symbols` and still exits `0`.

@@ -60,11 +60,13 @@ Every readable SQL file contributes a file node with the
 `minotaur-sql.content_sha256` digest of its original bytes, including any BOM
 and line endings. SQL symbols and relationships are payload-free namespaced
 extensions to the graph vocabulary. Generic `definitions` and `diff` observe
-supported SQL facts. `callers` consumes resolved `sql:reads-from` and
-`sql:foreign-key-to` edges, and `impact` follows them inbound; their
-[query-reference sections](query-reference.md) define the exact contracts.
-`unreferenced`, `surface`, `consumers`, and `system-deps` do not consume
-these edges. The existing generic unresolved-reference recall remains available.
+supported SQL facts. `callers`, `impact`, `surface`, `consumers`,
+`system-deps`, and `unreferenced` consume resolved `sql:reads-from` and
+`sql:foreign-key-to` edges; their [query-reference sections](query-reference.md)
+define the exact contracts. `unreferenced` uses those edges for current SQL
+table and view results. Other SQL symbol and relationship kinds remain outside
+these query contracts. The existing generic unresolved-reference recall remains
+available.
 
 The graph records the selected target paths. After registration, adding or
 editing SQL under a recorded directory is ordinary freshness drift. A
