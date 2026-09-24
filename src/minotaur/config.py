@@ -429,8 +429,10 @@ def _validate_foreign_key_target_file_key_quotes(
     """
     if not isinstance(raw, _TomlDocument):
         return
-    for name, value_start in _toml_code_assignments(raw.text):
-        if name != "foreign_key_target_files" or raw.text[value_start] != "{":
+    for path, value_start in _toml_code_assignments(raw.text):
+        if path != ("minotaur", "sql", "foreign_key_target_files") or raw.text[
+            value_start
+        ] != "{":
             continue
         contents = _inline_table_contents(raw.text, value_start)
         if contents is None:
@@ -443,10 +445,11 @@ def _validate_foreign_key_target_file_key_quotes(
                 )
 
 
-def _toml_code_assignments(text: str) -> tuple[tuple[str, int], ...]:
+def _toml_code_assignments(text: str) -> tuple[tuple[tuple[str, ...], int], ...]:
     """Return TOML assignments whose keys occur outside comments and strings."""
-    assignments: list[tuple[str, int]] = []
+    assignments: list[tuple[tuple[str, ...], int]] = []
     multiline_delimiter: str | None = None
+    table_path: tuple[str, ...] = ()
     offset = 0
     for line in text.splitlines(keepends=True):
         content = line.rstrip("\r\n")
@@ -457,36 +460,66 @@ def _toml_code_assignments(text: str) -> tuple[tuple[str, int], ...]:
             continue
         assignment = _toml_line_assignment(content)
         if assignment is not None:
-            name, value_start = assignment
-            assignments.append((name, offset + value_start))
+            key_path, value_start = assignment
+            assignments.append((table_path + key_path, offset + value_start))
             delimiter = _opening_multiline_delimiter(content, value_start)
             if delimiter is not None and _find_multiline_delimiter(
                 content, delimiter, value_start + len(delimiter)
             ) is None:
                 multiline_delimiter = delimiter
+        else:
+            header = _toml_table_header(content)
+            if header is not None:
+                table_path = header
         offset += len(line)
     return tuple(assignments)
 
 
-def _toml_line_assignment(line: str) -> tuple[str, int] | None:
+def _toml_line_assignment(line: str) -> tuple[tuple[str, ...], int] | None:
     """Recognize one ordinary TOML key/value line without interpreting values."""
     index = _skip_toml_whitespace(line, 0)
     if index == len(line) or line[index] == "#":
         return None
-    name, index = _toml_key_segment(line, index)
-    if name is None:
+    key_path, index = _toml_key_path(line, index)
+    if key_path is None:
         return None
-    while True:
-        index = _skip_toml_whitespace(line, index)
-        if index == len(line) or line[index] != ".":
-            break
-        name, index = _toml_key_segment(line, _skip_toml_whitespace(line, index + 1))
-        if name is None:
-            return None
     index = _skip_toml_whitespace(line, index)
     if index == len(line) or line[index] != "=":
         return None
-    return name, _skip_toml_whitespace(line, index + 1)
+    return key_path, _skip_toml_whitespace(line, index + 1)
+
+
+def _toml_table_header(line: str) -> tuple[str, ...] | None:
+    """Recognize one standard TOML table header outside values and comments."""
+    index = _skip_toml_whitespace(line, 0)
+    if index == len(line) or line[index] != "[" or line.startswith("[[", index):
+        return None
+    key_path, index = _toml_key_path(line, _skip_toml_whitespace(line, index + 1))
+    if key_path is None:
+        return None
+    index = _skip_toml_whitespace(line, index)
+    if index == len(line) or line[index] != "]":
+        return None
+    index = _skip_toml_whitespace(line, index + 1)
+    if index != len(line) and line[index] != "#":
+        return None
+    return key_path
+
+
+def _toml_key_path(line: str, index: int) -> tuple[tuple[str, ...] | None, int]:
+    """Read a dotted TOML key path with bare or quoted components."""
+    name, index = _toml_key_segment(line, index)
+    if name is None:
+        return None, index
+    names = [name]
+    while True:
+        index = _skip_toml_whitespace(line, index)
+        if index == len(line) or line[index] != ".":
+            return tuple(names), index
+        name, index = _toml_key_segment(line, _skip_toml_whitespace(line, index + 1))
+        if name is None:
+            return None, index
+        names.append(name)
 
 
 def _toml_key_segment(line: str, index: int) -> tuple[str | None, int]:
