@@ -144,3 +144,27 @@ CREATE TABLE S.CaseThing (id int)
             "text_mention": False,
         }
     ]
+
+
+def test_sql_quoted_dot_identifier_preserves_final_name_for_fallback_and_exclusion(
+    tmp_path: Path, capsys: object
+) -> None:
+    root = tmp_path / "sql"
+    _write(
+        root,
+        "schema.sql",
+        "CREATE TABLE [schema.with.dot].[table.with.dot] (id int)\n",
+    )
+    graph = tmp_path / "sql.json"
+    _analyze(root, graph)
+
+    assert _query_json(graph, root, capsys, "--text-fallback") == [
+        {
+            "kind": "sql:table",
+            "line": 1,
+            "path": "schema.sql",
+            "symbol": "schema.with.dot.table.with.dot",
+            "text_mention": False,
+        }
+    ]
+    assert _query_json(graph, root, capsys, "--exclude", "table.with.dot") == []
