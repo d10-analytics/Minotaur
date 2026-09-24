@@ -95,10 +95,7 @@ class SqlSettings:
         path_parts = _path_components(path)
         if path_parts is None:
             return False
-        for pattern in self.migration_patterns:
-            if _match_pattern(pattern, path_parts):
-                return True
-        return False
+        return any(_match_pattern(pattern, path_parts) for pattern in self.migration_patterns)
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,21 +373,18 @@ def _validate_sql_settings(raw: object, source: Path | str) -> SqlSettings:
         if name not in _SQL_KNOWN_FIELDS:
             raise ConfigError(f"unknown SQL config field: {name} (in {source})")
     threshold = raw.get("view_depth_threshold", _DEFAULT_VIEW_DEPTH_THRESHOLD)
-    migration_patterns = raw.get("migration_patterns", _DEFAULT_MIGRATION_PATTERNS)
+    migration_patterns = raw.get("migration_patterns", [])
     if not isinstance(migration_patterns, list) or any(
         not isinstance(item, str) for item in migration_patterns
     ):
         raise ConfigError(
-            "invalid minotaur.sql.migration_patterns: must be a list of strings "
-            f"(in {source})"
+            f"invalid minotaur.sql.migration_patterns: must be a list of strings (in {source})"
         )
     try:
         return SqlSettings(threshold, tuple(migration_patterns))
     except ValueError as error:
         field = (
-            "migration_patterns"
-            if "migration_patterns" in str(error)
-            else "view_depth_threshold"
+            "migration_patterns" if "migration_patterns" in str(error) else "view_depth_threshold"
         )
         raise ConfigError(f"invalid minotaur.sql.{field}: {error} (in {source})") from error
 
@@ -438,9 +432,11 @@ def _match_pattern(pattern: str, path_parts: tuple[str, ...]) -> bool:
             return match(pattern_index + 1, path_index) or (
                 path_index < len(path_parts) and match(pattern_index, path_index + 1)
             )
-        return path_index < len(path_parts) and fnmatchcase(
-            path_parts[path_index], component
-        ) and match(pattern_index + 1, path_index + 1)
+        return (
+            path_index < len(path_parts)
+            and fnmatchcase(path_parts[path_index], component)
+            and match(pattern_index + 1, path_index + 1)
+        )
 
     return match(0, 0)
 
