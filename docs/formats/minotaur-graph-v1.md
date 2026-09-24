@@ -155,8 +155,8 @@ selectable call sites.
 Core objects reject unknown fields. Each supported object may instead carry an
 `extensions` object whose non-empty keys conventionally identify a producer
 namespace and whose values are objects. The detailed extension-key grammar is
-intentionally deferred; consumers must not treat extension data as a core
-fact.
+intentionally deferred; consumers may use a documented producer-specific
+extension, but must not treat other extension data as a core fact.
 
 The Python analyzer currently emits these producer extensions. On each `file`
 node, `extensions["minotaur-python"]["content_sha256"]` is the lowercase
