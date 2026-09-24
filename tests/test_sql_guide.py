@@ -28,3 +28,16 @@ def test_sql_guide_documents_depth_scope_and_exclusions() -> None:
     assert "Procedure and function reads" in text
     assert "ordinary diamonds" in text
     assert "unrelated generic references" in text
+
+
+def test_sql_guide_documents_duplicate_categories_payload_and_exclusions() -> None:
+    text = _text()
+    assert "`canonical-and-migration`" in text
+    assert "`multi-migration`" in text
+    assert "`multi-canonical`" in text
+    assert '`{"minotaur-sql":{"category":<category>}}`' in text
+    assert "root-relative POSIX" in text
+    assert "Git history" in text
+    assert "live catalog" in text
+    assert "execute SQL" in text
+    assert "replay migrations" in text

@@ -812,6 +812,14 @@ def test_duplicate_declaration_categories_are_complete_and_order_independent(
         "ordinary/one.sql": "multi-canonical",
         "ordinary/two.sql": "multi-canonical",
     }
+    expected_ranges = {
+        "canonical/mixed.sql": (0, 13, 0, 18),
+        "migrations/mixed.sql": (0, 13, 0, 18),
+        "migrations/001.sql": (0, 13, 0, 21),
+        "migrations/nested/002.sql": (0, 13, 0, 21),
+        "ordinary/one.sql": (0, 13, 0, 22),
+        "ordinary/two.sql": (0, 13, 0, 22),
+    }
 
     def duplicate_warnings(result):
         return [
@@ -827,6 +835,16 @@ def test_duplicate_declaration_categories_are_complete_and_order_independent(
     assert [(item.path, item.location.sort_key) for item in first_duplicates] == sorted(
         (item.path, item.location.sort_key) for item in first_duplicates
     )
+    assert [
+        (
+            item.path,
+            item.location.range.start.line,
+            item.location.range.start.character,
+            item.location.range.end.line,
+            item.location.range.end.character,
+        )
+        for item in first_duplicates
+    ] == [(path, *expected_ranges[path]) for path in sorted(expected_ranges)]
     assert [(item.path, item.extensions) for item in first_duplicates] == [
         (path, {"minotaur-sql": {"category": expected_categories[path]}})
         for path in sorted(expected_categories)

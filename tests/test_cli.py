@@ -263,6 +263,43 @@ def test_sql_warning_only_analysis_succeeds_and_preserves_shared_metadata(
     ) == [0, 0]
 
 
+def test_configured_sql_duplicate_warnings_write_graph_and_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "configured"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["migrations"]\n[minotaur.sql]\n'
+        'migration_patterns = ["migrations/**/*.sql"]\n',
+    )
+    _write(root, "migrations/001.sql", "CREATE TABLE Duplicate (id int)\n")
+    _write(root, "migrations/nested/002.sql", "CREATE TABLE Duplicate (id int)\n")
+    monkeypatch.chdir(root)
+
+    assert cli.main(["analyze"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("duplicate-declaration") == 2
+    assert (
+        captured.err.count(
+            '[severity=warning metadata={"minotaur-sql":{"category":"multi-migration"}}]'
+        )
+        == 2
+    )
+    output = root / "graph.json"
+    assert output.is_file()
+    assert stamp_path(output).is_file()
+    graph = load_graph_file(output).document
+    assert graph.generated_by.name == "minotaur-sql"
+    assert [node.label for node in graph.nodes if node.symbol_kind == "sql:table"] == [
+        "Duplicate",
+        "Duplicate",
+    ]
+
+
 def test_sql_warning_and_parse_error_fail_after_writing_partial_graph(tmp_path: Path) -> None:
     root = tmp_path / "source"
     valid = _write(
