@@ -144,6 +144,11 @@ _CONNECTIONS = [
         ("calls", "imports", "references"),
     ),
     (
+        "system: analysis-platform",
+        "system: project-acquisition",
+        ("imports", "references"),
+    ),
+    (
         "system: analysis-python",
         "system: analysis-platform",
         ("calls", "imports", "references"),
@@ -161,6 +166,11 @@ _CONNECTIONS = [
     (
         "system: analysis-sql",
         "system: graph-contract",
+        ("calls", "imports", "references"),
+    ),
+    (
+        "system: analysis-sql",
+        "system: project-acquisition",
         ("calls", "imports", "references"),
     ),
     (
