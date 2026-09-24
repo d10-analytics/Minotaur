@@ -53,6 +53,26 @@ def _configured_repo(tmp_path: Path) -> Path:
     return root
 
 
+def _configured_sql_repo(tmp_path: Path) -> Path:
+    root = _repo(tmp_path)
+    (root / "src").mkdir()
+    (root / "src" / "schema.sql").write_text(
+        "CREATE TABLE base (id int)\n", encoding="utf-8"
+    )
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["src"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "sql"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "sql"\nfiles = ["src/schema.sql"]\n',
+        encoding="utf-8",
+    )
+    return root
+
+
 def _state(root: Path) -> dict[str, object]:
     """Capture every comparison input plus Git index and porcelain state."""
     tracked = subprocess.run(
@@ -650,6 +670,39 @@ def test_current_source_diagnostic_outside_selected_system_is_global_error(
     assert "consumer.py" in captured.err
     assert "captured source analysis produced diagnostics" in captured.err
     _assert_state(root, before)
+
+
+def test_systems_diff_renders_sql_warning_and_rejects_sql_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_sql_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    warning_source = (
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\nGO\n"
+        "CREATE VIEW v3 AS SELECT * FROM v2\nGO\n"
+        "CREATE VIEW v4 AS SELECT * FROM v3\n"
+    )
+    (root / "src" / "schema.sql").write_text(warning_source, encoding="utf-8")
+
+    status = cli.main(["query", "diff", "--systems", "--json"])
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "view-depth-warning" in captured.err
+    assert json.loads(captured.out)["changed"] is True
+
+    (root / "src" / "schema.sql").write_text(
+        warning_source + "\nGO\nCREATE TABLE broken (\n", encoding="utf-8"
+    )
+    status = cli.main(["query", "diff", "--systems", "--json"])
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert "captured source analysis produced diagnostics" in captured.err
 
 
 @pytest.mark.parametrize("route", ("root", "target", "systems"))

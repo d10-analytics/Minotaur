@@ -268,6 +268,42 @@ def test_systems_refresh_reports_source_diagnostics_in_overview_json(
     assert "minotaur: stale: orders/mod.py" in err
 
 
+def test_sql_system_refresh_reports_warning_and_mixed_error_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path, "sql-refresh")
+    _write(root, "schema.sql", "CREATE TABLE base (id int)\n")
+    _declare(root, "sql", ["schema.sql"])
+    graph = root / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(graph), str(root)]) == 0
+    capsys.readouterr()
+
+    warning_source = (
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\nGO\n"
+        "CREATE VIEW v3 AS SELECT * FROM v2\nGO\n"
+        "CREATE VIEW v4 AS SELECT * FROM v3\n"
+    )
+    _write(root, "schema.sql", warning_source)
+    status, out, err = _systems(capsys, root, graph, "--json")
+    assert status == 0
+    assert json.loads(out)["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "warnings": 1,
+        "errors": 0,
+    }
+
+    _write(root, "schema.sql", warning_source + "GO\nCREATE TABLE broken (\n")
+    status, out, err = _systems(capsys, root, graph, "--json")
+    assert status == 1
+    assert json.loads(out)["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "warnings": 1,
+        "errors": 1,
+    }
+
+
 def test_systems_empty_tree_details_text_is_complete_and_canonical(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

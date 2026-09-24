@@ -1052,6 +1052,41 @@ def test_system_cli_refresh_composes_zero_and_positive_diagnostics(
     assert payload["coverage"]["source_diagnostics"]["errors"] > 0
 
 
+def test_sql_system_query_refresh_reports_warning_and_mixed_error_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path, "sql-refresh")
+    _write(root, "schema.sql", "CREATE TABLE base (id int)\n")
+    _declare(root, "sql", ["schema.sql"])
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    warning_source = (
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\nGO\n"
+        "CREATE VIEW v3 AS SELECT * FROM v2\nGO\n"
+        "CREATE VIEW v4 AS SELECT * FROM v3\n"
+    )
+    _write(root, "schema.sql", warning_source)
+    status, out, _ = _query(capsys, graph, root, "surface", "sql", "--json")
+    assert status == 0
+    assert json.loads(out)["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "warnings": 1,
+        "errors": 0,
+    }
+
+    _write(root, "schema.sql", warning_source + "GO\nCREATE TABLE broken (\n")
+    status, out, _ = _query(capsys, graph, root, "consumers", "sql", "--json")
+    assert status == 1
+    assert json.loads(out)["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "warnings": 1,
+        "errors": 1,
+    }
+
+
 def test_system_cli_no_refresh_keeps_saved_coverage_and_unavailable_diagnostics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
