@@ -57,6 +57,13 @@ _SQL_KNOWN_FIELDS = frozenset(
 )
 _DEFAULT_VIEW_DEPTH_THRESHOLD = 3
 _DEFAULT_MIGRATION_PATTERNS: tuple[str, ...] = ()
+_FOREIGN_KEY_TARGET_FILES_ASSIGNMENT = re.compile(
+    r"""(?mx)
+    ^[ \t]*
+    (?:(?:minotaur[ \t]*\.[ \t]*)?(?:sql[ \t]*\.[ \t]*)?)
+    foreign_key_target_files[ \t]*=[ \t]*\{
+    """
+)
 
 
 class ConfigError(ValueError):
@@ -65,6 +72,14 @@ class ConfigError(ValueError):
     The message names the offending field or path so a caller (the CLI maps
     this error to exit status 2) can point the user at the exact problem.
     """
+
+
+class _TomlDocument(dict[str, object]):
+    """A generic parsed TOML table retaining its text for config-only checks."""
+
+    def __init__(self, values: Mapping[str, object], text: str) -> None:
+        super().__init__(values)
+        self.text = text
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,12 +293,14 @@ def read_toml_bytes(data: bytes, *, source: Path | str) -> dict[str, object]:
         raise ConfigError(f"invalid TOML in {source}: {error}") from error
     if not isinstance(raw, dict):
         raise ConfigError(f"TOML document must be a table: {source}")
-    return raw
+    return _TomlDocument(raw, text)
 
 
 def parse_config_bytes(data: bytes, *, source: Path | str) -> ValidatedConfig:
     """Validate a supplied config blob without consulting its path or disk."""
-    return _validate_config(read_toml_bytes(data, source=source), source=source)
+    raw = read_toml_bytes(data, source=source)
+    _validate_foreign_key_target_file_key_quotes(raw, source=source)
+    return _validate_config(raw, source=source)
 
 
 def _parse_config(path: Path) -> _ParsedConfig:
@@ -294,6 +311,7 @@ def _parse_config(path: Path) -> _ParsedConfig:
     violation has been rejected.
     """
     raw = read_toml_file(path)
+    _validate_foreign_key_target_file_key_quotes(raw, source=path)
     validated = _validate_config(raw, source=path)
     return _anchor_config(validated, source=path)
 
@@ -405,6 +423,84 @@ def _validate_sql_settings(raw: object, source: Path | str) -> SqlSettings:
                 "migration_patterns" if "migration_patterns" in message else "view_depth_threshold"
             )
         raise ConfigError(f"invalid minotaur.sql.{field}: {error} (in {source})") from error
+
+
+def _validate_foreign_key_target_file_key_quotes(
+    raw: Mapping[str, object], *, source: Path | str
+) -> None:
+    """Require quoted keys in the one config field whose names are SQL targets.
+
+    TOML parsing intentionally turns bare and quoted keys into the same string.
+    The generic reader therefore retains the original text, and only project
+    configuration validation inspects that text for this documented grammar.
+    """
+    if not isinstance(raw, _TomlDocument):
+        return
+    for match in _FOREIGN_KEY_TARGET_FILES_ASSIGNMENT.finditer(raw.text):
+        contents = _inline_table_contents(raw.text, match.end() - 1)
+        if contents is None:
+            continue
+        for entry in _split_inline_table_entries(contents):
+            if entry.strip() and not entry.lstrip().startswith(("'", '"')):
+                raise ConfigError(
+                    "invalid minotaur.sql.foreign_key_target_files: "
+                    f"target keys must be quoted (in {source})"
+                )
+
+
+def _inline_table_contents(text: str, opening_brace: int) -> str | None:
+    """Return one inline table's contents while preserving quoted values."""
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(opening_brace, len(text)):
+        character = text[index]
+        if quote is not None:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[opening_brace + 1 : index]
+    return None
+
+
+def _split_inline_table_entries(contents: str) -> tuple[str, ...]:
+    """Split an inline table on its top-level commas without parsing values."""
+    entries: list[str] = []
+    start = 0
+    nested = 0
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(contents):
+        if quote is not None:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character in "[{":
+            nested += 1
+        elif character in "]}":
+            nested -= 1
+        elif character == "," and nested == 0:
+            entries.append(contents[start:index])
+            start = index + 1
+    entries.append(contents[start:])
+    return tuple(entries)
 
 
 def _validate_migration_pattern(pattern: object) -> None:
