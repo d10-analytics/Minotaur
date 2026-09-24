@@ -133,3 +133,34 @@ def test_guide_documents_the_python_310_tomli_fallback_mechanism() -> None:
     assert "import tomllib" in text
     assert "import tomli as tomllib" in text
     assert "no mandatory third-party TOML dependency on 3.11+" in text
+
+
+def test_guide_documents_foreign_key_target_file_mapping_contract() -> None:
+    text = _guide_text()
+    assert "SQL foreign-key ownership can also be recorded with an exact target-to-file mapping" in text
+    assert 'foreign_key_target_files = { "dbo.Parent" = "schema/parent.sql"' in text
+    assert "Mapping keys must be quoted SQL target names with one or two non-empty" in text
+    assert "Keys are matched case-insensitively" in text
+    assert "Mapping values are literal, root-relative POSIX paths ending in `.sql`" in text
+    assert "cannot be absolute" in text
+    assert "contain `.` or `..` path components" in text
+    assert "use backslashes" in text
+    assert "contain glob characters" in text
+    assert "A mapping is not a glob and does not infer ownership from a filename" in text
+
+
+def test_guide_documents_foreign_key_mapping_rejection_and_warning_boundaries() -> None:
+    text = _guide_text()
+    assert "Invalid `foreign_key_target_files` syntax or values are rejected before source analysis" in text
+    assert "graph loading, or graph writing with status `2`" in text
+    assert "No graph or stamp sidecar is produced by that failure" in text
+    assert "only when its path is selected and readable" in text
+    assert "Multiple declarations take precedence and produce `ambiguous`" in text
+    assert "an absent, unreadable, or unselected mapped path produces `undeclared` instead" in text
+    assert "stable warning code `orphaned-foreign-key`" in text
+    assert (
+        "ordered `minotaur-sql` payload fields `source_table`, `constraint_name`, `target`, "
+        "and `reason`"
+    ) in text
+    assert "do not alter the existing generic unresolved graph identity" in text
+    assert "repeated observations for one source table and target text remain one coalesced generic" in text
