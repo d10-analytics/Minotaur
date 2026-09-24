@@ -181,6 +181,37 @@ def test_omitted_root_defaults_to_config_directory_and_default_graph(tmp_path: P
     assert resolved.root == cfg.resolve()
     assert resolved.graph == (cfg / "minotaur-graph.json").resolve()
     assert resolved.targets == ((cfg / "src").resolve(),)
+    assert resolved.sql.view_depth_threshold == 3
+
+
+def test_sql_view_depth_setting_is_validated_and_resolved(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        "[minotaur.sql]\nview_depth_threshold = 7\n",
+    )
+    resolved = resolve_config(tmp_path)
+    assert resolved.sql.view_depth_threshold == 7
+
+    for value in ('"seven"', "0", "-1"):
+        cfg.write_text(
+            '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+            f"[minotaur.sql]\nview_depth_threshold = {value}\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="view_depth_threshold"):
+            resolve_config(tmp_path)
+
+
+def test_unknown_sql_setting_is_rejected(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n[minotaur.sql]\nunknown = 1\n',
+    )
+    with pytest.raises(ConfigError, match="unknown SQL config field"):
+        resolve_config(tmp_path)
 
 
 def test_relative_config_values_anchor_at_the_declared_root(tmp_path: Path) -> None:

@@ -222,6 +222,100 @@ def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
     )
 
 
+def test_sql_warning_only_analysis_succeeds_and_preserves_shared_metadata(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    source = _write(
+        root,
+        "schema.sql",
+        "CREATE TABLE parent (id int)\nGO\n"
+        "CREATE TABLE child (parent_id int REFERENCES parent(id))\nGO\n"
+        "CREATE VIEW middle AS SELECT * FROM child\nGO\n"
+        "CREATE VIEW upper AS SELECT * FROM middle\nGO\n"
+        "CREATE VIEW top_view AS SELECT * FROM upper\nGO\n"
+        "CREATE VIEW highest AS SELECT * FROM top_view\n",
+    )
+    output = tmp_path / "sql.json"
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(source)])
+
+    assert status == 0
+    captured = capsys.readouterr()
+    assert "severity=warning" in captured.err
+    graph = load_graph_file(output).document
+    assert graph.extensions["minotaur"]["selection"] == ("schema.sql",)
+    components = graph.extensions["minotaur-sql"]["fk_components"]
+    assert len(components) == 1
+    assert [item["id"] for item in components] == [0]
+    assert [item["size"] for item in components] == [2]
+    assert all(
+        isinstance(node.extensions["minotaur-sql"]["fk_component"], int)
+        for node in graph.nodes
+        if node.symbol_kind == "sql:table"
+    )
+    assert sorted(
+        node.extensions["minotaur-sql"]["fk_component"]
+        for node in graph.nodes
+        if node.symbol_kind == "sql:table"
+    ) == [0, 0]
+
+
+def test_sql_warning_and_parse_error_fail_after_writing_partial_graph(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    valid = _write(
+        root,
+        "views.sql",
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW depth_one AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW depth_two AS SELECT * FROM depth_one\nGO\n"
+        "CREATE VIEW depth_three AS SELECT * FROM depth_two\nGO\n"
+        "CREATE VIEW depth_four AS SELECT * FROM depth_three\n",
+    )
+    broken = _write(root, "broken.sql", "CREATE TABLE Broken (id int\n")
+    output = tmp_path / "partial.json"
+
+    completed = _run(root, output, valid, broken)
+
+    assert completed.returncode == 1
+    assert completed.stderr.count("view-depth-warning") == 1
+    assert completed.stderr.count("parse-error") == 1
+    graph = load_graph_file(output).document
+    assert {node.path for node in graph.nodes if node.path is not None} == {
+        "broken.sql",
+        "views.sql",
+    }
+    assert {
+        node.label for node in graph.nodes if node.symbol_kind in {"sql:table", "sql:view"}
+    } == {"base", "depth_one", "depth_two", "depth_three", "depth_four"}
+
+
+def test_configured_sql_view_threshold_reaches_direct_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "configured"
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["schema.sql"]\n[minotaur.sql]\nview_depth_threshold = 1\n',
+    )
+    _write(
+        root,
+        "schema.sql",
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\n",
+    )
+    monkeypatch.chdir(root)
+
+    status = cli.main(["analyze"])
+    captured = capsys.readouterr()
+    assert status == 0
+    assert "view-depth-warning" in captured.err
+    assert '"depth":2' in captured.err
+
+
 @pytest.mark.parametrize(
     "suffixes",
     [

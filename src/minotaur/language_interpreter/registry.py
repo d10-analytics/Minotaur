@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from minotaur.config import SqlSettings
 from minotaur.language_interpreter.contract import AnalysisResult
 from minotaur.language_interpreter.javascript import NAMESPACE as JAVASCRIPT_NAMESPACE
 from minotaur.language_interpreter.javascript import analyze_javascript_files
@@ -18,7 +19,7 @@ from minotaur.language_interpreter.workspace import Workspace
 # Interpreters receive files after shared selection has established containment
 # and ordering. This avoids every language implementation repeating the same
 # security-sensitive filesystem policy.
-AnalyzeFiles = Callable[[Workspace, tuple[Path, ...]], AnalysisResult]
+AnalyzeFiles = Callable[..., AnalysisResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,18 @@ class InterpreterRegistration:
     extension: str
     analyze_files: AnalyzeFiles
     namespace: str = field(kw_only=True)
+    accepts_sql_settings: bool = field(default=False, kw_only=True)
+
+    def analyze(
+        self,
+        workspace: Workspace,
+        files: tuple[Path, ...],
+        sql_settings: SqlSettings | None = None,
+    ) -> AnalysisResult:
+        """Invoke this registration while preserving non-SQL call contracts."""
+        if self.accepts_sql_settings:
+            return self.analyze_files(workspace, files, sql_settings)
+        return self.analyze_files(workspace, files)
 
 
 class InterpreterRegistry:
@@ -87,7 +100,12 @@ def default_registry() -> InterpreterRegistry:
             InterpreterRegistration(
                 ".js", analyze_javascript_files, namespace=JAVASCRIPT_NAMESPACE
             ),
-            InterpreterRegistration(".sql", analyze_sql_files, namespace=SQL_NAMESPACE),
+            InterpreterRegistration(
+                ".sql",
+                analyze_sql_files,
+                namespace=SQL_NAMESPACE,
+                accepts_sql_settings=True,
+            ),
         )
     )
 

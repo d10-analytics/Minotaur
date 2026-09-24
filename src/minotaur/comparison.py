@@ -8,6 +8,7 @@ Only a comparable, fully validated pair is published to reporting consumers.
 
 from __future__ import annotations
 
+import inspect
 import os
 import stat
 from collections.abc import Mapping, Sequence
@@ -22,7 +23,7 @@ from minotaur.comparison_snapshot import (
     capture_local_revision,
     capture_working_tree,
 )
-from minotaur.config import ValidatedConfig
+from minotaur.config import SqlSettings, ValidatedConfig
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import LoadedGraph
 from minotaur.graph_model.serialization import serialize
@@ -72,6 +73,7 @@ class SelectionProducer(Protocol):
         root: Path,
         targets: tuple[Path, ...],
         metadata_targets: tuple[Path, ...] | None = None,
+        sql_settings: SqlSettings | None = None,
     ) -> tuple[Workspace, SourceSelection, AnalysisResult]: ...
 
 
@@ -97,6 +99,7 @@ class HistoricalInputs:
     sidecar: bytes
     systems: tuple[system.System, ...]
     selection: tuple[str, ...]
+    diagnostics: tuple[Diagnostic, ...] = ()
 
     @property
     def pinned(self) -> git.PinnedCommit:
@@ -513,6 +516,7 @@ class CurrentInputs:
     normalized_targets: tuple[str, ...]
     systems: tuple[system.System, ...]
     selection: tuple[str, ...]
+    diagnostics: tuple[Diagnostic, ...] = ()
 
     @property
     def current_config(self) -> ValidatedConfig:
@@ -822,6 +826,7 @@ class _CapturedAnalysis:
     selection: tuple[str, ...]
     graph: LoadedGraph
     graph_bytes: bytes
+    diagnostics: tuple[Diagnostic, ...] = ()
 
 
 def _relabel_snapshot_error(
@@ -931,11 +936,18 @@ def _captured_analysis(
 
         systems = _current_systems(root, systems_route)
         try:
-            workspace, selected, produced = producer(
+            producer_arguments = (
                 root_route.path,
                 tuple(analyzed_targets),
                 tuple(metadata_targets),
             )
+            if "sql_settings" in inspect.signature(producer).parameters:
+                workspace, selected, produced = producer(
+                    *producer_arguments,
+                    sql_settings=raw_config.sql,
+                )
+            else:
+                workspace, selected, produced = producer(*producer_arguments)
         except CurrentInputError:
             raise
         except Exception as error:
@@ -958,8 +970,9 @@ def _captured_analysis(
                 ) from error
 
         diagnostics = tuple(produced.diagnostics)
-        if diagnostics:
-            path = diagnostics[0].path
+        errors = tuple(item for item in diagnostics if item.is_error)
+        if errors:
+            path = errors[0].path
             raise _current_error(
                 path,
                 "captured source analysis produced diagnostics",
@@ -993,6 +1006,7 @@ def _captured_analysis(
             selection=selection,
             graph=graph,
             graph_bytes=graph_bytes,
+            diagnostics=diagnostics,
         )
     except CurrentInputError as error:
         raise _relabel_snapshot_error(error, snapshot) from error.__cause__
@@ -1076,6 +1090,7 @@ def prepare_comparison(
                 sidecar=(loading.graph_digest(old.graph_bytes) + "\n").encode("ascii"),
                 systems=old.systems,
                 selection=old.selection,
+                diagnostics=old.diagnostics,
             )
             current = CurrentInputs(
                 config_coordinate=new.config_coordinate,
@@ -1086,6 +1101,7 @@ def prepare_comparison(
                 normalized_targets=new.normalized_targets,
                 systems=new.systems,
                 selection=new.selection,
+                diagnostics=new.diagnostics,
             )
             old_reporting = ReportingSnapshot.prepare(old.graph.document, old.systems)
             new_reporting = ReportingSnapshot.prepare(new.graph.document, new.systems)

@@ -91,8 +91,9 @@ classified to named systems, excluding `no_system` and `external`; it is not a
 graph-wide unresolved count. `selection` records the saved analysis targets
 in the existing canonical lexical order and does not promise that every target
 was successfully analyzed. `source_diagnostics` is unavailable for a clean or
-`--no-refresh` answer, and is `observed_on_refresh` with a count after refresh,
-including zero.
+`--no-refresh` answer, and is `observed_on_refresh` with separate `warnings`
+and `errors` counts after refresh, including zero. Warning-only refreshes
+return exit status `0`; an error keeps the nonzero source-analysis status.
 
 `--details` puts each system's sorted declared paths beside its
 `declared_files` object, puts sorted unassigned paths beside

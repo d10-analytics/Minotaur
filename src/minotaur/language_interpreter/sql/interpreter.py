@@ -17,6 +17,7 @@ from typing import Any
 
 from sqlglot import exp, parse
 
+from minotaur.config import SqlSettings
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.evidence import Producer
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
@@ -34,6 +35,7 @@ from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, D
 from minotaur.language_interpreter.emission import NodeEmitter, file_node
 from minotaur.language_interpreter.reading import RawSource, read_sources
 from minotaur.language_interpreter.source_text import LineIndex
+from minotaur.language_interpreter.sql.diagnostics import analyze_view_warnings
 from minotaur.language_interpreter.workspace import Workspace
 
 NAMESPACE = "minotaur-sql"
@@ -102,8 +104,17 @@ class _Observation:
     source: tuple[tuple[str, ...], str, Location, str] | None = None
 
 
-def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
+def analyze_sql_files(
+    workspace: Workspace,
+    files: tuple[Path, ...],
+    sql_settings: SqlSettings | None = None,
+    *,
+    settings: SqlSettings | None = None,
+) -> AnalysisResult:
     """Analyze selected SQL files through the shared final registry entry."""
+    if sql_settings is not None and settings is not None:
+        raise ValueError("pass only one SQL settings value")
+    sql_settings = settings if settings is not None else sql_settings
     sources, diagnostics = read_sources(workspace, files)
     file_data = tuple(_make_file(source) for source in sources)
     nodes: list[Node] = [item.node for item in file_data]
@@ -247,6 +258,15 @@ def analyze_sql_files(workspace: Workspace, files: tuple[Path, ...]) -> Analysis
         generated_by=_PRODUCER,
         extensions={NAMESPACE: {"fk_components": fk_components}},
     )
+    diagnostics.sort(
+        key=lambda item: (
+            item.path,
+            item.location.sort_key if item.location else ("", 0, 0, 0, 0),
+            item.code.value,
+            item.message,
+        )
+    )
+    diagnostics.extend(analyze_view_warnings(document, sql_settings))
     diagnostics.sort(
         key=lambda item: (
             item.path,

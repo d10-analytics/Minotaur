@@ -43,6 +43,8 @@ The known fields inside `[minotaur]` are:
 * `systems_dir` — optional; the directory that holds the project's committed
   system definitions. It defaults to `docs/systems` inside the declared
   project root.
+* `sql` — optional table containing SQL analysis settings. Its supported
+  `view_depth_threshold` integer defaults to `3` and must be positive.
 
 Any other field is unknown to the current contract and is rejected, so a
 configuration can never silently carry fields the shipped commands do not
@@ -71,6 +73,9 @@ root = "."
 graph = "minotaur-graph.json"
 targets = ["src"]
 systems_dir = "docs/systems"
+
+[minotaur.sql]
+view_depth_threshold = 3
 ```
 
 Here, `root = "."` means the directory containing `.minotaur.toml`. The graph

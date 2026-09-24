@@ -1037,7 +1037,8 @@ def test_system_cli_refresh_composes_zero_and_positive_diagnostics(
     assert payload["refreshed"] is True
     assert payload["coverage"]["source_diagnostics"] == {
         "status": "observed_on_refresh",
-        "count": 0,
+        "warnings": 0,
+        "errors": 0,
     }
 
     _write(root, "broken.py", "def broken(\n")
@@ -1047,7 +1048,47 @@ def test_system_cli_refresh_composes_zero_and_positive_diagnostics(
     payload = json.loads(out)
     assert payload["refreshed"] is True
     assert payload["coverage"]["source_diagnostics"]["status"] == "observed_on_refresh"
-    assert payload["coverage"]["source_diagnostics"]["count"] > 0
+    assert payload["coverage"]["source_diagnostics"]["warnings"] == 0
+    assert payload["coverage"]["source_diagnostics"]["errors"] > 0
+
+
+def test_sql_system_query_refresh_reports_warning_and_mixed_error_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path, "sql-refresh")
+    _write(root, "schema.sql", "CREATE TABLE base (id int)\n")
+    _declare(root, "sql", ["schema.sql"])
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["."]\n[minotaur.sql]\nview_depth_threshold = 1\n',
+    )
+
+    warning_source = (
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\n"
+    )
+    _write(root, "schema.sql", warning_source)
+    status, out, _ = _query(capsys, graph, root, "surface", "sql", "--json")
+    assert status == 0
+    assert json.loads(out)["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "warnings": 1,
+        "errors": 0,
+    }
+
+    _write(root, "schema.sql", warning_source + "GO\nCREATE TABLE broken (\n")
+    status, out, _ = _query(capsys, graph, root, "consumers", "sql", "--json")
+    assert status == 1
+    assert json.loads(out)["coverage"]["source_diagnostics"] == {
+        "status": "observed_on_refresh",
+        "warnings": 1,
+        "errors": 1,
+    }
 
 
 def test_system_cli_no_refresh_keeps_saved_coverage_and_unavailable_diagnostics(
@@ -1243,7 +1284,8 @@ def test_reporting_snapshot_direct_query_variants_and_invocation_errors() -> Non
     assert composed.invocation.stale == ("a.py", "z.py")
     assert composed.to_dict()["coverage"]["source_diagnostics"] == {
         "status": "observed_on_refresh",
-        "count": 0,
+        "warnings": 0,
+        "errors": 0,
     }
 
     observed = dataclasses.replace(
@@ -1897,7 +1939,8 @@ def test_reporting_snapshot_all_systems_preserves_file_universes_and_detaches_js
     assert composed.to_dict()["query"] == "systems"
     assert composed.to_dict()["coverage"]["source_diagnostics"] == {
         "status": "observed_on_refresh",
-        "count": 0,
+        "warnings": 0,
+        "errors": 0,
     }
     assert "connections" in composed.to_dict()
 

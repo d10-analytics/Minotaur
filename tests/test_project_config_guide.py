@@ -108,6 +108,13 @@ def test_guide_documents_systems_dir_root_anchoring_and_default() -> None:
     assert "When `systems_dir` is omitted it defaults to `docs/systems` inside that root" in text
 
 
+def test_guide_documents_sql_view_depth_setting_and_default() -> None:
+    text = _guide_text()
+    assert "`view_depth_threshold`" in text
+    assert "defaults to `3`" in text
+    assert "must be positive" in text
+
+
 def test_guide_documents_diff_mode_configuration_boundary() -> None:
     text = _guide_text()
     assert (

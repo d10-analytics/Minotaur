@@ -392,9 +392,46 @@ def test_diagnostic_is_stderr_only_and_does_not_change_structure_exit(
     _commit_all(root)
     status = cli.main(["query", "diff", "--json"])
     captured = capsys.readouterr()
-    assert status == 0
+    assert status == 1
     assert "parse-error" in captured.err
     payload = json.loads(captured.out)
     assert payload["added"] == []
     assert payload["removed"] == []
     assert payload["relocated"] == []
+
+
+def test_committed_mode_renders_sql_warning_and_keeps_structural_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path)
+    _write_config(root, targets='targets = ["schema.sql"]')
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["schema.sql"]\n[minotaur.sql]\nview_depth_threshold = 3\n',
+        encoding="utf-8",
+    )
+    source = root / "schema.sql"
+    source.write_text(
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _commit_all(root, "baseline")
+
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["schema.sql"]\n[minotaur.sql]\nview_depth_threshold = 1\n',
+        encoding="utf-8",
+    )
+    status = cli.main(["query", "diff", "--json"])
+    captured = capsys.readouterr()
+    assert status == 0
+    assert "view-depth-warning" in captured.err
+    payload = json.loads(captured.out)
+    assert payload["added"] == []
+    assert payload["removed"] == []
+    assert payload["relationships_added"] == []
+    assert payload["relationships_removed"] == []
