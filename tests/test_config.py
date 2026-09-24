@@ -272,6 +272,52 @@ def test_omitted_sql_migration_patterns_default_to_empty(tmp_path: Path) -> None
     assert not resolved.sql.matches_migration("migrations/001.sql")
 
 
+def test_sql_foreign_key_target_files_are_normalized_and_immutable(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        '[minotaur.sql]\nforeign_key_target_files = { "DBO.Parent" = "schema/parent.sql" }\n',
+    )
+
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.sql.foreign_key_target_files == {"dbo.parent": "schema/parent.sql"}
+    assert resolved.sql.foreign_key_target_files["dbo.parent"] == "schema/parent.sql"
+    with pytest.raises(TypeError):
+        resolved.sql.foreign_key_target_files["dbo.parent"] = "other.sql"  # type: ignore[index]
+    assert resolved.sql.foreign_key_target_files["dbo.parent"] == "schema/parent.sql"
+    assert config.SqlSettings().foreign_key_target_files == {}
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        'foreign_key_target_files = ["schema/parent.sql"]',
+        'foreign_key_target_files = { "dbo.Parent" = 1 }',
+        "foreign_key_target_files = { \"dbo.Parent\" = 'schema\\\\parent.sql' }",
+        'foreign_key_target_files = { "dbo.Parent" = "/schema/parent.sql" }',
+        'foreign_key_target_files = { "dbo.Parent" = "schema/*.sql" }',
+        'foreign_key_target_files = { "dbo.Parent" = "schema/../parent.sql" }',
+        'foreign_key_target_files = { "dbo.Parent" = "schema/parent.txt" }',
+        'foreign_key_target_files = { "a.b.c" = "schema/parent.sql" }',
+        'foreign_key_target_files = { "dbo.Parent" = "schema/parent.sql", '
+        '"DBO.parent" = "other.sql" }',
+    ],
+)
+def test_invalid_sql_foreign_key_target_files_are_rejected_before_resolution(
+    tmp_path: Path, declaration: str
+) -> None:
+    _write(
+        tmp_path,
+        ".minotaur.toml",
+        f'[minotaur]\nschema_version = 1\ntargets = ["src"]\n[minotaur.sql]\n{declaration}\n',
+    )
+
+    with pytest.raises(ConfigError, match="foreign_key_target_files"):
+        resolve_config(tmp_path)
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
