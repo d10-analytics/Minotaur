@@ -233,6 +233,37 @@ def test_sql_migration_patterns_are_immutable_and_match_whole_components(
     assert cfg.exists()
 
 
+def test_sql_migration_pattern_matching_visits_repeated_recursive_states_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_parts = tuple([*(f"part{index}" for index in range(6)), "other.sql"])
+    pattern = "/".join([*("**" for _ in range(6)), "target.sql"])
+    calls: list[tuple[str, str]] = []
+    real_fnmatchcase = config.fnmatchcase
+
+    def observed_fnmatchcase(name: str, candidate: str) -> bool:
+        calls.append((name, candidate))
+        return real_fnmatchcase(name, candidate)
+
+    monkeypatch.setattr(config, "fnmatchcase", observed_fnmatchcase)
+
+    assert not config.SqlSettings(migration_patterns=(pattern,)).matches_migration(
+        "/".join(path_parts)
+    )
+    assert len(calls) == len(path_parts)
+    assert {name for name, _ in calls} == set(path_parts)
+    assert {candidate for _, candidate in calls} == {"target.sql"}
+
+
+def test_sql_migration_pattern_matching_does_not_depend_on_recursion_depth() -> None:
+    pattern = "/".join([*("**" for _ in range(1_500)), "target.sql"])
+    settings = config.SqlSettings(migration_patterns=(pattern,))
+
+    assert settings.matches_migration("target.sql")
+    assert settings.matches_migration("nested/target.sql")
+    assert not settings.matches_migration("nested/other.sql")
+
+
 def test_omitted_sql_migration_patterns_default_to_empty(tmp_path: Path) -> None:
     _write(tmp_path, ".minotaur.toml", _CONFIG)
     resolved = resolve_config(tmp_path)
