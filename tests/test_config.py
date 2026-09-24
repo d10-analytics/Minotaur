@@ -623,6 +623,43 @@ def test_parse_config_bytes_preserves_raw_values_without_source_access(
         first.root = "changed"  # type: ignore[misc]
 
 
+def test_config_lexical_validation_ignores_mapping_syntax_inside_toml_values() -> None:
+    """Captured configs keep multiline values and comments outside the mapping grammar."""
+    systems_dir = 'foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+    data = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        '# foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+        'systems_dir = """\n'
+        f"{systems_dir}"
+        '"""\n'
+    ).encode()
+
+    parsed = config.parse_config_bytes(data, source="captured.toml")
+
+    assert parsed.systems_dir == systems_dir
+
+
+def test_disk_config_lexical_validation_ignores_mapping_syntax_inside_toml_values(
+    tmp_path: Path,
+) -> None:
+    """Located configs keep multiline values and comments outside the mapping grammar."""
+    systems_dir = 'foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+    cfg = _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        '# foreign_key_target_files = { Parent = "schema/parent.sql" }\n'
+        'systems_dir = """\n'
+        f"{systems_dir}"
+        '\"\"\"\n',
+    )
+
+    resolved = resolve_config(tmp_path)
+
+    assert resolved.config_file == cfg.resolve()
+    assert resolved.systems_dir == (tmp_path / systems_dir).resolve()
+
+
 @pytest.mark.parametrize(
     ("data", "message"),
     [
