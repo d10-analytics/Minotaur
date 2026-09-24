@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import stat
 import sys
@@ -23,7 +24,7 @@ from minotaur.comparison import (
     _validate_live_current_contract,
 )
 from minotaur.comparison_snapshot import capture_local_revision, capture_working_tree
-from minotaur.config import ConfigError, find_config, resolve_config
+from minotaur.config import ConfigError, SqlSettings, find_config, resolve_config
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import (
     GraphLoadError,
@@ -345,7 +346,9 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
                 # command, so replacement is safe after the freshness check.
                 refresh_force = True
         metadata_targets = targets if scope is not None else None
-        result = _analyze_selection(root, targets, output, refresh_force, metadata_targets)
+        result = _analyze_selection(
+            root, targets, output, refresh_force, metadata_targets, sql_settings=resolved.sql
+        )
     except (OSError, SelectionError, ValueError) as error:
         _error(str(error))
         return 2
@@ -355,7 +358,7 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
         # partial graph has already been written so tools can still consume
         # facts from readable files; stderr remains the human-facing summary.
         print(_format_diagnostic(diagnostic), file=sys.stderr)
-    return 1 if result.diagnostics else 0
+    return 1 if result.errors else 0
 
 
 def _analyze_selection(
@@ -364,6 +367,7 @@ def _analyze_selection(
     output_path: Path,
     force: bool,
     metadata_targets: tuple[Path, ...] | None = None,
+    sql_settings: SqlSettings | None = None,
 ) -> AnalysisResult:
     """Analyze and atomically write one selected source set.
 
@@ -374,7 +378,11 @@ def _analyze_selection(
     workspace, selection = select_sources(root, targets, default_registry())
     output = _preflight_output(output_path, selection.files, force)
     _, _, result = _produce_selection(
-        root, targets, metadata_targets, prepared=(workspace, selection)
+        root,
+        targets,
+        metadata_targets,
+        prepared=(workspace, selection),
+        sql_settings=sql_settings,
     )
     content = serialize(result.document)
     # The graph is written to the resolved path so the atomic replace targets
@@ -408,6 +416,7 @@ def _produce_selection(
     metadata_targets: tuple[Path, ...] | None = None,
     *,
     prepared: tuple[Workspace, SourceSelection] | None = None,
+    sql_settings: SqlSettings | None = None,
 ) -> tuple[Workspace, SourceSelection, AnalysisResult]:
     """Produce one selected graph document in memory, without filesystem writes.
 
@@ -419,7 +428,7 @@ def _produce_selection(
         workspace, selection = select_sources(root, targets, default_registry())
     else:
         workspace, selection = prepared
-    result = _dispatch(workspace, selection.files)
+    result = _dispatch(workspace, selection.files, sql_settings=sql_settings)
     source_control = _git_source_control(workspace.root)
     if source_control is not None:
         result = replace(
@@ -516,6 +525,14 @@ class _QueryGraph:
     drift: Drift
     refreshed: bool
 
+    @property
+    def errors(self) -> tuple[Diagnostic, ...]:
+        return tuple(item for item in self.diagnostics if item.is_error)
+
+    @property
+    def warnings(self) -> tuple[Diagnostic, ...]:
+        return tuple(item for item in self.diagnostics if item.is_warning)
+
 
 def _report_stale(paths: Sequence[str]) -> None:
     """Print one ``stale:`` line per drifted path.
@@ -546,7 +563,12 @@ def _report_absent_files(systems: Sequence[System], index: GraphIndex) -> None:
 
 
 def _load_and_refresh_graph(
-    graph_path: Path, root: Path, no_refresh: bool, *, validate: bool = False
+    graph_path: Path,
+    root: Path,
+    no_refresh: bool,
+    *,
+    validate: bool = False,
+    sql_settings: SqlSettings | None = None,
 ) -> _QueryGraph:
     """Load a query graph, refreshing its recorded selection when stale.
 
@@ -592,6 +614,7 @@ def _load_and_refresh_graph(
         graph_path,
         True,
         metadata_targets=all_targets,
+        sql_settings=sql_settings,
     )
     return _QueryGraph(result.document, result.diagnostics, observed, True)
 
@@ -765,12 +788,17 @@ def _run_committed_diff(query: argparse.Namespace, located: Path) -> int:
         metadata_targets = None
     graph_path = _committed_graph_path(resolved, scope)
     old_loaded = _load_committed_old(graph_path, root=resolved.root, validate=query.validate)
-    _, _, produced = _produce_selection(resolved.root, targets, metadata_targets=metadata_targets)
+    _, _, produced = _produce_selection(
+        resolved.root,
+        targets,
+        metadata_targets=metadata_targets,
+        sql_settings=resolved.sql,
+    )
     for diagnostic in produced.diagnostics:
         print(_format_diagnostic(diagnostic), file=sys.stderr)
     output, changed = _diff_output(query, old_loaded.document, produced.document)
     print(output, end="")
-    return 1 if changed else 0
+    return 1 if produced.errors or changed else 0
 
 
 def _run_context(query: argparse.Namespace) -> str:
@@ -865,6 +893,7 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
             )
             arguments.graph = resolved.graph
             arguments.root = resolved.root
+            arguments.sql_settings = resolved.sql
             if arguments.name in _SYSTEM_QUERIES:
                 # AC-12 (D-09): the strict system-tree load runs here, in
                 # _query's system-query path, before _run_graph_query can
@@ -1049,8 +1078,14 @@ def _acquire_systems_pair(query: argparse.Namespace) -> _SystemsPair:
                 root: Path,
                 targets: tuple[Path, ...],
                 metadata_targets: tuple[Path, ...] | None = None,
+                sql_settings: SqlSettings | None = None,
             ) -> tuple[Workspace, SourceSelection, AnalysisResult]:
-                workspace, selection, result = _produce_selection(root, targets, metadata_targets)
+                workspace, selection, result = _produce_selection(
+                    root,
+                    targets,
+                    metadata_targets,
+                    sql_settings=sql_settings,
+                )
                 sink.extend(result.call_expressions)
                 return workspace, selection, result
 
@@ -1062,6 +1097,9 @@ def _acquire_systems_pair(query: argparse.Namespace) -> _SystemsPair:
         new = _captured_analysis(
             after, after_coordinate, _producer_for(new_observations), validate=True
         )
+        for diagnostic in (*old.diagnostics, *new.diagnostics):
+            if diagnostic.is_warning:
+                print(_format_diagnostic(diagnostic), file=sys.stderr)
         _require_pair_targets_materialized(old, new)
         before_sources = capture_source_bytes(
             _captured_side_root(old), _document_paths(old.graph.document)
@@ -1433,7 +1471,11 @@ def _publish_comparison_html(
 def _run_graph_query(query: argparse.Namespace) -> int:
     """Answer one index-backed query, refreshing the graph when it has drifted."""
     graph = _load_and_refresh_graph(
-        Path(query.graph), Path(query.root).resolve(), query.no_refresh, validate=query.validate
+        Path(query.graph),
+        Path(query.root).resolve(),
+        query.no_refresh,
+        validate=query.validate,
+        sql_settings=getattr(query, "sql_settings", None),
     )
     if query.name == "systems":
         snapshot = system_query.ReportingSnapshot.prepare(graph.document, query.systems)
@@ -1442,12 +1484,13 @@ def _run_graph_query(query: argparse.Namespace) -> int:
         invocation = system_query.QueryInvocation(
             refreshed=graph.refreshed,
             stale=graph.drift.paths,
-            source_diagnostics=len(graph.diagnostics) if graph.refreshed else None,
+            source_warnings=(len(graph.warnings) if graph.refreshed else None),
+            source_errors=(len(graph.errors) if graph.refreshed else None),
         )
         composed = system_query.compose_system_query(overview_report, invocation)
         output = render_systems_json(composed) if query.json else render_systems_text(composed)
         print(output, end="")
-        return 1 if graph.diagnostics else 0
+        return 1 if graph.errors else 0
     handler = _GRAPH_QUERIES.get(query.name)
     if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
         raise ValueError(f"unsupported query: {query.name}")
@@ -1464,7 +1507,8 @@ def _run_graph_query(query: argparse.Namespace) -> int:
         invocation = system_query.QueryInvocation(
             refreshed=graph.refreshed,
             stale=graph.drift.paths,
-            source_diagnostics=len(graph.diagnostics) if graph.refreshed else None,
+            source_warnings=(len(graph.warnings) if graph.refreshed else None),
+            source_errors=(len(graph.errors) if graph.refreshed else None),
         )
         composed = system_query.compose_system_query(report, invocation)
         summary = handler.render_text(report.results)
@@ -1484,7 +1528,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
             else handler.render_text(records)
         )
     print(output, end="")
-    return 1 if graph.diagnostics else 0
+    return 1 if graph.errors else 0
 
 
 def _add_query_subparsers(
@@ -1868,7 +1912,12 @@ def _with_selection_extension(
     return existing
 
 
-def _dispatch(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
+def _dispatch(
+    workspace: Workspace,
+    files: tuple[Path, ...],
+    *,
+    sql_settings: SqlSettings | None = None,
+) -> AnalysisResult:
     """Pass one language's selected files to its registered interpreter.
 
     Selection is extension-based, rather than a Python-specific CLI branch,
@@ -1903,7 +1952,7 @@ def _dispatch(workspace: Workspace, files: tuple[Path, ...]) -> AnalysisResult:
     if len(grouped) != 1:
         raise ValueError("selected files require unsupported multi-interpreter graph composition")
     registration, interpreter_files = next(iter(grouped.items()))
-    return registration.analyze_files(workspace, tuple(interpreter_files))
+    return registration.analyze(workspace, tuple(interpreter_files), sql_settings)
 
 
 def _stamp_if_validated(path: Path, loaded: LoadedGraph) -> None:
@@ -1958,13 +2007,30 @@ def _write_atomically(output: Path, content: bytes) -> None:
 
 def _format_diagnostic(diagnostic: Diagnostic) -> str:
     """Render stable, editor-friendly diagnostics without inventing locations."""
+    suffix = f" [severity={diagnostic.severity.value}"
+    if diagnostic.extensions is not None:
+        suffix += " metadata=" + json.dumps(
+            _thaw_diagnostic_metadata(diagnostic.extensions),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    suffix += "]"
     if diagnostic.location is None:
-        return f"{diagnostic.path}: {diagnostic.code.value}: {diagnostic.message}"
+        return f"{diagnostic.path}: {diagnostic.code.value}: {diagnostic.message}{suffix}"
     start = diagnostic.location.range.start
     return (
         f"{diagnostic.path}:{start.line}:{start.character}: "
-        f"{diagnostic.code.value}: {diagnostic.message}"
+        f"{diagnostic.code.value}: {diagnostic.message}{suffix}"
     )
+
+
+def _thaw_diagnostic_metadata(value: object) -> object:
+    """Convert immutable diagnostic metadata to ordinary JSON containers."""
+    if isinstance(value, Mapping):
+        return {key: _thaw_diagnostic_metadata(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw_diagnostic_metadata(item) for item in value]
+    return value
 
 
 def _error(message: str) -> None:

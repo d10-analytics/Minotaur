@@ -33,7 +33,7 @@ uses the standard-library ``tomllib`` and the conditional dependency installs
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from minotaur import git
@@ -48,7 +48,9 @@ _SECTION = "minotaur"
 _SCHEMA_VERSION = 1
 _DEFAULT_GRAPH_FILENAME = "minotaur-graph.json"
 _DEFAULT_SYSTEMS_DIR = "docs/systems"
-_KNOWN_FIELDS = frozenset({"schema_version", "root", "graph", "targets", "systems_dir"})
+_KNOWN_FIELDS = frozenset({"schema_version", "root", "graph", "targets", "systems_dir", "sql"})
+_SQL_KNOWN_FIELDS = frozenset({"view_depth_threshold"})
+_DEFAULT_VIEW_DEPTH_THRESHOLD = 3
 
 
 class ConfigError(ValueError):
@@ -60,6 +62,21 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class SqlSettings:
+    """Immutable SQL analysis settings resolved for one invocation."""
+
+    view_depth_threshold: int = _DEFAULT_VIEW_DEPTH_THRESHOLD
+
+    def __post_init__(self) -> None:
+        if isinstance(self.view_depth_threshold, bool) or not isinstance(
+            self.view_depth_threshold, int
+        ):
+            raise ValueError("view_depth_threshold must be an integer")
+        if self.view_depth_threshold <= 0:
+            raise ValueError("view_depth_threshold must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class ValidatedConfig:
     """A validated configuration declaration before filesystem anchoring."""
 
@@ -67,6 +84,7 @@ class ValidatedConfig:
     graph: str
     targets: tuple[str, ...]
     systems_dir: str
+    sql: SqlSettings = field(default_factory=SqlSettings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +103,7 @@ class _ParsedConfig:
     graph: Path
     targets: tuple[Path, ...]
     systems_dir: Path
+    sql: SqlSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +127,7 @@ class ProjectConfig:
     targets: tuple[Path, ...] | None
     graph: Path
     systems_dir: Path
+    sql: SqlSettings = field(default_factory=SqlSettings)
 
 
 def find_config(start: Path, *, config: Path | None = None) -> Path | None:
@@ -187,12 +207,14 @@ def resolve_config(
     else:
         targets = None
     systems_dir = parsed.systems_dir if parsed is not None else root / _DEFAULT_SYSTEMS_DIR
+    sql = parsed.sql if parsed is not None else SqlSettings()
     return ProjectConfig(
         config_file=located,
         root=root,
         targets=targets,
         graph=graph,
         systems_dir=systems_dir,
+        sql=sql,
     )
 
 
@@ -283,11 +305,14 @@ def _validate_config(raw: Mapping[str, object], *, source: Path | str) -> Valida
     elif not isinstance(systems_dir, str):
         raise ConfigError(f"config systems_dir must be a string (in {source})")
 
+    sql = _validate_sql_settings(section.get("sql"), source)
+
     return ValidatedConfig(
         root=root,
         graph=graph,
         targets=tuple(targets),
         systems_dir=systems_dir,
+        sql=sql,
     )
 
 
@@ -312,7 +337,26 @@ def _anchor_config(validated: ValidatedConfig, *, source: Path) -> _ParsedConfig
         graph=graph,
         targets=tuple(anchored),
         systems_dir=systems_dir,
+        sql=validated.sql,
     )
+
+
+def _validate_sql_settings(raw: object, source: Path | str) -> SqlSettings:
+    """Validate the optional ``[minotaur.sql]`` settings table."""
+    if raw is None:
+        return SqlSettings()
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"[minotaur.sql] must be a table (in {source})")
+    for name in raw:
+        if name not in _SQL_KNOWN_FIELDS:
+            raise ConfigError(f"unknown SQL config field: {name} (in {source})")
+    threshold = raw.get("view_depth_threshold", _DEFAULT_VIEW_DEPTH_THRESHOLD)
+    try:
+        return SqlSettings(threshold)
+    except ValueError as error:
+        raise ConfigError(
+            f"invalid minotaur.sql.view_depth_threshold: {error} (in {source})"
+        ) from error
 
 
 def _validate_schema_version(section: Mapping[object, object], path: Path | str) -> None:

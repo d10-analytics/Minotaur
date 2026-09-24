@@ -588,6 +588,8 @@ class QueryInvocation:
     refreshed: bool
     stale: tuple[str, ...] = field(default_factory=tuple)
     source_diagnostics: int | None = None
+    source_warnings: int | None = None
+    source_errors: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.refreshed, bool):
@@ -603,7 +605,27 @@ class QueryInvocation:
             or self.source_diagnostics < 0
         ):
             raise ValueError("source_diagnostics must be a non-negative integer or None")
-        if self.refreshed != (self.source_diagnostics is not None):
+        if self.source_warnings is not None and (
+            not isinstance(self.source_warnings, int)
+            or isinstance(self.source_warnings, bool)
+            or self.source_warnings < 0
+        ):
+            raise ValueError("source_warnings must be a non-negative integer or None")
+        if self.source_errors is not None and (
+            not isinstance(self.source_errors, int)
+            or isinstance(self.source_errors, bool)
+            or self.source_errors < 0
+        ):
+            raise ValueError("source_errors must be a non-negative integer or None")
+        if self.source_diagnostics is not None and self.source_errors is None:
+            object.__setattr__(self, "source_errors", self.source_diagnostics)
+        if self.source_diagnostics is not None and self.source_warnings is None:
+            object.__setattr__(self, "source_warnings", 0)
+        if self.refreshed != (
+            self.source_diagnostics is not None
+            or self.source_warnings is not None
+            or self.source_errors is not None
+        ):
             raise ValueError("refreshed and source_diagnostics disagree")
 
     def to_dict(self) -> dict[str, object]:
@@ -611,8 +633,12 @@ class QueryInvocation:
             "refreshed": self.refreshed,
             "stale": list(self.stale),
             "source_diagnostics": (
-                {"status": "observed_on_refresh", "count": self.source_diagnostics}
-                if self.source_diagnostics is not None
+                {
+                    "status": "observed_on_refresh",
+                    "warnings": self.source_warnings or 0,
+                    "errors": self.source_errors or 0,
+                }
+                if self.source_warnings is not None or self.source_errors is not None
                 else {"status": "unavailable"}
             ),
         }
