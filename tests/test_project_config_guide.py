@@ -137,7 +137,10 @@ def test_guide_documents_the_python_310_tomli_fallback_mechanism() -> None:
 
 def test_guide_documents_foreign_key_target_file_mapping_contract() -> None:
     text = _guide_text()
-    assert "SQL foreign-key ownership can also be recorded with an exact target-to-file mapping" in text
+    assert (
+        "SQL foreign-key ownership can also be recorded with an exact target-to-file mapping"
+        in text
+    )
     assert 'foreign_key_target_files = { "dbo.Parent" = "schema/parent.sql"' in text
     assert "Mapping keys must be quoted SQL target names with one or two non-empty" in text
     assert "Keys are matched case-insensitively" in text
@@ -151,7 +154,10 @@ def test_guide_documents_foreign_key_target_file_mapping_contract() -> None:
 
 def test_guide_documents_foreign_key_mapping_rejection_and_warning_boundaries() -> None:
     text = _guide_text()
-    assert "Invalid `foreign_key_target_files` syntax or values are rejected before source analysis" in text
+    assert (
+        "Invalid `foreign_key_target_files` syntax or values are rejected before source analysis"
+        in text
+    )
     assert "graph loading, or graph writing with status `2`" in text
     assert "No graph or stamp sidecar is produced by that failure" in text
     assert "only when its path is selected and readable" in text
@@ -163,4 +169,7 @@ def test_guide_documents_foreign_key_mapping_rejection_and_warning_boundaries() 
         "and `reason`"
     ) in text
     assert "do not alter the existing generic unresolved graph identity" in text
-    assert "repeated observations for one source table and target text remain one coalesced generic" in text
+    assert (
+        "repeated observations for one source table and target text remain one coalesced generic"
+        in text
+    )
