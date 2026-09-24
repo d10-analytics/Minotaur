@@ -133,6 +133,29 @@ def test_unresolved_view_terminal_is_one_final_generic_hop(tmp_path: Path) -> No
     )
 
 
+def test_unrelated_table_reference_is_not_a_view_depth_hop(tmp_path: Path) -> None:
+    source = tmp_path / "unrelated.sql"
+    source.write_text(
+        "CREATE TABLE base (id int REFERENCES missing_parent(id))\nGO\n"
+        "CREATE VIEW middle_view AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW root_view AS SELECT * FROM middle_view\n",
+        encoding="utf-8",
+    )
+    result = analyze_sql_files(
+        Workspace(tmp_path),
+        (source,),
+        SqlSettings(view_depth_threshold=1),
+    )
+
+    warnings = [item for item in result.warnings if item.code is DiagnosticCode.VIEW_DEPTH_WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].extensions["minotaur-sql"]["path"] == (
+        "root_view",
+        "middle_view",
+        "base",
+    )
+
+
 def test_runtime_dependency_is_exact_and_parser_is_real() -> None:
     assert sqlglot.__version__ == "30.18.0"
 
