@@ -422,6 +422,127 @@ CREATE FUNCTION S.F() RETURNS int AS RETURN 1 + (SELECT COUNT(*) FROM S.Base)
     }
 
 
+def test_query_function_calls_cover_expression_roots_and_self_calls(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE S.Other (id int)
+GO
+CREATE FUNCTION S.Calc(@id int) RETURNS int AS RETURN @id
+GO
+CREATE FUNCTION S.Recur(@id int) RETURNS int AS RETURN (
+ SELECT S.Recur(@id) FROM S.Base
+)
+GO
+CREATE FUNCTION S.TVFn(@id int) RETURNS TABLE AS RETURN (SELECT @id AS id)
+GO
+CREATE VIEW S.Read AS
+SELECT S.Calc(b.id), CASE WHEN S.Calc(b.id) > 0 THEN S.Calc(b.id) ELSE 0 END
+FROM S.Base b
+JOIN S.Other o ON S.Calc(o.id) = o.id
+WHERE S.Calc(b.id) > 0
+GROUP BY b.id, o.id
+HAVING S.Calc(b.id) > 0
+  AND b.id IN (SELECT S.Calc(n.id) FROM S.Other n)
+GO
+CREATE VIEW S.TVRead AS SELECT * FROM S.TVFn(1) JOIN S.Base ON 1 = 1
+"""
+    result = _analyze(tmp_path, **{"calls.sql": sql})
+    call_edges = _sql_edges(result, "sql:calls")
+    calls = {(source.label, target.label): edge for source, target, edge in call_edges}
+
+    assert not result.diagnostics
+    assert set(calls) == {
+        ("S.Read", "S.Calc"),
+        ("S.Recur", "S.Recur"),
+        ("S.TVRead", "S.TVFn"),
+    }
+    assert len(_evidence_locations(calls[("S.Read", "S.Calc")])) == 7
+    assert len(_evidence_locations(calls[("S.Recur", "S.Recur")])) == 1
+    assert _edges(result, "sql:reads-from") == {
+        ("S.Recur", "S.Base"),
+        ("S.Read", "S.Base"),
+        ("S.Read", "S.Other"),
+        ("S.TVRead", "S.Base"),
+    }
+    assert not {
+        (source.label, target.label)
+        for source, target, _edge in _sql_edges(result, "sql:reads-from")
+        if target.label == "S.TVFn"
+    }
+
+
+def test_rejected_query_root_drops_calls_and_reads_but_keeps_sibling(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE FUNCTION S.Calc(@id int) RETURNS int AS RETURN @id
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+SELECT S.Calc(id) INTO S.Destination FROM S.Base;
+SELECT S.Calc(id) FROM S.Base;
+END
+"""
+    result = _analyze(tmp_path, **{"rejected.sql": sql})
+
+    assert _edges(result, "sql:calls") == {("S.Read", "S.Calc")}
+    assert _edges(result, "sql:reads-from") == {("S.Read", "S.Base")}
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_function_resolution_is_forward_casefolded_and_preserves_fallbacks(
+    tmp_path: Path,
+) -> None:
+    forward = _analyze(
+        tmp_path / "forward",
+        **{
+            "view.sql": (
+                "CREATE TABLE S.Base (id int)\nGO\nCREATE VIEW S.V AS SELECT calc(id) FROM S.Base"
+            ),
+            "function.sql": "CREATE FUNCTION CALC(@id int) RETURNS int AS RETURN @id",
+        },
+    )
+    assert _edges(forward, "sql:calls") == {("S.V", "CALC")}
+    assert not forward.diagnostics
+
+    ambiguous = _analyze(
+        tmp_path / "ambiguous",
+        **{
+            "a.sql": "CREATE FUNCTION F(@id int) RETURNS int AS RETURN @id",
+            "b.sql": "CREATE FUNCTION F(@id int) RETURNS int AS RETURN @id",
+            "view.sql": "CREATE TABLE Base (id int)\nGO\nCREATE VIEW V AS SELECT F(id) FROM Base",
+        },
+    )
+    assert not _edges(ambiguous, "sql:calls")
+    assert any(item.code is DiagnosticCode.DUPLICATE_DECLARATION for item in ambiguous.diagnostics)
+    assert any(item.code is DiagnosticCode.AMBIGUOUS_REFERENCE for item in ambiguous.diagnostics)
+    assert any(
+        node.node_class.value == "unresolved-reference" and node.label == "F"
+        for node in ambiguous.document.nodes
+    )
+
+    fallback = _analyze(
+        tmp_path / "fallback",
+        **{
+            "view.sql": (
+                "CREATE TABLE Base (id int)\nGO\n"
+                "CREATE VIEW V AS SELECT dbo.Missing(id), Unknown(id), COUNT(id), COALESCE(id, 0) "
+                "FROM Base"
+            )
+        },
+    )
+    assert not _edges(fallback, "sql:calls")
+    unresolved = {
+        node.label
+        for node in fallback.document.nodes
+        if node.node_class.value == "unresolved-reference"
+    }
+    assert unresolved == {"dbo.Missing"}
+    assert not fallback.diagnostics
+
+
 @pytest.mark.parametrize(
     ("member", "diagnostic_location"),
     [
