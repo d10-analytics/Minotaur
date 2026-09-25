@@ -162,11 +162,11 @@ def analyze_sql_files(
                 result = _interpret_statement(tree, item, batch, diagnostics, declarations, nodes)
                 if result is not None:
                     observations.append(result)
-                    function_continuation = (
-                        isinstance(tree, exp.Create)
-                        and str(tree.args.get("kind") or "").upper() == "FUNCTION"
-                        and bool(tree.args.get("begin"))
-                    )
+                function_continuation = (
+                    isinstance(tree, exp.Create)
+                    and str(tree.args.get("kind") or "").upper() == "FUNCTION"
+                    and bool(tree.args.get("begin"))
+                )
 
     by_key: dict[tuple[str, ...], list[_Declaration]] = {}
     for declaration in declarations:
@@ -561,12 +561,17 @@ def _interpret_create(
     kind = str(tree.args.get("kind") or "").upper()
     target = tree.this
     if kind in {"PROCEDURE", "FUNCTION"}:
-        if tree.args.get("exists") or tree.args.get("clone") or tree.args.get("refresh"):
+        if (
+            tree.args.get("exists")
+            or tree.args.get("clone")
+            or tree.args.get("refresh")
+            or _is_create_or_replace(batch.text)
+        ):
             _unsupported(tree, item, batch, diagnostics)
             return None
-        if (
-            kind == "PROCEDURE" and isinstance(target, exp.StoredProcedure)
-        ) or (kind == "FUNCTION" and isinstance(target, exp.UserDefinedFunction)):
+        if (kind == "PROCEDURE" and isinstance(target, exp.StoredProcedure)) or (
+            kind == "FUNCTION" and isinstance(target, exp.UserDefinedFunction)
+        ):
             table = target.this
         elif kind == "FUNCTION" and isinstance(target, exp.Table):
             table = target
@@ -646,6 +651,10 @@ def _interpret_create(
             return None
         return _Observation(declaration, (), tuple(fks))
     return _Observation(declaration)
+
+
+def _is_create_or_replace(source: str) -> bool:
+    return re.match(r"\s*CREATE\s+OR\s+REPLACE\b", source, re.IGNORECASE) is not None
 
 
 def _sql_symbol_node(parts: tuple[str, ...], kind: str, location: Location) -> Node:
