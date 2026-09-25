@@ -25,9 +25,22 @@ relationships described by its AST-authoritative implementation:
   `sql:view` symbols;
 - persistent procedures and functions become `sql:procedure` and `sql:function`
   symbols. Parser-represented static query roots in their bodies can add
-  `sql:reads-from` relationships to persistent tables and views; parameters
+  `sql:reads-from` relationships to persistent tables and views and
+  `sql:calls` relationships to declared user-defined functions; parameters
   and return syntax do not become graph symbols;
 - table and view reads become the namespaced `sql:reads-from` relationship;
+- user-defined function calls in an accepted query root become the namespaced
+  `sql:calls` relationship. A schema-qualified call is a candidate for the
+  typed function resolver; an unqualified call is a candidate only when it
+  matches a declared `sql:function` case-insensitively. Built-ins and unknown
+  bare calls produce no call fact, while an ambiguous or missing qualified
+  call keeps the existing generic unresolved fallback;
+- the query-root walk covers calls in projections, predicates, `HAVING`, join
+  conditions, `CASE` expressions, nested queries, and other expression
+  positions. One relationship keeps all distinct physical call locations, and
+  each location spans the function name. A table-valued function used as a
+  `FROM` or `JOIN` source produces `sql:calls` only; persistent table and view
+  sources retain `sql:reads-from`;
 - foreign-key references become `sql:foreign-key-to` relationships;
 - a top-level, unconditional `ALTER TABLE` can add one or more named
   `CONSTRAINT ... FOREIGN KEY (...) REFERENCES ...` clauses when the entire
@@ -36,11 +49,14 @@ relationships described by its AST-authoritative implementation:
   `ON UPDATE`, and `NOT FOR REPLICATION` modifiers are accepted;
 - `CREATE OR ALTER VIEW` and `CREATE OR REPLACE VIEW` use SQLGlot's equivalent
   `replace=True` AST and therefore produce identical facts;
-- procedure and function bodies contribute reads only from parser-represented
-  static query roots to persistent tables and views. Queries contained in
-  DML, temporary sources, dynamic strings such as `EXEC(@sql)` or
-  `sp_executesql`, and opaque parser forms do not create `sql:reads-from`
-  facts; a separate eligible root remains available;
+- procedure and function bodies contribute reads and calls only from
+  parser-represented static query roots. Queries contained in DML, temporary
+  sources, dynamic strings such as `EXEC(@sql)` or `sp_executesql`, and opaque
+  parser forms do not create SQL dependency facts; a separate eligible root
+  remains available. `EXEC` or `EXECUTE` procedure invocation, including
+  system stored procedures, produces no `sql:calls`. Calls in table `DEFAULT`
+  constraints, computed-column definitions, standalone `RETURN` expressions,
+  and `SET` assignments remain outside this query-root slice;
 - `GO` batch boundaries are recognized without treating text scanning as SQL
   semantics.
 
@@ -139,12 +155,12 @@ parsed identifier in `extensions["minotaur-sql"]["name"]`, preserving quoted
 identifier segments that contain dots for `unreferenced` exclusions and text
 fallback on saved graphs. Generic `definitions` and `diff` observe supported
 SQL facts. `callers`, `impact`, `surface`, `consumers`,
-`system-deps`, and `unreferenced` consume resolved `sql:reads-from` and
-`sql:foreign-key-to` edges; their [query-reference sections](query-reference.md)
-define the exact contracts. `unreferenced` uses those edges for current SQL
-table and view results. Other SQL symbol and relationship kinds remain outside
-these query contracts. The existing generic unresolved-reference recall remains
-available.
+`system-deps`, and `unreferenced` consume the current resolved SQL dependency
+kinds `sql:reads-from`, `sql:foreign-key-to`, and `sql:calls`; their
+[query-reference sections](query-reference.md) define the exact contracts.
+`unreferenced` uses these edges for current SQL table, view, and function
+results. Other SQL symbol and relationship kinds remain outside these query
+contracts. The existing generic unresolved-reference recall remains available.
 
 The graph records the selected target paths. After registration, adding or
 editing SQL under a recorded directory is ordinary freshness drift. A
