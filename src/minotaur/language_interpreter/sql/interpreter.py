@@ -151,12 +151,22 @@ def analyze_sql_files(
                     )
                 )
                 continue
+            function_continuation = False
             for tree in trees:
                 if tree is None:
                     continue
+                if function_continuation:
+                    function_continuation = False
+                    if isinstance(tree, exp.EndStatement):
+                        continue
                 result = _interpret_statement(tree, item, batch, diagnostics, declarations, nodes)
                 if result is not None:
                     observations.append(result)
+                    function_continuation = (
+                        isinstance(tree, exp.Create)
+                        and str(tree.args.get("kind") or "").upper() == "FUNCTION"
+                        and bool(tree.args.get("begin"))
+                    )
 
     by_key: dict[tuple[str, ...], list[_Declaration]] = {}
     for declaration in declarations:
@@ -550,6 +560,35 @@ def _interpret_create(
 ) -> _Observation | None:
     kind = str(tree.args.get("kind") or "").upper()
     target = tree.this
+    if kind in {"PROCEDURE", "FUNCTION"}:
+        if (
+            kind == "PROCEDURE" and isinstance(target, exp.StoredProcedure)
+        ) or (kind == "FUNCTION" and isinstance(target, exp.UserDefinedFunction)):
+            table = target.this
+        elif kind == "FUNCTION" and isinstance(target, exp.Table):
+            table = target
+        else:
+            _unsupported(tree, item, batch, diagnostics)
+            return None
+        if not isinstance(table, exp.Table):
+            _unsupported(tree, item, batch, diagnostics)
+            return None
+        parts = _parts(table)
+        if parts is None or len(parts) not in {1, 2} or _nonpersistent_table(table):
+            _unsupported(tree, item, batch, diagnostics)
+            return None
+        location = _table_location(table, item, batch)
+        if location is None:
+            _unsupported(tree, item, batch, diagnostics)
+            return None
+        key = tuple(part.casefold() for part in parts)
+        node = _sql_symbol_node(parts, f"sql:{kind.casefold()}", location)
+        declaration = _Declaration(
+            kind.casefold(), key, ".".join(parts), location, node, item.file_id
+        )
+        declarations.append(declaration)
+        nodes.append(node)
+        return _Observation(declaration)
     if kind in {"INDEX", "NONCLUSTERED INDEX", "CLUSTERED INDEX"}:
         if _valid_index(tree):
             return None
