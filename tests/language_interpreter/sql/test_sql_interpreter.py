@@ -297,7 +297,10 @@ CREATE TABLE S.After (id int)
     assert symbols["S.GetBase"].location.range.start.character == 17
     assert symbols["S.Scalar"].location.range.start.line == 8
     assert symbols["S.Scalar"].location.range.start.character == 16
-    assert _edges(result, "sql:reads-from") == set()
+    assert _edges(result, "sql:reads-from") == {
+        ("S.GetBase", "S.Base"),
+        ("S.Rows", "S.Base"),
+    }
     assert {edge for edge in _edges(result, "contains") if edge[0] == "declarations.sql"} == {
         ("declarations.sql", "S"),
         ("declarations.sql", "S.Base"),
@@ -312,6 +315,248 @@ CREATE TABLE S.After (id int)
         ("S", "S.Base"),
         ("S", "S.After"),
     }
+
+
+def test_procedure_query_roots_use_the_shared_query_walker_once(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE S.Joined (id int)
+GO
+CREATE TABLE S.Other (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+WITH cte AS (SELECT id FROM S.Base)
+SELECT * FROM cte
+JOIN S.Joined ON cte.id = S.Joined.id
+WHERE cte.id IN (SELECT id FROM S.Other)
+UNION ALL SELECT * FROM S.Base;
+END
+"""
+    result = _analyze(tmp_path, **{"roots.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+    labels = {(edge[0].label, edge[1].label) for edge in edges}
+
+    assert not result.diagnostics
+    assert labels == {
+        ("S.Read", "S.Base"),
+        ("S.Read", "S.Joined"),
+        ("S.Read", "S.Other"),
+    }
+    locations = [location for edge in edges for location in edge[2].evidence[0].locations]
+    assert len(locations) == len(set(locations))
+    assert {
+        (location.path, location.range.start.line, location.range.start.character)
+        for location in locations
+    } == {
+        ("roots.sql", 7, sql.splitlines()[7].index("S.Base")),
+        ("roots.sql", 9, sql.splitlines()[9].index("S.Joined")),
+        ("roots.sql", 10, sql.splitlines()[10].index("S.Other")),
+        ("roots.sql", 11, sql.splitlines()[11].index("S.Base")),
+    }
+
+
+def test_procedure_query_root_inside_while_is_retained(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+WHILE 1 = 1 BEGIN
+SELECT * FROM S.Base;
+END
+END
+"""
+    result = _analyze(tmp_path, **{"loop.sql": sql})
+
+    assert not result.diagnostics
+    assert {"S.Base", "S.Read"} <= _symbols(result).keys()
+    assert {(edge[0].label, edge[1].label) for edge in _sql_edges(result, "sql:reads-from")} == {
+        ("S.Read", "S.Base")
+    }
+
+
+def test_procedure_if_condition_query_root_is_retained_once(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE S.Other (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+IF EXISTS (SELECT 1 FROM S.Base) SELECT * FROM S.Other;
+END
+"""
+    result = _analyze(tmp_path, **{"condition.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+
+    assert not result.diagnostics
+    assert {(edge[0].label, edge[0].symbol_kind) for edge in edges} == {("S.Read", "sql:procedure")}
+    assert {(edge[1].label, edge[1].symbol_kind) for edge in edges} == {
+        ("S.Base", "sql:table"),
+        ("S.Other", "sql:table"),
+    }
+    assert {(edge[0].label, edge[1].label) for edge in edges} == {
+        ("S.Read", "S.Base"),
+        ("S.Read", "S.Other"),
+    }
+    assert {location for edge in edges for location in _evidence_locations(edge[2])} == {
+        ("condition.sql", 5, sql.splitlines()[5].index("S.Base")),
+        ("condition.sql", 5, sql.splitlines()[5].index("S.Other")),
+    }
+
+
+def test_scalar_function_expression_nested_query_root_is_retained(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE FUNCTION S.F() RETURNS int AS RETURN 1 + (SELECT COUNT(*) FROM S.Base)
+"""
+    result = _analyze(tmp_path, **{"function.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+
+    assert not result.diagnostics
+    assert [
+        (edge[0].label, edge[0].symbol_kind, edge[1].label, edge[1].symbol_kind) for edge in edges
+    ] == [("S.F", "sql:function", "S.Base", "sql:table")]
+    assert _evidence_locations(edges[0][2]) == {
+        ("function.sql", 2, sql.splitlines()[2].index("S.Base"))
+    }
+
+
+@pytest.mark.parametrize(
+    ("member", "diagnostic_location"),
+    [
+        ("SET NOCOUNT ON;", (3, 4, 3, 11)),
+        ("COMMIT TRANSACTION;", None),
+        ("DECLARE @n int;", None),
+        ("ROLLBACK TRANSACTION;", None),
+        ("END CONVERSATION S.Hidden;", None),
+    ],
+)
+def test_unsupported_procedure_members_keep_separate_procedure_read_root(
+    tmp_path: Path, member: str, diagnostic_location: tuple[int, int, int, int] | None
+) -> None:
+    sql = f"""\
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+{member}
+SELECT * FROM S.Base;
+END
+"""
+    result = _analyze(tmp_path, **{"members.sql": sql})
+
+    symbols = _symbols(result)
+    assert {"S.Base", "S.Read"} <= symbols.keys()
+    assert symbols["S.Read"].symbol_kind == "sql:procedure"
+    assert symbols["S.Base"].symbol_kind == "sql:table"
+    edges = _sql_edges(result, "sql:reads-from")
+    assert len(edges) == 1
+    assert (edges[0][0].label, edges[0][1].label) == ("S.Read", "S.Base")
+    assert _evidence_locations(edges[0][2]) == {("members.sql", 4, 14)}
+    assert not _sql_edges(result, "references")
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+    assert len(result.diagnostics) == 1
+    diagnostic = result.diagnostics[0]
+    assert diagnostic.code is DiagnosticCode.UNSUPPORTED_SYNTAX
+    if diagnostic_location is None:
+        assert diagnostic.location is None
+    else:
+        start_line, start_character, end_line, end_character = diagnostic_location
+        assert diagnostic.location is not None
+        assert diagnostic.location.path == "members.sql"
+        assert diagnostic.location.range.start.line == start_line
+        assert diagnostic.location.range.start.character == start_character
+        assert diagnostic.location.range.end.line == end_line
+        assert diagnostic.location.range.end.character == end_character
+
+
+def test_procedure_roots_exclude_dml_and_temporary_sources_locally(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+SELECT * FROM S.Base;
+INSERT INTO S.Target SELECT * FROM S.Hidden;
+SELECT * FROM #scratch;
+END
+"""
+    result = _analyze(tmp_path, **{"roots.sql": sql})
+    symbols = _symbols(result)
+    edges = _sql_edges(result, "sql:reads-from")
+    unresolved = {
+        node.label
+        for node in result.document.nodes
+        if node.node_class.value == "unresolved-reference"
+    }
+
+    assert {"S.Base", "S.Read"} <= symbols.keys()
+    assert {(edge[0].label, edge[1].label) for edge in edges} == {("S.Read", "S.Base")}
+    assert unresolved == set()
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_dynamic_sql_is_opaque_but_a_separate_static_root_survives(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+EXEC(@sql);
+SELECT * FROM S.Base;
+END
+"""
+    result = _analyze(tmp_path, **{"dynamic.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+
+    assert {(edge[0].label, edge[1].label) for edge in edges} == {("S.Read", "S.Base")}
+    assert len(result.diagnostics) == 1
+    assert result.diagnostics[0].code is DiagnosticCode.UNSUPPORTED_SYNTAX
+    assert result.diagnostics[0].location is None
+
+
+def test_opaque_cursor_and_try_members_do_not_infer_text_reads(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.CursorRead AS BEGIN
+DECLARE c CURSOR FOR SELECT * FROM S.Hidden;
+SELECT * FROM S.Base;
+END
+GO
+CREATE PROCEDURE S.TryRead AS BEGIN TRY
+SELECT * FROM S.HiddenTry
+END TRY;
+BEGIN CATCH SELECT * FROM S.HiddenCatch END CATCH;
+SELECT * FROM S.Base;
+END
+"""
+    result = _analyze(tmp_path, **{"opaque.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+
+    assert {"S.CursorRead", "S.TryRead"} <= _symbols(result).keys()
+    assert {(edge[0].label, edge[1].label) for edge in edges} == {
+        ("S.CursorRead", "S.Base"),
+        ("S.TryRead", "S.Base"),
+    }
+    assert len(result.diagnostics) >= 2
+    assert all(item.code is DiagnosticCode.UNSUPPORTED_SYNTAX for item in result.diagnostics)
+
+
+def test_malformed_batch_is_atomic_and_later_procedure_batch_recovers(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE Broken (
+GO
+CREATE PROCEDURE S.Read AS BEGIN SELECT * FROM S.Base; END
+"""
+    result = _analyze(tmp_path, **{"recovery.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+
+    assert set(_symbols(result)) == {"S.Base", "S.Read"}
+    assert {(edge[0].label, edge[1].label) for edge in edges} == {("S.Read", "S.Base")}
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.PARSE_ERROR]
 
 
 @pytest.mark.parametrize(

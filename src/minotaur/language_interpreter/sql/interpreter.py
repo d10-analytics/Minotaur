@@ -598,7 +598,14 @@ def _interpret_create(
         )
         declarations.append(declaration)
         nodes.append(node)
-        return _Observation(declaration)
+        body_reads: list[tuple[tuple[str, ...], str, Location]] = []
+        for root in _procedural_query_roots(tree, kind, item, batch, diagnostics):
+            root_reads = _query_reads(root, item, batch, diagnostics)
+            if root_reads is None:
+                _unsupported(root, item, batch, diagnostics)
+            else:
+                body_reads.extend(root_reads)
+        return _Observation(declaration, tuple(body_reads), ())
     if kind in {"INDEX", "NONCLUSTERED INDEX", "CLUSTERED INDEX"}:
         if _valid_index(tree):
             return None
@@ -662,6 +669,114 @@ def _declaration_has_body(tree: exp.Create, kind: str) -> bool:
             statement is not None for statement in body.expressions
         )
     return body is not None
+
+
+_QUERY_ROOT_TYPES = (exp.Select, exp.Union, exp.Intersect, exp.Except)
+_DML_ROOT_TYPES = (exp.Insert, exp.Update, exp.Delete, exp.Merge)
+
+
+def _procedural_query_roots(
+    tree: exp.Create,
+    kind: str,
+    item: _File,
+    batch: _Batch,
+    diagnostics: list[Diagnostic],
+) -> list[exp.Expression]:
+    """Select parser-exposed query roots from one declaration body.
+
+    Query roots are handed to ``_query_reads`` as complete expressions so its
+    CTE, subquery, join, and set-operation handling remains shared with views.
+    Traversal deliberately stops at query and DML boundaries: walking into
+    either would revisit nested queries or model DML source reads.
+    """
+    body = tree.args.get("expression")
+    if kind == "FUNCTION":
+        if not isinstance(body, exp.Return):
+            return []
+        expression = body.this
+        if isinstance(expression, (exp.Execute, exp.ExecuteSql)):
+            _unsupported_unlocated(item, diagnostics)
+            return []
+        return _nested_query_roots(expression)
+    if not isinstance(body, exp.Block):
+        return []
+
+    roots: list[exp.Expression] = []
+
+    def visit(statement: exp.Expression) -> None:
+        if isinstance(statement, exp.EndStatement):
+            return
+        if isinstance(statement, _QUERY_ROOT_TYPES):
+            roots.append(statement)
+            return
+        if isinstance(statement, _DML_ROOT_TYPES):
+            return
+        if isinstance(statement, (exp.Execute, exp.ExecuteSql)):
+            _unsupported_unlocated(item, diagnostics)
+            return
+        if isinstance(statement, exp.Command):
+            if _is_structural_end_marker(statement):
+                return
+            _unsupported(statement, item, batch, diagnostics)
+            return
+        if isinstance(statement, exp.Block):
+            for nested in statement.expressions:
+                if nested is not None:
+                    visit(nested)
+            return
+        if isinstance(statement, exp.IfBlock):
+            roots.extend(_nested_query_roots(statement.this))
+            for branch in (statement.args.get("true"), statement.args.get("false")):
+                if isinstance(branch, exp.Expression):
+                    visit(branch)
+            return
+        if isinstance(statement, exp.WhileBlock):
+            loop_body = statement.args.get("body")
+            if isinstance(loop_body, exp.Expression):
+                visit(loop_body)
+            return
+        _unsupported(statement, item, batch, diagnostics)
+
+    for statement in body.expressions:
+        if statement is not None:
+            visit(statement)
+    return roots
+
+
+def _nested_query_roots(expression: exp.Expression | None) -> list[exp.Expression]:
+    """Return query roots nested in an expression without revisiting query scopes."""
+    if expression is None:
+        return []
+
+    roots: list[exp.Expression] = []
+
+    def visit(candidate: exp.Expression) -> None:
+        if isinstance(candidate, exp.Subquery):
+            nested = candidate.this
+            if isinstance(nested, exp.Expression):
+                visit(nested)
+            return
+        if isinstance(candidate, _QUERY_ROOT_TYPES):
+            roots.append(candidate)
+            return
+        if isinstance(candidate, (_DML_ROOT_TYPES, exp.Execute, exp.ExecuteSql, exp.Command)):
+            return
+        for nested in candidate.iter_expressions():
+            if isinstance(nested, exp.Expression):
+                visit(nested)
+
+    visit(expression)
+    return roots
+
+
+def _is_structural_end_marker(statement: exp.Command) -> bool:
+    expression = statement.args.get("expression")
+    return (
+        statement.this == "END"
+        and isinstance(expression, exp.Literal)
+        and expression.is_string
+        and str(expression.this).upper() == "END"
+    )
 
 
 def _is_create_or_replace(source: str, table: exp.Table, kind: str) -> bool:
@@ -1126,6 +1241,16 @@ def _unsupported(
             item.raw.relative,
             "unsupported T-SQL syntax",
             location,
+        )
+    )
+
+
+def _unsupported_unlocated(item: _File, diagnostics: list[Diagnostic]) -> None:
+    diagnostics.append(
+        Diagnostic(
+            DiagnosticCode.UNSUPPORTED_SYNTAX,
+            item.raw.relative,
+            "unsupported T-SQL syntax",
         )
     )
 

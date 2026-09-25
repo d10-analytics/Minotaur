@@ -170,6 +170,46 @@ CREATE FUNCTION S.Func(@id int) RETURNS int AS RETURN @id
     }
 
 
+def test_persisted_procedure_and_function_reads_feed_callers_impact_and_unreferenced(
+    tmp_path: Path,
+) -> None:
+    content = """\
+CREATE SCHEMA S
+GO
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE S.Unused (id int)
+GO
+CREATE VIEW S.Reader AS SELECT * FROM S.Base
+GO
+CREATE PROCEDURE S.Proc AS BEGIN
+SELECT * FROM S.Base;
+END
+GO
+CREATE FUNCTION S.Func() RETURNS TABLE AS RETURN (SELECT * FROM S.Base)
+"""
+    index = _persisted_index(tmp_path / "current", content)
+
+    assert [
+        (record.path, record.line, record.column, record.caller, record.kind, record.unresolved)
+        for record in callers(index, "s.base")
+    ] == [
+        ("catalog.sql", 7, 39, "S.Reader", "sql:reads-from", False),
+        ("catalog.sql", 10, 15, "S.Proc", "sql:reads-from", False),
+        ("catalog.sql", 13, 65, "S.Func", "sql:reads-from", False),
+    ]
+    assert impact(index, "s.base") == (
+        ImpactRecord(depth=0, symbol="S.Base", kind="sql:table"),
+        ImpactRecord(depth=1, symbol="S.Func", kind="sql:function"),
+        ImpactRecord(depth=1, symbol="S.Proc", kind="sql:procedure"),
+        ImpactRecord(depth=1, symbol="S.Reader", kind="sql:view"),
+    )
+    assert [
+        (record.symbol, record.kind)
+        for record in unreferenced(index, tmp_path / "current", ("catalog.sql",))
+    ] == [("S.Unused", "sql:table"), ("S.Reader", "sql:view")]
+
+
 def test_sql_relationships_feed_callers_and_core_recall_remains(
     tmp_path: Path,
 ) -> None:
