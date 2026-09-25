@@ -109,6 +109,7 @@ class _Observation:
     reads: tuple[tuple[tuple[str, ...], str, Location], ...] = ()
     foreign_keys: tuple[_ForeignKey, ...] = ()
     source: tuple[tuple[str, ...], str, Location, str] | None = None
+    calls: tuple[tuple[tuple[str, ...], str, Location], ...] = ()
 
 
 def analyze_sql_files(
@@ -206,6 +207,7 @@ def analyze_sql_files(
     schema_index = _typed_index(declarations, "schema")
     table_index = _typed_index(declarations, "table")
     view_index = _typed_index(declarations, "view")
+    function_index = _typed_index(declarations, "function")
     for key, values in schema_index.items():
         if len(values) != 1:
             continue
@@ -258,6 +260,18 @@ def analyze_sql_files(
                 emitter,
                 "sql:reads-from",
                 "read",
+            )
+        for key, text, location in observation.calls:
+            _resolve_function(
+                owner,
+                key,
+                text,
+                location,
+                function_index,
+                relationships,
+                nodes,
+                diagnostics,
+                emitter,
             )
         for foreign_key in observation.foreign_keys:
             _resolve_foreign_key(
@@ -438,6 +452,36 @@ def _resolve(
     _ = unresolved, relation
 
 
+def _resolve_function(
+    owner: _Declaration,
+    key: tuple[str, ...],
+    text: str,
+    location: Location,
+    functions: dict[tuple[str, ...], list[_Declaration]],
+    relationships: RelationshipAccumulator,
+    nodes: list[Node],
+    diagnostics: list[Diagnostic],
+    emitter: NodeEmitter,
+) -> None:
+    """Resolve a function call while keeping unknown bare names opaque."""
+    candidates = functions.get(key, [])
+    if len(candidates) == 1:
+        relationships.add(owner.node.id, candidates[0].node.id, "sql:calls", location)
+        return
+    if len(candidates) > 1:
+        diagnostics.append(
+            Diagnostic(
+                DiagnosticCode.AMBIGUOUS_REFERENCE,
+                location.path,
+                "ambiguous SQL reference",
+                location,
+            )
+        )
+    if len(candidates) == 0 and len(key) == 1:
+        return
+    emitter.unresolved(owner.node.id, text, location, nodes, relationships)
+
+
 def _resolve_foreign_key(
     owner: _Declaration,
     key: tuple[str, ...],
@@ -599,13 +643,19 @@ def _interpret_create(
         declarations.append(declaration)
         nodes.append(node)
         body_reads: list[tuple[tuple[str, ...], str, Location]] = []
+        body_calls: list[tuple[tuple[str, ...], str, Location]] = []
         for root in _procedural_query_roots(tree, kind, item, batch, diagnostics):
             root_reads = _query_reads(root, item, batch, diagnostics)
             if root_reads is None:
                 _unsupported(root, item, batch, diagnostics)
             else:
                 body_reads.extend(root_reads)
-        return _Observation(declaration, tuple(body_reads), ())
+                root_calls = _query_calls(root, item, batch)
+                if root_calls is None:
+                    _unsupported(root, item, batch, diagnostics)
+                else:
+                    body_calls.extend(root_calls)
+        return _Observation(declaration, tuple(body_reads), (), None, tuple(body_calls))
     if kind in {"INDEX", "NONCLUSTERED INDEX", "CLUSTERED INDEX"}:
         if _valid_index(tree):
             return None
@@ -650,7 +700,13 @@ def _interpret_create(
             nodes.pop()
             _unsupported(tree, item, batch, diagnostics)
             return None
-        return _Observation(declaration, tuple(reads), ())
+        calls = _query_calls(expression, item, batch)
+        if calls is None:
+            declarations.pop()
+            nodes.pop()
+            _unsupported(tree, item, batch, diagnostics)
+            return None
+        return _Observation(declaration, tuple(reads), (), None, tuple(calls))
     if kind == "TABLE":
         fks = _foreign_keys(target, item, batch, diagnostics)
         if fks is None:
@@ -1072,6 +1128,106 @@ def _interpret_alter(tree: exp.Alter, item: _File, batch: _Batch) -> _Observatio
     )
 
 
+def _function_name(call: exp.Anonymous) -> str | None:
+    value = call.args.get("this")
+    if isinstance(value, exp.Identifier):
+        return str(value.this)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _function_parts(expression: exp.Expression) -> tuple[str, ...] | None:
+    """Return the case-preserved qualified name for one generic function call."""
+    if isinstance(expression, exp.Anonymous):
+        name = _function_name(expression)
+        return (name,) if name is not None else None
+    if not isinstance(expression, exp.Dot):
+        return None
+    right = expression.args.get("expression")
+    if not isinstance(right, exp.Anonymous):
+        return None
+    left = expression.args.get("this")
+    if not isinstance(left, exp.Expression):
+        return None
+    prefix = (str(left.this),) if isinstance(left, exp.Identifier) else _qualified_identifiers(left)
+    name = _function_name(right)
+    if not prefix or name is None:
+        return None
+    return (*prefix, name)
+
+
+def _qualified_identifiers(expression: exp.Expression) -> tuple[str, ...] | None:
+    if isinstance(expression, exp.Identifier):
+        return (str(expression.this),)
+    if not isinstance(expression, exp.Dot):
+        return None
+    left = expression.args.get("this")
+    right = expression.args.get("expression")
+    if not isinstance(left, exp.Expression) or not isinstance(right, exp.Identifier):
+        return None
+    prefix = _qualified_identifiers(left)
+    if prefix is None:
+        return None
+    return (*prefix, str(right.this))
+
+
+def _function_location(call: exp.Anonymous, item: _File, batch: _Batch) -> Location | None:
+    start = call.meta.get("start")
+    end = call.meta.get("end")
+    if not isinstance(start, int) or not isinstance(end, int):
+        return None
+    absolute_start = batch.start + start
+    absolute_end = batch.start + end + 1
+    if absolute_start < 0 or absolute_end > len(item.line_index.source):
+        return None
+    return Location(
+        item.raw.relative,
+        Range(item.line_index.position(absolute_start), item.line_index.position(absolute_end)),
+    )
+
+
+def _table_function_parts(table: exp.Table) -> tuple[str, ...] | None:
+    function = table.args.get("this")
+    if not isinstance(function, exp.Anonymous):
+        return None
+    name = _function_name(function)
+    if name is None:
+        return None
+    identifiers: list[str] = []
+    for value in (table.args.get("catalog"), table.args.get("db")):
+        if value is None:
+            continue
+        if not isinstance(value, exp.Identifier):
+            return None
+        identifiers.append(str(value.this))
+    return (*identifiers, name)
+
+
+def _query_calls(
+    expression: Any, item: _File, batch: _Batch
+) -> list[tuple[tuple[str, ...], str, Location]] | None:
+    if not isinstance(expression, (exp.Query, exp.Select, exp.Union, exp.Intersect, exp.Except)):
+        return None
+    result: list[tuple[tuple[str, ...], str, Location]] = []
+    for candidate in expression.walk():
+        if not isinstance(candidate, exp.Anonymous):
+            continue
+        parent = candidate.parent
+        if isinstance(parent, exp.Table):
+            parts = _table_function_parts(parent)
+        else:
+            qualified = parent if isinstance(parent, exp.Dot) else candidate
+            parts = _function_parts(qualified)
+        if parts is None:
+            return None
+        location = _function_location(candidate, item, batch)
+        if location is None:
+            return None
+        result.append((tuple(part.casefold() for part in parts), ".".join(parts), location))
+    return result
+
+
 def _query_reads(
     expression: Any,
     item: _File,
@@ -1134,6 +1290,8 @@ def _query_reads(
             )
             for source in sources:
                 if isinstance(source, exp.Table):
+                    if _table_function_parts(source) is not None:
+                        continue
                     parts = _parts(source)
                     location = _table_location(source, item, batch)
                     if parts is None or len(parts) not in {1, 2} or _nonpersistent_table(source):
