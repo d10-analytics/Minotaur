@@ -141,6 +141,35 @@ CREATE VIEW S.Reader AS SELECT * FROM S.Parent
     }
 
 
+def test_persisted_procedure_and_function_declarations_feed_generic_queries(
+    tmp_path: Path,
+) -> None:
+    content = """\
+CREATE SCHEMA S
+GO
+CREATE PROCEDURE S.Proc @id int AS SELECT @id
+GO
+CREATE FUNCTION S.Func(@id int) RETURNS int AS RETURN @id
+"""
+    index = _persisted_index(tmp_path / "current", content)
+
+    assert [(record.symbol, record.kind) for record in definitions(index, "Proc")] == [
+        ("S.Proc", "sql:procedure")
+    ]
+    assert [(record.symbol, record.kind) for record in definitions(index, "Func")] == [
+        ("S.Func", "sql:function")
+    ]
+    assert _sql_facts(index) == set()
+    assert unreferenced(index, tmp_path / "current", ("catalog.sql",)) == ()
+
+    old = _persisted_document(tmp_path / "old", "CREATE SCHEMA S\n")
+    changes = diff(old, _persisted_document(tmp_path / "new", content))
+    assert {(change.kind, change.symbol) for change in changes.added} == {
+        ("sql:procedure", "S.Proc"),
+        ("sql:function", "S.Func"),
+    }
+
+
 def test_sql_relationships_feed_callers_and_core_recall_remains(
     tmp_path: Path,
 ) -> None:

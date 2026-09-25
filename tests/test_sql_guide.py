@@ -6,10 +6,15 @@ import re
 from pathlib import Path
 
 GUIDE = Path(__file__).parents[1] / "docs/guides/analyze-sql.md"
+FORMAT_REFERENCE = Path(__file__).parents[1] / "docs/formats/minotaur-graph-v1.md"
 
 
 def _text() -> str:
     return re.sub(r"\s+", " ", GUIDE.read_text(encoding="utf-8")).strip()
+
+
+def _format_text() -> str:
+    return re.sub(r"\s+", " ", FORMAT_REFERENCE.read_text(encoding="utf-8")).strip()
 
 
 def test_sql_guide_documents_view_warning_codes_and_nonfatal_severity() -> None:
@@ -28,6 +33,26 @@ def test_sql_guide_documents_depth_scope_and_exclusions() -> None:
     assert "Procedure and function reads" in text
     assert "ordinary diamonds" in text
     assert "unrelated generic references" in text
+
+
+def test_sql_guide_documents_procedure_and_function_declaration_boundary() -> None:
+    text = _text()
+    assert "`sql:procedure` and `sql:function` symbols" in text
+    assert "visible declarations only" in text
+    assert "no `sql:reads-from` facts" in text
+    assert "caller, impact, and `unreferenced` semantics do not include their body contents" in text
+    assert "[`sql-proc-function-read-dependencies`](a75baecd-3ed5-462e-b165-ceca57fb1fd3)" in text
+
+
+def test_graph_format_documents_procedure_and_function_declaration_boundary() -> None:
+    text = _format_text()
+    assert "`sql:procedure`, and `sql:function`" in text
+    assert "declaration symbols only in this accepted slice" in text
+    assert "no `sql:reads-from` relationships" in text
+    assert "[`sql-proc-function-read-dependencies`](a75baecd-3ed5-462e-b165-ceca57fb1fd3)" in text
+    assert "caller, impact, and `unreferenced` semantics remain unchanged" in text
+    assert "SQL relationships use `sql:reads-from` and `sql:foreign-key-to`" in text
+    assert "The graph format remains stable" in text
 
 
 def test_sql_guide_documents_duplicate_categories_payload_and_exclusions() -> None:

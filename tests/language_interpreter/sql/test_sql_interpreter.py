@@ -255,6 +255,176 @@ def test_runtime_dependency_is_exact_and_parser_is_real() -> None:
     assert sqlglot.__version__ == "30.18.0"
 
 
+def test_procedure_and_function_declarations_are_opaque_symbols(tmp_path: Path) -> None:
+    sql = """\
+CREATE SCHEMA S
+GO
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.GetBase @id int AS SELECT * FROM S.Base
+GO
+CREATE OR ALTER PROCEDURE S.Refresh AS BEGIN SELECT 1 END
+GO
+CREATE FUNCTION S.Scalar(@id int) RETURNS int AS RETURN @id
+GO
+CREATE OR ALTER FUNCTION S.Rows(@id int) RETURNS TABLE AS RETURN (SELECT * FROM S.Base)
+GO
+CREATE FUNCTION S.Block() RETURNS int AS BEGIN
+RETURN 1;
+END;
+CREATE TABLE S.After (id int)
+"""
+    result = _analyze(tmp_path, **{"declarations.sql": sql})
+    symbols = _symbols(result)
+
+    assert not result.diagnostics
+    assert {
+        "S",
+        "S.Base",
+        "S.GetBase",
+        "S.Refresh",
+        "S.Scalar",
+        "S.Rows",
+        "S.Block",
+        "S.After",
+    } == set(symbols)
+    assert {symbols[name].symbol_kind for name in symbols if name.startswith("S.")} == {
+        "sql:table",
+        "sql:procedure",
+        "sql:function",
+    }
+    assert symbols["S.GetBase"].location.range.start.line == 4
+    assert symbols["S.GetBase"].location.range.start.character == 17
+    assert symbols["S.Scalar"].location.range.start.line == 8
+    assert symbols["S.Scalar"].location.range.start.character == 16
+    assert _edges(result, "sql:reads-from") == set()
+    assert {edge for edge in _edges(result, "contains") if edge[0] == "declarations.sql"} == {
+        ("declarations.sql", "S"),
+        ("declarations.sql", "S.Base"),
+        ("declarations.sql", "S.GetBase"),
+        ("declarations.sql", "S.Refresh"),
+        ("declarations.sql", "S.Scalar"),
+        ("declarations.sql", "S.Rows"),
+        ("declarations.sql", "S.Block"),
+        ("declarations.sql", "S.After"),
+    }
+    assert {edge for edge in _edges(result, "contains") if edge[0] == "S"} == {
+        ("S", "S.Base"),
+        ("S", "S.After"),
+    }
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE OR REPLACE PROCEDURE S.P AS SELECT 1",
+        "CREATE OR REPLACE FUNCTION S.F() RETURNS int AS RETURN 1",
+        "-- leading comment\nCREATE OR REPLACE PROCEDURE S.P AS SELECT 1",
+        (
+            "/* leading block */ CREATE /* one */ OR /* two */ REPLACE /* three */ "
+            "FUNCTION S.F() RETURNS int AS RETURN 1"
+        ),
+        "; ; CREATE OR REPLACE FUNCTION S.F() RETURNS int AS RETURN 1",
+    ],
+)
+def test_or_replace_declarations_remain_unsupported(tmp_path: Path, statement: str) -> None:
+    result = _analyze(tmp_path, **{"replace.sql": statement})
+
+    assert not [node for node in result.document.nodes if node.symbol_kind]
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
+
+
+def test_or_replace_view_does_not_change_later_function_modifier(tmp_path: Path) -> None:
+    sql = """\
+CREATE OR REPLACE VIEW S.V AS SELECT 1;
+CREATE FUNCTION S.F() RETURNS int AS RETURN 1
+"""
+    result = _analyze(tmp_path, **{"mixed.sql": sql})
+
+    assert set(_symbols(result)) == {"S.V", "S.F"}
+    assert not result.diagnostics
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE PROCEDURE S.P",
+        "CREATE PROCEDURE S.P AS",
+        "CREATE FUNCTION S.F() RETURNS int",
+        "CREATE FUNCTION S.F() RETURNS int AS",
+    ],
+)
+def test_incomplete_declaration_headers_are_atomic_and_recover(
+    tmp_path: Path, statement: str
+) -> None:
+    result = _analyze(tmp_path, **{"incomplete.sql": statement})
+
+    assert not _symbols(result)
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE FUNCTION S.F() RETURNS int",
+        "CREATE FUNCTION S.F() RETURNS int AS",
+    ],
+)
+def test_incomplete_function_headers_are_atomic_and_recover_same_batch(
+    tmp_path: Path, statement: str
+) -> None:
+    result = _analyze(
+        tmp_path,
+        **{"incomplete.sql": f"{statement}; CREATE TABLE S.After (id int)"},
+    )
+
+    assert set(_symbols(result)) == {"S.After"}
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
+
+
+def test_unsupported_if_not_exists_block_function_has_one_diagnostic_and_recovers(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE FUNCTION IF NOT EXISTS S.F() RETURNS int AS BEGIN
+RETURN 1;
+END;
+CREATE TABLE S.After (id int)
+"""
+    result = _analyze(tmp_path, **{"if-not-exists.sql": sql})
+
+    assert set(_symbols(result)) == {"S.After"}
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
+
+
+def test_unsupported_declarations_and_parse_batches_remain_atomic(tmp_path: Path) -> None:
+    sql = """\
+CREATE FUNCTION S.Clr() RETURNS int AS EXTERNAL NAME a.b
+GO
+CREATE TRIGGER S.Trigger ON S.Base AFTER INSERT AS SELECT 1
+GO
+CREATE TABLE Broken (
+GO
+CREATE TABLE S.After (id int)
+"""
+    result = _analyze(tmp_path, **{"recovery.sql": sql})
+
+    assert set(_symbols(result)) == {"S.After"}
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.PARSE_ERROR,
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+    ]
+
+
 def test_declarations_fks_reads_and_raw_digest_preserve_source_coordinates(tmp_path: Path) -> None:
     content = (
         "\ufeffCREATE SCHEMA [Dø] \r\nGO\r\nCREATE TABLE [Dø].[Parent] (id int)\r\nGO\r\n"
