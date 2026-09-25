@@ -653,15 +653,16 @@ def _interpret_create(
 
 
 def _is_create_or_replace(source: str, table: exp.Table, kind: str) -> bool:
-    starts = [
-        identifier.meta.get("start")
-        for identifier in (
-            table.args.get("catalog"),
-            table.args.get("db"),
-            table.args.get("this"),
-        )
-        if isinstance(identifier, exp.Identifier) and isinstance(identifier.meta.get("start"), int)
-    ]
+    starts: list[int] = []
+    for identifier in (
+        table.args.get("catalog"),
+        table.args.get("db"),
+        table.args.get("this"),
+    ):
+        if isinstance(identifier, exp.Identifier):
+            start = identifier.meta.get("start")
+            if isinstance(start, int):
+                starts.append(start)
     if not starts:
         return False
     tokens = Tokenizer(dialect="tsql").tokenize(source[: min(starts)])
