@@ -375,6 +375,24 @@ END
     }
 
 
+def test_unsupported_set_member_keeps_separate_procedure_read_root(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+SET NOCOUNT ON;
+SELECT * FROM S.Base;
+END
+"""
+    result = _analyze(tmp_path, **{"set.sql": sql})
+
+    assert {"S.Base", "S.Read"} <= _symbols(result).keys()
+    assert {(edge[0].label, edge[1].label) for edge in _sql_edges(result, "sql:reads-from")} == {
+        ("S.Read", "S.Base")
+    }
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
 def test_procedure_roots_exclude_dml_and_temporary_sources_locally(tmp_path: Path) -> None:
     sql = """\
 CREATE TABLE S.Base (id int)
