@@ -561,6 +561,9 @@ def _interpret_create(
     kind = str(tree.args.get("kind") or "").upper()
     target = tree.this
     if kind in {"PROCEDURE", "FUNCTION"}:
+        if tree.args.get("exists") or tree.args.get("clone") or tree.args.get("refresh"):
+            _unsupported(tree, item, batch, diagnostics)
+            return None
         if (
             kind == "PROCEDURE" and isinstance(target, exp.StoredProcedure)
         ) or (kind == "FUNCTION" and isinstance(target, exp.UserDefinedFunction)):
