@@ -181,16 +181,25 @@ digest covers the original bytes, including a BOM and line endings. SQL
 symbols use the namespaced kinds `sql:schema`, `sql:table`, `sql:view`,
 `sql:procedure`, and `sql:function`. Procedures and functions are declaration
 and static-read sources: parser-represented static query roots in their bodies
-can add `sql:reads-from` relationships to persistent tables and views. Queries
+can add `sql:reads-from` relationships to persistent tables and views and
+`sql:calls` relationships to declared user-defined functions. Queries
 contained in DML, temporary sources, dynamic strings, and opaque parser forms
-add no read facts. Generic `definitions` and `diff` include these declaration
-symbols; `callers` and `impact` consume their persisted read relationships,
-while `unreferenced` continues to consider only SQL tables and views.
+add no read facts or call facts. Generic `definitions` and `diff` include these
+declaration symbols; `callers` and `impact` consume their persisted read and
+call relationships, while `unreferenced` considers SQL tables, views, and
+functions as candidates. A table-valued function used as a query source has a
+call relationship without a read relationship; persistent table and view
+sources retain their read relationships. Calls in `EXEC` or `EXECUTE`, dynamic
+SQL strings, table defaults, computed columns, and standalone `RETURN` or
+`SET` expressions are outside this accepted query-root slice.
 Each such symbol carries `extensions["minotaur-sql"]["name"]`, its final
 parsed identifier segment. This preserves dots within quoted identifiers for
 `unreferenced` bare-name matching after graph serialization without changing
-node identity. SQL relationships use `sql:reads-from` and
-`sql:foreign-key-to`. These namespaced extensions remain ordinary graph facts.
+node identity. SQL relationships use `sql:reads-from`, `sql:foreign-key-to`,
+and `sql:calls`. A `sql:calls` relationship is one
+source/target/kind tuple with all distinct physical call locations retained in
+its evidence; each location spans the function name. These namespaced
+extensions remain ordinary graph facts.
 The graph format remains stable while supported query commands declare which
 SQL relationship kinds they consume.
 

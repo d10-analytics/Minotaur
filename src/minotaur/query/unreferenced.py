@@ -16,7 +16,7 @@ from minotaur.query.symbols import label_bare_name
 
 _TOKEN_PATTERN = re.compile(r"\w+")
 _CANDIDATE_KINDS = frozenset({"class", "function", "method"})
-_SQL_CANDIDATE_KINDS = frozenset({"sql:table", "sql:view"})
+_SQL_CANDIDATE_KINDS = frozenset({"sql:table", "sql:view", "sql:function"})
 
 
 @dataclass(frozen=True, slots=True)

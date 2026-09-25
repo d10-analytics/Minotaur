@@ -341,6 +341,52 @@ def test_query_reference_keeps_the_system_query_model_claims() -> None:
     assert "An empty result prints `no dependencies`" in text
 
 
+def test_query_reference_documents_sql_call_consumers_and_function_candidates() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert (
+        "the current SQL dependency kinds `sql:reads-from`, `sql:foreign-key-to`, and `sql:calls`"
+        in text
+    )
+    assert "A SQL function-call result names the declaring owner and called `sql:function`" in text
+    assert "`impact` follows inbound `calls`, `imports`, and the current SQL dependency" in text
+    assert "SQL table, view, and function candidates use the same explicit" in text
+    assert "core functions, methods, and classes, plus SQL tables, views, and functions" in text
+    assert (
+        "SQL functions are reported when they have no inbound `sql:calls` relationship from a"
+        in text
+    )
+    assert "a recursive self-call does not count as inbound use" in text
+    assert (
+        "For SQL tables, views, and functions, it counts the bare name case-insensitively"
+    ) in text
+    assert "case-insensitive SQL table, view, and function declarations" in text
+    assert (
+        "through `calls`, `references`, `sql:reads-from`, `sql:foreign-key-to`, or `sql:calls`"
+        in text
+    )
+    assert "including `sql:reads-from`, `sql:foreign-key-to`, and `sql:calls`" in text
+
+
+def test_system_guide_documents_sql_call_boundary_kind() -> None:
+    text = _collapsed(QUERY_GUIDE)
+    assert (
+        "rows include the current SQL relationship kinds `sql:reads-from`, "
+        "`sql:foreign-key-to`, and `sql:calls`" in text
+    )
+    assert (
+        "SQL `sql:reads-from`, `sql:foreign-key-to`, and `sql:calls` edges participate in the same"
+        in text
+    )
+    assert (
+        "A `sql:calls` edge specifically records a call from one SQL declaration "
+        "to a declared `sql:function`" in text
+    )
+    assert (
+        "Every outgoing `calls`, `references`, `imports`, `sql:reads-from`, "
+        "`sql:foreign-key-to`, or `sql:calls` edge" in text
+    )
+
+
 def test_query_reference_documents_both_diff_modes_and_deliberate_exit_semantics() -> None:
     text = _collapsed(QUERY_REFERENCE)
     assert "Compare the committed graph at `HEAD` with the current working tree" in text

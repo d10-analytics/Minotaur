@@ -98,9 +98,10 @@ return exit status `0`; an error keeps the nonzero source-analysis status.
 `--details` puts each system's sorted declared paths beside its
 `declared_files` object, puts sorted unassigned paths beside
 `coverage.unassigned_files`, and adds top-level `connections`. Connection
-rows include the current SQL relationship kinds `sql:reads-from` and
-`sql:foreign-key-to` alongside the established Python boundary kinds. The compact
-answer omits these keys entirely. A connection is retained only when at least
+rows include the current SQL relationship kinds `sql:reads-from`,
+`sql:foreign-key-to`, and `sql:calls` alongside the established Python
+boundary kinds. The compact answer omits these keys entirely. A connection is
+retained only when at least
 one endpoint is a named system and the two endpoints are not the same named
 system. Thus named-to-named (different names), named-to-`no_system`,
 `no_system`-to-named, named-to-`external`, and `external`-to-named edges are
@@ -142,8 +143,10 @@ Boundary relationships come from two consumption layers, each reported with
 explicit kinds:
 
 * **Symbol layer** — `calls` and `references`: outside code invokes or refers
-  to the system's symbols. SQL `sql:reads-from` and `sql:foreign-key-to` edges
-  participate in the same named-boundary reports and overview connections.
+  to the system's symbols. SQL `sql:reads-from`, `sql:foreign-key-to`, and
+  `sql:calls` edges participate in the same named-boundary reports and
+  overview connections. A `sql:calls` edge specifically records a call from
+  one SQL declaration to a declared `sql:function`.
 * **Module layer** — `imports`: outside code links against the system's
   modules, even when no call into the system resolves.
 
@@ -193,8 +196,8 @@ detail.
 system's own outgoing boundary relationships: each named target system the
 system reaches, plus explicit `no_system` and `external` rows.
 
-* Every outgoing `calls`, `references`, `imports`, `sql:reads-from`, or
-  `sql:foreign-key-to` edge whose source endpoint lies inside the system
+* Every outgoing `calls`, `references`, `imports`, `sql:reads-from`,
+  `sql:foreign-key-to`, or `sql:calls` edge whose source endpoint lies inside the system
   classifies its target endpoint into exactly one category; a row exists only
   for categories with at least one target.
 * Same-system and same-file edges are internal and never a dependency.

@@ -80,12 +80,15 @@ Text output has one line per resolved call site:
 use.py:3:5  use.caller [calls]
 ```
 
-Callers consumes `calls` and the SQL dependency kinds `sql:reads-from` and
-`sql:foreign-key-to`. SQL qualified names are resolved case-insensitively after
-an exact label match; non-SQL labels remain case-sensitive. The relationship
-kind appears in every text and JSON result so a caller can distinguish a call,
-a view read, and a foreign-key reference. SQL unresolved-reference recall uses
-the same case-insensitive bare-name matching; non-SQL recall remains exact.
+Callers consumes `calls` and the current SQL dependency kinds `sql:reads-from`,
+`sql:foreign-key-to`, and `sql:calls`. SQL qualified names are resolved
+case-insensitively after an exact label match; non-SQL labels remain
+case-sensitive. The relationship kind appears in every text and JSON result
+so a caller can distinguish a Python call, a SQL function call, a view read,
+and a foreign-key reference. A SQL function-call result names the declaring
+owner and called `sql:function`, with its persisted call-site location. SQL
+unresolved-reference recall uses the same case-insensitive bare-name matching;
+non-SQL recall remains exact.
 
 Matching unresolved references whose text ends in the target's bare name are
 included after resolved calls and marked explicitly:
@@ -134,8 +137,8 @@ case-insensitively; non-SQL names retain exact matching.
 
 ### Trace inbound impact
 
-`impact` follows inbound `calls`, `imports`, and the SQL dependency
-relationships `sql:reads-from` and `sql:foreign-key-to`:
+`impact` follows inbound `calls`, `imports`, and the current SQL dependency
+relationships `sql:reads-from`, `sql:foreign-key-to`, and `sql:calls`:
 
 ```bash
 minotaur query impact package.api.handle --depth 2 \
@@ -170,8 +173,8 @@ the same node class as unstable scaffolding.
 
 ### Find unreferenced symbols
 
-Find graph-clean functions, methods, classes, SQL tables, and SQL views,
-optionally narrowing the source paths:
+Find graph-clean core functions, methods, and classes, plus SQL tables, views,
+and functions, optionally narrowing the source paths:
 
 ```bash
 minotaur query unreferenced src/package tests \
@@ -180,8 +183,8 @@ minotaur query unreferenced src/package tests \
   --graph GRAPH.json --root ROOT
 ```
 
-Automatic dunder and `test_*` exclusions apply to core code symbols. SQL table
-and view candidates use the same explicit `--exclude`, `--exclude-file`, and
+Automatic dunder and `test_*` exclusions apply to core code symbols. SQL table,
+view, and function candidates use the same explicit `--exclude`, `--exclude-file`, and
 `--exclude-pattern` controls, but ordinary SQL names are not filtered by those
 core naming heuristics. `--exclude` may be repeated; `--exclude-file` accepts a
 JSON list/object of names or one name per line. Both match a symbol's bare name
@@ -194,8 +197,10 @@ any language or framework. By default only graph relationships count. Core
 symbols are reported when the only inbound call or reference comes from the
 symbol itself (for example, a recursive call). SQL tables and views are
 reported when they have no inbound resolved `sql:reads-from` or
-`sql:foreign-key-to` relationship; an outgoing SQL relationship alone does not
-make its source used. A decorator is attributed to the enclosing module or
+`sql:foreign-key-to` relationship; SQL functions are reported when they have no
+inbound `sql:calls` relationship from a different object, so a recursive
+self-call does not count as inbound use. An outgoing SQL relationship alone
+does not make its source used. A decorator is attributed to the enclosing module or
 class as a reference to the decorated symbol, so decoration counts as a use; a
 never-called symbol wrapped by a decorator is therefore not listed. Use
 recorded anywhere else keeps a core symbol out of the result, including
@@ -210,12 +215,13 @@ src/package/helpers.py:18  package.helpers.orphan  function [text-mention]
 
 For core symbols, the fallback counts case-sensitive occurrences of the bare
 name and subtracts the definitions of that name in the scanned files. For SQL
-tables and views, it counts the bare name case-insensitively and subtracts
-case-insensitive SQL table/view declarations. In both cases, definitions of
-the same name no longer vouch for each other. The fallback is keyed by bare
-name, not by symbol: when two classes both define `render` and `'render'`
-appears once in a string, both `A.render` and `B.render` are marked
-`[text-mention]`, because source text cannot say which one was meant.
+tables, views, and functions, it counts the bare name case-insensitively and
+subtracts case-insensitive SQL table, view, and function declarations. In both
+cases, definitions of the same name no longer vouch for each other. The
+fallback is keyed by bare name, not by symbol: when two classes both define
+`render` and `'render'` appears once in a string, both `A.render` and
+`B.render` are marked `[text-mention]`, because source text cannot say which
+one was meant.
 
 JSON records contain `path`, `line`, `symbol`, `kind`, and `text_mention`.
 An empty result prints `no unreferenced symbols` and still exits `0`.
@@ -306,11 +312,12 @@ minotaur query system-deps orders --graph GRAPH.json --root ROOT
 
 The three queries report two consumption layers with explicit kinds —
 symbol-layer `calls`/`references` and module-layer `imports` — plus the
-current SQL dependency kinds `sql:reads-from` and `sql:foreign-key-to`:
+current SQL dependency kinds `sql:reads-from`, `sql:foreign-key-to`, and
+`sql:calls`:
 
 * `surface` lists the in-scope symbols that files outside the system reach
-  through `calls`, `references`, `sql:reads-from`, or
-  `sql:foreign-key-to`. An import of the system's module is never surface;
+  through `calls`, `references`, `sql:reads-from`, `sql:foreign-key-to`, or
+  `sql:calls`. An import of the system's module is never surface;
   the module is not an implicit callable boundary. Text output is
   `path  symbol  kinds` per record; an empty result prints
   `no exposed symbols`.
@@ -320,8 +327,8 @@ current SQL dependency kinds `sql:reads-from` and `sql:foreign-key-to`:
   module is a consumer through `imports` even when no call resolves. An empty
   result prints `no consumers`.
 * `system-deps` lists the target categories of the system's own outgoing
-  boundary relationships, including `sql:reads-from` and
-  `sql:foreign-key-to`: each named target system plus explicit `no_system` and
+  boundary relationships, including `sql:reads-from`, `sql:foreign-key-to`,
+  and `sql:calls`: each named target system plus explicit `no_system` and
   `external` rows, with per-target endpoint detail. Same-system and same-file
   edges are internal and never a dependency. An empty result prints
   `no dependencies`.

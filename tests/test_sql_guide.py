@@ -40,9 +40,20 @@ def test_sql_guide_documents_procedure_and_function_static_read_boundary() -> No
     assert "`sql:procedure` and `sql:function` symbols" in text
     assert "parser-represented static query roots" in text
     assert "`sql:reads-from` relationships to persistent tables and views" in text
+    assert "`sql:calls` relationships to declared user-defined functions" in text
+    assert "A schema-qualified call is a candidate for the typed function resolver" in text
+    assert (
+        "an unqualified call is a candidate only when it matches a declared `sql:function`" in text
+    )
+    assert "Built-ins and unknown bare calls produce no call fact" in text
+    assert "One relationship keeps all distinct physical call locations" in text
+    assert "each location spans the function name" in text
     assert "Queries contained in DML, temporary sources, dynamic strings" in text
     assert "`EXEC(@sql)` or `sp_executesql`" in text
-    assert "opaque parser forms do not create `sql:reads-from` facts" in text
+    assert "opaque parser forms do not create SQL dependency facts" in text
+    assert "`EXEC` or `EXECUTE` procedure invocation" in text
+    assert "table `DEFAULT` constraints, computed-column definitions" in text
+    assert "standalone `RETURN` expressions, and `SET` assignments" in text
     assert "a separate eligible root remains available" in text
     assert "malformed batches retain the existing batch recovery behavior" in text
 
@@ -56,9 +67,15 @@ def test_graph_format_documents_procedure_and_function_static_read_boundary() ->
         "Queries contained in DML, temporary sources, dynamic strings, and opaque parser forms"
         in text
     )
-    assert "`callers` and `impact` consume their persisted read relationships" in text
-    assert "`unreferenced` continues to consider only SQL tables and views" in text
-    assert "SQL relationships use `sql:reads-from` and `sql:foreign-key-to`" in text
+    assert "`callers` and `impact` consume their persisted read and call relationships" in text
+    assert "`unreferenced` considers SQL tables, views, and functions as candidates" in text
+    assert (
+        "A table-valued function used as a query source has a call relationship "
+        "without a read relationship" in text
+    )
+    assert "Calls in `EXEC` or `EXECUTE`, dynamic SQL strings, table defaults" in text
+    assert "SQL relationships use `sql:reads-from`, `sql:foreign-key-to`, and `sql:calls`" in text
+    assert "each location spans the function name" in text
     assert "The graph format remains stable" in text
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.query import system as system_query
 
 
 def _write(root: Path, relative: str, content: str) -> None:
@@ -146,6 +147,48 @@ CREATE TABLE S.CaseThing (id int)
             "text_mention": False,
         }
     ]
+
+
+def test_sql_function_candidates_keep_unused_and_recursive_functions(
+    tmp_path: Path, capsys: object
+) -> None:
+    root = tmp_path / "source"
+    _write(
+        root,
+        "functions.sql",
+        """\
+CREATE FUNCTION S.Unused() RETURNS int AS RETURN 1
+GO
+CREATE FUNCTION S.Callee() RETURNS int AS RETURN 1
+GO
+CREATE VIEW S.ExternalCaller AS SELECT S.Callee() AS value
+GO
+CREATE TABLE S.Base (id int)
+GO
+CREATE FUNCTION S.Recur() RETURNS TABLE AS RETURN (SELECT S.Recur() FROM S.Base)
+""",
+    )
+    graph = tmp_path / "graph.json"
+    _analyze(root, graph)
+
+    records = _query_json(graph, root, capsys, "functions.sql")
+    sql_functions = {record["symbol"] for record in records if record["kind"] == "sql:function"}
+    assert sql_functions == {"S.Unused", "S.Recur"}
+    assert "S.Callee" not in sql_functions
+
+
+def test_system_query_docstrings_name_registry_relative_sql_kinds() -> None:
+    docstrings = (
+        system_query.__doc__,
+        system_query.surface.__doc__,
+        system_query.consumers.__doc__,
+        system_query.system_deps.__doc__,
+    )
+    assert all(
+        doc is not None and "current SQL dependency" in " ".join(doc.split()) for doc in docstrings
+    )
+    assert "CURRENT_SQL_DEPENDENCY_KINDS" in (system_query.__doc__ or "")
+    assert "sql:reads-from`` / ``sql:foreign-key-to" not in (system_query.__doc__ or "")
 
 
 def test_sql_quoted_dot_identifier_preserves_final_name_for_fallback_and_exclusion(
