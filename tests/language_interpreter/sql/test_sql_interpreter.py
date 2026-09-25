@@ -288,17 +288,17 @@ CREATE TABLE S.After (id int)
         "S.Block",
         "S.After",
     } == set(symbols)
-    assert {
-        symbols[name].symbol_kind for name in symbols if name.startswith("S.")
-    } == {"sql:table", "sql:procedure", "sql:function"}
+    assert {symbols[name].symbol_kind for name in symbols if name.startswith("S.")} == {
+        "sql:table",
+        "sql:procedure",
+        "sql:function",
+    }
     assert symbols["S.GetBase"].location.range.start.line == 4
     assert symbols["S.GetBase"].location.range.start.character == 17
     assert symbols["S.Scalar"].location.range.start.line == 8
     assert symbols["S.Scalar"].location.range.start.character == 16
     assert _edges(result, "sql:reads-from") == set()
-    assert {
-        edge for edge in _edges(result, "contains") if edge[0] == "declarations.sql"
-    } == {
+    assert {edge for edge in _edges(result, "contains") if edge[0] == "declarations.sql"} == {
         ("declarations.sql", "S"),
         ("declarations.sql", "S.Base"),
         ("declarations.sql", "S.GetBase"),
@@ -312,6 +312,39 @@ CREATE TABLE S.After (id int)
         ("S", "S.Base"),
         ("S", "S.After"),
     }
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE OR REPLACE PROCEDURE S.P AS SELECT 1",
+        "CREATE OR REPLACE FUNCTION S.F() RETURNS int AS RETURN 1",
+    ],
+)
+def test_or_replace_declarations_remain_unsupported(tmp_path: Path, statement: str) -> None:
+    result = _analyze(tmp_path, **{"replace.sql": statement})
+
+    assert not [node for node in result.document.nodes if node.symbol_kind]
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
+
+
+def test_unsupported_if_not_exists_block_function_has_one_diagnostic_and_recovers(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE FUNCTION IF NOT EXISTS S.F() RETURNS int AS BEGIN
+RETURN 1;
+END;
+CREATE TABLE S.After (id int)
+"""
+    result = _analyze(tmp_path, **{"if-not-exists.sql": sql})
+
+    assert set(_symbols(result)) == {"S.After"}
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
 
 
 def test_unsupported_declarations_and_parse_batches_remain_atomic(tmp_path: Path) -> None:
