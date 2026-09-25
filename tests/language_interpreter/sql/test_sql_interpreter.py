@@ -528,6 +528,23 @@ END
     assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
 
 
+def test_rejected_function_shape_drops_procedure_root_reads(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+SELECT (id).fn(1) FROM S.Base;
+END
+"""
+    result = _analyze(tmp_path, **{"rejected-call.sql": sql})
+
+    assert not _edges(result, "sql:calls")
+    assert not _edges(result, "sql:reads-from")
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
 def test_function_resolution_is_forward_casefolded_and_preserves_fallbacks(
     tmp_path: Path,
 ) -> None:
