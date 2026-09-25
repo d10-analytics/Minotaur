@@ -347,6 +347,47 @@ CREATE FUNCTION S.F() RETURNS int AS RETURN 1
     assert not result.diagnostics
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE PROCEDURE S.P",
+        "CREATE PROCEDURE S.P AS",
+        "CREATE FUNCTION S.F() RETURNS int",
+        "CREATE FUNCTION S.F() RETURNS int AS",
+    ],
+)
+def test_incomplete_declaration_headers_are_atomic_and_recover(
+    tmp_path: Path, statement: str
+) -> None:
+    result = _analyze(tmp_path, **{"incomplete.sql": statement})
+
+    assert not _symbols(result)
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE FUNCTION S.F() RETURNS int",
+        "CREATE FUNCTION S.F() RETURNS int AS",
+    ],
+)
+def test_incomplete_function_headers_are_atomic_and_recover_same_batch(
+    tmp_path: Path, statement: str
+) -> None:
+    result = _analyze(
+        tmp_path,
+        **{"incomplete.sql": f"{statement}; CREATE TABLE S.After (id int)"},
+    )
+
+    assert set(_symbols(result)) == {"S.After"}
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX
+    ]
+
+
 def test_unsupported_if_not_exists_block_function_has_one_diagnostic_and_recovers(
     tmp_path: Path,
 ) -> None:
