@@ -375,22 +375,54 @@ END
     }
 
 
-def test_unsupported_set_member_keeps_separate_procedure_read_root(tmp_path: Path) -> None:
-    sql = """\
+@pytest.mark.parametrize(
+    ("member", "diagnostic_location"),
+    [
+        ("SET NOCOUNT ON;", (3, 4, 3, 11)),
+        ("COMMIT TRANSACTION;", None),
+        ("DECLARE @n int;", None),
+        ("ROLLBACK TRANSACTION;", None),
+        ("END CONVERSATION S.Hidden;", None),
+    ],
+)
+def test_unsupported_procedure_members_keep_separate_procedure_read_root(
+    tmp_path: Path, member: str, diagnostic_location: tuple[int, int, int, int] | None
+) -> None:
+    sql = f"""\
 CREATE TABLE S.Base (id int)
 GO
 CREATE PROCEDURE S.Read AS BEGIN
-SET NOCOUNT ON;
+{member}
 SELECT * FROM S.Base;
 END
 """
-    result = _analyze(tmp_path, **{"set.sql": sql})
+    result = _analyze(tmp_path, **{"members.sql": sql})
 
-    assert {"S.Base", "S.Read"} <= _symbols(result).keys()
-    assert {(edge[0].label, edge[1].label) for edge in _sql_edges(result, "sql:reads-from")} == {
-        ("S.Read", "S.Base")
-    }
-    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+    symbols = _symbols(result)
+    assert {"S.Base", "S.Read"} <= symbols.keys()
+    assert symbols["S.Read"].symbol_kind == "sql:procedure"
+    assert symbols["S.Base"].symbol_kind == "sql:table"
+    edges = _sql_edges(result, "sql:reads-from")
+    assert len(edges) == 1
+    assert (edges[0][0].label, edges[0][1].label) == ("S.Read", "S.Base")
+    assert _evidence_locations(edges[0][2]) == {("members.sql", 4, 14)}
+    assert not _sql_edges(result, "references")
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+    assert len(result.diagnostics) == 1
+    diagnostic = result.diagnostics[0]
+    assert diagnostic.code is DiagnosticCode.UNSUPPORTED_SYNTAX
+    if diagnostic_location is None:
+        assert diagnostic.location is None
+    else:
+        start_line, start_character, end_line, end_character = diagnostic_location
+        assert diagnostic.location is not None
+        assert diagnostic.location.path == "members.sql"
+        assert diagnostic.location.range.start.line == start_line
+        assert diagnostic.location.range.start.character == start_character
+        assert diagnostic.location.range.end.line == end_line
+        assert diagnostic.location.range.end.character == end_character
 
 
 def test_procedure_roots_exclude_dml_and_temporary_sources_locally(tmp_path: Path) -> None:
