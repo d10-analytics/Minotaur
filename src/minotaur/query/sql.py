@@ -4,9 +4,10 @@ from __future__ import annotations
 
 # Keep this list explicit: namespaced SQL relationships are not all
 # dependencies, so consumers must opt into each meaning deliberately.
-CURRENT_SQL_DEPENDENCY_KINDS: tuple[str, str] = (
+CURRENT_SQL_DEPENDENCY_KINDS: tuple[str, str, str] = (
     "sql:reads-from",
     "sql:foreign-key-to",
+    "sql:calls",
 )
 
 __all__ = ["CURRENT_SQL_DEPENDENCY_KINDS"]
