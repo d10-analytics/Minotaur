@@ -2348,6 +2348,7 @@ CREATE VIEW scratch.Reader AS SELECT * FROM billing.Invoice
     assert compact_text.err == ""
     assert "connections" not in compact_text.out
     assert compact_text.out.startswith("coverage ")
+
     compact_coverage = json.loads(compact_text.out.splitlines()[0].removeprefix("coverage "))
     assert compact_coverage["graph_files"] == {
         "scope": "final_graph_file_nodes",
@@ -2505,4 +2506,94 @@ CREATE VIEW scratch.Reader AS SELECT * FROM billing.Invoice
     assert sorted(root.glob("docs/systems/*/system.toml")) == [
         root / "docs/systems/billing/system.toml",
         root / "docs/systems/orders/system.toml",
+    ]
+
+
+def test_sql_function_calls_appear_in_all_cross_system_reports(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _repo(tmp_path, "sql-function-boundaries")
+    _write(
+        root,
+        "orders.sql",
+        """\
+CREATE SCHEMA orders
+GO
+CREATE VIEW orders.Reader AS SELECT billing.Calculate(1) AS value
+""",
+    )
+    _write(
+        root,
+        "billing.sql",
+        """\
+CREATE SCHEMA billing
+GO
+CREATE TABLE billing.Invoice (id int)
+GO
+CREATE FUNCTION billing.Calculate(@id int) RETURNS int AS RETURN @id
+""",
+    )
+    _declare(root, "orders", ["orders.sql"])
+    _declare(root, "billing", ["billing.sql"])
+    graph = _analyze(root)
+    monkeypatch.chdir(root)
+
+    def named_query(name: str, system_name: str) -> dict[str, object]:
+        status = cli.main(
+            [
+                "query",
+                name,
+                system_name,
+                "--graph",
+                str(graph),
+                "--root",
+                str(root),
+                "--json",
+                "--no-refresh",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 0, captured.err
+        return json.loads(captured.out)
+
+    surface_payload = named_query("surface", "billing")
+    assert surface_payload["results"] == [
+        {
+            "category": "system: billing",
+            "kinds": ["sql:calls"],
+            "path": "billing.sql",
+            "symbol": "billing.Calculate",
+        }
+    ]
+
+    consumers_payload = named_query("consumers", "billing")
+    assert consumers_payload["results"] == [
+        {
+            "category": "system: orders",
+            "file": "orders.sql",
+            "kinds": ["sql:calls"],
+            "targets": [
+                {
+                    "kind": "sql:calls",
+                    "label": "billing.Calculate",
+                    "path": "billing.sql",
+                }
+            ],
+        }
+    ]
+
+    dependencies_payload = named_query("system-deps", "orders")
+    assert dependencies_payload["results"] == [
+        {
+            "category": "system: billing",
+            "targets": [
+                {
+                    "kind": "sql:calls",
+                    "label": "billing.Calculate",
+                    "path": "billing.sql",
+                }
+            ],
+        }
     ]

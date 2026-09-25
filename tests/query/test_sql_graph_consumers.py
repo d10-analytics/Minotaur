@@ -160,7 +160,10 @@ CREATE FUNCTION S.Func(@id int) RETURNS int AS RETURN @id
         ("S.Func", "sql:function")
     ]
     assert _sql_facts(index) == set()
-    assert unreferenced(index, tmp_path / "current", ("catalog.sql",)) == ()
+    assert [
+        (record.symbol, record.kind)
+        for record in unreferenced(index, tmp_path / "current", ("catalog.sql",))
+    ] == [("S.Func", "sql:function")]
 
     old = _persisted_document(tmp_path / "old", "CREATE SCHEMA S\n")
     changes = diff(old, _persisted_document(tmp_path / "new", content))
@@ -207,7 +210,58 @@ CREATE FUNCTION S.Func() RETURNS TABLE AS RETURN (SELECT * FROM S.Base)
     assert [
         (record.symbol, record.kind)
         for record in unreferenced(index, tmp_path / "current", ("catalog.sql",))
-    ] == [("S.Unused", "sql:table"), ("S.Reader", "sql:view")]
+    ] == [
+        ("S.Unused", "sql:table"),
+        ("S.Reader", "sql:view"),
+        ("S.Func", "sql:function"),
+    ]
+
+
+def test_persisted_sql_calls_survive_roundtrip_and_feed_callers_and_impact(
+    tmp_path: Path,
+) -> None:
+    content = """\
+CREATE SCHEMA S
+GO
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE S.Child (parent_id int)
+GO
+ALTER TABLE S.Child ADD CONSTRAINT FK_child_parent FOREIGN KEY (parent_id) REFERENCES S.Base(id)
+GO
+CREATE VIEW S.Reader AS SELECT * FROM S.Base
+GO
+CREATE FUNCTION S.Callee(@id int) RETURNS int AS RETURN @id
+GO
+CREATE VIEW S.Caller AS SELECT S.Callee(id) FROM S.Base
+"""
+    index = _persisted_index(tmp_path / "current", content)
+
+    assert CURRENT_SQL_DEPENDENCY_KINDS == (
+        "sql:reads-from",
+        "sql:foreign-key-to",
+        "sql:calls",
+    )
+    assert _sql_facts(index) == {
+        ("sql:foreign-key-to", "S.Child", "S.Base"),
+        ("sql:reads-from", "S.Reader", "S.Base"),
+        ("sql:reads-from", "S.Caller", "S.Base"),
+        ("sql:calls", "S.Caller", "S.Callee"),
+    }
+    assert [
+        (record.caller, record.kind, record.unresolved) for record in callers(index, "s.callee")
+    ] == [("S.Caller", "sql:calls", False)]
+    assert impact(index, "s.callee") == (
+        ImpactRecord(depth=0, symbol="S.Callee", kind="sql:function"),
+        ImpactRecord(depth=1, symbol="S.Caller", kind="sql:view"),
+    )
+    assert {
+        (record.caller, record.kind, record.unresolved) for record in callers(index, "s.base")
+    } == {
+        ("S.Child", "sql:foreign-key-to", False),
+        ("S.Caller", "sql:reads-from", False),
+        ("S.Reader", "sql:reads-from", False),
+    }
 
 
 def test_sql_relationships_feed_callers_and_core_recall_remains(
@@ -215,7 +269,11 @@ def test_sql_relationships_feed_callers_and_core_recall_remains(
 ) -> None:
     index = _persisted_index(tmp_path / "current")
 
-    assert CURRENT_SQL_DEPENDENCY_KINDS == ("sql:reads-from", "sql:foreign-key-to")
+    assert CURRENT_SQL_DEPENDENCY_KINDS == (
+        "sql:reads-from",
+        "sql:foreign-key-to",
+        "sql:calls",
+    )
     assert [(record.symbol, record.kind) for record in definitions(index, "parent")] == [
         ("S.Parent", "sql:table")
     ]
