@@ -649,11 +649,11 @@ def _interpret_create(
             if root_reads is None:
                 _unsupported(root, item, batch, diagnostics)
             else:
-                body_reads.extend(root_reads)
                 root_calls = _query_calls(root, item, batch)
                 if root_calls is None:
                     _unsupported(root, item, batch, diagnostics)
                 else:
+                    body_reads.extend(root_reads)
                     body_calls.extend(root_calls)
         return _Observation(declaration, tuple(body_reads), (), None, tuple(body_calls))
     if kind in {"INDEX", "NONCLUSTERED INDEX", "CLUSTERED INDEX"}:
