@@ -565,6 +565,9 @@ def _interpret_create(
         if tree.args.get("exists") or tree.args.get("clone") or tree.args.get("refresh"):
             _unsupported(tree, item, batch, diagnostics)
             return None
+        if not _declaration_has_body(tree, kind):
+            _unsupported(tree, item, batch, diagnostics)
+            return None
         if (kind == "PROCEDURE" and isinstance(target, exp.StoredProcedure)) or (
             kind == "FUNCTION" and isinstance(target, exp.UserDefinedFunction)
         ):
@@ -650,6 +653,15 @@ def _interpret_create(
             return None
         return _Observation(declaration, (), tuple(fks))
     return _Observation(declaration)
+
+
+def _declaration_has_body(tree: exp.Create, kind: str) -> bool:
+    body = tree.args.get("expression")
+    if kind == "PROCEDURE":
+        return isinstance(body, exp.Block) and any(
+            statement is not None for statement in body.expressions
+        )
+    return body is not None
 
 
 def _is_create_or_replace(source: str, table: exp.Table, kind: str) -> bool:
