@@ -598,16 +598,14 @@ def _interpret_create(
         )
         declarations.append(declaration)
         nodes.append(node)
-        reads: list[tuple[tuple[str, ...], str, Location]] = []
-        for root in _procedural_query_roots(
-            tree, kind, item, batch, diagnostics
-        ):
+        body_reads: list[tuple[tuple[str, ...], str, Location]] = []
+        for root in _procedural_query_roots(tree, kind, item, batch, diagnostics):
             root_reads = _query_reads(root, item, batch, diagnostics)
             if root_reads is None:
                 _unsupported(root, item, batch, diagnostics)
             else:
-                reads.extend(root_reads)
-        return _Observation(declaration, tuple(reads), ())
+                body_reads.extend(root_reads)
+        return _Observation(declaration, tuple(body_reads), ())
     if kind in {"INDEX", "NONCLUSTERED INDEX", "CLUSTERED INDEX"}:
         if _valid_index(tree):
             return None
@@ -673,7 +671,7 @@ def _declaration_has_body(tree: exp.Create, kind: str) -> bool:
     return body is not None
 
 
-_QUERY_ROOT_TYPES = (exp.Query, exp.Select, exp.Union, exp.Intersect, exp.Except)
+_QUERY_ROOT_TYPES = (exp.Select, exp.Union, exp.Intersect, exp.Except)
 _DML_ROOT_TYPES = (exp.Insert, exp.Update, exp.Delete, exp.Merge)
 
 
