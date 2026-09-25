@@ -52,7 +52,10 @@ def test_graph_format_documents_procedure_and_function_static_read_boundary() ->
     assert "`sql:procedure`, and `sql:function`" in text
     assert "declaration and static-read sources" in text
     assert "parser-represented static query roots in their bodies" in text
-    assert "Queries contained in DML, temporary sources, dynamic strings, and opaque parser forms" in text
+    assert (
+        "Queries contained in DML, temporary sources, dynamic strings, and opaque parser forms"
+        in text
+    )
     assert "`callers` and `impact` consume their persisted read relationships" in text
     assert "`unreferenced` continues to consider only SQL tables and views" in text
     assert "SQL relationships use `sql:reads-from` and `sql:foreign-key-to`" in text
