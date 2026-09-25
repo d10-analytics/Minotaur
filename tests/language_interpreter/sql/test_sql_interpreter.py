@@ -457,8 +457,44 @@ CREATE VIEW S.TVRead AS SELECT * FROM S.TVFn(1) JOIN S.Base ON 1 = 1
         ("S.Recur", "S.Recur"),
         ("S.TVRead", "S.TVFn"),
     }
-    assert len(_evidence_locations(calls[("S.Read", "S.Calc")])) == 7
-    assert len(_evidence_locations(calls[("S.Recur", "S.Recur")])) == 1
+    assert {
+        (
+            location.path,
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        )
+        for location in next(item for item in calls[("S.Read", "S.Calc")].evidence).locations
+    } == {
+        ("calls.sql", 13, 9, 13, 13),
+        ("calls.sql", 13, 33, 13, 37),
+        ("calls.sql", 13, 55, 13, 59),
+        ("calls.sql", 15, 20, 15, 24),
+        ("calls.sql", 16, 8, 16, 12),
+        ("calls.sql", 18, 9, 18, 13),
+        ("calls.sql", 19, 24, 19, 28),
+    }
+    assert {
+        (
+            location.path,
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        )
+        for location in next(item for item in calls[("S.Recur", "S.Recur")].evidence).locations
+    } == {("calls.sql", 7, 10, 7, 15)}
+    assert {
+        (
+            location.path,
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        )
+        for location in next(item for item in calls[("S.TVRead", "S.TVFn")].evidence).locations
+    } == {("calls.sql", 21, 40, 21, 44)}
     assert _edges(result, "sql:reads-from") == {
         ("S.Recur", "S.Base"),
         ("S.Read", "S.Base"),
