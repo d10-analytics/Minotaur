@@ -24,8 +24,9 @@ relationships described by its AST-authoritative implementation:
 - schemas, persistent tables, and views become `sql:schema`, `sql:table`, and
   `sql:view` symbols;
 - persistent procedures and functions become `sql:procedure` and `sql:function`
-  symbols. They are visible declarations only; parameters and return syntax do
-  not become graph symbols;
+  symbols. Parser-represented static query roots in their bodies can add
+  `sql:reads-from` relationships to persistent tables and views; parameters
+  and return syntax do not become graph symbols;
 - table and view reads become the namespaced `sql:reads-from` relationship;
 - foreign-key references become `sql:foreign-key-to` relationships;
 - a top-level, unconditional `ALTER TABLE` can add one or more named
@@ -35,11 +36,11 @@ relationships described by its AST-authoritative implementation:
   `ON UPDATE`, and `NOT FOR REPLICATION` modifiers are accepted;
 - `CREATE OR ALTER VIEW` and `CREATE OR REPLACE VIEW` use SQLGlot's equivalent
   `replace=True` AST and therefore produce identical facts;
-- procedure and function bodies are opaque at this acceptance point. They emit
-  no `sql:reads-from` facts, and caller, impact, and `unreferenced` semantics do
-  not include their body contents. Static body-read extraction belongs to the
-  [`sql-proc-function-read-dependencies`](a75baecd-3ed5-462e-b165-ceca57fb1fd3)
-  package;
+- procedure and function bodies contribute reads only from parser-represented
+  static query roots to persistent tables and views. Queries contained in
+  DML, temporary sources, dynamic strings such as `EXEC(@sql)` or
+  `sp_executesql`, and opaque parser forms do not create `sql:reads-from`
+  facts; a separate eligible root remains available;
 - `GO` batch boundaries are recognized without treating text scanning as SQL
   semantics.
 
@@ -106,8 +107,11 @@ that generic graph fact into a typed edge.
 The optional SQL setting `view_depth_threshold` in `[minotaur.sql]` controls the maximum
 view path depth before a `view-depth-warning` is emitted. The default is `3`.
 View cycles are reported once per elementary cycle after all references have
-resolved. Procedure and function reads are not extracted: declarations do not
-create body reads;
+resolved. Procedure and function reads come only from parser-represented static
+query roots; DML-contained queries, temporary sources, dynamic strings, and
+opaque parser forms do not create reads. Declarations and separate eligible
+roots remain available, and malformed batches retain the existing batch
+recovery behavior;
 ordinary diamonds and unrelated generic references do not create view warnings.
 A direct core `references`
 edge from a view to an unresolved reference is the final permitted depth-path
