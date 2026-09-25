@@ -30,6 +30,18 @@ def test_sql_guide_documents_depth_scope_and_exclusions() -> None:
     assert "unrelated generic references" in text
 
 
+def test_sql_guide_documents_procedure_and_function_declaration_boundary() -> None:
+    text = _text()
+    assert "`sql:procedure` and `sql:function` symbols" in text
+    assert "visible declarations only" in text
+    assert "no `sql:reads-from` facts" in text
+    assert "caller, impact, and `unreferenced` semantics do not include their body contents" in text
+    assert (
+        "[`sql-proc-function-read-dependencies`](a75baecd-3ed5-462e-b165-ceca57fb1fd3)"
+        in text
+    )
+
+
 def test_sql_guide_documents_duplicate_categories_payload_and_exclusions() -> None:
     text = _text()
     assert "`canonical-and-migration`" in text

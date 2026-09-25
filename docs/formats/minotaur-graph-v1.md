@@ -178,7 +178,14 @@ core graph facts.
 The bounded SQL analyzer emits
 `extensions["minotaur-sql"]["content_sha256"]` on each SQL `file` node; the
 digest covers the original bytes, including a BOM and line endings. SQL
-symbols use the namespaced kinds `sql:schema`, `sql:table`, and `sql:view`.
+symbols use the namespaced kinds `sql:schema`, `sql:table`, `sql:view`,
+`sql:procedure`, and `sql:function`. Procedures and functions are declaration
+symbols only in this accepted slice: their parameters, return syntax, and
+bodies add no graph facts, including no `sql:reads-from` relationships. The
+eventual body-read behavior belongs to the
+[`sql-proc-function-read-dependencies`](a75baecd-3ed5-462e-b165-ceca57fb1fd3)
+package. Generic `definitions` and `diff` include these declaration symbols;
+caller, impact, and `unreferenced` semantics remain unchanged.
 Each such symbol carries `extensions["minotaur-sql"]["name"]`, its final
 parsed identifier segment. This preserves dots within quoted identifiers for
 `unreferenced` bare-name matching after graph serialization without changing
