@@ -35,22 +35,26 @@ def test_sql_guide_documents_depth_scope_and_exclusions() -> None:
     assert "unrelated generic references" in text
 
 
-def test_sql_guide_documents_procedure_and_function_declaration_boundary() -> None:
+def test_sql_guide_documents_procedure_and_function_static_read_boundary() -> None:
     text = _text()
     assert "`sql:procedure` and `sql:function` symbols" in text
-    assert "visible declarations only" in text
-    assert "no `sql:reads-from` facts" in text
-    assert "caller, impact, and `unreferenced` semantics do not include their body contents" in text
-    assert "[`sql-proc-function-read-dependencies`](a75baecd-3ed5-462e-b165-ceca57fb1fd3)" in text
+    assert "parser-represented static query roots" in text
+    assert "`sql:reads-from` relationships to persistent tables and views" in text
+    assert "Queries contained in DML, temporary sources, dynamic strings" in text
+    assert "`EXEC(@sql)` or `sp_executesql`" in text
+    assert "opaque parser forms do not create `sql:reads-from` facts" in text
+    assert "a separate eligible root remains available" in text
+    assert "malformed batches retain the existing batch recovery behavior" in text
 
 
-def test_graph_format_documents_procedure_and_function_declaration_boundary() -> None:
+def test_graph_format_documents_procedure_and_function_static_read_boundary() -> None:
     text = _format_text()
     assert "`sql:procedure`, and `sql:function`" in text
-    assert "declaration symbols only in this accepted slice" in text
-    assert "no `sql:reads-from` relationships" in text
-    assert "[`sql-proc-function-read-dependencies`](a75baecd-3ed5-462e-b165-ceca57fb1fd3)" in text
-    assert "caller, impact, and `unreferenced` semantics remain unchanged" in text
+    assert "declaration and static-read sources" in text
+    assert "parser-represented static query roots in their bodies" in text
+    assert "Queries contained in DML, temporary sources, dynamic strings, and opaque parser forms" in text
+    assert "`callers` and `impact` consume their persisted read relationships" in text
+    assert "`unreferenced` continues to consider only SQL tables and views" in text
     assert "SQL relationships use `sql:reads-from` and `sql:foreign-key-to`" in text
     assert "The graph format remains stable" in text
 
