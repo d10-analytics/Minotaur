@@ -694,13 +694,10 @@ def _procedural_query_roots(
         if not isinstance(body, exp.Return):
             return []
         expression = body.this
-        if isinstance(expression, exp.Subquery):
-            expression = expression.this
-        if isinstance(expression, _QUERY_ROOT_TYPES):
-            return [expression]
         if isinstance(expression, (exp.Execute, exp.ExecuteSql)):
             _unsupported_unlocated(item, diagnostics)
-        return []
+            return []
+        return _nested_query_roots(expression)
     if not isinstance(body, exp.Block):
         return []
 
@@ -728,6 +725,7 @@ def _procedural_query_roots(
                     visit(nested)
             return
         if isinstance(statement, exp.IfBlock):
+            roots.extend(_nested_query_roots(statement.this))
             for branch in (statement.args.get("true"), statement.args.get("false")):
                 if isinstance(branch, exp.Expression):
                     visit(branch)
@@ -742,6 +740,32 @@ def _procedural_query_roots(
     for statement in body.expressions:
         if statement is not None:
             visit(statement)
+    return roots
+
+
+def _nested_query_roots(expression: exp.Expression | None) -> list[exp.Expression]:
+    """Return query roots nested in an expression without revisiting query scopes."""
+    if expression is None:
+        return []
+
+    roots: list[exp.Expression] = []
+
+    def visit(candidate: exp.Expression) -> None:
+        if isinstance(candidate, exp.Subquery):
+            nested = candidate.this
+            if isinstance(nested, exp.Expression):
+                visit(nested)
+            return
+        if isinstance(candidate, _QUERY_ROOT_TYPES):
+            roots.append(candidate)
+            return
+        if isinstance(candidate, (_DML_ROOT_TYPES, exp.Execute, exp.ExecuteSql, exp.Command)):
+            return
+        for nested in candidate.iter_expressions():
+            if isinstance(nested, exp.Expression):
+                visit(nested)
+
+    visit(expression)
     return roots
 
 
