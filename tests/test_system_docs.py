@@ -350,11 +350,16 @@ def test_query_reference_documents_sql_call_consumers_and_function_candidates() 
     assert "A SQL function-call result names the declaring owner and called `sql:function`" in text
     assert "`impact` follows inbound `calls`, `imports`, and the current SQL dependency" in text
     assert "SQL table, view, and function candidates use the same explicit" in text
+    assert "core functions, methods, and classes, plus SQL tables, views, and functions" in text
     assert (
         "SQL functions are reported when they have no inbound `sql:calls` relationship from a"
         in text
     )
     assert "a recursive self-call does not count as inbound use" in text
+    assert (
+        "For SQL tables, views, and functions, it counts the bare name case-insensitively"
+    ) in text
+    assert "case-insensitive SQL table, view, and function declarations" in text
     assert (
         "through `calls`, `references`, `sql:reads-from`, `sql:foreign-key-to`, or `sql:calls`"
         in text

@@ -173,8 +173,8 @@ the same node class as unstable scaffolding.
 
 ### Find unreferenced symbols
 
-Find graph-clean functions, methods, classes, SQL tables, and SQL views,
-optionally narrowing the source paths:
+Find graph-clean core functions, methods, and classes, plus SQL tables, views,
+and functions, optionally narrowing the source paths:
 
 ```bash
 minotaur query unreferenced src/package tests \
@@ -215,12 +215,13 @@ src/package/helpers.py:18  package.helpers.orphan  function [text-mention]
 
 For core symbols, the fallback counts case-sensitive occurrences of the bare
 name and subtracts the definitions of that name in the scanned files. For SQL
-tables and views, it counts the bare name case-insensitively and subtracts
-case-insensitive SQL table/view declarations. In both cases, definitions of
-the same name no longer vouch for each other. The fallback is keyed by bare
-name, not by symbol: when two classes both define `render` and `'render'`
-appears once in a string, both `A.render` and `B.render` are marked
-`[text-mention]`, because source text cannot say which one was meant.
+tables, views, and functions, it counts the bare name case-insensitively and
+subtracts case-insensitive SQL table, view, and function declarations. In both
+cases, definitions of the same name no longer vouch for each other. The
+fallback is keyed by bare name, not by symbol: when two classes both define
+`render` and `'render'` appears once in a string, both `A.render` and
+`B.render` are marked `[text-mention]`, because source text cannot say which
+one was meant.
 
 JSON records contain `path`, `line`, `symbol`, `kind`, and `text_mention`.
 An empty result prints `no unreferenced symbols` and still exits `0`.
