@@ -718,6 +718,8 @@ def _procedural_query_roots(
             _unsupported_unlocated(item, diagnostics)
             return
         if isinstance(statement, exp.Command):
+            if str(statement.this).upper() == "END":
+                return
             _unsupported(statement, item, batch, diagnostics)
             return
         if isinstance(statement, exp.Block):
@@ -729,6 +731,11 @@ def _procedural_query_roots(
             for branch in (statement.args.get("true"), statement.args.get("false")):
                 if isinstance(branch, exp.Expression):
                     visit(branch)
+            return
+        if isinstance(statement, exp.WhileBlock):
+            loop_body = statement.args.get("body")
+            if isinstance(loop_body, exp.Expression):
+                visit(loop_body)
 
     for statement in body.expressions:
         if statement is not None:
