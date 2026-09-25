@@ -375,6 +375,53 @@ END
     }
 
 
+def test_procedure_if_condition_query_root_is_retained_once(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE S.Other (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+IF EXISTS (SELECT 1 FROM S.Base) SELECT * FROM S.Other;
+END
+"""
+    result = _analyze(tmp_path, **{"condition.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+
+    assert not result.diagnostics
+    assert {(edge[0].label, edge[0].symbol_kind) for edge in edges} == {("S.Read", "sql:procedure")}
+    assert {(edge[1].label, edge[1].symbol_kind) for edge in edges} == {
+        ("S.Base", "sql:table"),
+        ("S.Other", "sql:table"),
+    }
+    assert {(edge[0].label, edge[1].label) for edge in edges} == {
+        ("S.Read", "S.Base"),
+        ("S.Read", "S.Other"),
+    }
+    assert {location for edge in edges for location in _evidence_locations(edge[2])} == {
+        ("condition.sql", 5, sql.splitlines()[5].index("S.Base")),
+        ("condition.sql", 5, sql.splitlines()[5].index("S.Other")),
+    }
+
+
+def test_scalar_function_expression_nested_query_root_is_retained(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE FUNCTION S.F() RETURNS int AS RETURN 1 + (SELECT COUNT(*) FROM S.Base)
+"""
+    result = _analyze(tmp_path, **{"function.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+
+    assert not result.diagnostics
+    assert [
+        (edge[0].label, edge[0].symbol_kind, edge[1].label, edge[1].symbol_kind) for edge in edges
+    ] == [("S.F", "sql:function", "S.Base", "sql:table")]
+    assert _evidence_locations(edges[0][2]) == {
+        ("function.sql", 2, sql.splitlines()[2].index("S.Base"))
+    }
+
+
 @pytest.mark.parametrize(
     ("member", "diagnostic_location"),
     [
