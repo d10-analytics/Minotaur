@@ -714,14 +714,11 @@ def _procedural_query_roots(
             return
         if isinstance(statement, _DML_ROOT_TYPES):
             return
-        if isinstance(statement, exp.Set):
-            _unsupported(statement, item, batch, diagnostics)
-            return
         if isinstance(statement, (exp.Execute, exp.ExecuteSql)):
             _unsupported_unlocated(item, diagnostics)
             return
         if isinstance(statement, exp.Command):
-            if str(statement.this).upper() == "END":
+            if _is_structural_end_marker(statement):
                 return
             _unsupported(statement, item, batch, diagnostics)
             return
@@ -739,11 +736,23 @@ def _procedural_query_roots(
             loop_body = statement.args.get("body")
             if isinstance(loop_body, exp.Expression):
                 visit(loop_body)
+            return
+        _unsupported(statement, item, batch, diagnostics)
 
     for statement in body.expressions:
         if statement is not None:
             visit(statement)
     return roots
+
+
+def _is_structural_end_marker(statement: exp.Command) -> bool:
+    expression = statement.args.get("expression")
+    return (
+        statement.this == "END"
+        and isinstance(expression, exp.Literal)
+        and expression.is_string
+        and str(expression.this).upper() == "END"
+    )
 
 
 def _is_create_or_replace(source: str, table: exp.Table, kind: str) -> bool:
