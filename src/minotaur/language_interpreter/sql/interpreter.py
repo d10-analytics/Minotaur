@@ -714,6 +714,9 @@ def _procedural_query_roots(
             return
         if isinstance(statement, _DML_ROOT_TYPES):
             return
+        if isinstance(statement, exp.Set):
+            _unsupported(statement, item, batch, diagnostics)
+            return
         if isinstance(statement, (exp.Execute, exp.ExecuteSql)):
             _unsupported_unlocated(item, diagnostics)
             return
