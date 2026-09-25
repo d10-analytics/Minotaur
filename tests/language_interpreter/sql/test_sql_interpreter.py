@@ -255,6 +255,85 @@ def test_runtime_dependency_is_exact_and_parser_is_real() -> None:
     assert sqlglot.__version__ == "30.18.0"
 
 
+def test_procedure_and_function_declarations_are_opaque_symbols(tmp_path: Path) -> None:
+    sql = """\
+CREATE SCHEMA S
+GO
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.GetBase @id int AS SELECT * FROM S.Base
+GO
+CREATE OR ALTER PROCEDURE S.Refresh AS BEGIN SELECT 1 END
+GO
+CREATE FUNCTION S.Scalar(@id int) RETURNS int AS RETURN @id
+GO
+CREATE OR ALTER FUNCTION S.Rows(@id int) RETURNS TABLE AS RETURN (SELECT * FROM S.Base)
+GO
+CREATE FUNCTION S.Block() RETURNS int AS BEGIN
+RETURN 1;
+END;
+CREATE TABLE S.After (id int)
+"""
+    result = _analyze(tmp_path, **{"declarations.sql": sql})
+    symbols = _symbols(result)
+
+    assert not result.diagnostics
+    assert {
+        "S",
+        "S.Base",
+        "S.GetBase",
+        "S.Refresh",
+        "S.Scalar",
+        "S.Rows",
+        "S.Block",
+        "S.After",
+    } == set(symbols)
+    assert {
+        symbols[name].symbol_kind for name in symbols if name.startswith("S.")
+    } == {"sql:table", "sql:procedure", "sql:function"}
+    assert symbols["S.GetBase"].location.range.start.line == 4
+    assert symbols["S.GetBase"].location.range.start.character == 17
+    assert symbols["S.Scalar"].location.range.start.line == 8
+    assert symbols["S.Scalar"].location.range.start.character == 16
+    assert _edges(result, "sql:reads-from") == set()
+    assert {
+        edge for edge in _edges(result, "contains") if edge[0] == "declarations.sql"
+    } == {
+        ("declarations.sql", "S"),
+        ("declarations.sql", "S.Base"),
+        ("declarations.sql", "S.GetBase"),
+        ("declarations.sql", "S.Refresh"),
+        ("declarations.sql", "S.Scalar"),
+        ("declarations.sql", "S.Rows"),
+        ("declarations.sql", "S.Block"),
+        ("declarations.sql", "S.After"),
+    }
+    assert {edge for edge in _edges(result, "contains") if edge[0] == "S"} == {
+        ("S", "S.Base"),
+        ("S", "S.After"),
+    }
+
+
+def test_unsupported_declarations_and_parse_batches_remain_atomic(tmp_path: Path) -> None:
+    sql = """\
+CREATE FUNCTION S.Clr() RETURNS int AS EXTERNAL NAME a.b
+GO
+CREATE TRIGGER S.Trigger ON S.Base AFTER INSERT AS SELECT 1
+GO
+CREATE TABLE Broken (
+GO
+CREATE TABLE S.After (id int)
+"""
+    result = _analyze(tmp_path, **{"recovery.sql": sql})
+
+    assert set(_symbols(result)) == {"S.After"}
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DiagnosticCode.PARSE_ERROR,
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+    ]
+
+
 def test_declarations_fks_reads_and_raw_digest_preserve_source_coordinates(tmp_path: Path) -> None:
     content = (
         "\ufeffCREATE SCHEMA [Dø] \r\nGO\r\nCREATE TABLE [Dø].[Parent] (id int)\r\nGO\r\n"
