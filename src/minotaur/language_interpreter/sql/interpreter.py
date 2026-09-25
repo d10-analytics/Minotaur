@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlglot import exp, parse
+from sqlglot.tokens import Tokenizer
 
 from minotaur.config import SqlSettings
 from minotaur.graph_model.document import GraphDocument
@@ -561,12 +562,7 @@ def _interpret_create(
     kind = str(tree.args.get("kind") or "").upper()
     target = tree.this
     if kind in {"PROCEDURE", "FUNCTION"}:
-        if (
-            tree.args.get("exists")
-            or tree.args.get("clone")
-            or tree.args.get("refresh")
-            or _is_create_or_replace(batch.text)
-        ):
+        if tree.args.get("exists") or tree.args.get("clone") or tree.args.get("refresh"):
             _unsupported(tree, item, batch, diagnostics)
             return None
         if (kind == "PROCEDURE" and isinstance(target, exp.StoredProcedure)) or (
@@ -579,6 +575,9 @@ def _interpret_create(
             _unsupported(tree, item, batch, diagnostics)
             return None
         if not isinstance(table, exp.Table):
+            _unsupported(tree, item, batch, diagnostics)
+            return None
+        if _is_create_or_replace(batch.text, table, kind):
             _unsupported(tree, item, batch, diagnostics)
             return None
         parts = _parts(table)
@@ -653,8 +652,26 @@ def _interpret_create(
     return _Observation(declaration)
 
 
-def _is_create_or_replace(source: str) -> bool:
-    return re.match(r"\s*CREATE\s+OR\s+REPLACE\b", source, re.IGNORECASE) is not None
+def _is_create_or_replace(source: str, table: exp.Table, kind: str) -> bool:
+    starts = [
+        identifier.meta.get("start")
+        for identifier in (
+            table.args.get("catalog"),
+            table.args.get("db"),
+            table.args.get("this"),
+        )
+        if isinstance(identifier, exp.Identifier) and isinstance(identifier.meta.get("start"), int)
+    ]
+    if not starts:
+        return False
+    tokens = Tokenizer(dialect="tsql").tokenize(source[: min(starts)])
+    declaration_keywords = {"PROC", "PROCEDURE"} if kind == "PROCEDURE" else {"FUNCTION"}
+    for index in range(len(tokens) - 1, -1, -1):
+        if tokens[index].text.upper() not in declaration_keywords:
+            continue
+        prefix = [token.text.upper() for token in tokens[max(0, index - 3) : index]]
+        return prefix == ["CREATE", "OR", "REPLACE"]
+    return False
 
 
 def _sql_symbol_node(parts: tuple[str, ...], kind: str, location: Location) -> Node:
