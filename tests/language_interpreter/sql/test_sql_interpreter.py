@@ -319,6 +319,12 @@ CREATE TABLE S.After (id int)
     [
         "CREATE OR REPLACE PROCEDURE S.P AS SELECT 1",
         "CREATE OR REPLACE FUNCTION S.F() RETURNS int AS RETURN 1",
+        "-- leading comment\nCREATE OR REPLACE PROCEDURE S.P AS SELECT 1",
+        (
+            "/* leading block */ CREATE /* one */ OR /* two */ REPLACE /* three */ "
+            "FUNCTION S.F() RETURNS int AS RETURN 1"
+        ),
+        "; ; CREATE OR REPLACE FUNCTION S.F() RETURNS int AS RETURN 1",
     ],
 )
 def test_or_replace_declarations_remain_unsupported(tmp_path: Path, statement: str) -> None:
@@ -328,6 +334,17 @@ def test_or_replace_declarations_remain_unsupported(tmp_path: Path, statement: s
     assert [diagnostic.code for diagnostic in result.diagnostics] == [
         DiagnosticCode.UNSUPPORTED_SYNTAX
     ]
+
+
+def test_or_replace_view_does_not_change_later_function_modifier(tmp_path: Path) -> None:
+    sql = """\
+CREATE OR REPLACE VIEW S.V AS SELECT 1;
+CREATE FUNCTION S.F() RETURNS int AS RETURN 1
+"""
+    result = _analyze(tmp_path, **{"mixed.sql": sql})
+
+    assert set(_symbols(result)) == {"S.V", "S.F"}
+    assert not result.diagnostics
 
 
 def test_unsupported_if_not_exists_block_function_has_one_diagnostic_and_recovers(
