@@ -356,6 +356,25 @@ END
     }
 
 
+def test_procedure_query_root_inside_while_is_retained(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+WHILE 1 = 1 BEGIN
+SELECT * FROM S.Base;
+END
+END
+"""
+    result = _analyze(tmp_path, **{"loop.sql": sql})
+
+    assert not result.diagnostics
+    assert {"S.Base", "S.Read"} <= _symbols(result).keys()
+    assert {(edge[0].label, edge[1].label) for edge in _sql_edges(result, "sql:reads-from")} == {
+        ("S.Read", "S.Base")
+    }
+
+
 def test_procedure_roots_exclude_dml_and_temporary_sources_locally(tmp_path: Path) -> None:
     sql = """\
 CREATE TABLE S.Base (id int)
