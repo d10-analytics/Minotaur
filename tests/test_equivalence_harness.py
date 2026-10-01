@@ -997,6 +997,49 @@ def test_scenarios_cover_freshness_and_both_sidecar_trust_states(
     assert "step=h-f copies=f" in result.stdout
     assert "step=f graph SHA-256 before/after: IDENTICAL" in result.stdout
     assert "step=g graph SHA-256 before/after: IDENTICAL" in result.stdout
+    for letter in "de":
+        assert f"step={letter}: IDENTICAL (2, b''," in result.stdout
+        assert f"step={letter} graph SHA-256 before/after: IDENTICAL" in result.stdout
+
+
+def test_scenarios_refresh_partial_deletion_and_rename(
+    harness: types.ModuleType,
+    baseline_src: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _source_root(tmp_path)
+    (root / "other.py").write_text("other = True\n", encoding="utf-8")
+    workload = harness._load_queries(_workload_file(tmp_path, root.name))[root.name]
+    query = harness._scenario_query
+    observed: dict[tuple[str, str], tuple[int, bytes, bytes]] = {}
+
+    def observe(side, root, graph, no_refresh, **kwargs):
+        before = graph.read_bytes()
+        result = query(side, root, graph, no_refresh, **kwargs)
+        letter = graph.stem.split("-")[0]
+        if letter in ("d", "e"):
+            observed[letter, side.name] = (result.returncode, before, graph.read_bytes())
+        return result
+
+    monkeypatch.setattr(harness, "_scenario_query", observe)
+    assert harness._run_scenarios(
+        (harness.Side("baseline", baseline_src), harness.Side("branch", ROOT / "src")),
+        [(root, workload)],
+        tmp_path / "scenarios",
+    )
+    output = capsys.readouterr().out
+    for letter in "de":
+        assert f"step={letter}: IDENTICAL" in output
+        for side in ("baseline", "branch"):
+            exit_code, before, after = observed[letter, side]
+            assert exit_code == 0
+            assert after != before
+            paths = {
+                node["path"] for node in json.loads(after)["nodes"] if node["node_class"] == "file"
+            }
+            assert paths == ({"other.py"} if letter == "d" else {"other.py", "app_renamed.py"})
 
 
 def test_sidecar_scenarios_reject_a_step_that_did_not_set_up_its_stamp(
