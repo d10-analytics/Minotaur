@@ -331,9 +331,8 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
         # clean-output skip. A deleted root or explicitly selected file must
         # remain a command error even when an old graph happens to load.
         _, selection = select_sources(root, targets, default_registry())
-        # D-11 deliberately runs before output preflight. A graph that Minotaur
-        # can load is ours to refresh after drift, while an unrelated existing
-        # file still follows the normal refusal path below.
+        # Probe loadable graphs before output preflight so owned outputs can
+        # refresh after drift and unchanged outputs can skip analysis.
         refresh_force = arguments.force
         if output.exists() and not arguments.force:
             try:
@@ -342,15 +341,24 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
                 existing = None
             if existing is not None:
                 current_selection = _target_selection(root, targets)
+                observed = drift(existing.document, root)
+                same_selection = recorded_selection(existing.document) == current_selection
+                if arguments.output is not None and (
+                    not same_selection or belongs_to_different_tree(existing.document, observed)
+                ):
+                    raise ValueError(
+                        "output graph was produced for a different selection or tree "
+                        f"(pass --force to replace it): {output}"
+                    )
                 if (
-                    drift(existing.document, root).is_clean
-                    and recorded_selection(existing.document) == current_selection
+                    observed.is_clean
+                    and same_selection
                     and _analysis_facts_match(existing.document, selection.files, resolved.sql)
                 ):
                     print("minotaur: graph is up to date, skipping analysis", file=sys.stderr)
                     return 0
-                # A valid graph with drift was previously produced by this
-                # command, so replacement is safe after the freshness check.
+                # Ownership has been checked for explicit outputs; derived
+                # outputs also reconcile changes to their configured selection.
                 refresh_force = True
         metadata_targets = targets if scope is not None else None
         result = _analyze_selection(
