@@ -108,6 +108,16 @@ def drift(document: GraphDocument, root: Path) -> Drift:
     return Drift(tuple(sorted(changed)), tuple(sorted(missing)), tuple(sorted(added)))
 
 
+def belongs_to_different_tree(document: GraphDocument, observed: Drift) -> bool:
+    """Whether every recorded file is missing, regardless of newly found files.
+
+    A completely deleted or renamed selection is indistinguishable from a
+    different source tree. An empty graph alone is not evidence of either.
+    """
+    recorded = _file_nodes(document)
+    return bool(recorded) and recorded.keys() <= set(observed.missing)
+
+
 def _file_nodes(document: GraphDocument) -> dict[str, Node]:
     """Index valid file-node paths without relying on node IDs."""
     return {

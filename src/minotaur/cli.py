@@ -61,7 +61,12 @@ from minotaur.query import system as system_query
 from minotaur.query import system_diff as system_diff_query
 from minotaur.query import system_diff_view
 from minotaur.query import unreferenced as unreferenced_query
-from minotaur.query.freshness import Drift, drift, recorded_selection
+from minotaur.query.freshness import (
+    Drift,
+    belongs_to_different_tree,
+    drift,
+    recorded_selection,
+)
 from minotaur.query.index import GraphIndex
 from minotaur.query.render import (
     QueryRecord,
@@ -589,6 +594,13 @@ def _load_and_refresh_graph(
     if no_refresh:
         _report_stale(observed.paths)
         return _QueryGraph(loaded.document, (), observed, False)
+
+    if belongs_to_different_tree(loaded.document, observed):
+        raise ValueError(
+            f"graph belongs to a different tree: all {len(observed.missing)} recorded files "
+            f"are missing under root {root}; use the correct --root, --no-refresh to query "
+            "the saved graph, or analyze --force to replace it"
+        )
 
     recorded = recorded_selection(loaded.document)
     if not recorded:
