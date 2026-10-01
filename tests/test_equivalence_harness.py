@@ -20,8 +20,8 @@ from minotaur.language_interpreter.workspace import Workspace
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
-# Byte comparisons include the relationship kind in caller results.
-BASELINE_COMMIT = "9ea5f5a9543b51c6e38a987523dd88f051154d82"
+# Compare against the final source behavior, including full-file removal refusal.
+BASELINE_COMMIT = "c43c45d60605e75ee9013580ba7a59fbf5af88dd"
 VIEWER_ADVANCE_COMMIT = "52a8b29d376e99c582d686dbead579acc438de37"
 # Preserve the historical fixture provenance independently of output revisions.
 FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
