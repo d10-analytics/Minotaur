@@ -31,8 +31,14 @@ Every selected target must resolve beneath `ROOT`; directory targets are
 scanned recursively using the shared exclusion, symlink, and extension rules.
 The root-relative POSIX path is used for graph paths and module labels. An
 existing graph can be reused when its recorded selection and source bytes are
-current; Git commit and branch metadata do not gate reuse. Use `--force` to
-request a new snapshot.
+current and it records no errors; Git commit and branch metadata do not gate
+reuse. Recorded errors cause re-analysis and current diagnostic reporting.
+Use `--force` to request a new snapshot. With an explicit `--output`, an existing
+loadable graph with a different or missing recorded selection, or with every
+recorded file missing under the current root, exits `2` with
+`pass --force to replace it`. Partial deletion or content drift with the same
+selection still refreshes. Config- and scope-derived outputs reconcile changed
+selections without `--force`, after validating the current root and targets.
 The command writes canonical JSON atomically and returns `1` when a valid
 partial graph also carries parse or source-read diagnostics.
 

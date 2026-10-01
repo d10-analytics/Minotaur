@@ -175,6 +175,19 @@ selected root-relative targets for either language in the existing
 `extensions["minotaur"]["selection"]` array, with `.` representing the root.
 These values are freshness and diagnostic metadata, not identity inputs or
 core graph facts.
+The CLI also records analysis facts in the document's `minotaur` extension:
+`errors` is the integer count of error-severity diagnostics from the run that
+produced the graph, omitted when zero. It is not a stored diagnostic list.
+`sql_settings` appears only when selected files use an interpreter registration
+that accepts SQL settings. It contains the canonical effective settings,
+including defaults: `view_depth_threshold`, `migration_patterns` (an array of
+strings), and `foreign_key_target_files` (a sorted array of `[target, path]`
+string pairs). The pair encoding allows valid non-BMP target names as string
+values without using them as extension object keys. These facts are metadata,
+not identity inputs. The `analyze` clean-skip probe re-analyzes graphs recording
+errors or missing, invalid or changed SQL settings; query refresh continues to
+use source drift rather than these recorded facts.
+
 The bounded SQL analyzer emits
 `extensions["minotaur-sql"]["content_sha256"]` on each SQL `file` node; the
 digest covers the original bytes, including a BOM and line endings. SQL

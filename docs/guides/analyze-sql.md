@@ -162,6 +162,14 @@ kinds `sql:reads-from`, `sql:foreign-key-to`, and `sql:calls`; their
 results. Other SQL symbol and relationship kinds remain outside these query
 contracts. The existing generic unresolved-reference recall remains available.
 
+`analyze` does not clean-skip a graph recording error-severity diagnostics:
+it re-analyzes, reports current diagnostics, and returns `1` if errors remain.
+It also re-analyzes a SQL selection when its recorded effective SQL settings
+are absent, invalid or different from the current settings, even when source
+bytes are unchanged. After a clean analysis records the settings, the next
+unchanged run can skip. SQL-setting changes do not invalidate non-SQL graphs,
+and query refresh remains driven by source drift.
+
 The graph records the selected target paths. After registration, adding or
 editing SQL under a recorded directory is ordinary freshness drift. A
 `--no-refresh` query preserves the saved graph and reports stale paths. An
