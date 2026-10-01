@@ -22,7 +22,7 @@ def _write(root: Path, relative: str, content: str) -> Path:
     return path
 
 
-def _analyze(root: Path, output: Path, *targets: Path) -> int:
+def _analyze(root: Path, output: Path, *targets: Path, force: bool = False) -> int:
     return cli.main(
         [
             "analyze",
@@ -31,6 +31,7 @@ def _analyze(root: Path, output: Path, *targets: Path) -> int:
             "--output",
             str(output),
             *(str(target) for target in targets),
+            *(["--force"] if force else []),
         ]
     )
 
@@ -149,25 +150,50 @@ def test_javascript_drift_reports_all_file_freshness_dimensions(tmp_path: Path) 
     assert observed.added == ("pkg/added.js",)
 
 
-def test_query_refresh_removes_deleted_direct_selection_and_preserves_metadata(
-    tmp_path: Path,
+@pytest.mark.parametrize("rename", [False, True])
+def test_query_refuses_missing_direct_selection_and_force_recovers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], rename: bool
 ) -> None:
     root = tmp_path / "source"
-    source = _write(root, "deleted.py", "def deleted():\n    return 1\n")
+    source = _write(root, "deleted.py", "def foo():\n    return 1\n")
     output = tmp_path / "graph.json"
 
     assert _analyze(root, output, source) == 0
-    source.unlink()
+    before = output.read_bytes()
+    sidecar = stamp_path(output).read_bytes()
+    if rename:
+        source.rename(root / "renamed.py")
+    else:
+        source.unlink()
+    capsys.readouterr()
 
-    graph = cli._load_and_refresh_graph(output, root, False)
+    assert _query_definitions(root, output) == 2
+    refused = capsys.readouterr()
+    assert refused.out == ""
+    assert "1 recorded files" in refused.err
+    assert "analyze --force" in refused.err
+    assert "refreshing graph" not in refused.err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
 
-    assert graph.drift.missing == ("deleted.py",)
-    assert graph.refreshed is True
-    assert graph.diagnostics == ()
-    assert not any(node.path == "deleted.py" for node in graph.document.nodes)
-    assert json.loads(output.read_text(encoding="utf-8"))["extensions"] == {
-        "minotaur": {"selection": ["deleted.py"]}
-    }
+    assert _query_definitions(root, output, no_refresh=True) == 0
+    stale = capsys.readouterr()
+    assert "deleted.py:1  deleted.foo  function" in stale.out
+    assert "stale: deleted.py" in stale.err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
+
+    if not rename:
+        _write(root, "replacement.py", "def foo():\n    return 2\n")
+    assert _analyze(root, output, root, force=True) == 0
+    capsys.readouterr()
+    assert _query_definitions_json(root, output) == 0
+    recovered = json.loads(capsys.readouterr().out)
+    assert recovered["refreshed"] is False
+    assert recovered["stale"] == []
+    assert [result["path"] for result in recovered["results"]] == [
+        "renamed.py" if rename else "replacement.py"
+    ]
 
 
 def test_query_no_refresh_keeps_graph_and_warns_with_stale_path(
@@ -250,6 +276,17 @@ def test_public_query_refresh_removes_deleted_and_adds_directory_selection_files
 
     assert _analyze(root, output, package) == 0
     deleted.unlink()
+    before = output.read_bytes()
+    sidecar = stamp_path(output).read_bytes()
+    capsys.readouterr()
+    assert _query_definitions(root, output) == 2
+    refused = capsys.readouterr()
+    assert "analyze --force" in refused.err
+    assert "refreshing graph" not in refused.err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
+    assert _analyze(root, output, package, force=True) == 0
+    capsys.readouterr()
     assert _query_definitions(root, output) == 0
     removed = capsys.readouterr()
     removed_graph = json.loads(output.read_text(encoding="utf-8"))
@@ -366,40 +403,40 @@ def test_query_json_reports_refreshed_state_and_drifted_paths(
     }
 
 
-def test_public_query_refresh_rewrites_an_empty_graph_when_every_target_is_deleted(
+def test_public_query_partial_deletion_refreshes_then_full_deletion_requires_force(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Deleting the whole selection yields an empty graph, not a stale answer.
-
-    The refresh re-analyzes what is on disk, and nothing is: the graph is
-    rewritten with zero nodes and the query reports an empty result at exit 0.
-    That is the policy an agent must be able to rely on -- an empty answer
-    preceded by the refresh notice, rather than the previous snapshot answered
-    as if it were current. The recorded selection is kept so the paths are
-    picked up again if the files come back.
-    """
     root = tmp_path / "source"
-    source = _write(root, "app.py", "def foo():\n    return 1\n")
+    first = _write(root, "first.py", "def foo():\n    return 1\n")
+    second = _write(root, "second.py", "def foo():\n    return 2\n")
     output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    first.unlink()
+    capsys.readouterr()
 
-    assert _analyze(root, output, source) == 0
-    source.unlink()
+    assert _query_definitions_json(root, output) == 0
+    partial = capsys.readouterr()
+    answer = json.loads(partial.out)
+    assert answer["refreshed"] is True
+    assert answer["stale"] == ["first.py"]
+    assert [result["path"] for result in answer["results"]] == ["second.py"]
+    assert "refreshing graph" in partial.err
 
-    assert _query_definitions(root, output) == 0
-    captured = capsys.readouterr()
-    assert captured.out == "no definitions\n"
-    assert captured.err.splitlines() == [
-        "minotaur: refreshing graph (1 drifted paths)",
-        "minotaur: stale: app.py",
-    ]
+    before = output.read_bytes()
+    sidecar = stamp_path(output).read_bytes()
+    second.unlink()
+    assert _query_definitions_json(root, output) == 2
+    refused = capsys.readouterr()
+    assert refused.out == ""
+    assert str(root) in refused.err
+    assert "1 recorded files" in refused.err
+    assert "analyze --force" in refused.err
+    assert "refreshing graph" not in refused.err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
 
-    document = json.loads(output.read_text(encoding="utf-8"))
-    assert document["nodes"] == []
-    assert document["relationships"] == []
-    assert document["extensions"]["minotaur"]["selection"] == ["app.py"]
-
-    # The emptied graph is now clean: a second query neither refreshes again
-    # nor repeats the notice.
+    assert _analyze(root, output, root, force=True) == 0
+    capsys.readouterr()
     assert _query_definitions_json(root, output) == 0
     assert json.loads(capsys.readouterr().out) == {
         "query": "definitions",
@@ -407,3 +444,43 @@ def test_public_query_refresh_rewrites_an_empty_graph_when_every_target_is_delet
         "results": [],
         "stale": [],
     }
+
+
+@pytest.mark.parametrize("target", ["pkg", "."])
+def test_public_query_wrong_root_preserves_graph_even_with_new_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], target: str
+) -> None:
+    root = tmp_path / "src"
+    _write(root, "pkg/app.py", "def foo():\n    return 1\n")
+    _write(root, "pkg/other.py", "value = 2\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root / target) == 0
+    before = output.read_bytes()
+    sidecar = stamp_path(output).read_bytes()
+    document = load_graph_file(output).document
+    observed = drift(document, tmp_path)
+    assert observed.missing == ("pkg/app.py", "pkg/other.py")
+    if target == ".":
+        assert observed.added == ("src/pkg/app.py", "src/pkg/other.py")
+    else:
+        assert observed.added == ()
+    capsys.readouterr()
+
+    assert _query_definitions_json(tmp_path, output) == 2
+    refused = capsys.readouterr()
+    assert refused.out == ""
+    assert str(tmp_path) in refused.err
+    assert "2 recorded files" in refused.err
+    for recovery in ("--root", "--no-refresh", "analyze --force"):
+        assert recovery in refused.err
+    assert "refreshing graph" not in refused.err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
+
+    assert _query_definitions_json(tmp_path, output, no_refresh=True) == 0
+    saved = json.loads(capsys.readouterr().out)
+    assert saved["refreshed"] is False
+    assert saved["stale"] == ["pkg/app.py", "pkg/other.py", *observed.added]
+    assert [result["symbol"] for result in saved["results"]] == ["pkg.app.foo"]
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
