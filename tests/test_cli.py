@@ -225,6 +225,142 @@ def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
     )
 
 
+@pytest.mark.parametrize("query_refresh", [False, True])
+def test_sql_recorded_errors_prevent_clean_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    query_refresh: bool,
+) -> None:
+    root = tmp_path / "source"
+    source = _write(root, "schema.sql", "CREATE TABLE Good (id int)\n")
+    output = root / "graph.json"
+    monkeypatch.chdir(root)
+    arguments = ["analyze", "--root", str(root), "--output", str(output), str(source)]
+    if query_refresh:
+        assert cli.main(arguments) == 0
+        capsys.readouterr()
+    source.write_text("CREATE TABLE Good (id int)\nGO\nCREATE TABLE Broken (id int\n")
+    if query_refresh:
+        assert (
+            cli.main(["query", "definitions", "Good", "--root", str(root), "--graph", str(output)])
+            == 1
+        )
+        assert "refreshing graph" in capsys.readouterr().err
+    else:
+        assert cli.main(arguments) == 1
+        assert "parse-error" in capsys.readouterr().err
+    facts = json.loads(output.read_text())["extensions"]["minotaur"]
+    assert facts["errors"] == 1
+    assert "sql_settings" in facts
+    assert cli.main(arguments) == 1
+    diagnostic = capsys.readouterr().err
+    assert "parse-error" in diagnostic
+    assert "skipping analysis" not in diagnostic
+
+
+@pytest.mark.parametrize("language", ["sql", "py"])
+def test_sql_settings_edit_refreshes_only_sql_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    language: str,
+) -> None:
+    root = tmp_path / "source"
+    _write(
+        root, f"source.{language}", "CREATE TABLE T (id int)\n" if language == "sql" else "x = 1\n"
+    )
+    text = (
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        f'targets = ["source.{language}"]\n[minotaur.sql]\nview_depth_threshold = 1\n'
+    )
+    settings_path = _write(root, ".minotaur.toml", text)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    capsys.readouterr()
+    output = root / "graph.json"
+    original = output.read_bytes()
+    assert cli.main(["analyze"]) == 0
+    assert "graph is up to date, skipping analysis" in capsys.readouterr().err
+    settings_path.write_text(text.replace("threshold = 1", "threshold = 2"))
+    assert cli.main(["analyze"]) == 0
+    changed = capsys.readouterr().err
+    facts = json.loads(output.read_text())["extensions"]["minotaur"]
+    assert "errors" not in facts
+    if language == "sql":
+        assert "skipping analysis" not in changed
+        assert output.read_bytes() != original
+        assert facts["sql_settings"]["view_depth_threshold"] == 2
+    else:
+        assert "graph is up to date, skipping analysis" in changed
+        assert output.read_bytes() == original
+        assert "sql_settings" not in facts
+    assert cli.main(["analyze"]) == 0
+    assert "graph is up to date, skipping analysis" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        None,
+        "invalid",
+        {"view_depth_threshold": 1},
+        {"view_depth_threshold": 0, "migration_patterns": [], "foreign_key_target_files": []},
+        {"view_depth_threshold": 1, "migration_patterns": [], "foreign_key_target_files": [1]},
+    ],
+)
+def test_invalid_recorded_sql_settings_refresh_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    recorded: object,
+) -> None:
+    source = _write(tmp_path, "schema.sql", "CREATE TABLE T (id int)\n")
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "graph.json"
+    arguments = ["analyze", "--root", str(tmp_path), "--output", str(output), str(source)]
+    assert cli.main(arguments) == 0
+    capsys.readouterr()
+    original = output.read_bytes()
+    graph = json.loads(original)
+    facts = graph["extensions"]["minotaur"]
+    if recorded is None:
+        del facts["sql_settings"]
+    else:
+        facts["sql_settings"] = recorded
+    output.write_text(json.dumps(graph))
+    assert cli.main(arguments) == 0
+    assert "skipping analysis" not in capsys.readouterr().err
+    assert output.read_bytes() == original
+    assert cli.main(arguments) == 0
+    assert "graph is up to date, skipping analysis" in capsys.readouterr().err
+
+
+def test_sql_non_bmp_target_settings_round_trip_as_sorted_pairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tmp_path, "schema.sql", "CREATE TABLE T (id int)\n")
+    _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["schema.sql"]\n[minotaur.sql]\n'
+        'foreign_key_target_files = { "😀" = "schema.sql", "A" = "schema.sql" }\n',
+    )
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["analyze"]) == 0
+    capsys.readouterr()
+    facts = json.loads((tmp_path / "graph.json").read_text())["extensions"]["minotaur"]
+    assert facts["sql_settings"]["foreign_key_target_files"] == [
+        ["a", "schema.sql"],
+        ["😀", "schema.sql"],
+    ]
+    assert cli.main(["analyze"]) == 0
+    assert "graph is up to date, skipping analysis" in capsys.readouterr().err
+
+
 def test_sql_warning_only_analysis_succeeds_and_preserves_shared_metadata(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
