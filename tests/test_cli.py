@@ -2746,3 +2746,131 @@ def test_systems_diff_output_preflight_failure_reports_without_stdout(
     assert captured.out == ""
     assert "parent directory does not exist" in captured.err
     assert not (blocker / "report.html").exists()
+
+
+@pytest.mark.parametrize("whole_root", [False, True])
+def test_explicit_output_refuses_other_project_and_force_replaces(
+    tmp_path: Path, capsys, whole_root: bool
+) -> None:
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    source_a = _write(root_a, "a.py", "a = 1\n")
+    source_b = _write(root_b, "b.py", "b = 2\n")
+    output = tmp_path / "important.json"
+    target_a = root_a if whole_root else source_a
+    target_b = root_b if whole_root else source_b
+    assert cli.main(["analyze", "--root", str(root_a), "--output", str(output), str(target_a)]) == 0
+    before = hashlib.sha256(output.read_bytes()).hexdigest()
+    if whole_root:
+        assert json.loads(output.read_text())["extensions"]["minotaur"]["selection"] == ["."]
+    args = ["analyze", "--root", str(root_b), "--output", str(output), str(target_b)]
+    capsys.readouterr()
+    assert cli.main(args) == 2
+    refusal = capsys.readouterr().err
+    assert "different selection or tree" in refusal
+    assert "pass --force to replace it" in refusal
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == before
+    assert cli.main([*args, "--force"]) == 0
+    assert _paths(output) == {"b.py"}
+
+
+def test_explicit_output_without_recorded_selection_requires_force(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "src"
+    _write(root, "a.py", "a = 1\n")
+    output = tmp_path / "graph.json"
+    args = ["analyze", "--root", str(root), "--output", str(output), str(root)]
+    assert cli.main(args) == 0
+    graph = json.loads(output.read_text())
+    del graph["extensions"]["minotaur"]["selection"]
+    output.write_text(json.dumps(graph), encoding="utf-8")
+    assert load_graph_file(output).document.extensions["minotaur"] == {}
+    before = output.read_bytes()
+    assert cli.main(args) == 2
+    assert "pass --force to replace it" in capsys.readouterr().err
+    assert output.read_bytes() == before
+    assert cli.main([*args, "--force"]) == 0
+    assert json.loads(output.read_text())["extensions"]["minotaur"]["selection"] == ["."]
+
+
+def test_explicit_config_graph_refuses_but_derived_output_reconciles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    root = _config_repo(tmp_path)
+    _write(root, "a.py", "a = 1\n")
+    _write(root, "b.py", "b = 2\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "graph.json"\ntargets = ["a.py"]\n')
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    output = root / "graph.json"
+    before = output.read_bytes()
+    assert cli.main(["analyze", "--output", "graph.json", "b.py"]) == 2
+    assert "pass --force to replace it" in capsys.readouterr().err
+    assert output.read_bytes() == before
+    assert cli.main(["analyze", "b.py"]) == 0
+    assert _paths(output) == {"b.py"}
+    assert json.loads(output.read_text())["extensions"]["minotaur"]["selection"] == ["b.py"]
+
+
+def test_scope_changed_file_list_reconciles_derived_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _scope_project(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze", "--scope", "auth"]) == 0
+    definition = root / "docs/systems/auth/system.toml"
+    definition.write_text(definition.read_text().replace("src/auth/api.py", "src/other.py"))
+    assert cli.main(["analyze", "--scope", "auth"]) == 0
+    output = definition.parent / "graph.json"
+    assert _paths(output) == {"src/other.py"}
+    assert json.loads(output.read_text())["extensions"]["minotaur"]["selection"] == ["src/other.py"]
+
+
+def test_explicit_output_same_selection_partial_drift_refreshes(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "src"
+    removed = _write(root, "a.py", "a = 1\n")
+    retained = _write(root, "b.py", "b = 2\n")
+    output = tmp_path / "graph.json"
+    args = ["analyze", "--root", str(root), "--output", str(output), str(root)]
+    assert cli.main(args) == 0
+    before = output.read_bytes()
+    removed.unlink()
+    retained.write_text("b = 3\n")
+    assert cli.main(args) == 0
+    assert "skipping analysis" not in capsys.readouterr().err
+    assert output.read_bytes() != before
+    assert _paths(output) == {"b.py"}
+    assert cli.main(args) == 0
+    assert "skipping analysis" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("configured_recovery", [False, True])
+def test_full_deletion_refuses_query_and_explicit_analyze_then_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, configured_recovery: bool
+) -> None:
+    root = _config_repo(tmp_path)
+    first = _write(root, "a.py", "def foo(): return 1\n")
+    second = _write(root, "b.py", "b = 2\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "graph.json"\ntargets = ["."]\n')
+    monkeypatch.chdir(root)
+    args = ["analyze", "--output", "graph.json"]
+    assert cli.main(args) == 0
+    output = root / "graph.json"
+    before = output.read_bytes()
+    sidecar = stamp_path(output).read_bytes()
+    first.unlink()
+    second.unlink()
+    capsys.readouterr()
+    assert cli.main(["query", "definitions", "foo"]) == 2
+    assert "2 recorded files" in capsys.readouterr().err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
+    assert cli.main(args) == 2
+    assert "pass --force to replace it" in capsys.readouterr().err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
+    recovery_args = ["analyze"] if configured_recovery else [*args, "--force"]
+    assert cli.main(recovery_args) == 0
+    assert _paths(output) == set()
+    assert output.read_bytes() != before
+    assert cli.main(["query", "definitions", "foo"]) == 0
+    assert capsys.readouterr().out == "no definitions\n"
