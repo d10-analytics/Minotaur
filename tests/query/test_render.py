@@ -17,16 +17,16 @@ from minotaur import cli
 EXPECTED = {
     "definitions": (
         '{"query":"definitions","refreshed":false,"results":[{"duplicate":false,'
-        '"kind":"function","line":1,"path":"mod.py","symbol":"mod.target"}],"stale":[]}\n'
+        '"kind":"function","line":1,"path":"mod.py","symbol":"mod.target"}],"stale":[],"stale_analyzer":null}\n'
     ),
-    "callers": '{"query":"callers","refreshed":false,"results":[],"stale":[]}\n',
+    "callers": '{"query":"callers","refreshed":false,"results":[],"stale":[],"stale_analyzer":null}\n',
     "impact": (
         '{"query":"impact","refreshed":false,"results":[{"boundary":false,"depth":0,'
-        '"kind":"function","symbol":"mod.target"}],"stale":[]}\n'
+        '"kind":"function","symbol":"mod.target"}],"stale":[],"stale_analyzer":null}\n'
     ),
     "unreferenced": (
         '{"query":"unreferenced","refreshed":false,"results":[{"kind":"function","line":1,'
-        '"path":"mod.py","symbol":"mod.target","text_mention":false}],"stale":[]}\n'
+        '"path":"mod.py","symbol":"mod.target","text_mention":false}],"stale":[],"stale_analyzer":null}\n'
     ),
     "context": (
         '{"query":"context","results":[{"hash_available":true,"lines":[{"line":1,'

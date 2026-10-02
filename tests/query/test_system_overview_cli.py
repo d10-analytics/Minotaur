@@ -71,7 +71,8 @@ def test_systems_compact_json_has_exact_inventory_and_coverage_shape(
     assert err == "minotaur: warning: orders/missing.py (listed by system orders)\n"
     payload = json.loads(out)
     assert out == json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-    assert set(payload) == {"query", "refreshed", "stale", "results", "coverage"}
+    assert set(payload) == {"query", "refreshed", "stale", "stale_analyzer", "results", "coverage"}
+    assert payload["stale_analyzer"] is None
     assert payload["query"] == "systems"
     assert payload["refreshed"] is False
     assert payload["stale"] == []

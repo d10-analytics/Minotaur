@@ -17,7 +17,7 @@ import pytest
 from minotaur import cli, config, git
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import load_graph_file, stamp_path
-from minotaur.language_interpreter import registry
+from minotaur.language_interpreter import ANALYZER_SEMANTICS_VERSION, registry
 from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode, DiagnosticSeverity
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 
@@ -126,7 +126,7 @@ def test_valid_selection_with_no_registered_files_writes_empty_canonical_graph(
         "coordinate_encoding": "utf-8",
         "format": "minotaur-graph",
         "format_version": "0.1.0",
-        "generated_by": {"name": "minotaur"},
+        "generated_by": {"name": "minotaur", "version": ANALYZER_SEMANTICS_VERSION},
         "extensions": {"minotaur": {"selection": ["."]}},
         "nodes": [],
         "relationships": [],

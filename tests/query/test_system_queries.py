@@ -250,7 +250,8 @@ def test_surface_one_row_per_symbol_aggregates_reaching_kinds(
             "symbol": "orders.mod.order",
         }
     ]
-    assert set(payload) == {"query", "refreshed", "results", "stale", "coverage"}
+    assert set(payload) == {"query", "refreshed", "results", "stale", "stale_analyzer", "coverage"}
+    assert payload["stale_analyzer"] is None
     assert payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
 
 
@@ -504,7 +505,15 @@ def test_system_queries_json_is_deterministic_and_hides_graph_internals(
         assert first[1] == second[1]
         assert "node:sha256:" not in first[1]
         payload = json.loads(first[1])
-        assert set(payload) == {"query", "refreshed", "results", "stale", "coverage"}
+        assert set(payload) == {
+            "query",
+            "refreshed",
+            "results",
+            "stale",
+            "stale_analyzer",
+            "coverage",
+        }
+        assert payload["stale_analyzer"] is None
         for record in payload["results"]:
             if name == "surface":
                 assert set(record) == {"category", "kinds", "path", "symbol"}
@@ -995,7 +1004,15 @@ def test_system_cli_composes_coverage_and_details_for_each_query(
         assert status == 0
         assert err == ""
         default_payload = json.loads(default_out)
-        assert set(default_payload) == {"query", "refreshed", "results", "stale", "coverage"}
+        assert set(default_payload) == {
+            "query",
+            "refreshed",
+            "results",
+            "stale",
+            "stale_analyzer",
+            "coverage",
+        }
+        assert default_payload["stale_analyzer"] is None
         assert "relationships" not in default_payload
         assert default_payload["coverage"]["source_diagnostics"] == {"status": "unavailable"}
 
@@ -1182,7 +1199,16 @@ def test_reporting_snapshot_projects_coverage_and_details_from_canonical_owner()
     )
     assert composed.report is report
     payload = composed.to_dict()
-    assert set(payload) == {"query", "refreshed", "results", "stale", "coverage", "relationships"}
+    assert set(payload) == {
+        "query",
+        "refreshed",
+        "results",
+        "stale",
+        "stale_analyzer",
+        "coverage",
+        "relationships",
+    }
+    assert payload["stale_analyzer"] is None
     payload["coverage"]["declared_files"]["total"] = 99
     assert report.coverage.to_dict()["declared_files"]["total"] == 1
 

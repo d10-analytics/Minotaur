@@ -173,7 +173,8 @@ def test_public_systems_overview_walkthrough_matches_documented_contract(
     assert err == "minotaur: warning: orders/legacy.py (listed by system orders)\n"
     compact = json.loads(compact_json)
     assert compact_json == json.dumps(compact, sort_keys=True, separators=(",", ":")) + "\n"
-    assert set(compact) == {"query", "refreshed", "results", "stale", "coverage"}
+    assert set(compact) == {"query", "refreshed", "results", "stale", "stale_analyzer", "coverage"}
+    assert compact["stale_analyzer"] is None
     assert compact["results"] == [
         {
             "name": "billing",
