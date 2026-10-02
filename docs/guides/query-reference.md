@@ -560,6 +560,7 @@ Exit statuses are:
   graph queries, `1` means a graph refresh completed with source diagnostics;
 * `2` — `diff` encountered an argument, configuration, graph-load, or analysis
   error, or another query encountered an argument, graph-load, selection,
+  wrong-root refresh (every recorded file missing under `--root`),
   unknown-symbol, unknown-system,
   ambiguous-symbol, or committed-definition error (a symbol name that matches
   several definitions is never answered from an arbitrary one of them, and a
