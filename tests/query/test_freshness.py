@@ -364,6 +364,7 @@ def test_query_json_reports_refreshed_state_and_drifted_paths(
             }
         ],
         "stale": [],
+        "stale_analyzer": None,
     }
 
     source.write_text("# edited\ndef foo():\n    return 2\n", encoding="utf-8")
@@ -383,6 +384,7 @@ def test_query_json_reports_refreshed_state_and_drifted_paths(
             }
         ],
         "stale": ["app.py"],
+        "stale_analyzer": None,
     }
 
     source.write_text("# edited again\n" + source.read_text(encoding="utf-8"), encoding="utf-8")
@@ -400,6 +402,7 @@ def test_query_json_reports_refreshed_state_and_drifted_paths(
             }
         ],
         "stale": ["app.py"],
+        "stale_analyzer": None,
     }
 
 
@@ -443,6 +446,7 @@ def test_public_query_partial_deletion_refreshes_then_full_deletion_requires_for
         "refreshed": False,
         "results": [],
         "stale": [],
+        "stale_analyzer": None,
     }
 
 

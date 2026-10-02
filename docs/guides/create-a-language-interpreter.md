@@ -89,6 +89,12 @@ choose an interpreter. Registering the extension is all that is needed for the
 existing CLI to discover and dispatch explicitly selected `.example` files;
 do not add a language-specific subcommand or language flag.
 
+Add a representative sample root under `tests/fixtures/analyzer_semantics/`
+and include it in `tests/test_analyzer_semantics_version.py` so the registry-coverage
+test covers the new interpreter. Update `ANALYZER_SEMANTICS_VERSION` to the fresh
+fingerprint printed by that test, then follow the regeneration and later pin
+commit procedure in [contributing](contributing.md#changing-analyzer-output).
+
 After registering a new interpreter, maintain the [interpreter edge-case
 catalog](../concepts/interpreter-edge-cases.md) in this order: add one status
 row for every existing case; for each applicable row add a minimal example,

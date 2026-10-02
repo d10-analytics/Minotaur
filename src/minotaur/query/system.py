@@ -55,7 +55,7 @@ from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.graph_model.relationship import Relationship
-from minotaur.query.freshness import recorded_selection_view
+from minotaur.query.freshness import AnalyzerChange, recorded_selection_view
 from minotaur.query.index import GraphIndex
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.system import EndpointKind, System, classify_endpoint, resolve_system, system_for_file
@@ -590,6 +590,7 @@ class QueryInvocation:
     source_diagnostics: int | None = None
     source_warnings: int | None = None
     source_errors: int | None = None
+    stale_analyzer: AnalyzerChange | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.refreshed, bool):
@@ -599,6 +600,8 @@ class QueryInvocation:
         ):
             raise ValueError("stale must be a sequence of strings")
         object.__setattr__(self, "stale", tuple(sorted(self.stale)))
+        if self.stale_analyzer is not None and not isinstance(self.stale_analyzer, AnalyzerChange):
+            raise ValueError("stale_analyzer must be AnalyzerChange or None")
         if self.source_diagnostics is not None and (
             not isinstance(self.source_diagnostics, int)
             or isinstance(self.source_diagnostics, bool)
@@ -632,6 +635,9 @@ class QueryInvocation:
         return {
             "refreshed": self.refreshed,
             "stale": list(self.stale),
+            "stale_analyzer": (
+                self.stale_analyzer.to_dict() if self.stale_analyzer is not None else None
+            ),
             "source_diagnostics": (
                 {
                     "status": "observed_on_refresh",
@@ -904,6 +910,7 @@ class SystemQueryResult(Generic[RecordT]):
             "refreshed": self.invocation.refreshed,
             "results": [item.to_dict() for item in self.report.results],
             "stale": list(self.invocation.stale),
+            "stale_analyzer": self.invocation.to_dict()["stale_analyzer"],
             "coverage": coverage,
         }
         if isinstance(self.report, SystemsReport):

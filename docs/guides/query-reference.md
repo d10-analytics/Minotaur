@@ -41,7 +41,8 @@ system queries also accept `--details`):
 
 `--no-refresh` answers from the existing graph and reports drift without
 rewriting it; omit it when current source facts are required. `--json` exposes
-the `refreshed` and `stale` fields alongside query results. `context` reads
+the `refreshed`, `stale`, and always-present `stale_analyzer` fields
+alongside query results. `context` reads
 current source without refreshing. The explicit `diff OLD NEW` mode compares
 graph files without a source root or configuration; the committed-reference
 mode compares the graph read from `HEAD` with the current working tree and
@@ -49,6 +50,33 @@ therefore requires a located project configuration. For the complete
 order-of-operations contract, including detected and intentionally undetected
 changes, see
 [Graph freshness and snapshot order](../concepts/freshness.md).
+
+For a recorded, non-empty source selection, a missing or different
+`generated_by.version` also triggers refresh, even with identical source bytes:
+
+```text
+minotaur: analyzer version changed (<old> -> <new>), refreshing
+minotaur: analyzer version changed (<old> -> <new>), not refreshing
+```
+
+The second line is used instead when `--no-refresh` is passed; `<old>` is `none`
+when absent. Version-only refresh prints no zero-path refresh line. If paths
+also drifted, the analyzer line precedes the normal refresh and stale-path
+lines. Foreign, library-built and hand-built graphs without a recorded,
+non-empty selection are exempt from the version check: no version notice or
+version-triggered refresh, and `stale_analyzer` is `null`.
+
+Committed-reference `diff` refuses an old-side analyzer mismatch before
+in-memory analysis, including its outside-Git disk fallback. It exits `2`,
+prints nothing to stdout and reports:
+
+```text
+minotaur: error: committed graph was produced by analyzer version <old>, but this Minotaur uses <new>; run analyze and commit the refreshed graph and its sidecar
+```
+
+This uses the same selection exemption; `none` denotes an absent version.
+Explicit `diff OLD NEW`, `context`, and `visualize` do not check analyzer
+versions. System comparisons re-analyze both sides with the current analyzer.
 
 A refreshing graph query exits `2` before announcing a refresh when the graph
 records at least one file and every recorded file is missing under `--root`,
@@ -126,7 +154,7 @@ Re-run against a single definition once the duplicate is resolved, or use
 JSON uses the same records:
 
 ```json
-{"query":"callers","refreshed":false,"results":[{"caller":"use.caller","column":5,"kind":"calls","line":3,"path":"use.py","unresolved":false}],"stale":[]}
+{"query":"callers","refreshed":false,"results":[{"caller":"use.caller","column":5,"kind":"calls","line":3,"path":"use.py","unresolved":false}],"stale":[],"stale_analyzer":null}
 ```
 
 Every caller record contains `caller`, `column`, `kind`, `line`, `path`, and
@@ -258,8 +286,8 @@ line breaks, tabs, Escape, and Delete are therefore rejected before refresh or
 output. Default text starts with one
 canonical `coverage ` JSON line, followed by lines of the exact form
 `NAME  declared TOTAL  represented REPRESENTED  absent ABSENT`. Default JSON
-has exactly `query`, `refreshed`, `stale`, `results`, and `coverage`; each
-result's `declared_files` has `scope`, `total`, `represented`, and `absent`.
+has exactly `query`, `refreshed`, `stale`, `stale_analyzer`, `results`, and `coverage`;
+each result's `declared_files` has `scope`, `total`, `represented`, and `absent`.
 For example, the synthetic fixture used by the public walkthrough produces:
 
 ```text
@@ -352,8 +380,8 @@ the same bytes.
 The three named-boundary queries run in the shared graph-query loop, so
 `--no-refresh` and `--json` behave exactly as they do for the other graph
 queries. Their JSON
-envelope is `query`, `refreshed`, `results`, `stale`, and `coverage`, with
-`relationships` present only for `--details`; records carry semantic labels
+envelope is `query`, `refreshed`, `results`, `stale`, `stale_analyzer`, and `coverage`,
+with `relationships` present only for `--details`; records carry semantic labels
 and root-relative paths, never node IDs. Text output starts with a compact,
 key-sorted `coverage ` JSON line, followed by the unchanged summary. For
 example, the summary line has this form:
@@ -535,7 +563,7 @@ alongside it, so an agent reading only stdout learns what stderr would have
 told it:
 
 ```json
-{"query":"definitions","refreshed":true,"results":[],"stale":["src/example.py"]}
+{"query":"definitions","refreshed":true,"results":[],"stale":["src/example.py"],"stale_analyzer":null}
 ```
 
 For system queries, `coverage` is the composed coverage of the final graph
@@ -544,8 +572,13 @@ and this invocation; it is not the snapshot's unavailable diagnostic history.
 `refreshed` is `true` when this invocation rewrote `GRAPH`, and `stale` lists
 the drifted root-relative paths that caused it — sorted, and reported whether
 or not the refresh happened, so `--no-refresh` names the paths its answer may
-be wrong about. A clean graph reports `false` and `[]`. `diff` and `context`
-refresh nothing and keep their own envelopes; `context` reports per-file
+be wrong about. `stale_analyzer` is `null` when no version change was observed,
+or `{"graph":"<old>","current":"<new>"}` when one was (`graph` is `null` if
+no version was recorded). It reports the version change observed before any
+refresh, including a successful one. Version-only `--no-refresh` leaves saved
+graph bytes unchanged, reports `refreshed: false`, `stale: []` and a non-null
+`stale_analyzer`, and exits `0`. A clean graph reports `false`, `[]`, and `null`.
+`diff` and `context` refresh nothing and keep their own envelopes; `context` reports per-file
 staleness in its result instead.
 
 Exit statuses are:

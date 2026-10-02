@@ -31,7 +31,10 @@ excluded. A user interface converts lines to one-based values for display.
 `generated_by`, `generated_at`, and `source_control` are optional snapshot
 context. When present, `generated_at` is UTC RFC 3339; Git commits are full
 lowercase 40- or 64-character IDs. These fields are neither node identity nor
-history.
+history. Minotaur-written graphs record the analyzer semantics version in
+`generated_by.version`; freshness compares this version for graphs with a
+recorded, non-empty source selection. This is separate from the graph schema
+version and from interpreter evidence producer metadata.
 
 ## Locations
 

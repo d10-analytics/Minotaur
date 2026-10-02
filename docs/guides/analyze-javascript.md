@@ -31,8 +31,13 @@ Every selected target must resolve beneath `ROOT`; directory targets are
 scanned recursively using the shared exclusion, symlink, and extension rules.
 The root-relative POSIX path is used for graph paths and module labels. An
 existing graph can be reused when its recorded selection and source bytes are
-current and it records no errors; Git commit and branch metadata do not gate
-reuse. Recorded errors cause re-analysis and current diagnostic reporting.
+current, its analyzer semantics version is current, and it records no errors;
+Git commit and branch metadata do not gate reuse. Recorded errors cause re-analysis and current diagnostic reporting.
+A missing or different analyzer version on a graph with a recorded, non-empty
+selection causes re-analysis and prints
+`minotaur: analyzer version changed (<old> -> <new>), refreshing` to stderr
+(`none` means no recorded version), before re-analysis. It does not
+print the up-to-date skip message.
 Use `--force` to request a new snapshot. With an explicit `--output`, an existing
 loadable graph with a different or missing recorded selection, or with every
 recorded file missing under the current root, exits `2` with

@@ -7,11 +7,33 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from minotaur import language_interpreter
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
 from minotaur.language_interpreter.registry import default_registry
 from minotaur.language_interpreter.selection import SelectionError, select_sources
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyzerChange:
+    """The saved and current analyzer versions for a stale graph."""
+
+    graph: str | None
+    current: str
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {"graph": self.graph, "current": self.current}
+
+
+def analyzer_change(document: GraphDocument) -> AnalyzerChange | None:
+    """Compare analyzer versions only for recorded non-empty selections."""
+    selection = recorded_selection_view(document)
+    if not selection.recorded or not selection.targets:
+        return None
+    recorded = document.generated_by.version if document.generated_by is not None else None
+    current = language_interpreter.ANALYZER_SEMANTICS_VERSION
+    return AnalyzerChange(recorded, current) if recorded != current else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,11 +48,12 @@ class Drift:
     changed: tuple[str, ...] = ()
     missing: tuple[str, ...] = ()
     added: tuple[str, ...] = ()
+    analyzer: AnalyzerChange | None = None
 
     @property
     def is_clean(self) -> bool:
         """Whether no recorded or newly selected source has drifted."""
-        return not (self.changed or self.missing or self.added)
+        return not (self.changed or self.missing or self.added or self.analyzer is not None)
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -105,7 +128,12 @@ def drift(document: GraphDocument, root: Path) -> Drift:
             changed.append(relative)
 
     added = _added_files(workspace_root, recorded_selection(document), set(files))
-    return Drift(tuple(sorted(changed)), tuple(sorted(missing)), tuple(sorted(added)))
+    return Drift(
+        tuple(sorted(changed)),
+        tuple(sorted(missing)),
+        tuple(sorted(added)),
+        analyzer_change(document),
+    )
 
 
 def belongs_to_different_tree(document: GraphDocument, observed: Drift) -> bool:

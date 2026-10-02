@@ -318,7 +318,8 @@ def test_all_query_renderers_hide_graph_internals_in_text_and_json(
             # Record queries answer from a freshness-checked graph, so the
             # envelope also states whether that graph was rewritten and which
             # paths had drifted.
-            assert set(payload) == {"query", "refreshed", "results", "stale"}
+            assert set(payload) == {"query", "refreshed", "results", "stale", "stale_analyzer"}
+            assert payload["stale_analyzer"] is None
             assert payload["refreshed"] is False
             assert payload["stale"] == []
         assert payload["query"] == query_name

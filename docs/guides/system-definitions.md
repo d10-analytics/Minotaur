@@ -73,8 +73,8 @@ orders  declared 2  represented 1  absent 1
 ```
 
 The same compact facts in JSON have exactly the top-level keys `query`,
-`refreshed`, `stale`, `results`, and `coverage`. Each result has `name` and a
-`declared_files` object with `scope`, `total`, `represented`, and `absent`.
+`refreshed`, `stale`, `stale_analyzer`, `results`, and `coverage`. Each result
+has `name` and a `declared_files` object with `scope`, `total`, `represented`, and `absent`.
 The JSON representation is canonical: object keys are sorted, arrays use the
 documented lexical order, separators are compact, and one newline terminates
 the answer.
@@ -218,8 +218,8 @@ the same graph and systems always produce the same bytes.
 
 Text begins with one deterministic `coverage ` line, then the existing summary
 record lines. With `--json`, each query returns the system envelope (`query`,
-`refreshed`, `results`, `stale`, `coverage`) in the shared JSON envelope, whose records carry semantic
-endpoint labels, root-relative paths, explicit `kind` values, and the category
+`refreshed`, `results`, `stale`, `stale_analyzer`, `coverage`) in the shared JSON envelope,
+whose records carry semantic endpoint labels, root-relative paths, explicit `kind` values, and the category
 spellings above — never node IDs. `--details` adds a `relationships` line or
 JSON array with endpoint IDs, locations, provenance, producer/rule tags, and
 all recorded evidence sites; default summaries remain ID-free. See

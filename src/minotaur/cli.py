@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from minotaur import git
+from minotaur import git, language_interpreter
 from minotaur.comparison import (
     _captured_analysis,
     _current_config_route,
@@ -62,7 +62,9 @@ from minotaur.query import system_diff as system_diff_query
 from minotaur.query import system_diff_view
 from minotaur.query import unreferenced as unreferenced_query
 from minotaur.query.freshness import (
+    AnalyzerChange,
     Drift,
+    analyzer_change,
     belongs_to_different_tree,
     drift,
     recorded_selection,
@@ -359,6 +361,7 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
                     return 0
                 # Ownership has been checked for explicit outputs; derived
                 # outputs also reconcile changes to their configured selection.
+                _report_analyzer_change(observed.analyzer, refreshing=True)
                 refresh_force = True
         metadata_targets = targets if scope is not None else None
         result = _analyze_selection(
@@ -465,7 +468,16 @@ def _produce_selection(
                 [target, path] for target, path in sorted(settings.foreign_key_target_files.items())
             ],
         }
-    result = replace(result, document=replace(result.document, extensions=extensions))
+    producer = result.document.generated_by
+    assert producer is not None  # Every native interpreter, including the empty graph, sets it.
+    result = replace(
+        result,
+        document=replace(
+            result.document,
+            generated_by=replace(producer, version=language_interpreter.ANALYZER_SEMANTICS_VERSION),
+            extensions=extensions,
+        ),
+    )
     return workspace, selection, result
 
 
@@ -553,6 +565,17 @@ class _QueryGraph:
         return tuple(item for item in self.diagnostics if item.is_warning)
 
 
+def _report_analyzer_change(change: AnalyzerChange | None, *, refreshing: bool) -> None:
+    """Report analyzer drift consistently for analysis and query refreshes."""
+    if change is not None:
+        action = "refreshing" if refreshing else "not refreshing"
+        print(
+            f"minotaur: analyzer version changed ({change.graph or 'none'} -> {change.current}), "
+            f"{action}",
+            file=sys.stderr,
+        )
+
+
 def _report_stale(paths: Sequence[str]) -> None:
     """Print one ``stale:`` line per drifted path.
 
@@ -600,6 +623,7 @@ def _load_and_refresh_graph(
     if observed.is_clean:
         return _QueryGraph(loaded.document, (), observed, False)
     if no_refresh:
+        _report_analyzer_change(observed.analyzer, refreshing=False)
         _report_stale(observed.paths)
         return _QueryGraph(loaded.document, (), observed, False)
 
@@ -616,11 +640,13 @@ def _load_and_refresh_graph(
     # Announce the attempt before performing it, and from the same drift the
     # refusal path reports: re-analysis may fail before replacement, so this
     # line must not claim that a new graph exists yet.
-    print(
-        f"minotaur: refreshing graph ({len(observed.paths)} drifted paths)",
-        file=sys.stderr,
-    )
-    _report_stale(observed.paths)
+    _report_analyzer_change(observed.analyzer, refreshing=True)
+    if observed.paths:
+        print(
+            f"minotaur: refreshing graph ({len(observed.paths)} drifted paths)",
+            file=sys.stderr,
+        )
+        _report_stale(observed.paths)
     all_targets = tuple(root / target for target in recorded)
     existing_targets = tuple(target for target in all_targets if target.exists())
     # Analysis only reads the targets that still exist, but the selection
@@ -814,6 +840,13 @@ def _run_committed_diff(query: argparse.Namespace, located: Path) -> int:
         metadata_targets = None
     graph_path = _committed_graph_path(resolved, scope)
     old_loaded = _load_committed_old(graph_path, root=resolved.root, validate=query.validate)
+    change = analyzer_change(old_loaded.document)
+    if change is not None:
+        raise ValueError(
+            f"committed graph was produced by analyzer version {change.graph or 'none'}, "
+            f"but this Minotaur uses {change.current}; run analyze and commit the "
+            "refreshed graph and its sidecar"
+        )
     _, _, produced = _produce_selection(
         resolved.root,
         targets,
@@ -1510,6 +1543,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
         invocation = system_query.QueryInvocation(
             refreshed=graph.refreshed,
             stale=graph.drift.paths,
+            stale_analyzer=graph.drift.analyzer,
             source_warnings=(len(graph.warnings) if graph.refreshed else None),
             source_errors=(len(graph.errors) if graph.refreshed else None),
         )
@@ -1533,6 +1567,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
         invocation = system_query.QueryInvocation(
             refreshed=graph.refreshed,
             stale=graph.drift.paths,
+            stale_analyzer=graph.drift.analyzer,
             source_warnings=(len(graph.warnings) if graph.refreshed else None),
             source_errors=(len(graph.errors) if graph.refreshed else None),
         )
@@ -1549,6 +1584,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
                 records,
                 refreshed=graph.refreshed,
                 stale=graph.drift.paths,
+                stale_analyzer=graph.drift.analyzer,
             )
             if query.json
             else handler.render_text(records)

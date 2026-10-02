@@ -61,6 +61,38 @@ remain unchanged. When full verification is deferred to the `main` push, record
 that as pending post-merge coverage rather than as pre-merge proof. Missing or
 cancelled hosted evidence is not a pass.
 
+## Changing analyzer output
+
+`ANALYZER_SEMANTICS_VERSION` in
+`src/minotaur/language_interpreter/__init__.py` is the first 16 lowercase hex
+characters of the SHA-256 fingerprint of canonical analysis output for the
+committed sample roots. The fingerprint strips the version and `source_control`
+so it measures analyzer behavior rather than its own stamp or Git provenance.
+
+A change to analyzer output must add or extend a representative sample: Python
+uses `tests/fixtures/equivalence_root`, and the other language and empty roots
+live under `tests/fixtures/analyzer_semantics/`. A new interpreter adds a sample
+root there and includes it in the registry-coverage test. Behavior outside the
+samples is not detected automatically, so extending samples is part of the change.
+
+Run `python -m pytest tests/test_analyzer_semantics_version.py -q` and update
+`ANALYZER_SEMANTICS_VERSION` to the fresh value printed by the fingerprint
+assertion. Keep the production change and tests/fixtures in separate commits.
+Then regenerate the committed examples through both public scripts:
+
+```bash
+python3 scripts/generate_example_output.py
+python3 examples/system-walkthrough/regenerate_system_walkthrough.py
+```
+
+Commit the regenerated `examples/` and documentation, then advance
+`BASELINE_COMMIT` in `tests/test_equivalence_harness.py` to the last commit
+touching `src/`, in a separate later commit. Find that commit with
+`git log -1 --format=%H -- src/`. A later source change requires another pin
+advance; later documentation or test-only commits do not. Run the required
+GitHub full verification at the final branch commit. Merge with a merge commit
+so the pinned production commit survives; do not squash or rebase it away.
+
 ## Trace the first example
 
 Keep [app.py](../../examples/getting-started/app.py) open beside these files.
