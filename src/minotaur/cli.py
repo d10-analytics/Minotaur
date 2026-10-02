@@ -61,7 +61,12 @@ from minotaur.query import system as system_query
 from minotaur.query import system_diff as system_diff_query
 from minotaur.query import system_diff_view
 from minotaur.query import unreferenced as unreferenced_query
-from minotaur.query.freshness import Drift, drift, recorded_selection
+from minotaur.query.freshness import (
+    Drift,
+    belongs_to_different_tree,
+    drift,
+    recorded_selection,
+)
 from minotaur.query.index import GraphIndex
 from minotaur.query.render import (
     QueryRecord,
@@ -325,10 +330,9 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
         # Validate the current workspace and targets before considering a
         # clean-output skip. A deleted root or explicitly selected file must
         # remain a command error even when an old graph happens to load.
-        select_sources(root, targets, default_registry())
-        # D-11 deliberately runs before output preflight. A graph that Minotaur
-        # can load is ours to refresh after drift, while an unrelated existing
-        # file still follows the normal refusal path below.
+        _, selection = select_sources(root, targets, default_registry())
+        # Probe loadable graphs before output preflight so owned outputs can
+        # refresh after drift and unchanged outputs can skip analysis.
         refresh_force = arguments.force
         if output.exists() and not arguments.force:
             try:
@@ -337,14 +341,24 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
                 existing = None
             if existing is not None:
                 current_selection = _target_selection(root, targets)
+                observed = drift(existing.document, root)
+                same_selection = recorded_selection(existing.document) == current_selection
+                if arguments.output is not None and (
+                    not same_selection or belongs_to_different_tree(existing.document, observed)
+                ):
+                    raise ValueError(
+                        "output graph was produced for a different selection or tree "
+                        f"(pass --force to replace it): {output}"
+                    )
                 if (
-                    drift(existing.document, root).is_clean
-                    and recorded_selection(existing.document) == current_selection
+                    observed.is_clean
+                    and same_selection
+                    and _analysis_facts_match(existing.document, selection.files, resolved.sql)
                 ):
                     print("minotaur: graph is up to date, skipping analysis", file=sys.stderr)
                     return 0
-                # A valid graph with drift was previously produced by this
-                # command, so replacement is safe after the freshness check.
+                # Ownership has been checked for explicit outputs; derived
+                # outputs also reconcile changes to their configured selection.
                 refresh_force = True
         metadata_targets = targets if scope is not None else None
         result = _analyze_selection(
@@ -437,17 +451,21 @@ def _produce_selection(
             document=replace(result.document, source_control=source_control),
         )
     recorded_targets = targets if metadata_targets is None else metadata_targets
-    result = replace(
-        result,
-        document=replace(
-            result.document,
-            extensions=_with_selection_extension(
-                result.document.extensions,
-                workspace.root,
-                recorded_targets,
-            ),
-        ),
+    extensions = _with_selection_extension(
+        result.document.extensions, workspace.root, recorded_targets
     )
+    if result.errors:
+        extensions["minotaur"]["errors"] = len(result.errors)
+    if _selection_uses_sql_settings(selection.files):
+        settings = sql_settings or SqlSettings()
+        extensions["minotaur"]["sql_settings"] = {
+            "view_depth_threshold": settings.view_depth_threshold,
+            "migration_patterns": list(settings.migration_patterns),
+            "foreign_key_target_files": [
+                [target, path] for target, path in sorted(settings.foreign_key_target_files.items())
+            ],
+        }
+    result = replace(result, document=replace(result.document, extensions=extensions))
     return workspace, selection, result
 
 
@@ -584,6 +602,13 @@ def _load_and_refresh_graph(
     if no_refresh:
         _report_stale(observed.paths)
         return _QueryGraph(loaded.document, (), observed, False)
+
+    if belongs_to_different_tree(loaded.document, observed):
+        raise ValueError(
+            f"graph belongs to a different tree: all {len(observed.missing)} recorded files "
+            f"are missing under root {root}; use the correct --root, --no-refresh to query "
+            "the saved graph, or analyze --force to replace it"
+        )
 
     recorded = recorded_selection(loaded.document)
     if not recorded:
@@ -1911,6 +1936,36 @@ def _with_selection_extension(
     )
     existing["minotaur"] = minotaur
     return existing
+
+
+def _selection_uses_sql_settings(files: tuple[Path, ...]) -> bool:
+    """Whether a selected interpreter consumes the effective SQL settings."""
+    registry = default_registry()
+    return any(
+        registration is not None and registration.accepts_sql_settings
+        for registration in (registry.registration_for(path) for path in files)
+    )
+
+
+def _analysis_facts_match(
+    document: GraphDocument, files: tuple[Path, ...], sql_settings: SqlSettings
+) -> bool:
+    """Require a successful analysis with the current interpreter settings."""
+    facts = (document.extensions or {}).get("minotaur", {})
+    if _count(facts.get("errors")) > 0:
+        return False
+    if not _selection_uses_sql_settings(files):
+        return True
+    recorded: Any = facts.get("sql_settings")
+    try:
+        settings = SqlSettings(
+            view_depth_threshold=recorded["view_depth_threshold"],
+            migration_patterns=recorded["migration_patterns"],
+            foreign_key_target_files=dict(recorded["foreign_key_target_files"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return settings == sql_settings
 
 
 def _dispatch(

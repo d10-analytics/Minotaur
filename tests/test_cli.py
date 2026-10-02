@@ -225,6 +225,142 @@ def test_sql_selection_dispatches_and_partial_diagnostics_keep_valid_facts(
     )
 
 
+@pytest.mark.parametrize("query_refresh", [False, True])
+def test_sql_recorded_errors_prevent_clean_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    query_refresh: bool,
+) -> None:
+    root = tmp_path / "source"
+    source = _write(root, "schema.sql", "CREATE TABLE Good (id int)\n")
+    output = root / "graph.json"
+    monkeypatch.chdir(root)
+    arguments = ["analyze", "--root", str(root), "--output", str(output), str(source)]
+    if query_refresh:
+        assert cli.main(arguments) == 0
+        capsys.readouterr()
+    source.write_text("CREATE TABLE Good (id int)\nGO\nCREATE TABLE Broken (id int\n")
+    if query_refresh:
+        assert (
+            cli.main(["query", "definitions", "Good", "--root", str(root), "--graph", str(output)])
+            == 1
+        )
+        assert "refreshing graph" in capsys.readouterr().err
+    else:
+        assert cli.main(arguments) == 1
+        assert "parse-error" in capsys.readouterr().err
+    facts = json.loads(output.read_text())["extensions"]["minotaur"]
+    assert facts["errors"] == 1
+    assert "sql_settings" in facts
+    assert cli.main(arguments) == 1
+    diagnostic = capsys.readouterr().err
+    assert "parse-error" in diagnostic
+    assert "skipping analysis" not in diagnostic
+
+
+@pytest.mark.parametrize("language", ["sql", "py"])
+def test_sql_settings_edit_refreshes_only_sql_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    language: str,
+) -> None:
+    root = tmp_path / "source"
+    _write(
+        root, f"source.{language}", "CREATE TABLE T (id int)\n" if language == "sql" else "x = 1\n"
+    )
+    text = (
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        f'targets = ["source.{language}"]\n[minotaur.sql]\nview_depth_threshold = 1\n'
+    )
+    settings_path = _write(root, ".minotaur.toml", text)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    capsys.readouterr()
+    output = root / "graph.json"
+    original = output.read_bytes()
+    assert cli.main(["analyze"]) == 0
+    assert "graph is up to date, skipping analysis" in capsys.readouterr().err
+    settings_path.write_text(text.replace("threshold = 1", "threshold = 2"))
+    assert cli.main(["analyze"]) == 0
+    changed = capsys.readouterr().err
+    facts = json.loads(output.read_text())["extensions"]["minotaur"]
+    assert "errors" not in facts
+    if language == "sql":
+        assert "skipping analysis" not in changed
+        assert output.read_bytes() != original
+        assert facts["sql_settings"]["view_depth_threshold"] == 2
+    else:
+        assert "graph is up to date, skipping analysis" in changed
+        assert output.read_bytes() == original
+        assert "sql_settings" not in facts
+    assert cli.main(["analyze"]) == 0
+    assert "graph is up to date, skipping analysis" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        None,
+        "invalid",
+        {"view_depth_threshold": 1},
+        {"view_depth_threshold": 0, "migration_patterns": [], "foreign_key_target_files": []},
+        {"view_depth_threshold": 1, "migration_patterns": [], "foreign_key_target_files": [1]},
+    ],
+)
+def test_invalid_recorded_sql_settings_refresh_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    recorded: object,
+) -> None:
+    source = _write(tmp_path, "schema.sql", "CREATE TABLE T (id int)\n")
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "graph.json"
+    arguments = ["analyze", "--root", str(tmp_path), "--output", str(output), str(source)]
+    assert cli.main(arguments) == 0
+    capsys.readouterr()
+    original = output.read_bytes()
+    graph = json.loads(original)
+    facts = graph["extensions"]["minotaur"]
+    if recorded is None:
+        del facts["sql_settings"]
+    else:
+        facts["sql_settings"] = recorded
+    output.write_text(json.dumps(graph))
+    assert cli.main(arguments) == 0
+    assert "skipping analysis" not in capsys.readouterr().err
+    assert output.read_bytes() == original
+    assert cli.main(arguments) == 0
+    assert "graph is up to date, skipping analysis" in capsys.readouterr().err
+
+
+def test_sql_non_bmp_target_settings_round_trip_as_sorted_pairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tmp_path, "schema.sql", "CREATE TABLE T (id int)\n")
+    _write(
+        tmp_path,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["schema.sql"]\n[minotaur.sql]\n'
+        'foreign_key_target_files = { "😀" = "schema.sql", "A" = "schema.sql" }\n',
+    )
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["analyze"]) == 0
+    capsys.readouterr()
+    facts = json.loads((tmp_path / "graph.json").read_text())["extensions"]["minotaur"]
+    assert facts["sql_settings"]["foreign_key_target_files"] == [
+        ["a", "schema.sql"],
+        ["😀", "schema.sql"],
+    ]
+    assert cli.main(["analyze"]) == 0
+    assert "graph is up to date, skipping analysis" in capsys.readouterr().err
+
+
 def test_sql_warning_only_analysis_succeeds_and_preserves_shared_metadata(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2610,3 +2746,131 @@ def test_systems_diff_output_preflight_failure_reports_without_stdout(
     assert captured.out == ""
     assert "parent directory does not exist" in captured.err
     assert not (blocker / "report.html").exists()
+
+
+@pytest.mark.parametrize("whole_root", [False, True])
+def test_explicit_output_refuses_other_project_and_force_replaces(
+    tmp_path: Path, capsys, whole_root: bool
+) -> None:
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    source_a = _write(root_a, "a.py", "a = 1\n")
+    source_b = _write(root_b, "b.py", "b = 2\n")
+    output = tmp_path / "important.json"
+    target_a = root_a if whole_root else source_a
+    target_b = root_b if whole_root else source_b
+    assert cli.main(["analyze", "--root", str(root_a), "--output", str(output), str(target_a)]) == 0
+    before = hashlib.sha256(output.read_bytes()).hexdigest()
+    if whole_root:
+        assert json.loads(output.read_text())["extensions"]["minotaur"]["selection"] == ["."]
+    args = ["analyze", "--root", str(root_b), "--output", str(output), str(target_b)]
+    capsys.readouterr()
+    assert cli.main(args) == 2
+    refusal = capsys.readouterr().err
+    assert "different selection or tree" in refusal
+    assert "pass --force to replace it" in refusal
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == before
+    assert cli.main([*args, "--force"]) == 0
+    assert _paths(output) == {"b.py"}
+
+
+def test_explicit_output_without_recorded_selection_requires_force(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "src"
+    _write(root, "a.py", "a = 1\n")
+    output = tmp_path / "graph.json"
+    args = ["analyze", "--root", str(root), "--output", str(output), str(root)]
+    assert cli.main(args) == 0
+    graph = json.loads(output.read_text())
+    del graph["extensions"]["minotaur"]["selection"]
+    output.write_text(json.dumps(graph), encoding="utf-8")
+    assert load_graph_file(output).document.extensions["minotaur"] == {}
+    before = output.read_bytes()
+    assert cli.main(args) == 2
+    assert "pass --force to replace it" in capsys.readouterr().err
+    assert output.read_bytes() == before
+    assert cli.main([*args, "--force"]) == 0
+    assert json.loads(output.read_text())["extensions"]["minotaur"]["selection"] == ["."]
+
+
+def test_explicit_config_graph_refuses_but_derived_output_reconciles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    root = _config_repo(tmp_path)
+    _write(root, "a.py", "a = 1\n")
+    _write(root, "b.py", "b = 2\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "graph.json"\ntargets = ["a.py"]\n')
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    output = root / "graph.json"
+    before = output.read_bytes()
+    assert cli.main(["analyze", "--output", "graph.json", "b.py"]) == 2
+    assert "pass --force to replace it" in capsys.readouterr().err
+    assert output.read_bytes() == before
+    assert cli.main(["analyze", "b.py"]) == 0
+    assert _paths(output) == {"b.py"}
+    assert json.loads(output.read_text())["extensions"]["minotaur"]["selection"] == ["b.py"]
+
+
+def test_scope_changed_file_list_reconciles_derived_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _scope_project(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze", "--scope", "auth"]) == 0
+    definition = root / "docs/systems/auth/system.toml"
+    definition.write_text(definition.read_text().replace("src/auth/api.py", "src/other.py"))
+    assert cli.main(["analyze", "--scope", "auth"]) == 0
+    output = definition.parent / "graph.json"
+    assert _paths(output) == {"src/other.py"}
+    assert json.loads(output.read_text())["extensions"]["minotaur"]["selection"] == ["src/other.py"]
+
+
+def test_explicit_output_same_selection_partial_drift_refreshes(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "src"
+    removed = _write(root, "a.py", "a = 1\n")
+    retained = _write(root, "b.py", "b = 2\n")
+    output = tmp_path / "graph.json"
+    args = ["analyze", "--root", str(root), "--output", str(output), str(root)]
+    assert cli.main(args) == 0
+    before = output.read_bytes()
+    removed.unlink()
+    retained.write_text("b = 3\n")
+    assert cli.main(args) == 0
+    assert "skipping analysis" not in capsys.readouterr().err
+    assert output.read_bytes() != before
+    assert _paths(output) == {"b.py"}
+    assert cli.main(args) == 0
+    assert "skipping analysis" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("configured_recovery", [False, True])
+def test_full_deletion_refuses_query_and_explicit_analyze_then_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, configured_recovery: bool
+) -> None:
+    root = _config_repo(tmp_path)
+    first = _write(root, "a.py", "def foo(): return 1\n")
+    second = _write(root, "b.py", "b = 2\n")
+    _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "graph.json"\ntargets = ["."]\n')
+    monkeypatch.chdir(root)
+    args = ["analyze", "--output", "graph.json"]
+    assert cli.main(args) == 0
+    output = root / "graph.json"
+    before = output.read_bytes()
+    sidecar = stamp_path(output).read_bytes()
+    first.unlink()
+    second.unlink()
+    capsys.readouterr()
+    assert cli.main(["query", "definitions", "foo"]) == 2
+    assert "2 recorded files" in capsys.readouterr().err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
+    assert cli.main(args) == 2
+    assert "pass --force to replace it" in capsys.readouterr().err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar
+    recovery_args = ["analyze"] if configured_recovery else [*args, "--force"]
+    assert cli.main(recovery_args) == 0
+    assert _paths(output) == set()
+    assert output.read_bytes() != before
+    assert cli.main(["query", "definitions", "foo"]) == 0
+    assert capsys.readouterr().out == "no definitions\n"

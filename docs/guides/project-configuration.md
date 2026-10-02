@@ -119,6 +119,13 @@ automatic stale-source refresh, committed `query diff`, and both captured
 sides of historical/system comparison, so a route cannot silently apply a
 different pattern.
 
+Changing effective `[minotaur.sql]` settings causes the next `analyze` of a SQL
+selection to re-analyze even when source bytes are unchanged. Missing or invalid
+recorded settings also cause re-analysis. A clean run records the new settings,
+so the following unchanged run can skip; recorded errors keep re-analysis
+necessary. Non-SQL selections ignore SQL-setting changes. Query refresh still
+uses source drift, so a settings edit alone does not trigger it.
+
 SQL foreign-key ownership can also be recorded with an exact target-to-file
 mapping:
 
@@ -203,6 +210,15 @@ analyzing a different root. An explicit CLI value keeps its own spelling: a
 relative value stays relative and is interpreted from the working directory,
 and an absolute value stays absolute, exactly as before configuration
 existed.
+
+An explicit `analyze --output` is ownership-checked even when it names the
+configured `graph`: if the existing loadable graph records a different target
+selection (or none), or records files but all are missing under the current
+root, analysis exits `2` with `pass --force to replace it`. Pass `--force` to
+replace that graph. When the output comes from configured `graph` or `--scope`,
+Minotaur instead reconciles changed selections without `--force`, including
+explicit positional target overrides with a config-derived output. The current
+root and targets must still pass source-selection validation.
 
 A configuration file present in the tree is validated on every
 config-consuming invocation, including one whose flags are fully explicit; an

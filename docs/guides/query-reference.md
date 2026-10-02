@@ -50,6 +50,17 @@ order-of-operations contract, including detected and intentionally undetected
 changes, see
 [Graph freshness and snapshot order](../concepts/freshness.md).
 
+A refreshing graph query exits `2` before announcing a refresh when the graph
+records at least one file and every recorded file is missing under `--root`,
+even if new files were added. The error names the root and recorded file count.
+This also covers deleting or renaming every recorded file; partial deletion
+still refreshes. Correct `--root`, use `--no-refresh` to answer from saved facts,
+or run `analyze --force` with the desired targets and explicit `--output`.
+An `analyze` using the configured `graph` output also recovers without `--force`.
+The refusal preserves graph bytes and an already-current sidecar; validation
+may stamp a missing or stale sidecar first. A wrong root retaining at least one
+recorded path is not detected by this rule.
+
 The `--validate` option on graph-reading commands forces full schema and
 node-ID validation even when a matching sidecar would authorize the trusted
 load path. Use it after external graph or sidecar edits; the concept page
@@ -549,6 +560,7 @@ Exit statuses are:
   graph queries, `1` means a graph refresh completed with source diagnostics;
 * `2` — `diff` encountered an argument, configuration, graph-load, or analysis
   error, or another query encountered an argument, graph-load, selection,
+  wrong-root refresh (every recorded file missing under `--root`),
   unknown-symbol, unknown-system,
   ambiguous-symbol, or committed-definition error (a symbol name that matches
   several definitions is never answered from an arbitrary one of them, and a

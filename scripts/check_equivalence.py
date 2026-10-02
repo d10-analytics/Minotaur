@@ -897,6 +897,16 @@ def _run_scenarios(
                 continue
             states = [state for state in prepared if state is not None]
             before_sha = [_sha(state[1]) for state in states]
+            expect_refusal = []
+            for (source, graph), copy in zip(states, copies, strict=True):
+                file_paths = {
+                    node["path"]
+                    for node in json.loads(graph.read_bytes())["nodes"]
+                    if node["node_class"] == "file" and node.get("path") is not None
+                }
+                expect_refusal.append(
+                    letter in "de" and file_paths == {source.relative_to(copy).as_posix()}
+                )
             for source, graph in states:
                 original = source.read_bytes()
                 if letter in "ab":
@@ -943,31 +953,53 @@ def _run_scenarios(
                 allow_refresh_attempt_delta=letter in "acde",
             ):
                 ok = False
-            if left.returncode not in (0, 1) or right.returncode not in (0, 1):
-                ok = False
+            for result, refusal in zip((left, right), expect_refusal, strict=True):
+                if result.returncode not in ((2,) if refusal else (0, 1)):
+                    ok = False
+                if refusal and result.stdout.strip():
+                    print(
+                        f"scenario root={root} step={letter}: refusal produced an answer",
+                        file=sys.stderr,
+                    )
+                    ok = False
             if letter in SIDECAR_STEPS and not _check_sidecar_stamps(letter, root, states):
                 ok = False
             # Every step must really answer on both sides: two identical
             # ``no definitions`` outputs would compare IDENTICAL while proving
             # nothing about the freshness sequence under test.  Step (d)
-            # deletes the source that may define the symbol, so it is the one
-            # step judged only on exit code and byte identity.
-            if letter != "d" and not (_answered(left) and _answered(right)):
+            # deletes the source that may define the symbol. A different-tree
+            # refusal likewise has no answer, but must preserve the saved graph.
+            if letter != "d" and any(
+                not refusal and not _answered(result)
+                for result, refusal in zip((left, right), expect_refusal, strict=True)
+            ):
                 print(
                     f"scenario root={root} step={letter}: query produced no answer"
                     f" (baseline exit {left.returncode}, branch exit {right.returncode})",
                     file=sys.stderr,
                 )
                 ok = False
-            if left.returncode in (0, 1) and right.returncode in (0, 1):
+            if all(
+                result.returncode in ((2,) if refusal else (0, 1))
+                for result, refusal in zip((left, right), expect_refusal, strict=True)
+            ):
                 left_sha = _sha(states[0][1])
                 right_sha = _sha(states[1][1])
                 if not _row(
                     f"scenario root={root} step={letter} graph SHA-256", left_sha, right_sha
                 ):
                     ok = False
-                if letter in "fg":
-                    if left_sha != before_sha[0] or right_sha != before_sha[1]:
+                if letter in "fg" or any(expect_refusal):
+                    if any(
+                        after != before
+                        for before, after, preserve in zip(
+                            before_sha,
+                            (left_sha, right_sha),
+                            [letter in "fg" or refusal for refusal in expect_refusal],
+                            strict=True,
+                        )
+                        if preserve
+                    ):
                         print(
                             f"scenario root={root} step={letter}: graph changed unexpectedly",
                             file=sys.stderr,

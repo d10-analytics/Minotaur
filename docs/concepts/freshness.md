@@ -13,13 +13,13 @@ literal because agents commonly parse these messages and JSON fields.
 | Sequence | Detected? | Mechanism (function and file) | Observable (stderr / JSON field / exit code) | Guard or escape hatch |
 | --- | --- | --- | --- | --- |
 | `analyze`, edit a tracked supported source (`.py`, `.js`, or `.sql`), then query | yes | `drift.changed` in `minotaur/query/freshness.py` (AC-03 scenario (a)) | `minotaur: refreshing graph (N drifted paths)` is the pre-analysis attempt line; then `minotaur: stale: <path>`; JSON `refreshed: true`, `stale: [<path>]`; exit `0` when no diagnostics | Re-run `analyze --force` when the intended selection also changed |
-| `analyze`, delete a tracked file, then query | yes | `drift.missing` in `minotaur/query/freshness.py` (AC-03 scenario (d)) | The same attempt and stale lines; JSON `stale`; exit `0` when the replacement analysis is clean | Recreate the file or analyze the desired targets again |
+| `analyze`, delete a tracked file, then query | yes | `drift.missing` in `minotaur/query/freshness.py` (AC-03 scenario (d)) | If another recorded file remains, the same attempt and stale lines; JSON `stale`; exit `0` when the replacement analysis is clean. If every recorded file is missing, exit `2` before any refresh announcement | Recreate the file, or run `analyze --force` with the desired targets and explicit `--output`; a config-derived `analyze` also recovers |
 | `analyze` a directory, add a supported source (`.py`, `.js`, or `.sql`) below that recorded directory, then query | yes | `_added_files` and `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (c)) | `minotaur: refreshing graph (N drifted paths)` is the pre-analysis attempt line; then `minotaur: stale: <path>`; JSON `refreshed: true`; exit `0` when clean | Analyze a different target set if the new file is intentionally out of scope |
 | `analyze` a Python directory, add JavaScript below that recorded directory, then query | detected, but refused | `drift.added` followed by `_dispatch` in `minotaur/cli.py` (AC-07) | The attempt and stale lines print before the mixed-language error; no completion line or query JSON is printed; exit `2`; graph and sidecar bytes remain unchanged | Select one language per graph until composition is explicitly supported |
 | `analyze` a Python directory, add SQL below that recorded directory, then query | detected, but refused | `drift.added` followed by `_dispatch` in `minotaur/cli.py` (AC-06) | The exact attempt and stale lines print before the mixed-language error; no completion line or query JSON is printed; exit `2`; graph and sidecar bytes remain unchanged | Select one language per graph until composition is explicitly supported |
-| `analyze`, rename a tracked file, then query | yes | `drift.missing` plus `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (e)) | Both root-relative paths are reported as `minotaur: stale: <path>`; JSON `stale` contains both; exit `0` when clean | Analyze the renamed target explicitly if it is now outside the recorded directory |
+| `analyze`, rename a tracked file, then query | yes | `drift.missing` plus `drift.added` in `minotaur/query/freshness.py` (AC-03 scenario (e)) | If another recorded file remains and the new path is under a recorded directory, both root-relative paths are reported as `minotaur: stale: <path>`; JSON `stale` contains both; exit `0` when clean. Renaming every recorded file exits `2`, even when new paths are detected | Run `analyze --force` with the renamed targets and explicit `--output`, or use a config-derived `analyze` |
 | `analyze`, switch branches so selected bytes differ, then query | yes | `drift.changed` in `minotaur/query/freshness.py` (same changed-byte observable as AC-03 scenario (a)) | Refresh and stale diagnostics name the changed paths; JSON has `refreshed: true`; exit `0` when clean | Treat the resulting graph as the new branch snapshot |
-| `analyze`, edit a tracked `.py`, then query with `--no-refresh` | yes, without refreshing | `drift.changed` in `minotaur/query/freshness.py` and the `no_refresh` branch of `_load_and_refresh_graph` in `minotaur/cli.py` (AC-03 scenario (b)) | `minotaur: stale: <path>` with no refreshed line; JSON `refreshed: false`, `stale: [<path>]`; exit `0` — a saved graph carries no diagnostics, so `--no-refresh` never exits `1`; only a refresh whose re-analysis emitted diagnostics does | Omit `--no-refresh` when current facts are required |
+| `analyze`, edit a tracked `.py`, then query with `--no-refresh` | yes, without refreshing | `drift.changed` in `minotaur/query/freshness.py` and the `no_refresh` branch of `_load_and_refresh_graph` in `minotaur/cli.py` (AC-03 scenario (b)) | `minotaur: stale: <path>` with no refreshed line; JSON `refreshed: false`, `stale: [<path>]`; exit `0` — a saved graph may record an error count, but queries do not replay diagnostic history, so `--no-refresh` never exits `1`; only a refresh whose re-analysis emitted error diagnostics does | Omit `--no-refresh` when current facts are required |
 | `analyze`, edit a tracked `.py`, then `unreferenced --text-fallback --no-refresh` | yes, but the fallback text scan is also suppressed | `stale_graph = query.no_refresh and not observed.is_clean` gates `text_fallback=query.text_fallback and not stale_graph` in `_run_unreferenced` (`minotaur/cli.py:360`, `:380`) | Same `minotaur: stale: <path>` line and JSON `stale`; the result is graph-relationships-only even though `--text-fallback` was passed, and no `[text-mention]` marks appear (AC-18: `tests/query/test_unreferenced.py::test_unreferenced_no_refresh_uses_deleted_graph_path_without_text_reads`) | Omit `--no-refresh` (or drop `--text-fallback`, which would have no effect anyway) when a current-source text scan is required |
 | `analyze`, then `touch` a tracked file without changing bytes | no drift | `hashlib.sha256` comparison in `drift` (`minotaur/query/freshness.py`; AC-03 scenario (f)) | No stderr freshness line; JSON `refreshed: false`, `stale: []`; exit `0` | Change the bytes or use `analyze --force` if a new snapshot is required for another reason |
 | `analyze`, edit a tracked file, then restore identical bytes | no drift | Byte comparison in `drift` (`minotaur/query/freshness.py`; AC-03 scenario (g)) | No refresh or stale diagnostic; JSON `stale: []`; exit `0` | None is needed: the snapshot is byte-current again |
@@ -28,14 +28,15 @@ literal because agents commonly parse these messages and JSON fields.
 | `analyze`, then add or edit a file under an excluded or hidden directory that was never explicitly selected | no | `_is_excluded` in `minotaur/language_interpreter/selection.py` prevents discovery (AC-18: `test_excluded_and_hidden_directory_edits_are_not_detected`) | No refresh; JSON `refreshed: false`, `stale: []`; exit `0` | Explicitly select the excluded target when it is intentionally in scope |
 | `analyze`, edit a file reached only through an out-of-root symlink | no | `select_sources` resolves and rejects the escape in `minotaur/language_interpreter/selection.py` (AC-18: `test_out_of_root_symlink_edit_is_not_detected`) | No refresh; JSON `stale: []`; exit `0` | Analyze a root that contains the resolved file, or copy it inside the root |
 | `analyze` a file with a parse failure, then edit that file | no `changed`/`missing` finding | `interpreter.py` omits the failed file node after `SyntaxError`; `drift` can compare no recorded hash (AC-18: `test_parse_failed_file_has_no_changed_or_missing_finding_but_new_file_is_added`) | `changed` and `missing` remain empty for that file; a query still refreshes when the file appears in `added`; its re-analysis returns exit `1`, but does not re-print the parse diagnostic | Run `analyze` to see the parse diagnostic, then fix the parse error; a new supported file below a recorded directory is reported as `added` |
-| Load a graph with no recorded selection and query after source drift | no automatic refresh | `recorded_selection` in `minotaur/query/freshness.py` and the guard in `_load_and_refresh_graph` in `minotaur/cli.py` (AC-18: `test_graph_without_recorded_selection_refuses_automatic_refresh`) | `minotaur: error: graph has no recorded source selection; cannot refresh`; exit `2` | Re-run `analyze` so the graph records its targets |
+| Load a graph with no recorded selection and query after source drift | no automatic refresh | `recorded_selection` in `minotaur/query/freshness.py` and the guard in `_load_and_refresh_graph` in `minotaur/cli.py` (AC-18: `test_graph_without_recorded_selection_refuses_automatic_refresh`) | `minotaur: error: graph has no recorded source selection; cannot refresh`; exit `2` | Re-run `analyze --force` with an explicit `--output` so the graph records its targets, or use a config-derived `analyze` |
 | Read valid graph bytes whose sidecar digest does not match | yes — distrust, not an integrity error | `load_graph_file` in `minotaur/graph_model/loading.py` rejects the stale sidecar and runs the full validation once (AC-03 scenario (j)) | No diagnostic; one slow full read; `<GRAPH>.sha256` is rewritten to the true digest; exit `0` | None needed: the graph was valid and is re-stamped after validation |
 | Hand-edit graph bytes and leave the sidecar untouched, then read it | yes for schema-shape and identity edits; no for a label-only edit | `load_graph_file` in `minotaur/graph_model/loading.py` rejects the stale sidecar and runs full schema and semantic validation, including node-ID recomputation (AC-18: `test_stale_sidecar_detects_schema_shape_and_node_identity_but_not_labels`) | A node-identity edit exits `2` with `minotaur: error: graph semantic validation failed: /nodes/N/id: node id '...' does not match the digest recomputed from its identity; ...`; a schema-shape edit exits `2` with its schema-validation finding; a label-only edit exits `0` and is re-stamped | `--validate` forces the same full pass on a stamped graph; no trusted-path check detects a label-only edit |
 | Delete the sidecar, then read the graph | not an error | `load_graph_file` treats a missing or unreadable sidecar as untrusted and runs the full validation once; the read command re-stamps after it passes (AC-03 scenario (i)) | No diagnostic; the read is slower once; a new `<GRAPH>.sha256` appears | None needed |
 | Read with `--validate` regardless of sidecar state | yes — always the full pass | `load_graph_file(..., validate=True)` never consults the sidecar (AC-03 scenario (k)) | Same output as an untrusted read; after a passing read the sidecar is rewritten with the verified digest (`_stamp_if_validated` in `minotaur/cli.py`), so a mismatched stamp is repaired | Use after any external graph edit |
 | Hand-edit graph bytes and regenerate its sidecar, then read it | graph-file integrity is not detected on the trusted path | `load_graph_file` and `validate_document(..., verify_node_ids=False)` in `minotaur/graph_model/loading.py` (AC-18: `test_regenerated_sidecar_trusts_hand_edited_graph_until_validate`) | The trusted read loads without a finding; `--validate` runs the full check and reports a node-ID mismatch; exit `2` for the invalid validated read | Pass `--validate` after external graph edits |
-| Run `analyze` with an existing graph and a clean source selection | clean-skip only when content and selection are current | The probe in `minotaur/cli.py` compares `drift(...).is_clean` and `recorded_selection` (AC-03 scenario (h), after (f)); Git `source_control` is not a gate | `minotaur: graph is up to date, skipping analysis`; exit `0` | `--force` bypasses the probe |
-| Query a graph whose bytes are clean but its selection metadata differs from the requested analyze targets | queries compare drift only | `_load_and_refresh_graph` calls `drift`; the analyze probe additionally compares selection (`minotaur/cli.py`; AC-18: `test_query_ignores_selection_mismatch_but_analyze_reconciles_it`) | Query may answer without refresh; `analyze` re-runs instead of printing the clean-skip line | Use `analyze` to reconcile the recorded target set |
+| Run `analyze` with an existing graph and a clean source selection | clean-skip only when content, selection and recorded analysis facts are current | The probe in `minotaur/cli.py` compares `drift(...).is_clean`, `recorded_selection`, recorded errors and effective SQL settings (AC-03 scenario (h), after (f)); Git `source_control` is not a gate | `minotaur: graph is up to date, skipping analysis`; exit `0` | `--force` bypasses the probe |
+| Query a graph whose bytes are clean but its selection metadata differs from the requested analyze targets | queries compare drift only | `_load_and_refresh_graph` calls `drift`; the analyze probe additionally compares selection (`minotaur/cli.py`; AC-18: `test_query_ignores_selection_mismatch_but_explicit_analyze_requires_force`) | Query may answer without refresh; `analyze` with an explicit `--output` refuses with exit `2` and `pass --force to replace it` | Use `analyze --force` to replace the recorded target set at an explicit output; config- and scope-derived outputs reconcile without `--force` |
+| Query a graph under a root where every recorded file is missing | detected, but refused when at least one file was recorded, regardless of added paths | `belongs_to_different_tree` in `minotaur/query/freshness.py`, checked by `_load_and_refresh_graph` before the refresh announcement | Exit `2`; error names the root and recorded file count; graph bytes remain unchanged, as do already-current sidecar bytes | Correct `--root`, pass `--no-refresh` to read saved facts, or run `analyze --force` with an explicit `--output`; a config-derived `analyze` also recovers |
 | An edit lands after `drift()` and before the answer is printed | no concurrency detection | No lock or `flock`/`fcntl` guard exists around freshness and answer production (`minotaur/query/freshness.py`, `minotaur/cli.py`; AC-18: `test_edit_after_drift_is_not_detected_between_drift_and_answer`) | The answer can describe the pre-edit snapshot; no special diagnostic is promised | Coordinate writers externally when a consistent multi-process snapshot matters |
 | Run explicit `query diff OLD NEW` | no source freshness check | `_run_explicit_diff` in `minotaur/cli.py` loads and compares two graph files directly (AC-18: `test_diff_does_not_call_source_drift`) | The normal diff text or JSON; exit `0` when identical and `1` when structures differ; no `stale` field is added | Use a freshness-checked graph query first when comparing current source |
 | Run committed-reference `query diff` | no graph-file/source refresh or side effect | `_run_committed_diff` reads the graph and sidecar from `HEAD`, then analyzes the current selection in memory | The normal diff text or JSON; exit `0` when identical and `1` when structures differ; errors exit `2`; no `stale` field and no graph or sidecar rewrite | Provide a located config; use explicit `OLD NEW` for the config-free mode |
@@ -55,8 +56,17 @@ a stale answer without claiming that replacement has succeeded.
 ### Tracked deletion
 
 Deletion is compared against the file node rather than the directory walk.
-The refresh can produce an empty graph while preserving selection metadata, so
-the same path can be detected if it returns later.
+Partial deletion still refreshes and preserves selection metadata, so the
+same path can be detected if it returns later. If every recorded file is
+missing, a refreshing query refuses with exit `2` before announcing a refresh,
+even if new files were added. Full deletion and full rename are indistinguishable
+from a wrong root under this rule. Correct `--root`, use `--no-refresh` for saved
+facts, or replace the graph with `analyze --force` and an explicit `--output`
+(or a config-derived `analyze`). Recovery may produce an empty graph. A graph
+with no recorded files does not trigger this refusal. A wrong root containing
+at least one recorded path remains outside this protection. Refusal preserves
+graph bytes; sidecar bytes stay unchanged if already current, but a missing
+or stale sidecar may have been stamped during graph validation.
 
 ### Added file under a directory target
 
@@ -66,9 +76,11 @@ the same extension, exclusion, and containment policy used by `analyze`.
 
 ### Rename
 
-A rename has two independent facts: the old path is missing and the new path
-is added. Reporting both prevents an agent from mistaking a moved file for a
-simple deletion or a new unrelated source file.
+When another recorded file remains, a rename has two independent facts: the
+old path is missing and the new path is added if it is under a recorded
+directory. Reporting both prevents an agent from mistaking a moved file for a
+simple deletion or a new unrelated source file. Renaming every recorded file
+triggers the same refusal and recovery as full deletion, regardless of added paths.
 
 ### Branch switch with changed bytes
 
@@ -176,15 +188,17 @@ current source should be embedded.
 
 The analyze command preserves the selected content and selection metadata. Its
 probe skips only when content is clean and the requested selection equals the
-recorded selection; Git snapshot identity is not a condition. The recorded
+recorded selection, no errors are recorded, and a SQL selection has matching
+valid recorded settings. Git snapshot identity is not a condition. The recorded
 commit and branch remain last-generation provenance and may lag `HEAD`.
 
 ### Query drift comparison
 
 The query path intentionally asks only whether the recorded source bytes and
 directory additions have drifted. Target-set reconciliation belongs to
-`analyze`, which can be invoked with the desired targets; source-control
-metadata is not a freshness authority.
+`analyze`, which can be invoked with the desired targets and `--force` for an
+explicit `--output`; config- and scope-derived outputs reconcile without
+`--force`. Source-control metadata is not a freshness authority.
 
 ### Concurrent edit
 
@@ -221,7 +235,8 @@ registered interpreter for its extension, hashes current bytes, and compares
 them with that producer's recorded `content_sha256` extension value (for
 example, `extensions["minotaur-javascript"]["content_sha256"]`). Missing files
 and new files under recorded directory targets use separate `missing` and
-`added` sets. The query refresh path prints the exact attempt line
+`added` sets. If every recorded file is missing, the wrong-root guard refuses
+before a refresh attempt. Otherwise the query refresh path prints the exact attempt line
 `minotaur: refreshing graph (N drifted paths)` and the sorted stale-path union
 before re-analyzing, so an agent can see why a replacement was attempted. The
 attempt line is not a completion claim: a source diagnostic returns exit code
@@ -277,12 +292,24 @@ needed.
 ## Analyze's clean-skip probe
 
 `analyze` has a stricter probe than a query. It skips when the source content is
-clean and the requested target selection equals the graph's recorded selection.
+clean and the requested target selection equals the graph's recorded selection,
+provided the graph records no errors and, for a SQL selection, its recorded
+SQL settings are valid and equal to the effective settings. Recorded errors
+force re-analysis and current diagnostic reporting; unchanged errors still
+return exit `1`. Missing, invalid or changed SQL settings cause re-analysis;
+a subsequent clean run can skip. Non-SQL selections ignore SQL-setting changes.
+Queries do not use these recorded facts as refresh gates.
 The recorded Git commit and branch are provenance from the last real
 generation, not freshness gates. Thus a branch change or commit advance whose
 selected bytes are identical leaves the graph bytes stable and may leave its
-stamp lagging `HEAD`; a content or selection change, or `--force`, regenerates
-the graph and records the then-current commit and branch.
+stamp lagging `HEAD`. A content change regenerates an owned graph and records
+the then-current commit and branch. An explicit `--output` that loads as a graph
+requires `--force` if its selection differs (including absent selection metadata)
+or every recorded file is missing under the current root. This check precedes
+clean-skip and applies even when the explicit path equals the configured graph.
+Config- and scope-derived outputs reconcile changed selections without
+`--force`; the current root and targets must still be valid. `--force` bypasses
+the probe and requests a new snapshot.
 
 ## Snapshot queries and concurrency
 

@@ -603,7 +603,9 @@ def test_stale_sidecar_detects_schema_shape_and_node_identity_but_not_labels(
     assert "'label' is a required property" in capsys.readouterr().err
 
 
-def test_query_ignores_selection_mismatch_but_analyze_reconciles_it(tmp_path: Path, capsys) -> None:
+def test_query_ignores_selection_mismatch_but_explicit_analyze_requires_force(
+    tmp_path: Path, capsys
+) -> None:
     """docs/concepts/freshness.md — Query a graph whose bytes are clean but its selection metadata differs from the requested analyze targets."""  # noqa: E501
     root = tmp_path / "source"
     selected = _write(root, "selected.py", "def foo():\n    return 1\n")
@@ -636,26 +638,23 @@ def test_query_ignores_selection_mismatch_but_analyze_reconciles_it(tmp_path: Pa
         "selection"
     ] == ["selected.py"]
 
-    # Analyze has a stricter clean-skip probe: a changed target selection
-    # forces reconciliation even though the source bytes themselves are clean.
-    assert (
-        cli.main(
-            [
-                "analyze",
-                "--root",
-                str(root),
-                "--output",
-                str(output),
-                str(package),
-            ]
-        )
-        == 0
-    )
+    # An explicit output requires permission to replace a different selection,
+    # even when the recorded source bytes themselves are clean.
+    analyze_args = ["analyze", "--root", str(root), "--output", str(output), str(package)]
+    assert cli.main(analyze_args) == 2
     analyze_capture = capsys.readouterr()
-    assert "graph is up to date, skipping analysis" not in analyze_capture.err
+    assert "pass --force to replace it" in analyze_capture.err
+    assert output.read_bytes() == before_query
+
+    assert cli.main([*analyze_args, "--force"]) == 0
     assert json.loads(output.read_text(encoding="utf-8"))["extensions"]["minotaur"][
         "selection"
     ] == ["pkg"]
+    assert {
+        node["path"]
+        for node in json.loads(output.read_text())["nodes"]
+        if node["node_class"] == "file"
+    } == {"pkg/other.py"}
 
 
 def test_edit_after_drift_is_not_detected_between_drift_and_answer(
