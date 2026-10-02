@@ -19,7 +19,9 @@ EXPECTED = {
         '{"query":"definitions","refreshed":false,"results":[{"duplicate":false,'
         '"kind":"function","line":1,"path":"mod.py","symbol":"mod.target"}],"stale":[],"stale_analyzer":null}\n'
     ),
-    "callers": '{"query":"callers","refreshed":false,"results":[],"stale":[],"stale_analyzer":null}\n',
+    "callers": (
+        '{"query":"callers","refreshed":false,"results":[],"stale":[],"stale_analyzer":null}\n'
+    ),
     "impact": (
         '{"query":"impact","refreshed":false,"results":[{"boundary":false,"depth":0,'
         '"kind":"function","symbol":"mod.target"}],"stale":[],"stale_analyzer":null}\n'

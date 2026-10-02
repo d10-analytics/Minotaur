@@ -57,7 +57,7 @@ def _fingerprint(root: Path) -> str:
 def test_analyzer_version_matches_output_fingerprint(tmp_path: Path) -> None:
     fresh = _fingerprint(tmp_path)
     assert re.fullmatch(r"[0-9a-f]{16}", language_interpreter.ANALYZER_SEMANTICS_VERSION)
-    assert language_interpreter.ANALYZER_SEMANTICS_VERSION == fresh, f"Fresh fingerprint: {fresh}"
+    assert fresh == language_interpreter.ANALYZER_SEMANTICS_VERSION, f"Fresh fingerprint: {fresh}"
 
 
 def test_fingerprint_covers_every_registered_interpreter_once(tmp_path: Path) -> None:
@@ -318,7 +318,10 @@ def test_version_and_path_drift_order_and_failed_refresh_atomicity(
         expected += "minotaur: refreshing graph (1 drifted paths)\n"
     expected += f"minotaur: stale: {path}\n"
     if mode == "mixed":
-        expected += "minotaur: error: selected files require unsupported multi-interpreter graph composition\n"
+        expected += (
+            "minotaur: error: selected files require unsupported "
+            "multi-interpreter graph composition\n"
+        )
         assert output.out == ""
     assert output.err == expected
     if mode != "refresh":
@@ -453,7 +456,8 @@ def test_committed_diff_refuses_before_even_failing_analysis(
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err == (
-        f"minotaur: error: committed graph was produced by analyzer version {'none' if missing else OLD}, "
+        "minotaur: error: committed graph was produced by analyzer version "
+        f"{'none' if missing else OLD}, "
         f"but this Minotaur uses {language_interpreter.ANALYZER_SEMANTICS_VERSION}; "
         "run analyze and commit the refreshed graph and its sidecar\n"
     )
