@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, cast
 
+from minotaur.query.freshness import AnalyzerChange
 from minotaur.query.system import SystemQueryResult
 
 
@@ -29,6 +30,7 @@ def render_json(
     *,
     refreshed: bool,
     stale: Sequence[str],
+    stale_analyzer: AnalyzerChange | None,
 ) -> str:
     """Render the shared record-query envelope for one query result.
 
@@ -47,6 +49,7 @@ def render_json(
             "refreshed": refreshed,
             "results": [record.to_dict() for record in records],
             "stale": sorted(stale),
+            "stale_analyzer": stale_analyzer.to_dict() if stale_analyzer is not None else None,
         }
     )
 
