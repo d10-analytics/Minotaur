@@ -20,8 +20,10 @@ from minotaur.language_interpreter.workspace import Workspace
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
-# Compare against the final source behavior, including full-file removal refusal.
-BASELINE_COMMIT = "c43c45d60605e75ee9013580ba7a59fbf5af88dd"
+# Compare against the final source behavior, including analyzer version stamps.
+BASELINE_COMMIT = "24ce53bee2cc014660b9915f81e9efac47c754da"
+# Freeze the source validated by the historical viewer and navigation comparisons.
+PRE_STAMP_COMMIT = "c43c45d60605e75ee9013580ba7a59fbf5af88dd"
 VIEWER_ADVANCE_COMMIT = "52a8b29d376e99c582d686dbead579acc438de37"
 # Preserve the historical fixture provenance independently of output revisions.
 FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
@@ -1289,12 +1291,13 @@ def test_equivalence_baseline_advance_is_necessary_and_sufficient(tmp_path: Path
 
     reverted_side = _worktree_side(tmp_path, "reverted", PRE_ADVANCE_BASELINE)
     advanced_side = _worktree_side(tmp_path, "advanced", VIEWER_ADVANCE_COMMIT)
+    frozen_side = _worktree_side(tmp_path, "pre-stamp", PRE_STAMP_COMMIT)
     try:
         reverted = _run(
             "--baseline-src",
             str(reverted_side),
             "--branch-src",
-            str(ROOT / "src"),
+            str(frozen_side),
             "--queries",
             str(workload_path),
             "--root",
@@ -1314,7 +1317,7 @@ def test_equivalence_baseline_advance_is_necessary_and_sufficient(tmp_path: Path
             "--baseline-src",
             str(advanced_side),
             "--branch-src",
-            str(ROOT / "src"),
+            str(frozen_side),
             "--queries",
             str(workload_path),
             "--root",
@@ -1325,6 +1328,7 @@ def test_equivalence_baseline_advance_is_necessary_and_sufficient(tmp_path: Path
     finally:
         _remove_worktree(reverted_side)
         _remove_worktree(advanced_side)
+        _remove_worktree(frozen_side)
 
 
 def test_navigation_baseline_advance_preserves_exact_query_comparison(tmp_path: Path) -> None:
@@ -1334,12 +1338,13 @@ def test_navigation_baseline_advance_preserves_exact_query_comparison(tmp_path: 
     workload_path, _ = _non_diff_workload(tmp_path)
     old_side = _worktree_side(tmp_path, "old-navigation", VIEWER_ADVANCE_COMMIT)
     new_side = _worktree_side(tmp_path, "new-navigation", BASELINE_COMMIT)
+    frozen_side = _worktree_side(tmp_path, "pre-stamp", PRE_STAMP_COMMIT)
     try:
         old = _run(
             "--baseline-src",
             str(old_side),
             "--branch-src",
-            str(ROOT / "src"),
+            str(frozen_side),
             "--queries",
             str(workload_path),
             "--root",
@@ -1365,3 +1370,4 @@ def test_navigation_baseline_advance_preserves_exact_query_comparison(tmp_path: 
     finally:
         _remove_worktree(old_side)
         _remove_worktree(new_side)
+        _remove_worktree(frozen_side)
