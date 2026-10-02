@@ -59,10 +59,15 @@ Normal recursive scans exclude hidden directories, caches, and virtual
 environments. Explicitly selecting such a file or directory includes it.
 The output parent directory must already exist, and an output path may never
 also be a selected source file. An existing graph can be reused when its
-recorded selection and analyzed source content are clean and it records no
-errors: Minotaur prints
+recorded selection and analyzed source content are clean, its analyzer semantics
+version is current, and it records no errors: Minotaur prints
 `graph is up to date, skipping analysis` and leaves the file unchanged. Use
 `--force` to analyze and rewrite an existing graph regardless of freshness.
+A missing or different analyzer version on a graph with a recorded, non-empty
+selection causes re-analysis and prints
+`minotaur: analyzer version changed (<old> -> <new>), refreshing` to stderr
+(`none` means no recorded version), before re-analysis. It does not
+print the up-to-date skip message.
 Recorded errors cause re-analysis and current diagnostic reporting instead of
 reuse. With an explicit `--output`, an existing loadable graph with a different
 or missing recorded selection, or with every recorded file missing under the

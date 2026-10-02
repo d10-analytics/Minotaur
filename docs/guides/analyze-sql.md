@@ -168,7 +168,11 @@ It also re-analyzes a SQL selection when its recorded effective SQL settings
 are absent, invalid or different from the current settings, even when source
 bytes are unchanged. After a clean analysis records the settings, the next
 unchanged run can skip. SQL-setting changes do not invalidate non-SQL graphs,
-and query refresh remains driven by source drift.
+and query refresh uses source drift and the analyzer semantics version.
+Clean-skip also requires a current analyzer version for a recorded, non-empty
+selection. A missing or different version prints
+`minotaur: analyzer version changed (<old> -> <new>), refreshing` before
+re-analysis (`none` for a missing version), without the up-to-date skip line.
 
 The graph records the selected target paths. After registration, adding or
 editing SQL under a recorded directory is ordinary freshness drift. A

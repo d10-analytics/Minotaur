@@ -124,7 +124,8 @@ selection to re-analyze even when source bytes are unchanged. Missing or invalid
 recorded settings also cause re-analysis. A clean run records the new settings,
 so the following unchanged run can skip; recorded errors keep re-analysis
 necessary. Non-SQL selections ignore SQL-setting changes. Query refresh still
-uses source drift, so a settings edit alone does not trigger it.
+uses source drift and the analyzer semantics version, so a settings edit alone
+does not trigger it.
 
 SQL foreign-key ownership can also be recorded with an exact target-to-file
 mapping:
