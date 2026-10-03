@@ -2924,3 +2924,49 @@ def test_analyze_dubious_ownership_discovery_and_provenance(
         assert result.returncode == 0, result.stderr
         assert "source_control omitted" in result.stderr
         assert "source_control" not in json.loads(output.read_text())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux byte filenames")
+def test_analyze_non_utf8_directory_keeps_commit_and_config_boundary(tmp_path: Path) -> None:
+    _write_config(tmp_path, _MINOTAUR_CONFIG + 'targets = ["missing.py"]\n')
+    root = _config_repo(tmp_path, os.fsdecode(b"t8-\xe9"))
+    _write(root, "app.py", "value = 1\n")
+    assert _git(root, "add", "app.py").returncode == 0
+    assert _git(root, "commit", "-qm", "initial").returncode == 0
+    expected = _git(root, "rev-parse", "HEAD").stdout.strip()
+
+    result = _run_in(root, "analyze", "--root", ".", "--output", "graph.json", "app.py")
+
+    assert result.returncode == 0, result.stderr
+    graph = json.loads((root / "graph.json").read_text(encoding="utf-8"))
+    assert graph["source_control"]["commit"] == expected
+    assert _paths(root / "graph.json") == {"app.py"}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux byte ref names")
+@pytest.mark.parametrize("committed", [False, True])
+def test_analyze_omits_non_utf8_branch(tmp_path: Path, committed: bool) -> None:
+    root = _config_repo(tmp_path)
+    _write(root, "app.py", "value = 1\n")
+    expected = None
+    if committed:
+        assert _git(root, "add", "app.py").returncode == 0
+        assert _git(root, "commit", "-qm", "initial").returncode == 0
+        expected = _git(root, "rev-parse", "HEAD").stdout.strip()
+    branch = os.fsdecode(b"feat-\xe9")
+    if committed:
+        assert _git(root, "branch", branch).returncode == 0
+    assert _git(root, "symbolic-ref", "HEAD", f"refs/heads/{branch}").returncode == 0
+    observed = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=root, capture_output=True, check=True
+    )
+    assert observed.stdout.strip() == b"feat-\xe9"
+
+    result = _run_in(root, "analyze", "--root", ".", "--output", "graph.json", "app.py")
+
+    assert result.returncode == 0, result.stderr
+    graph = json.loads((root / "graph.json").read_text(encoding="utf-8"))
+    if committed:
+        assert graph["source_control"] == {"system": "git", "commit": expected}
+    else:
+        assert "source_control" not in graph
