@@ -609,3 +609,31 @@ def test_outside_git_disk_fallback_forces_c_locale(tmp_path: Path) -> None:
     result = _run(root, "query", "diff", env=env)
     assert result.returncode == 1, result.stderr
     assert "+ app.added" in result.stdout
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_committed_diff_in_orphaned_linked_worktree_exits_two(
+    tmp_path: Path, explicit: bool
+) -> None:
+    (tmp_path / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\ntargets = ["linked/app.py"]\n', encoding="utf-8"
+    )
+    root, _, _ = _graph_fixture(tmp_path)
+    assert _run(root, "analyze").returncode == 0
+    _commit_all(root)
+    linked = tmp_path / "linked"
+    _git(root, "worktree", "add", "-q", str(linked))
+    root.rename(tmp_path / "moved")
+    (linked / "app.py").write_text("def app():\n    pass\n\ndef added():\n    pass\n")
+    graph = linked / "graph.json"
+    before = (graph.read_bytes(), stamp_path(graph).read_bytes())
+    args = ["query", "diff"]
+    if explicit:
+        args += ["--config", str(linked / ".minotaur.toml")]
+
+    result = _run(linked, *args)
+
+    assert result.returncode == 2, result.stderr
+    assert result.stdout == ""
+    assert "not a git repository:" in result.stderr
+    assert (graph.read_bytes(), stamp_path(graph).read_bytes()) == before

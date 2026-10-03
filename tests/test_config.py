@@ -1186,3 +1186,21 @@ def test_discovery_non_utf8_directory_preserves_git_boundary(
     assert find_config(Path.cwd()) is None
     inner = _write(root, ".minotaur.toml", _CONFIG)
     assert find_config(Path.cwd()) == inner
+
+
+def test_discovery_stops_in_orphaned_linked_worktree(tmp_path: Path) -> None:
+    _write(tmp_path, ".minotaur.toml", _CONFIG)
+    main = tmp_path / "main"
+    main.mkdir()
+    assert _git(main, "init", "-q").returncode == 0
+    assert _git(main, "config", "user.email", "tests@example.invalid").returncode == 0
+    assert _git(main, "config", "user.name", "Minotaur Tests").returncode == 0
+    assert _git(main, "commit", "-q", "--allow-empty", "-m", "initial").returncode == 0
+    linked = tmp_path / "linked"
+    assert _git(main, "worktree", "add", "-q", str(linked)).returncode == 0
+    main.rename(tmp_path / "moved")
+
+    with pytest.raises(
+        ConfigError, match="Git work-tree discovery failed: .*not a git repository:"
+    ):
+        find_config(linked)

@@ -2970,3 +2970,27 @@ def test_analyze_omits_non_utf8_branch(tmp_path: Path, committed: bool) -> None:
         assert graph["source_control"] == {"system": "git", "commit": expected}
     else:
         assert "source_control" not in graph
+
+
+def test_analyze_in_orphaned_linked_worktree_stops_before_writing(tmp_path: Path) -> None:
+    parent_graph = tmp_path / "parent-graph.json"
+    _write_config(
+        tmp_path, _MINOTAUR_CONFIG + 'targets = ["linked/app.py"]\ngraph = "parent-graph.json"\n'
+    )
+    main = _config_repo(tmp_path, "main")
+    _write(main, "app.py", "value = 1\n")
+    assert _git(main, "add", "app.py").returncode == 0
+    assert _git(main, "commit", "-qm", "initial").returncode == 0
+    linked = tmp_path / "linked"
+    assert _git(main, "worktree", "add", "-q", str(linked)).returncode == 0
+    main.rename(tmp_path / "moved")
+    output = linked / "graph.json"
+
+    result = _run_in(linked, "analyze", "--root", ".", "--output", str(output), "app.py")
+
+    assert result.returncode == 2, result.stderr
+    assert "not a git repository:" in result.stderr
+    assert not output.exists()
+    assert not stamp_path(output).exists()
+    assert not parent_graph.exists()
+    assert not stamp_path(parent_graph).exists()
