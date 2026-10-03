@@ -518,10 +518,12 @@ def _warn_unresolved_imports(document: GraphDocument, root: Path) -> None:
 
 def _git_source_control(root: Path) -> SourceControl | None:
     """Return the Git snapshot metadata for ``root``, when it is available."""
-    work_tree = git.run_git(root, ("rev-parse", "--is-inside-work-tree"))
-    if work_tree is None:
+    try:
+        work_tree = git.work_tree_root(root)
+    except git.GitProbeError as error:
+        print(f"minotaur: warning: {error}; source_control omitted", file=sys.stderr)
         return None
-    if work_tree.returncode != 0 or work_tree.stdout.strip() != "true":
+    if work_tree is None:
         return None
 
     commit_result = git.run_git(root, ("rev-parse", "HEAD"))
@@ -806,7 +808,8 @@ def _load_committed_old(graph_path: Path, *, root: Path, validate: bool) -> Load
     work_tree = git.work_tree_root(root)
     if work_tree is None:
         # Outside Git (or with an unavailable probe), disk is the deliberate
-        # fallback. load_graph_file itself only reads; this path never stamps.
+        # fallback. Discovery errors propagate before analysis rather than using disk.
+        # load_graph_file itself only reads; this path never stamps.
         return load_graph_file(graph_path, validate=validate)
     try:
         relative = graph_path.resolve().relative_to(work_tree).as_posix()

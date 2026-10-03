@@ -179,7 +179,8 @@ def find_config(start: Path, *, config: Path | None = None) -> Path | None:
     discovery is disabled.  Otherwise the nearest ``.minotaur.toml`` walking
     from ``start`` toward the filesystem root is returned, stopping at the
     enclosing Git work-tree root per the discovery boundary; ``None`` means no
-    config governs the resolution.
+    config governs the resolution. Git discovery failures raise :class:`ConfigError`;
+    unavailable Git leaves discovery unbounded.
     """
     if config is not None:
         selected = config if config.is_absolute() else start / config
@@ -750,7 +751,10 @@ def _git_work_tree_root(start: Path) -> Path | None:
     """Return the enclosing Git work-tree top for ``start``, or ``None``.
 
     ``None`` covers both "not inside a Git work tree" and "the guarded probe
-    is unavailable or failed"; discovery then continues to the filesystem
-    root instead of stopping at an assumed boundary.
+    is unavailable"; discovery then continues to the filesystem root.
+    A probe that ran and failed instead stops discovery with ``ConfigError``.
     """
-    return git.work_tree_root(start)
+    try:
+        return git.work_tree_root(start)
+    except git.GitProbeError as error:
+        raise ConfigError(f"Git work-tree discovery failed: {error}") from error

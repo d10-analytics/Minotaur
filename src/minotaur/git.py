@@ -11,8 +11,31 @@ from pathlib import Path
 from typing import Any
 
 
+# Repository-local variables reported by `git rev-parse --local-env-vars`,
+# except GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT, which retain caller policy.
+_REPOSITORY_LOCAL_ENVIRONMENT = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+)
+
+
+class GitProbeError(ValueError):
+    """Git ran but could not determine the enclosing work tree."""
+
+
 def _probe_environment() -> dict[str, str]:
-    """Return an environment that forbids implicit promisor object fetches.
+    """Isolate repository discovery while retaining inherited Git policy.
 
     Git reads for a pinned local revision must never reach a network remote.
     A partial clone would otherwise transparently fetch a missing promised
@@ -21,7 +44,10 @@ def _probe_environment() -> dict[str, str]:
     strict read paths already translate into a side-attributed error.
     """
     environment = dict(os.environ)
+    for name in _REPOSITORY_LOCAL_ENVIRONMENT:
+        environment.pop(name, None)
     environment["GIT_NO_LAZY_FETCH"] = "1"
+    environment["LC_ALL"] = "C"
     return environment
 
 
@@ -46,10 +72,18 @@ def run_git(
 
 
 def work_tree_root(start: Path) -> Path | None:
-    """Return the enclosing work-tree root, or ``None`` for an unknown probe."""
+    """Return the work-tree root, or ``None`` outside Git or without Git.
+
+    Raise :class:`GitProbeError` when Git runs but discovery fails.
+    """
     completed = run_git(start, ("rev-parse", "--show-toplevel"))
-    if completed is None or completed.returncode != 0:
+    if completed is None:
         return None
+    if completed.returncode != 0:
+        message = _error_text(completed.stderr)
+        if "not a git repository" in message or "must be run in a work tree" in message:
+            return None
+        raise GitProbeError(message)
     value = completed.stdout.strip()
     return Path(value).resolve() if value else None
 
@@ -59,7 +93,8 @@ def read_head_blob(root: Path, relative_path: str) -> bytes | None:
 
     Git command/probe failures are also represented as ``None``. Callers that
     already established a work tree treat that as a strict artifact error;
-    callers deciding whether Git is available use :func:`work_tree_root`.
+    callers deciding whether Git is available use :func:`work_tree_root`,
+    which distinguishes discovery failures from unavailable Git.
     """
     try:
         completed = run_git(root, ("show", f"HEAD:{relative_path}"), text=False)
