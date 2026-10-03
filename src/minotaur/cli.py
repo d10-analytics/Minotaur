@@ -1675,7 +1675,9 @@ def _add_query_subparsers(
         "--details", action="store_true", help="include declared paths and connections"
     )
     if systems_mode:
-        diff_description = "Compare configured systems between Git revisions or with the working tree."
+        diff_description = (
+            "Compare configured systems between Git revisions or with the working tree."
+        )
         diff_epilog = (
             "With no BEFORE and AFTER, compare HEAD with the current working tree; "
             "with BEFORE AFTER, compare those two Git revisions. Use --before-config "
