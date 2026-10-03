@@ -1616,7 +1616,10 @@ def _add_query_subparsers(
     ``query diff`` keeps the strict config-free grammar when explicit OLD NEW
     positionals are present. When a config is located, its OLD/NEW positionals
     become optional and the committed mode registers ``--scope`` and
-    ``--config``. The remaining subcommands consume config ``graph``/``root``,
+    ``--config``, with a help pointer to the separate systems mode. Systems
+    help describes revision comparison with BEFORE/AFTER display labels while
+    retaining the old/new argument destinations. The remaining subcommands
+    consume config ``graph``/``root``,
     so when a config was located their declarations relax and ``--config`` is
     registered.
     """
@@ -1671,7 +1674,16 @@ def _add_query_subparsers(
     systems_parser.add_argument(
         "--details", action="store_true", help="include declared paths and connections"
     )
-    if config_located or systems_mode:
+    if systems_mode:
+        diff_description = "Compare configured systems between Git revisions or with the working tree."
+        diff_epilog = (
+            "With no BEFORE and AFTER, compare HEAD with the current working tree; "
+            "with BEFORE AFTER, compare those two Git revisions. Use --before-config "
+            "and --after-config for per-side configuration. Exit status: 0 means "
+            "structures are identical, 1 means structures differ, and 2 means the "
+            "command could not complete; the caller decides the consequence."
+        )
+    elif config_located:
         diff_description = (
             "Compare the current working tree with the committed graph at HEAD "
             "(or compare two explicit graph snapshots)."
@@ -1679,7 +1691,8 @@ def _add_query_subparsers(
         diff_epilog = (
             "Modes: with no OLD and NEW, use the located project config and "
             "optionally --scope NAME; with OLD NEW, compare those explicit files "
-            "without using project config. Exit status: 0 means structures are "
+            "without using project config. For systems comparison, see "
+            "query diff --systems --help. Exit status: 0 means structures are "
             "identical, 1 means structures differ, and 2 means the command "
             "could not complete; the caller decides the consequence."
         )
@@ -1697,10 +1710,14 @@ def _add_query_subparsers(
         epilog=diff_epilog,
     )
     diff_parser.add_argument(
-        "old", nargs="?" if (config_located or systems_mode) else None, metavar="OLD"
+        "old",
+        nargs="?" if (config_located or systems_mode) else None,
+        metavar="BEFORE" if systems_mode else "OLD",
     )
     diff_parser.add_argument(
-        "new", nargs="?" if (config_located or systems_mode) else None, metavar="NEW"
+        "new",
+        nargs="?" if (config_located or systems_mode) else None,
+        metavar="AFTER" if systems_mode else "NEW",
     )
     diff_parser.add_argument("--json", action="store_true", help="emit stable JSON records")
     if config_located and not systems_mode:
