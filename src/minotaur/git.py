@@ -59,7 +59,7 @@ def run_git(
 ) -> subprocess.CompletedProcess[Any] | None:
     """Run a Git probe, decoding text with filesystem encoding semantics."""
     try:
-        completed = subprocess.run(
+        completed: subprocess.CompletedProcess[Any] = subprocess.run(
             ["git", *arguments],
             cwd=root,
             capture_output=True,
