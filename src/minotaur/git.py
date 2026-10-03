@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 # Repository-local variables reported by `git rev-parse --local-env-vars`,
 # except GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT, which retain caller policy.
 _REPOSITORY_LOCAL_ENVIRONMENT = (
