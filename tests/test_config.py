@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import os
 import re
 import subprocess
 import sys
@@ -1125,3 +1126,81 @@ def test_pyproject_declares_the_tomli_backport_marker() -> None:
     text = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     dependencies = text.split("dependencies = [", 1)[1].split("]", 1)[0]
     assert re.search(r"tomli>=2\.0; python_version < \"3\.11\"", dependencies)
+
+
+def test_discovery_ignores_absolute_git_dir_from_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    assert _git(root, "init", "-q").returncode == 0
+    top = _write(root, ".minotaur.toml", _CONFIG)
+    monkeypatch.setenv("GIT_DIR", str(root / ".git"))
+    assert find_config(sub) == top
+
+
+def test_discovery_preserves_inherited_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outer = _write(tmp_path, ".minotaur.toml", _CONFIG)
+    root = tmp_path / "repo"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    assert _git(root, "init", "-q").returncode == 0
+    assert find_config(sub) is None
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(root))
+    assert find_config(sub) == outer
+
+
+def test_discovery_walks_above_bare_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outer = _write(tmp_path, ".minotaur.toml", _CONFIG)
+    bare = tmp_path / "bare.git"
+    bare.mkdir()
+    assert _git(bare, "init", "--bare", "-q").returncode == 0
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "all")
+    assert find_config(bare) == outer
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux byte filenames")
+def test_discovery_non_utf8_directory_preserves_git_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, ".minotaur.toml", _CONFIG)
+    root = tmp_path / os.fsdecode(b"t8-\xe9")
+    root.mkdir()
+    assert _git(root, "init", "-q").returncode == 0
+    assert _git(root, "config", "user.email", "tests@example.invalid").returncode == 0
+    assert _git(root, "config", "user.name", "Minotaur Tests").returncode == 0
+    _write(root, "app.py", "value = 1\n")
+    assert _git(root, "add", "app.py").returncode == 0
+    assert _git(root, "commit", "-qm", "initial").returncode == 0
+    inside = root / "nested"
+    inside.mkdir()
+    monkeypatch.chdir(inside)
+
+    assert find_config(Path.cwd()) is None
+    inner = _write(root, ".minotaur.toml", _CONFIG)
+    assert find_config(Path.cwd()) == inner
+
+
+def test_discovery_stops_in_orphaned_linked_worktree(tmp_path: Path) -> None:
+    _write(tmp_path, ".minotaur.toml", _CONFIG)
+    main = tmp_path / "main"
+    main.mkdir()
+    assert _git(main, "init", "-q").returncode == 0
+    assert _git(main, "config", "user.email", "tests@example.invalid").returncode == 0
+    assert _git(main, "config", "user.name", "Minotaur Tests").returncode == 0
+    assert _git(main, "commit", "-q", "--allow-empty", "-m", "initial").returncode == 0
+    linked = tmp_path / "linked"
+    assert _git(main, "worktree", "add", "-q", str(linked)).returncode == 0
+    main.rename(tmp_path / "moved")
+
+    with pytest.raises(
+        ConfigError, match="Git work-tree discovery failed: .*not a git repository:"
+    ):
+        find_config(linked)

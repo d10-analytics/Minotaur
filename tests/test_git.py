@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -425,3 +427,113 @@ def test_tolerant_head_probe_still_returns_none_for_absence_and_failure(
     monkeypatch.setattr(git.subprocess, "run", unavailable)
     assert git.read_head_blob(root, "plain file.txt") is None
     monkeypatch.setattr(git.subprocess, "run", original_run)
+
+
+def test_probe_environment_strips_live_repository_variables_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    names = _run(tmp_path, "rev-parse", "--local-env-vars").splitlines()
+    kept = {
+        "GIT_CONFIG_PARAMETERS": "'core.quotePath=false'",
+        "GIT_CONFIG_COUNT": "0",
+        "GIT_CEILING_DIRECTORIES": str(tmp_path),
+        "GIT_NAMESPACE": "probe-test",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER": "0",
+    }
+    for name in names:
+        monkeypatch.setenv(name, kept.get(name, "repository-local-sentinel"))
+    for name, value in kept.items():
+        monkeypatch.setenv(name, value)
+    before = dict(os.environ)
+    original = subprocess.run
+    environments: list[dict[str, str]] = []
+
+    def recording(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        environments.append(dict(kwargs["env"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(git.subprocess, "run", recording)
+    result = git.run_git(tmp_path, ("--version",))
+    assert result is not None and result.returncode == 0
+    assert len(environments) == 1
+    environment = environments[0]
+    assert not (set(names) - {"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"}) & environment.keys()
+    assert {name: environment[name] for name in kept} == kept
+    assert environment["LC_ALL"] == "C"
+    assert environment["GIT_NO_LAZY_FETCH"] == "1"
+    assert dict(os.environ) == before
+
+
+def _orphaned_linked_worktree(tmp_path: Path) -> Path:
+    """A linked worktree whose gitfile names a gitdir that no longer exists."""
+    main = tmp_path / "main"
+    main.mkdir()
+    _run(main, "init", "--quiet")
+    _run(main, "config", "user.email", "tests@example.invalid")
+    _run(main, "config", "user.name", "Git tests")
+    _run(main, "commit", "--quiet", "--allow-empty", "-m", "initial")
+    linked = tmp_path / "linked"
+    _run(main, "worktree", "add", "--quiet", str(linked))
+    main.rename(tmp_path / "moved")
+    return linked
+
+
+def test_work_tree_root_rejects_orphaned_linked_worktree(tmp_path: Path) -> None:
+    linked = _orphaned_linked_worktree(tmp_path)
+    # Git names the unopenable gitdir in its own version-dependent way (a path,
+    # or "(null)"), so only the colon form that marks a named repository is
+    # stable; the "(or any ...)" forms mean discovery found no repository.
+    with pytest.raises(git.GitProbeError, match=r"not a git repository:(?! \(or )"):
+        git.work_tree_root(linked)
+
+
+def test_work_tree_root_returns_none_outside_any_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    completed = git.run_git(outside, ("rev-parse", "--show-toplevel"))
+    assert completed is not None
+    assert "not a git repository (or any of the parent directories)" in completed.stderr
+    assert git.work_tree_root(outside) is None
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "fatal: not a git repository (or any of the parent directories): .git\n",
+        "fatal: not a git repository (or any parent up to mount point /mnt)\n"
+        "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+        "fatal: this operation must be run in a work tree\n",
+    ],
+)
+def test_work_tree_root_treats_only_no_repository_forms_as_outside_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str
+) -> None:
+    def failed(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(command, 128, stdout=b"", stderr=stderr.encode())
+
+    monkeypatch.setattr(git.subprocess, "run", failed)
+    assert git.work_tree_root(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("stderr", "named"),
+    [
+        (b"fatal: not a git repository: /gone/.git/worktrees/linked\n", "/gone"),
+        (b"fatal: not a git repository: (null)\n", "(null)"),
+    ],
+)
+def test_work_tree_root_raises_for_named_missing_git_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: bytes, named: str
+) -> None:
+    def failed(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(command, 128, stdout=b"", stderr=stderr)
+
+    monkeypatch.setattr(git.subprocess, "run", failed)
+    with pytest.raises(git.GitProbeError, match=re.escape(f"not a git repository: {named}")):
+        git.work_tree_root(tmp_path)

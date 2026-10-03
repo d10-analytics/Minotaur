@@ -401,6 +401,18 @@ def test_query_reference_documents_both_diff_modes_and_deliberate_exit_semantics
     )
 
 
+def test_query_reference_documents_committed_diff_git_failure_boundary() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert (
+        "If the Git probe runs and fails, committed `query diff` exits `2`, quoting "
+        "git's message instead of reading the disk graph, even with `--config`" in text
+    )
+    assert (
+        "Only when outside a Git work tree, or when git is not installed or cannot be "
+        "launched, does this mode fall back to reading the disk graph" in text
+    )
+
+
 def test_readme_documents_optional_graph_workflow_and_system_comparison() -> None:
     text = _collapsed(README)
     assert "optional repository workflow" in text
