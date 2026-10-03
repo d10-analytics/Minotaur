@@ -29,6 +29,16 @@ _REPOSITORY_LOCAL_ENVIRONMENT = (
 )
 
 
+# Messages (under the forced C locale) meaning discovery found no repository
+# or no work tree. "not a git repository: <path>" is excluded: it names a
+# repository Git was directed to but could not open, such as the missing
+# gitdir behind a linked worktree's gitfile.
+_OUTSIDE_WORK_TREE = re.compile(
+    r"not a git repository \(or any (?:of the parent directories|parent up to mount point)"
+    r"|must be run in a work tree"
+)
+
+
 class GitProbeError(ValueError):
     """Git ran but could not determine the enclosing work tree."""
 
@@ -84,7 +94,7 @@ def work_tree_root(start: Path) -> Path | None:
         return None
     if completed.returncode != 0:
         message = _error_text(completed.stderr)
-        if "not a git repository" in message or "must be run in a work tree" in message:
+        if _OUTSIDE_WORK_TREE.search(message):
             return None
         raise GitProbeError(message)
     value = completed.stdout.strip()
