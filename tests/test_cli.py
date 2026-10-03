@@ -1988,6 +1988,138 @@ def _file_paths(graph: dict[str, object]) -> set[str]:
     return {node["path"] for node in graph["nodes"] if node["node_class"] == "file"}
 
 
+@pytest.fixture
+def argument_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = _config_repo(tmp_path)
+    _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+    body = _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n'
+    _write_config(root, body)
+    _write(root, "alt.toml", body.replace('"g.json"', '"alt.json"'))
+    monkeypatch.chdir(root)
+    return root
+
+
+@pytest.mark.parametrize("option", [["--conf", "alt.toml"], ["--conf=alt.toml"]])
+def test_analyze_rejects_abbreviated_config_without_writes(
+    argument_project: Path, capsys: pytest.CaptureFixture[str], option: list[str]
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        cli.main(["analyze", *option])
+
+    captured = capsys.readouterr()
+    assert error.value.code == 2
+    assert captured.out == ""
+    assert "unrecognized arguments: --conf" in captured.err
+    for name in ("g.json", "alt.json"):
+        graph = argument_project / name
+        assert not graph.exists()
+        assert not stamp_path(graph).exists()
+
+
+@pytest.mark.parametrize("option", [["--config", "alt.toml"], ["--config=alt.toml"]])
+def test_analyze_exact_config_selects_alternate_graph(
+    argument_project: Path, option: list[str]
+) -> None:
+    assert cli.main(["analyze", *option]) == 0
+    graph = argument_project / "alt.json"
+    assert _paths(graph) == {"src/app.py"}
+    assert stamp_path(graph).read_text().strip() == hashlib.sha256(graph.read_bytes()).hexdigest()
+    assert not (argument_project / "g.json").exists()
+    assert not stamp_path(argument_project / "g.json").exists()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["visualize", "--output", "o.html", "--conf=alt.toml"],
+        ["query", "callers", "src.app.app", "--conf=alt.toml"],
+    ],
+)
+def test_graph_consumers_reject_abbreviated_config_without_writes(
+    argument_project: Path, capsys: pytest.CaptureFixture[str], arguments: list[str]
+) -> None:
+    assert cli.main(["analyze"]) == 0
+    graph = argument_project / "g.json"
+    original = graph.read_bytes()
+    sidecar = stamp_path(graph).read_bytes()
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as error:
+        cli.main(arguments)
+
+    captured = capsys.readouterr()
+    assert error.value.code == 2
+    assert captured.out == ""
+    assert "unrecognized arguments: --conf=alt.toml" in captured.err
+    assert graph.read_bytes() == original
+    assert stamp_path(graph).read_bytes() == sidecar
+    assert not (argument_project / "o.html").exists()
+    assert not (argument_project / "alt.json").exists()
+    assert not stamp_path(argument_project / "alt.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "token"),
+    [
+        (["g.json", "g.json", "--js"], "--js"),
+        (["--sc=foo"], "--sc=foo"),
+        (["--systems", "--det"], "--det"),
+        (["--systems", "--befor", "x"], "--befor"),
+    ],
+)
+def test_diff_modes_reject_abbreviated_options_without_writes(
+    argument_project: Path,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    token: str,
+) -> None:
+    assert cli.main(["analyze"]) == 0
+    before = {path: path.read_bytes() for path in argument_project.rglob("*") if path.is_file()}
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as error:
+        cli.main(["query", "diff", *arguments])
+
+    captured = capsys.readouterr()
+    assert error.value.code == 2
+    assert captured.out == ""
+    assert f"unrecognized arguments: {token}" in captured.err
+    assert "unknown system" not in captured.err
+    after = {path: path.read_bytes() for path in argument_project.rglob("*") if path.is_file()}
+    assert after == before
+
+
+@pytest.mark.parametrize("command", [[], ["query"], ["analyze"]])
+def test_parsers_reject_abbreviated_help(
+    argument_project: Path, capsys: pytest.CaptureFixture[str], command: list[str]
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        cli.main([*command, "--hel"])
+
+    captured = capsys.readouterr()
+    assert error.value.code == 2
+    assert captured.out == ""
+    if command == ["analyze"]:
+        assert "unrecognized arguments: --hel" in captured.err
+    assert not (argument_project / "g.json").exists()
+    assert not stamp_path(argument_project / "g.json").exists()
+
+
+@pytest.mark.parametrize("option", ["-h", "--help"])
+def test_analyze_exact_help_remains_available(
+    argument_project: Path, capsys: pytest.CaptureFixture[str], option: str
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        cli.main(["analyze", option])
+
+    captured = capsys.readouterr()
+    assert error.value.code == 0
+    assert "usage: minotaur analyze" in captured.out
+    assert captured.err == ""
+    assert not (argument_project / "g.json").exists()
+    assert not stamp_path(argument_project / "g.json").exists()
+
+
 def _scope_project(
     tmp_path: Path,
     *,
