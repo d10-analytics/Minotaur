@@ -72,6 +72,72 @@ def test_guide_documents_explicit_config_selection() -> None:
     assert "never merges" in text
 
 
+def test_guide_documents_git_probe_failure_and_unavailable_fallback() -> None:
+    text = _guide_text()
+    assert (
+        "Outside a Git work tree — or when git is not installed or cannot be launched — "
+        "the walk continues all the way to the filesystem root" in text
+    )
+    assert (
+        "If a Git probe runs and fails, every config-capable command started inside "
+        "the checkout without `--config` stops with exit `2`, quoting git's message, "
+        "before writing a graph" in text
+    )
+    sentences = re.split(r"(?<=\.)\s+", text)
+    warnings = [sentence for sentence in sentences if "source_control omitted" in sentence]
+    assert len(warnings) == 1
+    assert (
+        "Given `--config` (or started outside the checkout), `analyze` and a graph "
+        "query that refreshes a stale graph warn `source_control omitted` and continue "
+        "with their normal exit status" in warnings[0]
+    )
+    assert "visualize" not in warnings[0]
+    assert "Committed `query diff` still exits `2`, even with `--config`" in text
+    assert "With discovery bypassed, `visualize` is unaffected because it never probes git" in text
+    assert "The explicit `query diff OLD NEW` form never probes git either" in text
+    assert (
+        "When git is not installed or cannot be launched, provenance is omitted without "
+        "a warning and committed `query diff` falls back to reading the disk graph" in text
+    )
+
+
+def test_guide_documents_hook_environment_isolation_without_discarding_policy() -> None:
+    text = _guide_text()
+    sentences = re.split(r"(?<=\.)\s+", text)
+    ignored = [sentence for sentence in sentences if "Git probes ignore" in sentence]
+    honoured = [sentence for sentence in sentences if "are still honoured" in sentence]
+    assert len(ignored) == len(honoured) == 1
+    assert "Minotaur can run from a pre-commit hook in any worktree" in ignored[0]
+    assert "inherited repository-location variables" in ignored[0]
+    assert set(re.findall(r"\bGIT_[A-Z_]+\b", ignored[0])) == {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    }
+    assert "Inherited `git -c`/`GIT_CONFIG_*` settings" in honoured[0]
+    for name in (
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_NAMESPACE",
+        "GIT_TEST_",
+    ):
+        assert name in honoured[0]
+        assert all(name not in sentence for sentence in sentences if sentence != honoured[0])
+    assert "except that probes set `GIT_NO_LAZY_FETCH=1` and `LC_ALL=C`" in honoured[0]
+
+
 def test_guide_documents_field_by_field_precedence_with_explicit_cli_wins() -> None:
     text = _guide_text()
     assert "field by field" in text
