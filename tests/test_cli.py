@@ -1999,6 +1999,188 @@ def argument_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+@pytest.fixture
+def help_resolver_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    original = cli.resolve_config
+    calls: list[dict[str, object]] = []
+
+    def recording(start: Path, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return original(start, **kwargs)
+
+    monkeypatch.setattr(cli, "resolve_config", recording)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["analyze"],
+        ["visualize"],
+        *[
+            ["query", name]
+            for name in (
+                "callers",
+                "consumers",
+                "context",
+                "definitions",
+                "impact",
+                "surface",
+                "system-deps",
+                "systems",
+                "unreferenced",
+                "diff",
+            )
+        ],
+    ],
+)
+def test_configured_help_locates_without_resolving_invalid_config(
+    argument_project: Path,
+    help_resolver_calls: list[dict[str, object]],
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+) -> None:
+    _write_config(argument_project, "[minotaur]\nschema_version = 99\n")
+    with pytest.raises(SystemExit) as result:
+        cli.main([*command, "--help"])
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    text = " ".join(output.out.split())
+    assert "--config CONFIG" in text
+    if command == ["analyze"]:
+        assert "--scope NAME" in text
+        assert "[--root ROOT]" in text
+        assert "[--output OUTPUT]" in text
+    elif command == ["visualize"]:
+        assert "[--input INPUT]" in text
+    elif command == ["query", "diff"]:
+        assert "[OLD] [NEW]" in text
+        assert "--scope NAME" in text
+    else:
+        assert "[--graph GRAPH]" in text
+        assert "[--root ROOT]" in text
+    assert help_resolver_calls == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["analyze", "--help", "--config", "nope.toml"],
+        ["analyze", "-h", "--config", "nope.toml"],
+        ["visualize", "--help", "--config", "nope.toml"],
+        ["query", "callers", "--help", "--config", "nope.toml"],
+        ["analyze", "--help", "--config="],
+    ],
+)
+def test_help_after_config_locate_error_shows_configured_grammar(
+    argument_project: Path,
+    help_resolver_calls: list[dict[str, object]],
+    capsys: pytest.CaptureFixture[str],
+    args: list[str],
+) -> None:
+    with pytest.raises(SystemExit) as result:
+        cli.main(args)
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert "--config CONFIG" in output.out
+    if args[0] == "analyze":
+        assert "--scope NAME" in output.out
+    assert help_resolver_calls == []
+
+
+def test_help_symbol_preserves_original_config_error_and_graph(
+    argument_project: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(["analyze"]) == 0
+    # The walk-up config can answer a query if the original error is lost.
+    assert cli.main(["query", "definitions", "--", "--help"]) == 0
+    capsys.readouterr()
+    graph = argument_project / "g.json"
+    before = graph.read_bytes(), stamp_path(graph).read_bytes()
+    assert cli.main(["query", "definitions", "--config", "nope.toml", "--", "--help"]) == 2
+    output = capsys.readouterr()
+    assert "config file does not exist: nope.toml" in output.err
+    assert output.out == ""
+    assert (graph.read_bytes(), stamp_path(graph).read_bytes()) == before
+
+
+@pytest.mark.parametrize("command", [["analyze"], ["query", "callers"]])
+def test_config_free_help_keeps_strict_grammar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    help_resolver_calls: list[dict[str, object]],
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+) -> None:
+    monkeypatch.chdir(_config_repo(tmp_path))
+    with pytest.raises(SystemExit) as result:
+        cli.main([*command, "--help"])
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert "--config" not in output.out
+    assert "--scope" not in output.out
+    if command == ["analyze"]:
+        usage = " ".join(output.out.split("\n\n", 1)[0].split())
+        assert "--root ROOT" in usage
+        assert "[--root ROOT]" not in usage
+    assert help_resolver_calls == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["query", "diff", "a.json", "b.json", "--help"],
+        ["query", "diff", "--systems", "--help", "--config", "nope.toml"],
+    ],
+)
+def test_explicit_and_systems_help_bypass_config_discovery(
+    argument_project: Path,
+    help_resolver_calls: list[dict[str, object]],
+    capsys: pytest.CaptureFixture[str],
+    args: list[str],
+) -> None:
+    with pytest.raises(SystemExit) as result:
+        cli.main(args)
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    if "--systems" in args:
+        assert "--before-config" in output.out
+    else:
+        text = " ".join(output.out.split())
+        assert "OLD NEW" in text
+        assert "[OLD]" not in text
+        assert "--config CONFIG" not in text
+        assert "--scope NAME" not in text
+    assert help_resolver_calls == []
+
+
+@pytest.mark.parametrize("command", [["analyze"], ["query", "diff"]])
+def test_help_survives_git_probe_failure_in_orphaned_worktree(
+    tmp_path: Path,
+    command: list[str],
+) -> None:
+    main = _config_repo(tmp_path, "main")
+    _write(main, "app.py", "value = 1\n")
+    assert _git(main, "add", "app.py").returncode == 0
+    assert _git(main, "commit", "-qm", "initial").returncode == 0
+    linked = tmp_path / "linked"
+    assert _git(main, "worktree", "add", "-q", str(linked)).returncode == 0
+    main.rename(tmp_path / "moved")
+    failure = _run_in(linked, *command)
+    assert failure.returncode == 2
+    assert "not a git repository:" in failure.stderr
+    result = _run_in(linked, *command, "--help")
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert "--config CONFIG" in result.stdout
+    assert "--scope NAME" in result.stdout
+
+
 @pytest.mark.parametrize("option", [["--conf", "alt.toml"], ["--conf=alt.toml"]])
 def test_analyze_rejects_abbreviated_config_without_writes(
     argument_project: Path, capsys: pytest.CaptureFixture[str], option: list[str]

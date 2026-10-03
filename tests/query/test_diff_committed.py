@@ -637,3 +637,31 @@ def test_committed_diff_in_orphaned_linked_worktree_exits_two(
     assert result.stdout == ""
     assert "not a git repository:" in result.stderr
     assert (graph.read_bytes(), stamp_path(graph).read_bytes()) == before
+
+
+@pytest.mark.parametrize("option", [["--config", "nope.toml"], ["--config="]])
+def test_committed_diff_help_survives_config_locate_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    option: list[str],
+) -> None:
+    root = _repo(tmp_path)
+    _write_config(root)
+    monkeypatch.chdir(root)
+    calls: list[dict[str, object]] = []
+    original = cli.resolve_config
+
+    def recording(start: Path, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return original(start, **kwargs)
+
+    monkeypatch.setattr(cli, "resolve_config", recording)
+    with pytest.raises(SystemExit) as result:
+        cli.main(["query", "diff", "--help", *option])
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert "--config CONFIG" in output.out
+    assert "--scope NAME" in output.out
+    assert calls == []
