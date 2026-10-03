@@ -489,6 +489,11 @@ the configured targets in the current working tree with the configured graph at
 that system's committed graph. It is distinct from `--systems`, and the
 explicit two-snapshot mode below remains configuration-free.
 
+If the Git probe runs and fails, committed `query diff` exits `2`, quoting
+git's message instead of reading the disk graph, even with `--config`.
+Only when outside a Git work tree, or when git is not installed or cannot be
+launched, does this mode fall back to reading the disk graph.
+
 Compare two analyzed graph files explicitly, without a source root or
 configuration:
 

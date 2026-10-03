@@ -175,9 +175,34 @@ parent directories toward the filesystem root, and the nearest
 `.minotaur.toml` found on the way up governs the invocation. The walk has one
 boundary: when the current directory is inside a Git work tree, discovery
 stops at the work-tree root, so a `.minotaur.toml` above the work-tree root
-never binds to a project inside it. Outside a Git work tree — or when the Git
-probe is unavailable — the walk continues all the way to the filesystem root,
+never binds to a project inside it. Outside a Git work tree — or when git is
+not installed or cannot be launched — the walk continues all the way to the filesystem root,
 still preferring the nearest file.
+
+If a Git probe runs and fails, every config-capable command started inside
+the checkout without `--config` stops with exit `2`, quoting git's message,
+before writing a graph. This includes `analyze` with explicit source and
+output paths, `visualize`, and config-consuming `query` commands; help skips
+discovery except for committed `query diff --help`.
+Given `--config` (or started outside the checkout), `analyze` and a graph
+query that refreshes a stale graph warn `source_control omitted` and continue
+with their normal exit status when their analysis encounters that probe failure.
+Committed `query diff` still exits `2`, even with `--config`.
+With discovery bypassed, `visualize` is unaffected because it never probes git.
+The explicit `query diff OLD NEW` form never probes git either.
+When git is not installed or cannot be launched, provenance is omitted without
+a warning and committed `query diff` falls back to reading the disk graph.
+
+Minotaur can run from a pre-commit hook in any worktree: Git probes ignore
+the inherited repository-location variables `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+`GIT_CONFIG`, `GIT_OBJECT_DIRECTORY`, `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_IMPLICIT_WORK_TREE`, `GIT_GRAFT_FILE`, `GIT_INDEX_FILE`,
+`GIT_NO_REPLACE_OBJECTS`, `GIT_REPLACE_REF_BASE`, `GIT_PREFIX`,
+`GIT_SHALLOW_FILE`, and `GIT_COMMON_DIR`.
+Inherited `git -c`/`GIT_CONFIG_*` settings (including `GIT_CONFIG_PARAMETERS`
+and `GIT_CONFIG_COUNT`), `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`,
+`GIT_NAMESPACE`, `GIT_TEST_*`, and other Git variables are still honoured,
+except that probes set `GIT_NO_LAZY_FETCH=1` and `LC_ALL=C`.
 
 Passing `--config CONFIG` selects exactly that configuration file instead:
 the value is resolved from the current working directory when relative, must
