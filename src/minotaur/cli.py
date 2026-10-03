@@ -117,10 +117,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     is built, so the strict no-config grammar relaxes only for
     config-consuming commands when a config was located.  After parsing, each
     config-consuming command runs the shared resolver exactly once and hands
-    every owner one resolved value set.  Help only performs locate-only
-    discovery for the config-capable committed ``query diff`` grammar; it
-    never parses or validates the located config. Explicit OLD NEW help stays
-    config-free.
+    every owner one resolved value set. Help locates configuration without
+    parsing or validating it. If locating fails, a real help request still
+    shows the configured grammar; otherwise the locate error is reported.
+    Explicit OLD NEW and systems-mode help stay discovery-free.
     """
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     systems_mode = _is_systems_mode(raw_argv)
@@ -133,6 +133,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # unusable-config case.
         located = None if systems_mode else _locate_config(raw_argv)
     except ConfigError as error:
+        if any(token in ("-h", "--help") for token in raw_argv):
+            _parser(config_located=True).parse_args(raw_argv)
         _error(str(error))
         return 2
     parser = _parser(config_located=located is not None or systems_mode, systems_mode=systems_mode)
@@ -152,9 +154,9 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
     ``raw_argv`` is scanned as plain tokens, not with argparse, because the
     parser itself must be built differently depending on the answer.  ``None``
     keeps the strict grammar for explicit graph positionals, an unrecognized
-    command, or no config discoverable from the working directory. Configured
-    ``query diff --help`` is locate-only: it can expose the committed-mode
-    grammar without parsing or validating the config. An explicit
+    command, or no config discoverable from the working directory. Help uses
+    the same locate-only discovery to expose the governing grammar without
+    parsing or validating the config. An explicit
     ``--config`` with an empty value or a value that does not exist raises a
     :class:`ConfigError` naming the option or path, so the failure happens
     before any parsing or analysis and never falls back to walk-up discovery.
@@ -174,18 +176,12 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
             option_tokens = raw_argv[subcommand_index + 1 :]
             if _diff_positional_tokens(option_tokens):
                 return None
-            # Config discovery is locate-only here. A config is never parsed
-            # or validated on the help path; explicit OLD NEW help returned
-            # above remains config-free.
-            return find_config(Path.cwd(), config=_explicit_config(option_tokens))
-        if subcommand not in _CONFIG_CONSUMING_QUERIES:
+        elif subcommand not in _CONFIG_CONSUMING_QUERIES:
             return None
         option_tokens = raw_argv[subcommand_index + 1 :]
     elif command in _CONFIG_CONSUMING_COMMANDS:
         option_tokens = raw_argv[command_index + 1 :]
     else:
-        return None
-    if any(token in ("-h", "--help") for token in raw_argv):
         return None
     return find_config(Path.cwd(), config=_explicit_config(option_tokens))
 
