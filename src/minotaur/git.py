@@ -57,18 +57,22 @@ def run_git(
     *,
     text: bool = True,
 ) -> subprocess.CompletedProcess[Any] | None:
-    """Run a Git probe, treating unavailable or failed execution as unknown."""
+    """Run a Git probe, decoding text with filesystem encoding semantics."""
     try:
-        return subprocess.run(
+        completed = subprocess.run(
             ["git", *arguments],
             cwd=root,
             capture_output=True,
             check=False,
-            text=text,
+            text=False,
             env=_probe_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    if text:
+        completed.stdout = os.fsdecode(completed.stdout)
+        completed.stderr = os.fsdecode(completed.stderr)
+    return completed
 
 
 def work_tree_root(start: Path) -> Path | None:

@@ -538,6 +538,12 @@ def _git_source_control(root: Path) -> SourceControl | None:
         if branch_result is not None and branch_result.returncode == 0
         else None
     )
+    if branch:
+        try:
+            os.fsencode(branch).decode("utf-8")
+        except UnicodeError:
+            # Graph strings must be valid Unicode; the commit still identifies HEAD.
+            branch = None
     if not commit and not branch:
         return None
     return SourceControl(system="git", commit=commit or None, branch=branch or None)
