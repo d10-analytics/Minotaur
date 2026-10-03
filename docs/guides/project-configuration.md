@@ -181,7 +181,9 @@ still preferring the nearest file.
 
 If a Git probe runs and fails, every config-capable command started inside
 the checkout without `--config` stops with exit `2`, quoting git's message,
-before writing a graph. This includes `analyze` with explicit source and
+before writing a graph. A linked worktree whose Git directory has been moved
+or deleted is such a failed probe, not a directory outside Git, even though
+git's message reads `not a git repository: <path>`. This includes `analyze` with explicit source and
 output paths, `visualize`, and config-consuming `query` commands; help skips
 discovery except for committed `query diff --help`.
 Given `--config` (or started outside the checkout), `analyze` and a graph
