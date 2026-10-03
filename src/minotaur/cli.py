@@ -1828,6 +1828,13 @@ def _add_validate_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class _ExactArgumentParser(argparse.ArgumentParser):
+    """Require full option spellings, including on inherited subparsers."""
+
+    def __init__(self, *args: Any, allow_abbrev: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
+
+
 def _parser(config_located: bool = False, *, systems_mode: bool = False) -> argparse.ArgumentParser:
     """Build the CLI parser, toggling config-defaultable declarations (D-05).
 
@@ -1839,9 +1846,10 @@ def _parser(config_located: bool = False, *, systems_mode: bool = False) -> argp
     configuration value as a default); the resolver fills whatever the
     command line left out after parsing.  ``--config`` is registered per
     command on config-consuming commands and on the config-located committed
-    ``query diff`` mode.
+    ``query diff`` mode. The root and all nested subparsers require exact
+    option spellings, matching the raw option scans used for discovery.
     """
-    parser = argparse.ArgumentParser(prog="minotaur")
+    parser = _ExactArgumentParser(prog="minotaur")
     commands = parser.add_subparsers(dest="command", required=True)
     analyze = commands.add_parser("analyze", help="analyze selected supported source files")
     analyze.add_argument("--root", required=not config_located, help="existing source root")
