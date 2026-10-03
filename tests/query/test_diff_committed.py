@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,10 +23,13 @@ def _git(root: Path, *args: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def _run(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run(
+    cwd: Path, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run the installed module from a real subprocess in ``cwd``."""
     return subprocess.run(
         [sys.executable, "-m", "minotaur", *args],
+        env=env,
         cwd=cwd,
         text=True,
         capture_output=True,
@@ -481,3 +487,125 @@ def test_committed_mode_preserves_configured_sql_migration_patterns(
     assert not settings.__class__(migration_patterns=("*.sql",)).matches_migration(
         "migrations/001.sql"
     )
+
+
+def test_linked_worktree_pre_commit_hook_discovers_top_config(tmp_path: Path) -> None:
+    main = _repo(tmp_path)
+    _write_config(main, targets='targets = ["sub/a.py"]')
+    (main / "sub").mkdir()
+    (main / "sub/a.py").write_text("def f():\n    pass\n")
+    assert _run(main, "analyze").returncode == 0
+    _commit_all(main)
+    linked = tmp_path / "linked"
+    _git(main, "worktree", "add", "-qb", "linked", str(linked))
+    status = tmp_path / "hook-status"
+    output = tmp_path / "hook-output"
+    inherited = tmp_path / "hook-git-dir"
+    hook = main / ".git/hooks/pre-commit"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s" "$GIT_DIR" > {shlex.quote(str(inherited))}\n'
+        f"cd sub && {shlex.quote(sys.executable)} -m minotaur query diff "
+        f"> {shlex.quote(str(output))} 2>&1\n"
+        f'printf "%s" "$?" > {shlex.quote(str(status))}\nexit 0\n'
+    )
+    hook.chmod(0o755)
+    (linked / "sub/a.py").write_text("def f():\n    pass\n\ndef g():\n    pass\n")
+    _git(linked, "add", "sub/a.py")
+    _git(linked, "commit", "-qm", "add function")
+    assert status.exists(), "the real pre-commit hook must execute"
+    hook_dir = Path(inherited.read_text())
+    assert hook_dir.is_absolute()
+    assert "worktrees" in hook_dir.parts
+    assert status.read_text() == "1", output.read_text()
+    assert "+ sub.a.g" in output.read_text()
+
+
+def test_relative_git_dir_uses_head_with_subdirectory_root(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    sub = root / "sub"
+    sub.mkdir()
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "sub"\ntargets = ["a.py"]\ngraph = "graph.json"\n'
+    )
+    source = sub / "a.py"
+    source.write_text("def f():\n    pass\n")
+    assert _run(root, "analyze").returncode == 0
+    _commit_all(root)
+    source.write_text("def f():\n    pass\n\ndef g():\n    pass\n")
+    env = dict(os.environ, GIT_DIR=".git")
+    refreshed = _run(root, "analyze", "--force", env=env)
+    assert refreshed.returncode == 0, refreshed.stderr
+    assert "source_control" in json.loads((sub / "graph.json").read_text())
+    result = _run(root, "query", "diff", env=env)
+    assert result.returncode == 1, result.stderr
+    assert "+ a.g" in result.stdout
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_committed_diff_rejects_dubious_ownership_before_analysis(
+    tmp_path: Path, explicit: bool
+) -> None:
+    root, source, graph = _graph_fixture(tmp_path)
+    assert _run(root, "analyze").returncode == 0
+    _commit_all(root)
+    source.write_text("def app():\n    pass\n\ndef added():\n    pass\n")
+    assert _run(root, "analyze", "--force").returncode == 0
+    before = (graph.read_bytes(), stamp_path(graph).read_bytes())
+    env = dict(
+        os.environ,
+        GIT_TEST_ASSUME_DIFFERENT_OWNER="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+    )
+    env.pop("GIT_CONFIG_COUNT", None)
+    env.pop("GIT_CONFIG_PARAMETERS", None)
+    args = ["query", "diff"]
+    if explicit:
+        args += ["--config", str(root / ".minotaur.toml")]
+    result = _run(root, *args, env=env)
+    assert result.returncode == 2
+    assert "dubious ownership" in result.stderr
+    assert result.stdout == ""
+    assert (graph.read_bytes(), stamp_path(graph).read_bytes()) == before
+
+
+def test_committed_diff_preserves_safe_directory_environment(tmp_path: Path) -> None:
+    root, source, _ = _graph_fixture(tmp_path)
+    assert _run(root, "analyze").returncode == 0
+    _commit_all(root)
+    source.write_text("def app():\n    pass\n\ndef added():\n    pass\n")
+    assert _run(root, "analyze", "--force").returncode == 0
+    env = dict(
+        os.environ,
+        GIT_TEST_ASSUME_DIFFERENT_OWNER="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_COUNT="1",
+        GIT_CONFIG_KEY_0="safe.directory",
+        GIT_CONFIG_VALUE_0=str(root),
+    )
+    result = _run(root, "query", "diff", env=env)
+    assert result.returncode == 1, result.stderr
+    assert "+ app.added" in result.stdout
+
+
+def test_outside_git_disk_fallback_forces_c_locale(tmp_path: Path) -> None:
+    root, source, _ = _graph_fixture(tmp_path, git_repo=False)
+    assert _run(root, "analyze").returncode == 0
+    source.write_text("def app():\n    pass\n\ndef added():\n    pass\n")
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "git"
+    shim.write_text(
+        '#!/bin/sh\nif [ "$LC_ALL" != C ]; then\n'
+        'echo "fatal: kein Git-Repository" >&2\nexit 128\nfi\n'
+        f'exec {shlex.quote(real_git)} "$@"\n'
+    )
+    shim.chmod(0o755)
+    env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], LC_ALL="C.UTF-8")
+    result = _run(root, "query", "diff", env=env)
+    assert result.returncode == 1, result.stderr
+    assert "+ app.added" in result.stdout

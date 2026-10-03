@@ -1125,3 +1125,41 @@ def test_pyproject_declares_the_tomli_backport_marker() -> None:
     text = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     dependencies = text.split("dependencies = [", 1)[1].split("]", 1)[0]
     assert re.search(r"tomli>=2\.0; python_version < \"3\.11\"", dependencies)
+
+
+def test_discovery_ignores_absolute_git_dir_from_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    assert _git(root, "init", "-q").returncode == 0
+    top = _write(root, ".minotaur.toml", _CONFIG)
+    monkeypatch.setenv("GIT_DIR", str(root / ".git"))
+    assert find_config(sub) == top
+
+
+def test_discovery_preserves_inherited_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outer = _write(tmp_path, ".minotaur.toml", _CONFIG)
+    root = tmp_path / "repo"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    assert _git(root, "init", "-q").returncode == 0
+    assert find_config(sub) is None
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(root))
+    assert find_config(sub) == outer
+
+
+def test_discovery_walks_above_bare_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outer = _write(tmp_path, ".minotaur.toml", _CONFIG)
+    bare = tmp_path / "bare.git"
+    bare.mkdir()
+    assert _git(bare, "init", "--bare", "-q").returncode == 0
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "all")
+    assert find_config(bare) == outer

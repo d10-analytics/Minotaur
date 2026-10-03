@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -425,3 +426,41 @@ def test_tolerant_head_probe_still_returns_none_for_absence_and_failure(
     monkeypatch.setattr(git.subprocess, "run", unavailable)
     assert git.read_head_blob(root, "plain file.txt") is None
     monkeypatch.setattr(git.subprocess, "run", original_run)
+
+
+def test_probe_environment_strips_live_repository_variables_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    names = _run(tmp_path, "rev-parse", "--local-env-vars").splitlines()
+    kept = {
+        "GIT_CONFIG_PARAMETERS": "'core.quotePath=false'",
+        "GIT_CONFIG_COUNT": "0",
+        "GIT_CEILING_DIRECTORIES": str(tmp_path),
+        "GIT_NAMESPACE": "probe-test",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER": "0",
+    }
+    for name in names:
+        monkeypatch.setenv(name, kept.get(name, "repository-local-sentinel"))
+    for name, value in kept.items():
+        monkeypatch.setenv(name, value)
+    before = dict(os.environ)
+    original = subprocess.run
+    environments: list[dict[str, str]] = []
+
+    def recording(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        environments.append(dict(kwargs["env"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(git.subprocess, "run", recording)
+    result = git.run_git(tmp_path, ("--version",))
+    assert result is not None and result.returncode == 0
+    assert len(environments) == 1
+    environment = environments[0]
+    assert not (set(names) - {"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"}) & environment.keys()
+    assert {name: environment[name] for name in kept} == kept
+    assert environment["LC_ALL"] == "C"
+    assert environment["GIT_NO_LAZY_FETCH"] == "1"
+    assert dict(os.environ) == before

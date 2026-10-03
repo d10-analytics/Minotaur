@@ -1172,7 +1172,7 @@ def test_analyze_clean_skip_runs_no_git_probes(
 
 
 def test_analyze_ignores_git_probe_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = tmp_path / "source"
     _write(root, "app.py", "value = 1\n")
@@ -1183,16 +1183,15 @@ def test_analyze_ignores_git_probe_failures(
     def fail_git(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         nonlocal calls
         calls += 1
-        if calls == 1:
-            return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
         raise OSError("git unavailable")
 
     monkeypatch.setattr(git.subprocess, "run", fail_git)
     result = cli._analyze_selection(root, (root,), output, False)
 
-    assert calls == 3
+    assert calls == 1
     assert result.document.source_control is None
     assert output.exists()
+    assert "warning" not in capsys.readouterr().err
 
 
 def test_analyze_force_rewrites_clean_graph(tmp_path: Path) -> None:
@@ -2874,3 +2873,54 @@ def test_full_deletion_refuses_query_and_explicit_analyze_then_recovers(
     assert output.read_bytes() != before
     assert cli.main(["query", "definitions", "foo"]) == 0
     assert capsys.readouterr().out == "no definitions\n"
+
+
+def test_analyze_ignores_foreign_git_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _config_repo(tmp_path, "project")
+    foreign = _config_repo(tmp_path, "foreign")
+    for repo in (root, foreign):
+        _write(repo, "app.py", f'value = "{repo.name}"\n')
+        _write_config(repo, _MINOTAUR_CONFIG + 'targets = ["app.py"]\ngraph = "graph.json"\n')
+        assert _git(repo, "add", ".").returncode == 0
+        assert _git(repo, "commit", "-qm", repo.name).returncode == 0
+    expected = _git(root, "rev-parse", "HEAD").stdout.strip()
+    other = _git(foreign, "rev-parse", "HEAD").stdout.strip()
+    monkeypatch.setenv("GIT_DIR", str(foreign / ".git"))
+    result = _run_in(root, "analyze", "--force")
+    assert result.returncode == 0, result.stderr
+    provenance = json.loads((root / "graph.json").read_text())["source_control"]
+    assert provenance["commit"] == expected
+    assert provenance["commit"] != other
+
+
+@pytest.mark.parametrize("mode", ["configured", "paths", "config", "outside"])
+def test_analyze_dubious_ownership_discovery_and_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    root = _config_repo(tmp_path)
+    _write(root, "app.py", "def app():\n    pass\n")
+    cfg = _write_config(root, _MINOTAUR_CONFIG + 'targets = ["app.py"]\ngraph = "graph.json"\n')
+    output = root / "graph.json"
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)
+    args = ["analyze"]
+    cwd = root
+    if mode == "paths":
+        args += ["--root", ".", "--output", str(output), "app.py"]
+    elif mode == "config":
+        args += ["--config", str(cfg)]
+    elif mode == "outside":
+        cwd = tmp_path
+        args += ["--root", str(root), "--output", str(output), str(root / "app.py")]
+    result = _run_in(cwd, *args)
+    assert "dubious ownership" in result.stderr
+    if mode in {"configured", "paths"}:
+        assert result.returncode == 2
+        assert not output.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert "source_control omitted" in result.stderr
+        assert "source_control" not in json.loads(output.read_text())
