@@ -3000,19 +3000,35 @@ def test_systems_diff_parser_registers_zero_or_two_revisions_and_options() -> No
     assert pinned.force is False
 
 
+@pytest.mark.parametrize("configured", [False, True])
 def test_systems_diff_help_lists_publication_options(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    configured: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
+    root = _config_repo(tmp_path)
+    if configured:
+        _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+        _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n')
     monkeypatch.chdir(root)
 
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["query", "diff", "--systems", "--help"])
 
     assert excinfo.value.code == 0
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    out = " ".join(captured.out.split())
     assert "usage: minotaur query diff" in out
+    assert "[BEFORE] [AFTER]" in out
+    assert "revision" in out
+    for excluded in ("[OLD]", "--scope", "explicit files", "graph snapshots"):
+        assert excluded not in out
+    assert (
+        "Exit status: 0 means structures are identical, 1 means structures differ, "
+        "and 2 means the command could not complete; the caller decides the consequence."
+    ) in out
     for option in ("--systems", "--html", "--force", "--before-config", "--after-config"):
         assert option in out
 
@@ -3020,15 +3036,21 @@ def test_systems_diff_help_lists_publication_options(
 def test_ordinary_diff_help_does_not_advertise_systems_options(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
+    root = _config_repo(tmp_path)
     monkeypatch.chdir(root)
 
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["query", "diff", "--help"])
 
     assert excinfo.value.code == 0
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    out = " ".join(captured.out.split())
+    assert "Compare two explicit analyzed graph snapshots." in out
+    assert (
+        "Exit status: 0 means structures are identical, 1 means structures differ, "
+        "and 2 means the command could not complete; the caller decides the consequence."
+    ) in out
     for option in ("--systems", "--html", "--before-config", "--after-config"):
         assert option not in out
 

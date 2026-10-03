@@ -199,7 +199,13 @@ def test_config_free_and_config_located_diff_help_expose_their_own_grammar(
     assert "--config CONFIG" in located_output
     assert "0 means structures are identical" in located_help_text
     assert "1 means structures differ" in located_help_text
-    assert "caller decides the consequence" in located_help_text
+    assert "query diff --systems --help" in located_help_text
+    assert (
+        "Exit status: 0 means structures are identical, 1 means structures differ, "
+        "and 2 means the command could not complete; the caller decides the consequence."
+    ) in located_help_text
+    for option in ("--html", "--before-config", "--after-config"):
+        assert option not in located_help_text
 
 
 def test_config_free_bare_and_mixed_diff_grammar_is_refused_without_reading_graph(
