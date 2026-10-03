@@ -1846,8 +1846,9 @@ def _add_validate_flag(parser: argparse.ArgumentParser) -> None:
 class _ExactArgumentParser(argparse.ArgumentParser):
     """Require full option spellings, including on inherited subparsers."""
 
-    def __init__(self, *args: Any, allow_abbrev: bool = False, **kwargs: Any) -> None:
-        super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
 
 
 def _parser(config_located: bool = False, *, systems_mode: bool = False) -> argparse.ArgumentParser:
