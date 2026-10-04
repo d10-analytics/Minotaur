@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+import errno
 import hashlib
+import io
 import json
 import os
 import stat
@@ -3409,3 +3412,131 @@ def test_analyze_in_orphaned_linked_worktree_stops_before_writing(tmp_path: Path
     assert not stamp_path(output).exists()
     assert not parent_graph.exists()
     assert not stamp_path(parent_graph).exists()
+
+
+def _run_with_closed_stdout(cwd: Path, *argv: str) -> subprocess.CompletedProcess[str]:
+    reader, writer = os.pipe()
+    os.close(reader)
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "minotaur", *argv],
+            cwd=cwd,
+            stdout=writer,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    finally:
+        os.close(writer)
+
+
+def test_closed_stdout_pipe_keeps_buffered_diff_status_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = _write(tmp_path, "app.py", "def example():\n    return 1\n")
+    graph = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(tmp_path), "--output", str(graph), str(source)]) == 0
+
+    result = _run_with_closed_stdout(tmp_path, "query", "diff", str(graph), str(graph))
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_closed_stdout_pipe_keeps_large_output_status_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    graphs = []
+    for name, count in (("big", 400), ("small", 1)):
+        root = tmp_path / name
+        source = _write(
+            root,
+            "app.py",
+            "".join(
+                f"def unreferenced_function_{index:03d}():\n    return {index}\n\n"
+                for index in range(count)
+            ),
+        )
+        graph = tmp_path / f"{name}.json"
+        assert cli.main(["analyze", "--root", str(root), "--output", str(graph), str(source)]) == 0
+        graphs.append(graph)
+
+    for arguments, status in (
+        (["query", "diff", str(graphs[0]), str(graphs[1])], 1),
+        (["query", "unreferenced", "--graph", str(graphs[0]), "--root", str(tmp_path / "big")], 0),
+    ):
+        captured = _run_in(tmp_path, *arguments)
+        assert captured.returncode == status
+        assert len(captured.stdout.encode("utf-8")) > 8192
+        result = _run_with_closed_stdout(tmp_path, *arguments)
+        assert result.returncode == status
+        assert result.stderr == ""
+
+
+def test_command_stdout_writes_use_the_shared_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    module = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    for statement in module.body:
+        if isinstance(statement, ast.FunctionDef) and statement.name == "_write_stdout":
+            continue
+        for node in ast.walk(statement):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "print"
+            ):
+                assert any(
+                    keyword.arg == "file"
+                    and isinstance(keyword.value, ast.Attribute)
+                    and isinstance(keyword.value.value, ast.Name)
+                    and keyword.value.value.id == "sys"
+                    and keyword.value.attr == "stderr"
+                    for keyword in node.keywords
+                ), f"stdout print bypasses shared writer at line {node.lineno}"
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                assert (node.value.id, node.attr) != ("sys", "stdout"), (
+                    f"stdout access bypasses shared writer at line {node.lineno}"
+                )
+
+
+def test_stdout_writer_propagates_non_pipe_errors_and_tolerates_missing_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = _write(tmp_path, "app.py", "def example():\n    return 1\n")
+    graph = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(tmp_path), "--output", str(graph), str(source)]) == 0
+    capsys.readouterr()
+
+    class FullStream:
+        def write(self, text: str) -> int:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", FullStream())
+        assert cli.main(["query", "diff", str(graph), str(graph)]) == 2
+    assert "minotaur: error:" in capsys.readouterr().err
+
+    class DescriptorlessStream:
+        def write(self, text: str) -> int:
+            raise BrokenPipeError
+
+        def fileno(self) -> int:
+            raise io.UnsupportedOperation("no descriptor")
+
+    redirects = []
+
+    def record_redirect(source: int, destination: int) -> None:
+        redirects.append((source, destination))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.os, "dup2", record_redirect)
+        patch.setattr(sys, "stdout", DescriptorlessStream())
+        assert cli._write_stdout("x") is None
+        patch.setattr(sys, "stdout", None)
+        assert cli._write_stdout("x") is None
+    assert redirects == []
