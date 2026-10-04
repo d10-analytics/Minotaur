@@ -144,6 +144,22 @@ def test_guide_documents_field_by_field_precedence_with_explicit_cli_wins() -> N
     assert "an explicit CLI value always wins for its own field" in text
 
 
+def test_guide_documents_scoped_analysis_precedence_and_conflicts() -> None:
+    text = _guide_text()
+    assert (
+        "`analyze --scope NAME` — replaces the configured `targets` with the named "
+        "system's declared files" in text
+    )
+    assert (
+        "writes `graph.json` and its `graph.json.sha256` sidecar into that system's "
+        "definition directory instead of the configured `graph`" in text
+    )
+    assert (
+        "It requires a located configuration and cannot be combined with positional "
+        "`TARGET` arguments or `--output`" in text
+    )
+
+
 def test_guide_documents_root_anchoring_at_the_configuration_file_directory() -> None:
     text = _guide_text()
     assert "resolved relative to the directory that contains the configuration file" in text
