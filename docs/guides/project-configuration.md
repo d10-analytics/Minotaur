@@ -166,9 +166,13 @@ relationship.
 a `.minotaur.toml` when they run. The explicit two-file form, `query diff OLD
 NEW`, never locates, parses, or validates a configuration file; it is strictly
 config-free. The committed-reference form, `query diff` with no positional
-graphs (optionally with `--scope NAME`), requires a located configuration. Its
-help path only locates the file to expose the configured grammar; it does not
-parse or validate that configuration.
+graphs (optionally with `--scope NAME`), requires a located configuration.
+For `analyze`, `visualize`, the config-consuming `query` subcommands, and
+committed `query diff`, `--help` only locates the configuration file to show
+the configured grammar; it never parses or validates that configuration.
+If locating fails because of a missing or empty `--config` or a failed Git
+probe, help still shows the configured grammar and exits `0` with no stderr
+output, while a real run exits `2`.
 
 Discovery starts in the current working directory and walks up through its
 parent directories toward the filesystem root, and the nearest
@@ -185,8 +189,8 @@ before writing a graph. A linked worktree whose Git directory has been moved
 or deleted is such a failed probe, not a directory outside Git, even though
 git's message begins `not a git repository:` (followed by the missing
 location, or `(null)` in some Git versions). This includes `analyze` with explicit source and
-output paths, `visualize`, and config-consuming `query` commands; help skips
-discovery except for committed `query diff --help`.
+output paths, `visualize`, and config-consuming `query` commands during a real
+run; help uses the locate-failure behavior described above.
 Given `--config` (or started outside the checkout), `analyze` and a graph
 query that refreshes a stale graph warn `source_control omitted` and continue
 with their normal exit status when their analysis encounters that probe failure.

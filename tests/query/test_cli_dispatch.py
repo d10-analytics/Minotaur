@@ -77,7 +77,7 @@ def _write(root: Path, path: str, source: str) -> None:
 def test_help_exits_zero_next_to_an_invalid_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """AC-07: --help never locates or validates a config, so it exits 0."""
+    """Help locates the config to select grammar without validating its contents."""
     root = _repo(tmp_path)
     (root / ".minotaur.toml").write_text(
         '[minotaur]\nschema_version = 99\ntargets = ["src"]\n', encoding="utf-8"
@@ -87,7 +87,11 @@ def test_help_exits_zero_next_to_an_invalid_config(
         with pytest.raises(SystemExit) as excinfo:
             cli.main(argv)
         assert excinfo.value.code == 0
-        assert "usage:" in capsys.readouterr().out
+        output = capsys.readouterr()
+        assert "usage:" in output.out
+        assert output.err == ""
+        if argv != ["query", "--help"]:
+            assert "--config CONFIG" in output.out
 
 
 def test_query_grammar_relaxes_only_when_a_config_is_located(

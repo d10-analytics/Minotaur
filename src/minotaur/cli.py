@@ -117,10 +117,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     is built, so the strict no-config grammar relaxes only for
     config-consuming commands when a config was located.  After parsing, each
     config-consuming command runs the shared resolver exactly once and hands
-    every owner one resolved value set.  Help only performs locate-only
-    discovery for the config-capable committed ``query diff`` grammar; it
-    never parses or validates the located config. Explicit OLD NEW help stays
-    config-free.
+    every owner one resolved value set. Help locates configuration without
+    parsing or validating it. If locating fails, a real help request still
+    shows the configured grammar; otherwise the locate error is reported.
+    Explicit OLD NEW and systems-mode help stay discovery-free.
     """
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     systems_mode = _is_systems_mode(raw_argv)
@@ -133,6 +133,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # unusable-config case.
         located = None if systems_mode else _locate_config(raw_argv)
     except ConfigError as error:
+        if any(token in ("-h", "--help") for token in raw_argv):
+            _parser(config_located=True).parse_args(raw_argv)
         _error(str(error))
         return 2
     parser = _parser(config_located=located is not None or systems_mode, systems_mode=systems_mode)
@@ -152,9 +154,9 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
     ``raw_argv`` is scanned as plain tokens, not with argparse, because the
     parser itself must be built differently depending on the answer.  ``None``
     keeps the strict grammar for explicit graph positionals, an unrecognized
-    command, or no config discoverable from the working directory. Configured
-    ``query diff --help`` is locate-only: it can expose the committed-mode
-    grammar without parsing or validating the config. An explicit
+    command, or no config discoverable from the working directory. Help uses
+    the same locate-only discovery to expose the governing grammar without
+    parsing or validating the config. An explicit
     ``--config`` with an empty value or a value that does not exist raises a
     :class:`ConfigError` naming the option or path, so the failure happens
     before any parsing or analysis and never falls back to walk-up discovery.
@@ -174,18 +176,12 @@ def _locate_config(raw_argv: Sequence[str]) -> Path | None:
             option_tokens = raw_argv[subcommand_index + 1 :]
             if _diff_positional_tokens(option_tokens):
                 return None
-            # Config discovery is locate-only here. A config is never parsed
-            # or validated on the help path; explicit OLD NEW help returned
-            # above remains config-free.
-            return find_config(Path.cwd(), config=_explicit_config(option_tokens))
-        if subcommand not in _CONFIG_CONSUMING_QUERIES:
+        elif subcommand not in _CONFIG_CONSUMING_QUERIES:
             return None
         option_tokens = raw_argv[subcommand_index + 1 :]
     elif command in _CONFIG_CONSUMING_COMMANDS:
         option_tokens = raw_argv[command_index + 1 :]
     else:
-        return None
-    if any(token in ("-h", "--help") for token in raw_argv):
         return None
     return find_config(Path.cwd(), config=_explicit_config(option_tokens))
 
@@ -1620,7 +1616,10 @@ def _add_query_subparsers(
     ``query diff`` keeps the strict config-free grammar when explicit OLD NEW
     positionals are present. When a config is located, its OLD/NEW positionals
     become optional and the committed mode registers ``--scope`` and
-    ``--config``. The remaining subcommands consume config ``graph``/``root``,
+    ``--config``, with a help pointer to the separate systems mode. Systems
+    help describes revision comparison with BEFORE/AFTER display labels while
+    retaining the old/new argument destinations. The remaining subcommands
+    consume config ``graph``/``root``,
     so when a config was located their declarations relax and ``--config`` is
     registered.
     """
@@ -1675,7 +1674,18 @@ def _add_query_subparsers(
     systems_parser.add_argument(
         "--details", action="store_true", help="include declared paths and connections"
     )
-    if config_located or systems_mode:
+    if systems_mode:
+        diff_description = (
+            "Compare configured systems between Git revisions or with the working tree."
+        )
+        diff_epilog = (
+            "With no BEFORE and AFTER, compare HEAD with the current working tree; "
+            "with BEFORE AFTER, compare those two Git revisions. Use --before-config "
+            "and --after-config for per-side configuration. Exit status: 0 means "
+            "structures are identical, 1 means structures differ, and 2 means the "
+            "command could not complete; the caller decides the consequence."
+        )
+    elif config_located:
         diff_description = (
             "Compare the current working tree with the committed graph at HEAD "
             "(or compare two explicit graph snapshots)."
@@ -1683,7 +1693,8 @@ def _add_query_subparsers(
         diff_epilog = (
             "Modes: with no OLD and NEW, use the located project config and "
             "optionally --scope NAME; with OLD NEW, compare those explicit files "
-            "without using project config. Exit status: 0 means structures are "
+            "without using project config. For systems comparison, see "
+            "query diff --systems --help. Exit status: 0 means structures are "
             "identical, 1 means structures differ, and 2 means the command "
             "could not complete; the caller decides the consequence."
         )
@@ -1701,10 +1712,14 @@ def _add_query_subparsers(
         epilog=diff_epilog,
     )
     diff_parser.add_argument(
-        "old", nargs="?" if (config_located or systems_mode) else None, metavar="OLD"
+        "old",
+        nargs="?" if (config_located or systems_mode) else None,
+        metavar="BEFORE" if systems_mode else "OLD",
     )
     diff_parser.add_argument(
-        "new", nargs="?" if (config_located or systems_mode) else None, metavar="NEW"
+        "new",
+        nargs="?" if (config_located or systems_mode) else None,
+        metavar="AFTER" if systems_mode else "NEW",
     )
     diff_parser.add_argument("--json", action="store_true", help="emit stable JSON records")
     if config_located and not systems_mode:
@@ -1828,6 +1843,14 @@ def _add_validate_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class _ExactArgumentParser(argparse.ArgumentParser):
+    """Require full option spellings, including on inherited subparsers."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
 def _parser(config_located: bool = False, *, systems_mode: bool = False) -> argparse.ArgumentParser:
     """Build the CLI parser, toggling config-defaultable declarations (D-05).
 
@@ -1839,9 +1862,10 @@ def _parser(config_located: bool = False, *, systems_mode: bool = False) -> argp
     configuration value as a default); the resolver fills whatever the
     command line left out after parsing.  ``--config`` is registered per
     command on config-consuming commands and on the config-located committed
-    ``query diff`` mode.
+    ``query diff`` mode. The root and all nested subparsers require exact
+    option spellings, matching the raw option scans used for discovery.
     """
-    parser = argparse.ArgumentParser(prog="minotaur")
+    parser = _ExactArgumentParser(prog="minotaur")
     commands = parser.add_subparsers(dest="command", required=True)
     analyze = commands.add_parser("analyze", help="analyze selected supported source files")
     analyze.add_argument("--root", required=not config_located, help="existing source root")

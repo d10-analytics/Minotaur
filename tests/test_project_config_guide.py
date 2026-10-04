@@ -189,7 +189,17 @@ def test_guide_documents_diff_mode_configuration_boundary() -> None:
     ) in text
     assert "The committed-reference form, `query diff` with no positional graphs" in text
     assert "requires a located configuration" in text
-    assert "Its help path only locates the file to expose the configured grammar" in text
+    assert (
+        "For `analyze`, `visualize`, the config-consuming `query` subcommands, and "
+        "committed `query diff`, `--help` only locates the configuration file to show "
+        "the configured grammar; it never parses or validates that configuration."
+    ) in text
+    assert (
+        "If locating fails because of a missing or empty `--config` or a failed Git "
+        "probe, help still shows the configured grammar and exits `0` with no stderr "
+        "output, while a real run exits `2`."
+    ) in text
+    assert "help skips discovery" not in text
 
 
 def test_guide_documents_the_python_310_tomli_fallback_mechanism() -> None:

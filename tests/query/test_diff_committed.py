@@ -199,7 +199,13 @@ def test_config_free_and_config_located_diff_help_expose_their_own_grammar(
     assert "--config CONFIG" in located_output
     assert "0 means structures are identical" in located_help_text
     assert "1 means structures differ" in located_help_text
-    assert "caller decides the consequence" in located_help_text
+    assert "query diff --systems --help" in located_help_text
+    assert (
+        "Exit status: 0 means structures are identical, 1 means structures differ, "
+        "and 2 means the command could not complete; the caller decides the consequence."
+    ) in located_help_text
+    for option in ("--html", "--before-config", "--after-config"):
+        assert option not in located_help_text
 
 
 def test_config_free_bare_and_mixed_diff_grammar_is_refused_without_reading_graph(
@@ -637,3 +643,31 @@ def test_committed_diff_in_orphaned_linked_worktree_exits_two(
     assert result.stdout == ""
     assert "not a git repository:" in result.stderr
     assert (graph.read_bytes(), stamp_path(graph).read_bytes()) == before
+
+
+@pytest.mark.parametrize("option", [["--config", "nope.toml"], ["--config="]])
+def test_committed_diff_help_survives_config_locate_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    option: list[str],
+) -> None:
+    root = _repo(tmp_path)
+    _write_config(root)
+    monkeypatch.chdir(root)
+    calls: list[dict[str, object]] = []
+    original = cli.resolve_config
+
+    def recording(start: Path, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return original(start, **kwargs)
+
+    monkeypatch.setattr(cli, "resolve_config", recording)
+    with pytest.raises(SystemExit) as result:
+        cli.main(["query", "diff", "--help", *option])
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert "--config CONFIG" in output.out
+    assert "--scope NAME" in output.out
+    assert calls == []
