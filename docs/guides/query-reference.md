@@ -9,7 +9,13 @@ Start with an analysis of the source selection you want to query:
 
 ```bash
 minotaur analyze --root ROOT --output GRAPH.json TARGET [TARGET ...]
+minotaur analyze --scope NAME
 ```
+
+`analyze --scope` requires a located `.minotaur.toml` and selects the named
+system's declared files. It cannot be combined with positional targets or
+`--output`. It writes the system's graph to `graph.json` and its
+`graph.json.sha256` sidecar in the system's definition directory.
 
 The analyzer records the selected root-relative targets and a SHA-256 digest
 for every selected file. Query commands that take `--root` use those values
@@ -486,7 +492,8 @@ minotaur query diff --scope NAME
 That mode requires a located `.minotaur.toml`. With no `--scope`, it compares
 the configured targets in the current working tree with the configured graph at
 `HEAD`; `--scope NAME` instead compares the named system's declared files with
-that system's committed graph. It is distinct from `--systems`, and the
+that system's committed graph, the `graph.json` that `analyze --scope NAME`
+writes in its definition directory. It is distinct from `--systems`, and the
 explicit two-snapshot mode below remains configuration-free.
 
 If the Git probe runs and fails, committed `query diff` exits `2`, quoting

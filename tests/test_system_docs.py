@@ -174,6 +174,20 @@ def test_format_reference_documents_narrative_files_are_ignored() -> None:
     assert "No prose is ever parsed" in text
 
 
+def test_format_reference_documents_system_graph_writes_and_committed_reads() -> None:
+    text = _collapsed(FORMAT_REFERENCE)
+    assert (
+        "`analyze --scope NAME` writes the system's graph, `graph.json`, and its "
+        "`graph.json.sha256` sidecar into the same directory" in text
+    )
+    assert (
+        "committed `query diff --scope NAME` reads that `graph.json` and its "
+        "`graph.json.sha256` sidecar at `HEAD`" in text
+    )
+    assert "the system loader never reads `graph.json` or its sidecar" in text
+    assert "reads nothing else in the system directory" not in text
+
+
 def test_format_reference_documents_strict_all_or_nothing_failure() -> None:
     text = _collapsed(FORMAT_REFERENCE)
     assert "deterministic and strict" in text
@@ -291,6 +305,21 @@ def test_purpose_documents_committed_diff_and_content_keyed_reproducibility() ->
 
 def test_query_reference_file_exists() -> None:
     assert QUERY_REFERENCE.is_file(), f"query reference file missing: {QUERY_REFERENCE}"
+
+
+def test_query_reference_documents_scoped_analysis_and_committed_graph_origin() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert "minotaur analyze --scope NAME" in text
+    assert "`analyze --scope` requires a located `.minotaur.toml`" in text
+    assert "cannot be combined with positional targets or `--output`" in text
+    assert (
+        "writes the system's graph to `graph.json` and its `graph.json.sha256` "
+        "sidecar in the system's definition directory" in text
+    )
+    assert (
+        "that system's committed graph, the `graph.json` that `analyze --scope NAME` "
+        "writes in its definition directory" in text
+    )
 
 
 def test_query_reference_enumerates_the_system_queries_with_shared_options() -> None:
