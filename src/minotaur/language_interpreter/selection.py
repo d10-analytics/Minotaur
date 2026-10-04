@@ -71,13 +71,15 @@ def select_sources(
 def _resolve_target(target: Path, root: Path) -> Path:
     """Resolve a target before containment checks to make symlinks visible."""
     if not target.exists():
-        # Targets follow the usual CLI convention and resolve against the
-        # working directory, not --root. The message spells that out because
-        # `--root src minotaur` is a natural first attempt on a src/ layout.
-        raise SelectionError(
-            f"target does not exist: {target} (targets are resolved from the current "
-            f"directory {Path.cwd()}, not from --root {root})"
-        )
+        message = f"target does not exist: {target}"
+        # Relative targets follow the usual CLI convention and resolve against
+        # the working directory, not --root. Explain that for src/ layouts.
+        if not target.is_absolute():
+            message += (
+                f" (targets are resolved from the current directory {Path.cwd()}, "
+                f"not from --root {root})"
+            )
+        raise SelectionError(message)
     resolved = target.resolve()
     try:
         resolved.relative_to(root)
