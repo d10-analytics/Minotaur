@@ -1505,8 +1505,44 @@ def test_missing_target_error_explains_working_directory_resolution(
     )
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert status == 2
-    assert "target does not exist: nope" in captured.err
-    assert f"resolved from the current directory {Path.cwd()}, not from --root" in captured.err
+    assert captured.err == (
+        "minotaur: error: target does not exist: nope "
+        f"(targets are resolved from the current directory {Path.cwd()}, "
+        f"not from --root {tmp_path})\n"
+    )
+
+
+def test_absolute_missing_target_error_omits_working_directory_hint(
+    tmp_path: Path, capsys: object
+) -> None:
+    target = tmp_path / "nope.py"
+    status = cli.main(
+        ["analyze", "--root", str(tmp_path), "--output", str(tmp_path / "g.json"), str(target)]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 2
+    assert captured.err == f"minotaur: error: target does not exist: {target}\n"
+
+
+def test_relative_missing_target_does_not_resolve_against_root(
+    tmp_path: Path, capsys: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "nope.py", "value = 1\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    output = tmp_path / "g.json"
+    status = cli.main(
+        ["analyze", "--root", str(tmp_path), "--output", str(output), "nope.py"]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert status == 2
+    assert captured.err == (
+        "minotaur: error: target does not exist: nope.py "
+        f"(targets are resolved from the current directory {Path.cwd()}, "
+        f"not from --root {tmp_path})\n"
+    )
+    assert not output.exists()
 
 
 def _unstamped_graph(tmp_path: Path) -> tuple[Path, Path]:
@@ -1984,6 +2020,30 @@ def _run_in(cwd: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.mark.parametrize("outside_project", [False, True])
+def test_configured_missing_target_error_omits_working_directory_hint(
+    tmp_path: Path, outside_project: bool
+) -> None:
+    root = _config_repo(tmp_path)
+    config = _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src/missing.py"]\n',
+    )
+    if outside_project:
+        cwd = tmp_path / "elsewhere"
+        cwd.mkdir()
+        completed = _run_in(cwd, "analyze", "--config", str(config))
+    else:
+        completed = _run_in(root, "analyze")
+
+    assert completed.returncode == 2
+    assert completed.stderr == (
+        f"minotaur: error: target does not exist: {root / 'src/missing.py'}\n"
+    )
+    assert not (root / "g.json").exists()
+    assert not stamp_path(root / "g.json").exists()
+
+
 def _file_paths(graph: dict[str, object]) -> set[str]:
     return {node["path"] for node in graph["nodes"] if node["node_class"] == "file"}
 
@@ -2395,6 +2455,25 @@ def test_analyze_scope_writes_truthful_schema_graph_and_sidecar(tmp_path: Path) 
     assert loaded.document.to_dict() == graph
 
 
+def test_committed_scope_diff_missing_target_omits_working_directory_hint(
+    tmp_path: Path,
+) -> None:
+    root = _scope_project(tmp_path)
+    analyzed = _run_in(root, "analyze", "--scope", "auth")
+    assert analyzed.returncode == 0, analyzed.stderr
+    output = root / "docs" / "systems" / "auth" / "graph.json"
+    assert _git(root, "add", str(output), str(stamp_path(output))).returncode == 0
+    assert _git(root, "commit", "-m", "record scope graph").returncode == 0
+    target = root / "src" / "auth" / "api.py"
+    target.unlink()
+
+    completed = _run_in(root, "query", "diff", "--scope", "auth")
+
+    assert completed.returncode == 2
+    assert completed.stderr == f"minotaur: error: target does not exist: {target}\n"
+    assert completed.stdout == ""
+
+
 def test_analyze_scope_has_whole_repo_skip_refresh_and_force_lifecycle(tmp_path: Path) -> None:
     root = _scope_project(tmp_path)
     output = root / "docs" / "systems" / "auth" / "graph.json"
@@ -2455,7 +2534,9 @@ def test_analyze_scope_rejects_duplicate_missing_and_unsupported_declarations(
     root = _scope_project(tmp_path, files="src/auth/missing.py")
     missing = _run_in(root, "analyze", "--scope", "auth")
     assert missing.returncode == 2
-    assert "target does not exist" in missing.stderr
+    assert missing.stderr == (
+        f"minotaur: error: target does not exist: {root / 'src/auth/missing.py'}\n"
+    )
 
     second = root / "docs" / "systems" / "second"
     second.mkdir()
