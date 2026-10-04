@@ -1011,6 +1011,7 @@ class _HtmlOutputPlan:
     identity: tuple[int, int] | None
     parent: Path
     parent_identity: tuple[int, int] | None
+    resolved_parent_identity: tuple[int, int]
 
 
 def _run_systems_diff(query: argparse.Namespace) -> int:
@@ -1460,6 +1461,7 @@ def _preflight_html_output(output: Path, *, force: bool) -> _HtmlOutputPlan:
         parent_identity: tuple[int, int] | None = (parent_info.st_dev, parent_info.st_ino)
     except OSError:  # pragma: no cover - the preflight already proved the parent exists.
         parent_identity = None
+    resolved_parent_info = os.stat(resolved.parent)
     try:
         info = os.stat(resolved)
     except OSError:
@@ -1471,6 +1473,7 @@ def _preflight_html_output(output: Path, *, force: bool) -> _HtmlOutputPlan:
         identity=(info.st_dev, info.st_ino) if info is not None else None,
         parent=parent,
         parent_identity=parent_identity,
+        resolved_parent_identity=(resolved_parent_info.st_dev, resolved_parent_info.st_ino),
     )
 
 
@@ -1512,6 +1515,15 @@ def _publish_comparison_html(
         plan.parent_identity is not None
         and (parent_info.st_dev, parent_info.st_ino) != plan.parent_identity
     ):
+        raise ValueError(f"output parent directory changed during comparison: {plan.display}")
+    try:
+        resolved_parent_info = os.stat(plan.resolved.parent)
+    except OSError as error:
+        raise ValueError(f"output parent directory is unavailable: {plan.display}") from error
+    if (
+        resolved_parent_info.st_dev,
+        resolved_parent_info.st_ino,
+    ) != plan.resolved_parent_identity:
         raise ValueError(f"output parent directory changed during comparison: {plan.display}")
     try:
         info = os.stat(plan.resolved)
@@ -1984,6 +1996,11 @@ def _preflight_output(output: Path, files: tuple[Path, ...], force: bool) -> Pat
     if not output.parent.is_dir():
         raise ValueError(f"output parent directory does not exist: {output.parent}")
     resolved = output.resolve()
+    if not resolved.parent.is_dir():
+        raise ValueError(
+            f"output parent directory does not exist: {resolved.parent} "
+            f"({output} resolves to {resolved})"
+        )
     if resolved in files:
         raise ValueError(f"output is also a selected source file: {output}")
     if output.exists() and output.is_dir():
