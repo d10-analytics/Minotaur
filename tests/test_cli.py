@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+import errno
 import hashlib
+import io
 import json
 import os
 import stat
@@ -1228,6 +1231,52 @@ def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_fil
     assert list(tmp_path.glob(".graph.json.*")) == []
 
 
+@pytest.mark.parametrize("writer_name", ["_write_atomically", "_write_no_clobber"])
+@pytest.mark.parametrize("trigger", ["invalid_content", "interrupted_fsync"])
+def test_atomic_writers_remove_temporary_file_on_any_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer_name: str, trigger: str
+) -> None:
+    output = tmp_path / "out.json"
+    output.write_bytes(b"existing destination")
+    writer = getattr(cli, writer_name)
+
+    if trigger == "invalid_content":
+        with pytest.raises(TypeError):
+            writer(output, "not-bytes")
+    else:
+
+        def raise_keyboard_interrupt(descriptor: int) -> None:
+            raise KeyboardInterrupt("interrupted fsync")
+
+        monkeypatch.setattr(cli.os, "fsync", raise_keyboard_interrupt)
+        with pytest.raises(KeyboardInterrupt, match="interrupted fsync"):
+            writer(output, b"x")
+
+    assert list(tmp_path.glob(".out.json.*")) == []
+    assert output.read_bytes() == b"existing destination"
+
+
+def test_atomic_writers_share_one_temporary_body() -> None:
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "tempfile"
+        and node.func.attr == "mkstemp"
+    ]
+    assert len(calls) == 1
+    owners = [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and calls[0] in ast.walk(node)
+    ]
+    assert len(owners) == 1
+    assert owners[0] not in {"_write_atomically", "_write_no_clobber"}
+
+
 def test_written_files_respect_process_umask(tmp_path: Path) -> None:
     """L-1: mkstemp's 0600 mode is widened to the process umask on replace."""
     root = tmp_path / "source"
@@ -1326,6 +1375,42 @@ def _symlinked_graph(tmp_path: Path) -> tuple[Path, Path, Path]:
     link = tmp_path / "graph.json"
     link.symlink_to(real)
     return root, link, real
+
+
+def test_analyze_refuses_dangling_output_link_before_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    resolved = tmp_path / "missingdir" / "out.json"
+    link = tmp_path / "link.json"
+    link.symlink_to(resolved)
+
+    def unexpected_analysis(*args: object, **kwargs: object) -> None:
+        raise AssertionError("analysis must not run for an invalid output parent")
+
+    monkeypatch.setattr(cli, "_produce_selection", unexpected_analysis)
+    assert cli.main(["analyze", "--root", str(root), "--output", str(link), str(root)]) == 2
+    captured = capsys.readouterr()
+    assert "parent directory does not exist" in captured.err
+    assert str(resolved.parent) in captured.err
+    assert f"{link} resolves to {resolved}" in captured.err
+    assert not resolved.parent.exists()
+    assert not stamp_path(link).exists()
+    assert not list(tmp_path.rglob(".out.json.*"))
+
+
+def test_analyze_keeps_unresolved_missing_parent_refusal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "missing" / ".." / "out.json"
+
+    assert cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)]) == 2
+    captured = capsys.readouterr()
+    assert f"output parent directory does not exist: {output.parent}" in captured.err
+    assert not (tmp_path / "out.json").exists()
 
 
 def test_analyze_through_symlink_stamps_beside_the_link_not_the_resolved_file(
@@ -3409,3 +3494,197 @@ def test_analyze_in_orphaned_linked_worktree_stops_before_writing(tmp_path: Path
     assert not stamp_path(output).exists()
     assert not parent_graph.exists()
     assert not stamp_path(parent_graph).exists()
+
+
+def _run_with_closed_stdout(cwd: Path, *argv: str) -> subprocess.CompletedProcess[str]:
+    reader, writer = os.pipe()
+    os.close(reader)
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "minotaur", *argv],
+            cwd=cwd,
+            stdout=writer,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    finally:
+        os.close(writer)
+
+
+def test_closed_stdout_pipe_keeps_buffered_diff_status_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = _write(tmp_path, "app.py", "def example():\n    return 1\n")
+    graph = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(tmp_path), "--output", str(graph), str(source)]) == 0
+
+    result = _run_with_closed_stdout(tmp_path, "query", "diff", str(graph), str(graph))
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_closed_stdout_pipe_keeps_large_output_status_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    graphs = []
+    for name, count in (("big", 400), ("small", 1)):
+        root = tmp_path / name
+        source = _write(
+            root,
+            "app.py",
+            "".join(
+                f"def unreferenced_function_{index:03d}():\n    return {index}\n\n"
+                for index in range(count)
+            ),
+        )
+        graph = tmp_path / f"{name}.json"
+        assert cli.main(["analyze", "--root", str(root), "--output", str(graph), str(source)]) == 0
+        graphs.append(graph)
+
+    for arguments, status in (
+        (["query", "diff", str(graphs[0]), str(graphs[1])], 1),
+        (["query", "unreferenced", "--graph", str(graphs[0]), "--root", str(tmp_path / "big")], 0),
+    ):
+        captured = _run_in(tmp_path, *arguments)
+        assert captured.returncode == status
+        assert len(captured.stdout.encode("utf-8")) > 8192
+        result = _run_with_closed_stdout(tmp_path, *arguments)
+        assert result.returncode == status
+        assert result.stderr == ""
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/full"), reason="requires the /dev/full device")
+def test_full_stdout_device_reports_one_error_and_keeps_failure_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = _write(tmp_path, "app.py", "def example():\n    return 1\n")
+    graph = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(tmp_path), "--output", str(graph), str(source)]) == 0
+
+    with open("/dev/full", "w") as full:
+        result = subprocess.run(
+            [sys.executable, "-m", "minotaur", "query", "diff", str(graph), str(graph)],
+            cwd=tmp_path,
+            stdout=full,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+    assert result.returncode == 2, result.stderr
+    lines = [line for line in result.stderr.splitlines() if line]
+    assert len(lines) == 1, result.stderr
+    assert lines[0].startswith("minotaur: error:")
+    assert "Exception ignored" not in result.stderr
+
+
+def test_command_stdout_writes_use_the_shared_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    module = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    for statement in module.body:
+        if isinstance(statement, ast.FunctionDef) and statement.name == "_write_stdout":
+            continue
+        for node in ast.walk(statement):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "print"
+            ):
+                assert any(
+                    keyword.arg == "file"
+                    and isinstance(keyword.value, ast.Attribute)
+                    and isinstance(keyword.value.value, ast.Name)
+                    and keyword.value.value.id == "sys"
+                    and keyword.value.attr == "stderr"
+                    for keyword in node.keywords
+                ), f"stdout print bypasses shared writer at line {node.lineno}"
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                assert (node.value.id, node.attr) != ("sys", "stdout"), (
+                    f"stdout access bypasses shared writer at line {node.lineno}"
+                )
+
+
+def test_stdout_writer_propagates_non_pipe_errors_and_tolerates_missing_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = _write(tmp_path, "app.py", "def example():\n    return 1\n")
+    graph = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(tmp_path), "--output", str(graph), str(source)]) == 0
+    capsys.readouterr()
+
+    class FullStream:
+        def write(self, text: str) -> int:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", FullStream())
+        assert cli.main(["query", "diff", str(graph), str(graph)]) == 2
+    assert "minotaur: error:" in capsys.readouterr().err
+
+    class DescriptorlessStream:
+        def write(self, text: str) -> int:
+            raise BrokenPipeError
+
+        def fileno(self) -> int:
+            raise io.UnsupportedOperation("no descriptor")
+
+    redirects = []
+
+    def record_redirect(source: int, destination: int) -> None:
+        redirects.append((source, destination))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.os, "dup2", record_redirect)
+        patch.setattr(sys, "stdout", DescriptorlessStream())
+        assert cli._write_stdout("x") is None
+        patch.setattr(sys, "stdout", None)
+        assert cli._write_stdout("x") is None
+    assert redirects == []
+
+
+@pytest.mark.parametrize("redirect_fails", [False, True])
+def test_stdout_writer_closes_redirect_descriptor_even_when_duplication_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, redirect_fails: bool
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    class BufferedBrokenStream(io.StringIO):
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+        def fileno(self) -> int:
+            return 12345
+
+    stream = BufferedBrokenStream()
+    redirects = []
+    failure = OSError(errno.EBADF, "redirect failed")
+
+    def duplicate(source: int, destination: int) -> None:
+        assert destination == stream.fileno()
+        assert os.write(source, b"discarded") == len(b"discarded")
+        redirects.append(source)
+        if redirect_fails:
+            raise failure
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", stream)
+        patch.setattr(cli.os, "dup2", duplicate)
+        if redirect_fails:
+            with pytest.raises(OSError) as caught:
+                cli._write_stdout("buffered output")
+            assert caught.value is failure
+        else:
+            cli._write_stdout("buffered output")
+    assert stream.getvalue() == "buffered output"
+    assert len(redirects) == 1
+    with pytest.raises(OSError) as closed:
+        os.fstat(redirects[0])
+    assert closed.value.errno == errno.EBADF

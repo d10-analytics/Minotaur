@@ -57,7 +57,8 @@ Repeated and overlapping targets are analyzed once.
 
 Normal recursive scans exclude hidden directories, caches, and virtual
 environments. Explicitly selecting such a file or directory includes it.
-The output parent directory must already exist, and an output path may never
+The output parent directory must already exist; for a symbolic-link output,
+the directory the link resolves into must also exist. An output path may never
 also be a selected source file. An existing graph can be reused when its
 recorded selection and analyzed source content are clean, its analyzer semantics
 version is current, and it records no errors: Minotaur prints

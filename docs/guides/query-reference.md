@@ -611,6 +611,11 @@ Exit statuses are:
   several definitions is never answered from an arbitrary one of them, and a
   system query never answers from a partial or invalid systems tree).
 
+If the standard-output reader closes early (for example, `head`), the query
+stops quietly and keeps the exit status above; this does not cover `--help`.
+Any other standard-output write failure, such as a full disk, is reported as
+one error and exits `2`.
+
 The commands never execute or import the analyzed source. Dynamic dispatch,
 reflection, generated code, and configuration-dependent behavior remain
 outside the graph's static claims. For Python-specific selection, nested-scope

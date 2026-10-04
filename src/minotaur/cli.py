@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import stat
 import sys
 import tempfile
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from minotaur import git, language_interpreter
 from minotaur.comparison import (
@@ -792,7 +793,7 @@ def _run_explicit_diff(query: argparse.Namespace) -> int:
     new_loaded = load_graph_file(new_path, validate=query.validate)
     _stamp_if_validated(new_path, new_loaded)
     output, changed = _diff_output(query, old_loaded.document, new_loaded.document)
-    print(output, end="")
+    _write_stdout(output)
     return 1 if changed else 0
 
 
@@ -861,7 +862,7 @@ def _run_committed_diff(query: argparse.Namespace, located: Path) -> int:
     for diagnostic in produced.diagnostics:
         print(_format_diagnostic(diagnostic), file=sys.stderr)
     output, changed = _diff_output(query, old_loaded.document, produced.document)
-    print(output, end="")
+    _write_stdout(output)
     return 1 if produced.errors or changed else 0
 
 
@@ -971,7 +972,7 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
                 if arguments.name != "systems":
                     arguments.system = resolve_system(arguments.systems, arguments.system_name)
         if snapshot is not None:
-            print(snapshot(arguments), end="")
+            _write_stdout(snapshot(arguments))
             return 0
         return _run_graph_query(arguments)
     except (GraphLoadError, OSError, ValueError) as error:
@@ -1010,6 +1011,7 @@ class _HtmlOutputPlan:
     identity: tuple[int, int] | None
     parent: Path
     parent_identity: tuple[int, int] | None
+    resolved_parent_identity: tuple[int, int]
 
 
 def _run_systems_diff(query: argparse.Namespace) -> int:
@@ -1072,7 +1074,7 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
             protected_files=pair.protected_files,
             protected_directories=pair.protected_directories,
         )
-    print(output, end="")
+    _write_stdout(output)
     if content is not None and len(content) > _LARGE_ARTIFACT_BYTES:
         print("minotaur: warning: comparison report exceeds 10 MiB", file=sys.stderr)
     return selected.exit_code
@@ -1459,6 +1461,7 @@ def _preflight_html_output(output: Path, *, force: bool) -> _HtmlOutputPlan:
         parent_identity: tuple[int, int] | None = (parent_info.st_dev, parent_info.st_ino)
     except OSError:  # pragma: no cover - the preflight already proved the parent exists.
         parent_identity = None
+    resolved_parent_info = os.stat(resolved.parent)
     try:
         info = os.stat(resolved)
     except OSError:
@@ -1470,29 +1473,19 @@ def _preflight_html_output(output: Path, *, force: bool) -> _HtmlOutputPlan:
         identity=(info.st_dev, info.st_ino) if info is not None else None,
         parent=parent,
         parent_identity=parent_identity,
+        resolved_parent_identity=(resolved_parent_info.st_dev, resolved_parent_info.st_ino),
     )
 
 
 def _write_no_clobber(output: Path, content: bytes) -> None:
     """Publish complete bytes only when the destination is still unoccupied."""
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(temporary, 0o666 & ~umask)
+    with _durable_temporary(output, content) as temporary:
         try:
             os.link(temporary, output)
         except FileExistsError as error:
             raise ValueError(
                 f"output destination was created during comparison: {output}"
             ) from error
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _publish_comparison_html(
@@ -1511,6 +1504,15 @@ def _publish_comparison_html(
         plan.parent_identity is not None
         and (parent_info.st_dev, parent_info.st_ino) != plan.parent_identity
     ):
+        raise ValueError(f"output parent directory changed during comparison: {plan.display}")
+    try:
+        resolved_parent_info = os.stat(plan.resolved.parent)
+    except OSError as error:
+        raise ValueError(f"output parent directory is unavailable: {plan.display}") from error
+    if (
+        resolved_parent_info.st_dev,
+        resolved_parent_info.st_ino,
+    ) != plan.resolved_parent_identity:
         raise ValueError(f"output parent directory changed during comparison: {plan.display}")
     try:
         info = os.stat(plan.resolved)
@@ -1554,7 +1556,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
         )
         composed = system_query.compose_system_query(overview_report, invocation)
         output = render_systems_json(composed) if query.json else render_systems_text(composed)
-        print(output, end="")
+        _write_stdout(output)
         return 1 if graph.errors else 0
     handler = _GRAPH_QUERIES.get(query.name)
     if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
@@ -1594,7 +1596,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
             if query.json
             else handler.render_text(records)
         )
-    print(output, end="")
+    _write_stdout(output)
     return 1 if graph.errors else 0
 
 
@@ -1946,7 +1948,12 @@ def _visualize(arguments: argparse.Namespace, located: Path | None) -> int:
         loaded = load_graph_file(input_path, validate=arguments.validate)
         # D-12: a freshness guard was considered for visualize but declined;
         # rendering need not have a source root and remains cheap to repeat.
-        output = _preflight_output(Path(arguments.output), (input_path.resolve(),), arguments.force)
+        output = _preflight_output(
+            Path(arguments.output),
+            (input_path.resolve(),),
+            arguments.force,
+            collision="--output is the same file as --input",
+        )
         # M-4: stamp only after the output preflight passes. Stamping before
         # this check meant `visualize --output existing.html` without
         # `--force` exited 2 while still creating `<input>.sha256` on disk —
@@ -1972,7 +1979,13 @@ def _visualize(arguments: argparse.Namespace, located: Path | None) -> int:
     return 0
 
 
-def _preflight_output(output: Path, files: tuple[Path, ...], force: bool) -> Path:
+def _preflight_output(
+    output: Path,
+    files: tuple[Path, ...],
+    force: bool,
+    *,
+    collision: str = "output is also a selected source file",
+) -> Path:
     """Validate the destination before any analysis work creates an artifact.
 
     Resolving the destination matters for the same reason targets are
@@ -1983,8 +1996,13 @@ def _preflight_output(output: Path, files: tuple[Path, ...], force: bool) -> Pat
     if not output.parent.is_dir():
         raise ValueError(f"output parent directory does not exist: {output.parent}")
     resolved = output.resolve()
+    if not resolved.parent.is_dir():
+        raise ValueError(
+            f"output parent directory does not exist: {resolved.parent} "
+            f"({output} resolves to {resolved})"
+        )
     if resolved in files:
-        raise ValueError(f"output is also a selected source file: {output}")
+        raise ValueError(f"{collision}: {output}")
     if output.exists() and output.is_dir():
         raise ValueError(f"output path is a directory: {output}")
     if output.exists() and not force:
@@ -2099,6 +2117,29 @@ def _stamp_if_validated(path: Path, loaded: LoadedGraph) -> None:
         return
 
 
+@contextmanager
+def _durable_temporary(output: Path, content: bytes) -> Iterator[Path]:
+    """Prepare durable bytes beside the destination and always remove the temporary file."""
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # mkstemp creates the temporary file mode 0600, which the graph
+        # and sidecar would otherwise inherit through os.replace. In a shared
+        # checkout that leaves the file unreadable to anyone but the writer,
+        # who then silently pays the full-validation path forever. Widen the
+        # mode to whatever the process umask allows, same as a normal create.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(temporary, 0o666 & ~umask)
+        yield temporary
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _write_atomically(output: Path, content: bytes) -> None:
     """Replace ``output`` only after a complete canonical document is durable.
 
@@ -2107,27 +2148,8 @@ def _write_atomically(output: Path, content: bytes) -> None:
     so a reader sees either the previous graph or the complete new graph,
     never a partially written JSON document.
     """
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        # L-1: mkstemp creates the temporary file mode 0600, which the graph
-        # and sidecar would otherwise inherit through os.replace. In a shared
-        # checkout that leaves the file unreadable to anyone but the writer,
-        # who then silently pays the full-validation path forever. Widen the
-        # mode to whatever the process umask allows, same as a normal create.
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(temporary, 0o666 & ~umask)
+    with _durable_temporary(output, content) as temporary:
         os.replace(temporary, output)
-    except OSError:
-        # If writing fails before replacement, remove only the file created by
-        # this call.  The prior destination is left untouched by atomic replace.
-        temporary.unlink(missing_ok=True)
-        raise
 
 
 def _format_diagnostic(diagnostic: Diagnostic) -> str:
@@ -2157,6 +2179,38 @@ def _thaw_diagnostic_metadata(value: object) -> object:
     if isinstance(value, (list, tuple)):
         return [_thaw_diagnostic_metadata(item) for item in value]
     return value
+
+
+def _write_stdout(text: str) -> None:
+    """Write command output without a failed write replacing the command's status.
+
+    A closed reader is quiet and keeps the status. Any other write failure is
+    re-raised for the caller to report, after the unwritten buffer is dropped
+    so the interpreter's shutdown flush cannot fail a second time.
+    """
+    try:
+        print(text, end="")
+        if sys.stdout is not None:
+            sys.stdout.flush()
+    except BrokenPipeError:
+        _discard_unwritten_output(sys.stdout)
+    except OSError:
+        # The original write failure is the one worth reporting.
+        with suppress(OSError):
+            _discard_unwritten_output(sys.stdout)
+        raise
+
+
+def _discard_unwritten_output(stream: TextIO | None) -> None:
+    """Point the stream's descriptor at the null device so shutdown drops its buffer."""
+    if stream is None:
+        return
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, ValueError, io.UnsupportedOperation):
+        return
+    with open(os.devnull, "w") as sink:
+        os.dup2(sink.fileno(), descriptor)
 
 
 def _error(message: str) -> None:

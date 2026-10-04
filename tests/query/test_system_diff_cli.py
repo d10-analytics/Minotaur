@@ -1675,6 +1675,128 @@ def test_systems_output_directory_and_missing_parent_are_errors(
     assert "parent directory does not exist" in captured.err
 
 
+def test_systems_html_dangling_link_is_refused_before_acquisition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    resolved = tmp_path / "missing" / "report.html"
+    link = tmp_path / "link.html"
+    link.symlink_to(resolved)
+
+    def unexpected_acquisition(*args: object, **kwargs: object) -> None:
+        raise AssertionError("acquisition must not run for an invalid output parent")
+
+    monkeypatch.setattr(cli, "_acquire_systems_pair", unexpected_acquisition)
+    capsys.readouterr()
+    assert cli.main(["query", "diff", "--systems", "--html", str(link)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert str(resolved) in captured.err
+    assert not resolved.parent.exists()
+
+
+def test_systems_html_link_target_directory_replaced_during_comparison_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    given_parent = tmp_path / "A"
+    given_parent.mkdir()
+    resolved_parent = tmp_path / "B"
+    resolved_parent.mkdir()
+    old_parent = tmp_path / "B.old"
+    link = given_parent / "report.html"
+    link.symlink_to(resolved_parent / "report.html")
+    original_acquire = cli._acquire_systems_pair
+
+    def replace_parent(*args: object, **kwargs: object) -> object:
+        resolved_parent.rename(old_parent)
+        resolved_parent.mkdir()
+        return original_acquire(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli, "_acquire_systems_pair", replace_parent)
+    capsys.readouterr()
+    assert cli.main(["query", "diff", "--systems", "--html", str(link)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"output parent directory changed during comparison: {link}" in captured.err
+    assert list(resolved_parent.iterdir()) == []
+    assert list(old_parent.iterdir()) == []
+
+
+def test_systems_html_link_target_directory_removed_during_comparison_preserves_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    given_parent = tmp_path / "A"
+    given_parent.mkdir()
+    resolved_parent = tmp_path / "B"
+    resolved_parent.mkdir()
+    old_parent = tmp_path / "B.old"
+    (resolved_parent / "report.html").write_bytes(b"previous report")
+    link = given_parent / "report.html"
+    link.symlink_to(resolved_parent / "report.html")
+    original_acquire = cli._acquire_systems_pair
+
+    def remove_parent(*args: object, **kwargs: object) -> object:
+        resolved_parent.rename(old_parent)
+        return original_acquire(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli, "_acquire_systems_pair", remove_parent)
+    capsys.readouterr()
+    assert cli.main(["query", "diff", "--systems", "--html", str(link), "--force"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"output parent directory is unavailable: {link}" in captured.err
+    assert (old_parent / "report.html").read_bytes() == b"previous report"
+    assert sorted(path.name for path in old_parent.iterdir()) == ["report.html"]
+    assert not resolved_parent.exists()
+    assert link.is_symlink()
+
+
+def test_systems_html_intermediate_directory_link_retargeted_during_comparison_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    before = tmp_path / "B"
+    before.mkdir()
+    after = tmp_path / "C"
+    after.mkdir()
+    directory_link = tmp_path / "out"
+    directory_link.symlink_to(before, target_is_directory=True)
+    report = directory_link / "report.html"
+    original_acquire = cli._acquire_systems_pair
+
+    def retarget_parent(*args: object, **kwargs: object) -> object:
+        directory_link.unlink()
+        directory_link.symlink_to(after, target_is_directory=True)
+        return original_acquire(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli, "_acquire_systems_pair", retarget_parent)
+    capsys.readouterr()
+    assert cli.main(["query", "diff", "--systems", "--html", str(report)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"output parent directory changed during comparison: {report}" in captured.err
+    assert list(before.iterdir()) == []
+    assert list(after.iterdir()) == []
+
+
 def test_systems_output_write_failure_preserves_existing_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

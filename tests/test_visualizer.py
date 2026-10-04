@@ -188,11 +188,28 @@ def test_presentation_assigns_exact_system_membership_to_every_located_node() ->
     assert tax.id not in presentation["node_systems"]
 
 
-def test_visualize_cli_refuses_alias_and_writes_atomically(tmp_path: Path) -> None:
+def test_visualize_cli_refuses_alias_and_writes_atomically(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     input_path = tmp_path / "graph.json"
     input_path.write_text(json.dumps(_graph()), encoding="utf-8")
+    original = input_path.read_bytes()
+    alias = tmp_path / "alias.html"
+    alias.symlink_to(input_path)
+    for destination, flags in ((input_path, []), (input_path, ["--force"]), (alias, ["--force"])):
+        assert (
+            cli.main(
+                ["visualize", "--input", str(input_path), "--output", str(destination), *flags]
+            )
+            == 2
+        )
+        captured = capsys.readouterr()
+        assert f"--output is the same file as --input: {destination}" in captured.err
+        assert "also a selected source" not in captured.err
+        assert captured.out == ""
+        assert input_path.read_bytes() == original
+        assert alias.is_symlink()
     output = tmp_path / "view.html"
-    assert cli.main(["visualize", "--input", str(input_path), "--output", str(input_path)]) == 2
     assert cli.main(["visualize", "--input", str(input_path), "--output", str(output)]) == 0
     assert output.read_bytes().startswith(b"<!doctype html>")
     assert cli.main(["visualize", "--input", str(input_path), "--output", str(output)]) == 2
