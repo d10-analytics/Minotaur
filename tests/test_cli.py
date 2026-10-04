@@ -1231,6 +1231,52 @@ def test_atomic_output_failure_preserves_old_graph_and_removes_its_temporary_fil
     assert list(tmp_path.glob(".graph.json.*")) == []
 
 
+@pytest.mark.parametrize("writer_name", ["_write_atomically", "_write_no_clobber"])
+@pytest.mark.parametrize("trigger", ["invalid_content", "interrupted_fsync"])
+def test_atomic_writers_remove_temporary_file_on_any_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer_name: str, trigger: str
+) -> None:
+    output = tmp_path / "out.json"
+    output.write_bytes(b"existing destination")
+    writer = getattr(cli, writer_name)
+
+    if trigger == "invalid_content":
+        with pytest.raises(TypeError):
+            writer(output, "not-bytes")
+    else:
+
+        def raise_keyboard_interrupt(descriptor: int) -> None:
+            raise KeyboardInterrupt("interrupted fsync")
+
+        monkeypatch.setattr(cli.os, "fsync", raise_keyboard_interrupt)
+        with pytest.raises(KeyboardInterrupt, match="interrupted fsync"):
+            writer(output, b"x")
+
+    assert list(tmp_path.glob(".out.json.*")) == []
+    assert output.read_bytes() == b"existing destination"
+
+
+def test_atomic_writers_share_one_temporary_body() -> None:
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "tempfile"
+        and node.func.attr == "mkstemp"
+    ]
+    assert len(calls) == 1
+    owners = [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and calls[0] in ast.walk(node)
+    ]
+    assert len(owners) == 1
+    assert owners[0] not in {"_write_atomically", "_write_no_clobber"}
+
+
 def test_written_files_respect_process_umask(tmp_path: Path) -> None:
     """L-1: mkstemp's 0600 mode is widened to the process umask on replace."""
     root = tmp_path / "source"
