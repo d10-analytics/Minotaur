@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import stat
@@ -792,7 +793,7 @@ def _run_explicit_diff(query: argparse.Namespace) -> int:
     new_loaded = load_graph_file(new_path, validate=query.validate)
     _stamp_if_validated(new_path, new_loaded)
     output, changed = _diff_output(query, old_loaded.document, new_loaded.document)
-    print(output, end="")
+    _write_stdout(output)
     return 1 if changed else 0
 
 
@@ -861,7 +862,7 @@ def _run_committed_diff(query: argparse.Namespace, located: Path) -> int:
     for diagnostic in produced.diagnostics:
         print(_format_diagnostic(diagnostic), file=sys.stderr)
     output, changed = _diff_output(query, old_loaded.document, produced.document)
-    print(output, end="")
+    _write_stdout(output)
     return 1 if produced.errors or changed else 0
 
 
@@ -971,7 +972,7 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
                 if arguments.name != "systems":
                     arguments.system = resolve_system(arguments.systems, arguments.system_name)
         if snapshot is not None:
-            print(snapshot(arguments), end="")
+            _write_stdout(snapshot(arguments))
             return 0
         return _run_graph_query(arguments)
     except (GraphLoadError, OSError, ValueError) as error:
@@ -1072,7 +1073,7 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
             protected_files=pair.protected_files,
             protected_directories=pair.protected_directories,
         )
-    print(output, end="")
+    _write_stdout(output)
     if content is not None and len(content) > _LARGE_ARTIFACT_BYTES:
         print("minotaur: warning: comparison report exceeds 10 MiB", file=sys.stderr)
     return selected.exit_code
@@ -1554,7 +1555,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
         )
         composed = system_query.compose_system_query(overview_report, invocation)
         output = render_systems_json(composed) if query.json else render_systems_text(composed)
-        print(output, end="")
+        _write_stdout(output)
         return 1 if graph.errors else 0
     handler = _GRAPH_QUERIES.get(query.name)
     if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
@@ -1594,7 +1595,7 @@ def _run_graph_query(query: argparse.Namespace) -> int:
             if query.json
             else handler.render_text(records)
         )
-    print(output, end="")
+    _write_stdout(output)
     return 1 if graph.errors else 0
 
 
@@ -2157,6 +2158,24 @@ def _thaw_diagnostic_metadata(value: object) -> object:
     if isinstance(value, (list, tuple)):
         return [_thaw_diagnostic_metadata(item) for item in value]
     return value
+
+
+def _write_stdout(text: str) -> None:
+    """Write command output without losing its status when the reader closes."""
+    try:
+        print(text, end="")
+        if sys.stdout is not None:
+            sys.stdout.flush()
+    except BrokenPipeError:
+        if sys.stdout is None:
+            return
+        try:
+            descriptor = sys.stdout.fileno()
+        except (AttributeError, ValueError, io.UnsupportedOperation):
+            return
+        # Discard the failed buffer when the interpreter flushes it at shutdown.
+        with open(os.devnull, "w") as sink:
+            os.dup2(sink.fileno(), descriptor)
 
 
 def _error(message: str) -> None:
