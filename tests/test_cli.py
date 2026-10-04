@@ -3557,6 +3557,32 @@ def test_closed_stdout_pipe_keeps_large_output_status_quietly(
         assert result.stderr == ""
 
 
+@pytest.mark.skipif(not os.path.exists("/dev/full"), reason="requires the /dev/full device")
+def test_full_stdout_device_reports_one_error_and_keeps_failure_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = _write(tmp_path, "app.py", "def example():\n    return 1\n")
+    graph = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(tmp_path), "--output", str(graph), str(source)]) == 0
+
+    with open("/dev/full", "w") as full:
+        result = subprocess.run(
+            [sys.executable, "-m", "minotaur", "query", "diff", str(graph), str(graph)],
+            cwd=tmp_path,
+            stdout=full,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+    assert result.returncode == 2, result.stderr
+    lines = [line for line in result.stderr.splitlines() if line]
+    assert len(lines) == 1, result.stderr
+    assert lines[0].startswith("minotaur: error:")
+    assert "Exception ignored" not in result.stderr
+
+
 def test_command_stdout_writes_use_the_shared_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
