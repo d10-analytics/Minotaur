@@ -3540,3 +3540,43 @@ def test_stdout_writer_propagates_non_pipe_errors_and_tolerates_missing_descript
         patch.setattr(sys, "stdout", None)
         assert cli._write_stdout("x") is None
     assert redirects == []
+
+
+@pytest.mark.parametrize("redirect_fails", [False, True])
+def test_stdout_writer_closes_redirect_descriptor_even_when_duplication_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, redirect_fails: bool
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    class BufferedBrokenStream(io.StringIO):
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+        def fileno(self) -> int:
+            return 12345
+
+    stream = BufferedBrokenStream()
+    redirects = []
+    failure = OSError(errno.EBADF, "redirect failed")
+
+    def duplicate(source: int, destination: int) -> None:
+        assert destination == stream.fileno()
+        assert os.write(source, b"discarded") == len(b"discarded")
+        redirects.append(source)
+        if redirect_fails:
+            raise failure
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", stream)
+        patch.setattr(cli.os, "dup2", duplicate)
+        if redirect_fails:
+            with pytest.raises(OSError) as caught:
+                cli._write_stdout("buffered output")
+            assert caught.value is failure
+        else:
+            cli._write_stdout("buffered output")
+    assert stream.getvalue() == "buffered output"
+    assert len(redirects) == 1
+    with pytest.raises(OSError) as closed:
+        os.fstat(redirects[0])
+    assert closed.value.errno == errno.EBADF
