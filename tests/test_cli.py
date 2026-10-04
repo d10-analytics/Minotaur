@@ -1331,6 +1331,42 @@ def _symlinked_graph(tmp_path: Path) -> tuple[Path, Path, Path]:
     return root, link, real
 
 
+def test_analyze_refuses_dangling_output_link_before_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    resolved = tmp_path / "missingdir" / "out.json"
+    link = tmp_path / "link.json"
+    link.symlink_to(resolved)
+
+    def unexpected_analysis(*args: object, **kwargs: object) -> None:
+        raise AssertionError("analysis must not run for an invalid output parent")
+
+    monkeypatch.setattr(cli, "_produce_selection", unexpected_analysis)
+    assert cli.main(["analyze", "--root", str(root), "--output", str(link), str(root)]) == 2
+    captured = capsys.readouterr()
+    assert "parent directory does not exist" in captured.err
+    assert str(resolved.parent) in captured.err
+    assert f"{link} resolves to {resolved}" in captured.err
+    assert not resolved.parent.exists()
+    assert not stamp_path(link).exists()
+    assert not list(tmp_path.rglob(".out.json.*"))
+
+
+def test_analyze_keeps_unresolved_missing_parent_refusal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "app.py", "def app():\n    return 1\n")
+    output = tmp_path / "missing" / ".." / "out.json"
+
+    assert cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)]) == 2
+    captured = capsys.readouterr()
+    assert f"output parent directory does not exist: {output.parent}" in captured.err
+    assert not (tmp_path / "out.json").exists()
+
+
 def test_analyze_through_symlink_stamps_beside_the_link_not_the_resolved_file(
     tmp_path: Path,
 ) -> None:
