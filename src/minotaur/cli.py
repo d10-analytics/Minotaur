@@ -11,8 +11,8 @@ import stat
 import sys
 import tempfile
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -1479,24 +1479,13 @@ def _preflight_html_output(output: Path, *, force: bool) -> _HtmlOutputPlan:
 
 def _write_no_clobber(output: Path, content: bytes) -> None:
     """Publish complete bytes only when the destination is still unoccupied."""
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(temporary, 0o666 & ~umask)
+    with _durable_temporary(output, content) as temporary:
         try:
             os.link(temporary, output)
         except FileExistsError as error:
             raise ValueError(
                 f"output destination was created during comparison: {output}"
             ) from error
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _publish_comparison_html(
@@ -2117,6 +2106,29 @@ def _stamp_if_validated(path: Path, loaded: LoadedGraph) -> None:
         return
 
 
+@contextmanager
+def _durable_temporary(output: Path, content: bytes) -> Iterator[Path]:
+    """Prepare durable bytes beside the destination and always remove the temporary file."""
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # mkstemp creates the temporary file mode 0600, which the graph
+        # and sidecar would otherwise inherit through os.replace. In a shared
+        # checkout that leaves the file unreadable to anyone but the writer,
+        # who then silently pays the full-validation path forever. Widen the
+        # mode to whatever the process umask allows, same as a normal create.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(temporary, 0o666 & ~umask)
+        yield temporary
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _write_atomically(output: Path, content: bytes) -> None:
     """Replace ``output`` only after a complete canonical document is durable.
 
@@ -2125,27 +2137,8 @@ def _write_atomically(output: Path, content: bytes) -> None:
     so a reader sees either the previous graph or the complete new graph,
     never a partially written JSON document.
     """
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        # L-1: mkstemp creates the temporary file mode 0600, which the graph
-        # and sidecar would otherwise inherit through os.replace. In a shared
-        # checkout that leaves the file unreadable to anyone but the writer,
-        # who then silently pays the full-validation path forever. Widen the
-        # mode to whatever the process umask allows, same as a normal create.
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(temporary, 0o666 & ~umask)
+    with _durable_temporary(output, content) as temporary:
         os.replace(temporary, output)
-    except OSError:
-        # If writing fails before replacement, remove only the file created by
-        # this call.  The prior destination is left untouched by atomic replace.
-        temporary.unlink(missing_ok=True)
-        raise
 
 
 def _format_diagnostic(diagnostic: Diagnostic) -> str:
