@@ -1731,6 +1731,40 @@ def test_systems_html_link_target_directory_replaced_during_comparison_is_refuse
     assert list(old_parent.iterdir()) == []
 
 
+def test_systems_html_link_target_directory_removed_during_comparison_preserves_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    given_parent = tmp_path / "A"
+    given_parent.mkdir()
+    resolved_parent = tmp_path / "B"
+    resolved_parent.mkdir()
+    old_parent = tmp_path / "B.old"
+    (resolved_parent / "report.html").write_bytes(b"previous report")
+    link = given_parent / "report.html"
+    link.symlink_to(resolved_parent / "report.html")
+    original_acquire = cli._acquire_systems_pair
+
+    def remove_parent(*args: object, **kwargs: object) -> object:
+        resolved_parent.rename(old_parent)
+        return original_acquire(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli, "_acquire_systems_pair", remove_parent)
+    capsys.readouterr()
+    assert cli.main(["query", "diff", "--systems", "--html", str(link), "--force"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"output parent directory is unavailable: {link}" in captured.err
+    assert (old_parent / "report.html").read_bytes() == b"previous report"
+    assert sorted(path.name for path in old_parent.iterdir()) == ["report.html"]
+    assert not resolved_parent.exists()
+    assert link.is_symlink()
+
+
 def test_systems_html_intermediate_directory_link_retargeted_during_comparison_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
