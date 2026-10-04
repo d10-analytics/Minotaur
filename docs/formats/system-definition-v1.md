@@ -3,8 +3,11 @@
 A system definition is a committed, repository-visible artifact: one
 directory per system under a configurable location, each holding a single
 machine-readable file named `system.toml` whose contract is described here.
-Minotaur reads nothing else in the system directory — narrative documentation
-may coexist with the definition and is ignored.
+`analyze --scope NAME` writes the system's graph, `graph.json`, and its
+`graph.json.sha256` sidecar into the same directory; committed
+`query diff --scope NAME` reads that `graph.json` and its `graph.json.sha256`
+sidecar at `HEAD`. Narrative documentation may coexist with the definition
+and is ignored by the system loader.
 
 Why definitions exist as committed scopes, and what questions they make
 answerable, is stated in
@@ -69,7 +72,8 @@ convenience entry is deliberately not offered in this version.
 
 ## Narrative files are ignored
 
-Only the `system.toml` file is read and validated. Narrative documentation
+Only the `system.toml` file is read and validated by the system loader;
+the system loader never reads `graph.json` or its sidecar. Narrative documentation
 may sit beside it in the same directory (for example a `README.md`), and any
 other file or directory under `systems_dir` that is not an immediate child
 directory holding a `system.toml` is equally ignored. No prose is ever

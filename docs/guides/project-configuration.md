@@ -230,6 +230,11 @@ CLI value always wins for its own field:
 
 * `analyze` — `--root` overrides `root`, `--output` overrides `graph`, and a
   non-empty positional `TARGET` list overrides `targets`.
+* `analyze --scope NAME` — replaces the configured `targets` with the named
+  system's declared files and writes `graph.json` and its `graph.json.sha256`
+  sidecar into that system's definition directory instead of the configured
+  `graph`. It requires a located configuration and cannot be combined with
+  positional `TARGET` arguments or `--output`.
 * config-consuming `query` subcommands — `--root` overrides `root` and
   `--graph` overrides `graph`.
 * `visualize` — `--input` overrides `graph`; `--source-root` overrides `root`
