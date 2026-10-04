@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from minotaur import git, language_interpreter
 from minotaur.comparison import (
@@ -2182,21 +2182,35 @@ def _thaw_diagnostic_metadata(value: object) -> object:
 
 
 def _write_stdout(text: str) -> None:
-    """Write command output without losing its status when the reader closes."""
+    """Write command output without a failed write replacing the command's status.
+
+    A closed reader is quiet and keeps the status. Any other write failure is
+    re-raised for the caller to report, after the unwritten buffer is dropped
+    so the interpreter's shutdown flush cannot fail a second time.
+    """
     try:
         print(text, end="")
         if sys.stdout is not None:
             sys.stdout.flush()
     except BrokenPipeError:
-        if sys.stdout is None:
-            return
-        try:
-            descriptor = sys.stdout.fileno()
-        except (AttributeError, ValueError, io.UnsupportedOperation):
-            return
-        # Discard the failed buffer when the interpreter flushes it at shutdown.
-        with open(os.devnull, "w") as sink:
-            os.dup2(sink.fileno(), descriptor)
+        _discard_unwritten_output(sys.stdout)
+    except OSError:
+        # The original write failure is the one worth reporting.
+        with suppress(OSError):
+            _discard_unwritten_output(sys.stdout)
+        raise
+
+
+def _discard_unwritten_output(stream: TextIO | None) -> None:
+    """Point the stream's descriptor at the null device so shutdown drops its buffer."""
+    if stream is None:
+        return
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, ValueError, io.UnsupportedOperation):
+        return
+    with open(os.devnull, "w") as sink:
+        os.dup2(sink.fileno(), descriptor)
 
 
 def _error(message: str) -> None:
