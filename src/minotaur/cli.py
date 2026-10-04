@@ -1948,7 +1948,12 @@ def _visualize(arguments: argparse.Namespace, located: Path | None) -> int:
         loaded = load_graph_file(input_path, validate=arguments.validate)
         # D-12: a freshness guard was considered for visualize but declined;
         # rendering need not have a source root and remains cheap to repeat.
-        output = _preflight_output(Path(arguments.output), (input_path.resolve(),), arguments.force)
+        output = _preflight_output(
+            Path(arguments.output),
+            (input_path.resolve(),),
+            arguments.force,
+            collision="--output is the same file as --input",
+        )
         # M-4: stamp only after the output preflight passes. Stamping before
         # this check meant `visualize --output existing.html` without
         # `--force` exited 2 while still creating `<input>.sha256` on disk —
@@ -1974,7 +1979,13 @@ def _visualize(arguments: argparse.Namespace, located: Path | None) -> int:
     return 0
 
 
-def _preflight_output(output: Path, files: tuple[Path, ...], force: bool) -> Path:
+def _preflight_output(
+    output: Path,
+    files: tuple[Path, ...],
+    force: bool,
+    *,
+    collision: str = "output is also a selected source file",
+) -> Path:
     """Validate the destination before any analysis work creates an artifact.
 
     Resolving the destination matters for the same reason targets are
@@ -1991,7 +2002,7 @@ def _preflight_output(output: Path, files: tuple[Path, ...], force: bool) -> Pat
             f"({output} resolves to {resolved})"
         )
     if resolved in files:
-        raise ValueError(f"output is also a selected source file: {output}")
+        raise ValueError(f"{collision}: {output}")
     if output.exists() and output.is_dir():
         raise ValueError(f"output path is a directory: {output}")
     if output.exists() and not force:
