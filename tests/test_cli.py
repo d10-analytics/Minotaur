@@ -1532,9 +1532,7 @@ def test_relative_missing_target_does_not_resolve_against_root(
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
     output = tmp_path / "g.json"
-    status = cli.main(
-        ["analyze", "--root", str(tmp_path), "--output", str(output), "nope.py"]
-    )
+    status = cli.main(["analyze", "--root", str(tmp_path), "--output", str(output), "nope.py"])
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert status == 2
     assert captured.err == (
