@@ -2623,3 +2623,99 @@ CREATE FUNCTION billing.Calculate(@id int) RETURNS int AS RETURN @id
             ],
         }
     ]
+
+
+@pytest.mark.parametrize("query", ("surface", "consumers", "system-deps"))
+def test_partitioned_report_rows_equal_single_system_reports_without_coverage(query, monkeypatch):
+    document, systems = _row_reporting_fixture()
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    expected = {
+        system.name: snapshot.report(query, system.name, details=True) for system in systems
+    }
+
+    def fail_coverage(*args):
+        raise AssertionError("row-only reports must not compute coverage")
+
+    monkeypatch.setattr(system_query.ReportingSnapshot, "_coverage", fail_coverage)
+    rows = snapshot.report_rows(query)
+    assert set(rows) == {system.name for system in systems}
+    for name, (records, relationships) in rows.items():
+        assert records == expected[name].results
+        assert relationships == expected[name].row_relationships
+    with pytest.raises(TypeError):
+        rows["extra"] = ((), {})
+    with pytest.raises(TypeError):
+        rows["orders"][1][("extra",)] = ()
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+def test_partitioned_overlapping_systems_route_only_to_first_owner(reverse):
+    source = _projection_symbol("source", "source.py", 0)
+    target = _projection_symbol("target", "target.py", 0)
+    edge = Relationship(source.id, target.id, "calls", (Evidence(Provenance.STATIC_ANALYSIS),))
+    document = GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(source, target),
+        relationships=(edge,),
+    )
+    owners = (System("first", ("target.py",)), System("second", ("target.py",)))
+    if reverse:
+        owners = tuple(reversed(owners))
+    systems = owners + (System("caller", ("source.py",)), System("empty", ("absent.py",)))
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    winner, loser = owners[0].name, owners[1].name
+    detail = system_query.TargetDetail("target", "target.py", "calls")
+    expected = {
+        "surface": {
+            winner: (
+                system_query.SurfaceRecord(f"system: {winner}", ("calls",), "target.py", "target"),
+            )
+        },
+        "consumers": {
+            winner: (
+                system_query.ConsumersRecord("system: caller", "source.py", ("calls",), (detail,)),
+            )
+        },
+        "system-deps": {"caller": (system_query.SystemDepsRecord(f"system: {winner}", (detail,)),)},
+    }
+    for query in ("surface", "consumers", "system-deps"):
+        rows = snapshot.report_rows(query)
+        assert set(rows) == {system.name for system in systems}
+        for system in systems:
+            records, relationships = rows[system.name]
+            report = snapshot.report(query, system.name, details=True)
+            assert records == report.results == expected[query].get(system.name, ())
+            assert relationships == report.row_relationships
+        assert rows[loser] == ((), {})
+        contributors = [
+            item for _, mapping in rows.values() for values in mapping.values() for item in values
+        ]
+        assert [(item.source.id, item.target.id, item.kind) for item in contributors] == [
+            edge.tuple_key
+        ]
+
+
+@pytest.mark.parametrize("query", ("surface", "consumers", "system-deps"))
+def test_single_system_report_uses_prepared_file_membership(query):
+    class CountedFiles(tuple):
+        contains_calls = 0
+        iterations = 0
+
+        def __contains__(self, item):
+            self.contains_calls += 1
+            return super().__contains__(item)
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    document, ordinary = _row_reporting_fixture()
+    systems = tuple(System(system.name, CountedFiles(system.files)) for system in ordinary)
+    snapshot = system_query.ReportingSnapshot.prepare(document, systems)
+    report = snapshot.report(query, "orders", details=True)
+    expected = system_query.ReportingSnapshot.prepare(document, ordinary).report(
+        query, "orders", details=True
+    )
+    assert report == expected
+    assert all(system.files.contains_calls == 0 for system in systems)
+    assert [system.files.iterations for system in systems] == [2, 1]
