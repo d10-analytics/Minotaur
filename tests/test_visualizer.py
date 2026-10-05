@@ -575,3 +575,34 @@ def test_regenerating_checked_in_examples_only_reproduces_reviewed_bytes() -> No
         "regeneration must reproduce the reviewed artifacts without touching any "
         f"other tracked file: {sorted(introduced)}"
     )
+
+
+def test_presentation_prepares_membership_once_without_file_scans() -> None:
+    class CountingFiles(tuple):
+        iterations = 0
+        contains = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+        def __contains__(self, item):
+            self.contains += 1
+            return super().__contains__(item)
+
+    loaded = load_graph_bytes(json.dumps(_graph()).encode())
+    checkout = CountingFiles(("src/checkout.py",))
+    overlap = CountingFiles(("src/checkout.py", "absent.py"))
+    presentation = build_presentation(
+        loaded.canonical,
+        systems=(System("checkout", checkout), System("overlap", overlap)),
+        document_nodes=loaded.document.nodes,
+    )
+    assert presentation["node_systems"] == {
+        node.id: "checkout"
+        for node in loaded.document.nodes
+        if node.path == "src/checkout.py"
+        or (node.location is not None and node.location.path == "src/checkout.py")
+    }
+    assert [checkout.iterations, overlap.iterations] == [1, 1]
+    assert [checkout.contains, overlap.contains] == [0, 0]

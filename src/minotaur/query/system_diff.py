@@ -45,7 +45,7 @@ from minotaur.query.system import (
     SurfaceRecord,
     SystemDepsRecord,
 )
-from minotaur.system import EndpointKind, classify_endpoint
+from minotaur.system import EndpointKind
 
 _REPORT_QUERIES = ("surface", "consumers", "system-deps")
 _BOUNDARY_KINDS = frozenset({"calls", "references", "imports"})
@@ -94,7 +94,7 @@ def _public_key(key: tuple[object, ...]) -> tuple[str, ...]:
 
 
 def _category(snapshot: ReportingSnapshot, node: Node) -> str:
-    membership = classify_endpoint(snapshot.systems, node)
+    membership = snapshot.membership.classify(node)
     if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
         return f"system: {membership.system.name}"
     if membership.kind is EndpointKind.NO_SYSTEM:
@@ -393,14 +393,14 @@ def _endpoint_structure(
 
 
 def _report_payload(
-    snapshot: ReportingSnapshot, query: str, name: str
+    snapshot: ReportingSnapshot,
+    query: str,
+    name: str,
+    rows: tuple[tuple[Any, ...], Mapping[tuple[str, ...], tuple[RelationshipDetail, ...]]],
 ) -> dict[tuple[str, ...], dict[str, object]]:
-    if name not in {system.name for system in snapshot.systems}:
-        return {}
-    report = cast(Any, snapshot).report(query, name, details=True)
+    records, row_relationships = rows
     result: dict[tuple[str, ...], dict[str, object]] = {}
-    row_relationships = report.row_relationships or {}
-    for record in report.results:
+    for record in records:
         key: tuple[str, ...]
         if query == "surface" and isinstance(record, SurfaceRecord):
             key = (name, record.path, record.symbol)
@@ -433,12 +433,11 @@ def _all_reports(
     snapshot: ReportingSnapshot,
 ) -> dict[str, dict[tuple[str, ...], dict[str, object]]]:
     result: dict[str, dict[tuple[str, ...], dict[str, object]]] = {}
-    names = tuple(system.name for system in snapshot.systems)
     for query in _REPORT_QUERIES:
         result[query] = {
             key: value
-            for name in names
-            for key, value in _report_payload(snapshot, query, name).items()
+            for name, rows in snapshot.report_rows(query).items()
+            for key, value in _report_payload(snapshot, query, name, rows).items()
         }
     return result
 

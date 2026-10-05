@@ -25,7 +25,7 @@ from minotaur.query.correspondence import (
     RelationshipOccurrence,
     prepare_whole_graph,
 )
-from minotaur.system import EndpointKind, classify_endpoint
+from minotaur.system import EndpointKind
 
 if TYPE_CHECKING:
     from minotaur.query.system import ReportingSnapshot
@@ -90,7 +90,7 @@ def _group_payload(values: Iterable[object]) -> object:
 def _category(snapshot: ReportingSnapshot | None, node: Node) -> str | None:
     if snapshot is None:
         return None
-    membership = classify_endpoint(snapshot.systems, node)
+    membership = snapshot.membership.classify(node)
     if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
         return membership.system.name
     return None

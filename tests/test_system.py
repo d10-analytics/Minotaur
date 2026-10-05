@@ -925,3 +925,77 @@ def test_listed_files_without_an_analyzed_node_are_surfaced_in_stable_order(
         AbsentFile(system=systems[0], file="src/auth/missing.py"),
         AbsentFile(system=systems[1], file="src/orders/report.py"),
     )
+
+
+class _CountingFiles(tuple):
+    def __new__(cls, *files: str):
+        value = super().__new__(cls, files)
+        value.iterations = 0
+        value.contains = 0
+        return value
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+    def __contains__(self, item):
+        self.contains += 1
+        return super().__contains__(item)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_prepared_membership_preserves_first_listing_without_scanning(reverse: bool) -> None:
+    files_a = _CountingFiles("shared.py", "a.py")
+    files_b = _CountingFiles("shared.py", "b.py")
+    systems = (System("A", files_a), System("B", files_b))
+    if reverse:
+        systems = tuple(reversed(systems))
+    prepared = system.SystemMembership(systems)
+    expected = EndpointMembership(EndpointKind.SYSTEM, systems[0], "shared.py")
+    assert prepared.systems == systems
+    for _ in range(10):
+        assert prepared.system_for_file("shared.py") is systems[0]
+        assert prepared.classify(_file_node("shared.py")) == expected
+        assert prepared.system_for_file("unlisted.py") is None
+        assert prepared.classify(_source_symbol("unlisted.py")) == EndpointMembership(
+            EndpointKind.NO_SYSTEM, file="unlisted.py"
+        )
+        assert prepared.classify(_upstream_symbol("external")) == EndpointMembership(
+            EndpointKind.EXTERNAL
+        )
+    assert [files_a.iterations, files_b.iterations] == [1, 1]
+    assert [files_a.contains, files_b.contains] == [0, 0]
+
+    for files in (files_a, files_b):
+        files.iterations = 0
+    assert system.system_for_file(systems, "shared.py") is systems[0]
+    assert system.classify_endpoint(systems, _file_node("shared.py")) == expected
+    assert [files_a.iterations, files_b.iterations] == [2, 2]
+    assert [files_a.contains, files_b.contains] == [0, 0]
+
+
+def test_prepared_membership_is_immutable_and_uses_module_file_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import FrozenInstanceError
+
+    systems = [System("A", ("chosen.py",))]
+    prepared = system.SystemMembership(systems)
+    systems.clear()
+    assert prepared.systems == (System("A", ("chosen.py",)),)
+    with pytest.raises(FrozenInstanceError):
+        prepared.systems = ()
+    with pytest.raises(TypeError):
+        prepared._by_file["other.py"] = prepared.systems[0]
+    calls = []
+
+    def derive(node: Node) -> str:
+        calls.append(node.id)
+        return "chosen.py"
+
+    monkeypatch.setattr(system, "_node_file", derive)
+    node = _file_node("other.py")
+    assert prepared.classify(node) == EndpointMembership(
+        EndpointKind.SYSTEM, prepared.systems[0], "chosen.py"
+    )
+    assert calls == [node.id]

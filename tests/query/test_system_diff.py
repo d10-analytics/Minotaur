@@ -745,7 +745,7 @@ def test_distinctive_native_report_owner_substitution_is_consumed(
         (Relationship(source.id, target.id, "references", edge.evidence),),
         systems,
     )
-    original = ReportingSnapshot.report
+    original = ReportingSnapshot.report_rows
     calls: list[tuple[bool, str]] = []
     control = compare_systems(old, new)
     assert control.changed is False
@@ -753,15 +753,13 @@ def test_distinctive_native_report_owner_substitution_is_consumed(
     def substituted(
         snapshot: ReportingSnapshot,
         selected_query: str,
-        system_name: str | None = None,
-        details: bool = False,
     ) -> object:
         calls.append((snapshot is new, selected_query))
         if snapshot is new and selected_query == query:
-            return original(alternate, selected_query, system_name, details)
-        return original(snapshot, selected_query, system_name, details)
+            return original(alternate, selected_query)
+        return original(snapshot, selected_query)
 
-    monkeypatch.setattr(ReportingSnapshot, "report", substituted)
+    monkeypatch.setattr(ReportingSnapshot, "report_rows", substituted)
     result = compare_systems(old, new)
 
     assert (True, query) in calls
@@ -991,6 +989,7 @@ def test_node_and_relationship_observation_changes_remain_neutral() -> None:
 def test_comparison_local_index_work_is_linear(count, mode, monkeypatch):
     from collections.abc import Mapping
 
+    from minotaur.query import call_diff, system_diff
     from minotaur.query.correspondence import CorrespondenceIndex
 
     source = _symbol("source", "a.py")
@@ -999,12 +998,59 @@ def test_comparison_local_index_work_is_linear(count, mode, monkeypatch):
         ("a.toml", "A", ("a.py", "b.py") if mode == "internal" else ("a.py",)),
         ("b.toml", "B", ("unused.py",) if mode == "internal" else ("b.py",)),
     )
-    edges = tuple(_call(source, target) for target in targets)
+    sites = tuple(Location("a.py", Range(Position(i, 4), Position(i, 10))) for i in range(count))
+    edges = tuple(
+        replace(
+            _call(source, target),
+            evidence=(Evidence(Provenance.STATIC_ANALYSIS, locations=(site,)),),
+        )
+        for target, site in zip(targets, sites, strict=True)
+    )
+    observations = tuple(
+        CallExpressionObservation("python", site, site, f"call-{i}") for i, site in enumerate(sites)
+    )
+    new_observations = observations[:-1] if mode == "changed" else observations
     old = _snapshot((source, *targets), edges, systems)
     new = _snapshot((source, *targets), edges[:-1] if mode == "changed" else edges, systems)
     projections = []
     traversed = 0
     original_details = ReportingSnapshot.relationship_details
+    original_location_key = call_diff._location_key
+    original_prepare = system_diff.prepare_correspondence
+    location_calls = 0
+    whole_graph_keys = 0
+    whole_graph_walks = 0
+
+    def location_key(location):
+        nonlocal location_calls
+        location_calls += 1
+        return original_location_key(location)
+
+    class CountedWholeGraph(Mapping):
+        def __init__(self, values):
+            self.values = values
+
+        def __len__(self):
+            return len(self.values)
+
+        def __getitem__(self, key):
+            return self.values[key]
+
+        def __iter__(self):
+            nonlocal whole_graph_walks
+            for key in self.values:
+                whole_graph_walks += 1
+                yield key
+
+    def prepare(document, **kwargs):
+        nonlocal whole_graph_keys
+        index = original_prepare(document, **kwargs)
+        if kwargs.get("whole_graph"):
+            whole_graph_keys += len(index.relationships_by_key)
+            return replace(
+                index, relationships_by_key=CountedWholeGraph(index.relationships_by_key)
+            )
+        return index
 
     def details(snapshot):
         projections.append(snapshot)
@@ -1032,7 +1078,29 @@ def test_comparison_local_index_work_is_linear(count, mode, monkeypatch):
         "relationship_groups",
         property(lambda index: CountedGroups(index.relationships_by_key)),
     )
-    result = compare_systems(old, new)
+    monkeypatch.setattr(call_diff, "_location_key", location_key)
+    monkeypatch.setattr(system_diff, "prepare_correspondence", prepare)
+    result = compare_systems(
+        old,
+        new,
+        old_call_observations=observations,
+        new_call_observations=new_observations,
+    )
+    evidence_locations = sum(
+        len(evidence.locations)
+        for snapshot in (old, new)
+        for relationship in snapshot.document.relationships
+        if relationship.kind == "calls"
+        for evidence in relationship.evidence
+    )
+    assert location_calls <= 4 * (len(observations) + len(new_observations) + evidence_locations)
+    assert whole_graph_keys == len(edges) + len(new.document.relationships)
+    assert whole_graph_walks <= 3 * whole_graph_keys
+    assert len(result.call_changes) == count
+    assert sum(item.status == "removed" for item in result.call_changes) == (mode == "changed")
+    assert sum(item.status == "unchanged" for item in result.call_changes) == count - (
+        mode == "changed"
+    )
     assert result.changed is (mode == "changed")
     assert sum(item is old for item in projections) == (0 if mode == "internal" else 1)
     assert sum(item is new for item in projections) == (0 if mode == "internal" else 1)
@@ -1084,3 +1152,103 @@ def test_repeated_unresolved_details_remain_side_local_after_id_regeneration():
         systems,
     )
     assert compare_systems(old, permuted).to_dict() == result.to_dict()
+
+
+@pytest.mark.parametrize("system_count", (2, 8, 32))
+def test_system_report_comparison_work_is_independent_of_system_count(system_count, monkeypatch):
+    import random
+
+    from minotaur import system as membership_module
+    from minotaur.system import System
+
+    class CountedFiles(tuple):
+        contains_calls = 0
+        iterations = 0
+
+        def __contains__(self, item):
+            self.contains_calls += 1
+            return super().__contains__(item)
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    files = tuple(f"file{i}.py" for i in range(64))
+    nodes = tuple(_symbol(f"symbol{i}", files[i // 4], i % 4) for i in range(256))
+    upstream = tuple(_upstream(f"external{i}", f"upstream{i}") for i in range(3))
+    rng = random.Random(307)
+    pairs = set()
+    while len(pairs) < 512:
+        pairs.add((rng.randrange(len(nodes)), rng.randrange(len(nodes) + len(upstream))))
+    destinations = nodes + upstream
+    edges = []
+    observations = []
+    for i, (source_index, target_index) in enumerate(sorted(pairs)):
+        source, target = nodes[source_index], destinations[target_index]
+        site = Location(source.location.path, Range(Position(i + 10, 2), Position(i + 10, 8)))
+        edges.append(
+            Relationship(
+                source.id,
+                target.id,
+                "calls",
+                (Evidence(Provenance.STATIC_ANALYSIS, locations=(site,)),),
+            )
+        )
+        observations.append(CallExpressionObservation("python", site, site, f"call-{i}"))
+    systems = tuple(
+        System(f"system{i}", CountedFiles(files[i:48:system_count])) for i in range(system_count)
+    )
+    old = _snapshot(destinations, tuple(edges), systems)
+    new = _snapshot(destinations, tuple(edges[:-5]), systems)
+    node_file_calls = resolution_calls = coverage_calls = yielded_items = 0
+    original_node_file = membership_module._node_file
+    original_resolve = system_query._resolve_supported_relationships
+    original_coverage = ReportingSnapshot._coverage
+
+    def node_file(node):
+        nonlocal node_file_calls
+        node_file_calls += 1
+        return original_node_file(node)
+
+    class CountedResolved(tuple):
+        def __iter__(self):
+            nonlocal yielded_items
+            for item in super().__iter__():
+                yielded_items += 1
+                yield item
+
+    def resolve(index):
+        nonlocal resolution_calls
+        resolution_calls += 1
+        return CountedResolved(original_resolve(index))
+
+    def coverage(snapshot, target):
+        nonlocal coverage_calls
+        coverage_calls += 1
+        return original_coverage(snapshot, target)
+
+    monkeypatch.setattr(membership_module, "_node_file", node_file)
+    monkeypatch.setattr(system_query, "_resolve_supported_relationships", resolve)
+    monkeypatch.setattr(ReportingSnapshot, "_coverage", coverage)
+    for system in systems:
+        system.files.contains_calls = system.files.iterations = 0
+    result = compare_systems(
+        old,
+        new,
+        old_call_observations=tuple(observations),
+        new_call_observations=tuple(observations[:-5]),
+    )
+    node_total = len(old.document.nodes) + len(new.document.nodes)
+    edge_total = len(old.document.relationships) + len(new.document.relationships)
+    # At most 8N for graph/context nodes; 6E for partition classification,
+    # 2E for row targets, 6E for row involvement, 14E for graph/boundary,
+    # 2E for context connections and 4E for call membership: <= 34(N + E).
+    assert node_total + edge_total <= node_file_calls <= 34 * (node_total + edge_total)
+    assert resolution_calls <= 8
+    assert coverage_calls == 0
+    assert all(system.files.contains_calls == 0 for system in systems)
+    assert all(system.files.iterations <= 24 for system in systems)
+    assert yielded_items <= 6 * edge_total
+    assert len(result.call_changes) == 512
+    assert sum(change.status == "removed" for change in result.call_changes) == 5
+    assert result.changed

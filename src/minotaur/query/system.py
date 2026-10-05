@@ -58,7 +58,7 @@ from minotaur.graph_model.relationship import Relationship
 from minotaur.query.freshness import AnalyzerChange, recorded_selection_view
 from minotaur.query.index import GraphIndex
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
-from minotaur.system import EndpointKind, System, classify_endpoint, resolve_system, system_for_file
+from minotaur.system import EndpointKind, System, SystemMembership, resolve_system
 
 _CALLS = RelationshipKind.CALLS.value
 _REFERENCES = RelationshipKind.REFERENCES.value
@@ -246,106 +246,122 @@ def _resolve_supported_relationships(index: GraphIndex) -> tuple[_ResolvedRelati
 
 
 def _select_report(
-    systems: Sequence[System],
+    systems: Sequence[System] | SystemMembership,
     index: GraphIndex,
     target: System,
     query: Literal["surface", "consumers", "system-deps"],
 ) -> _ReportSelection:
-    """Select records and their exact contributing edges in one shared pass."""
-    grouped: dict[RowKey, list[_ResolvedRelationship]] = defaultdict(list)
+    """Select one system through the shared partition owner."""
+    membership = systems if isinstance(systems, SystemMembership) else SystemMembership(systems)
+    return _partition_report(membership, index, query, target)[target.name]
+
+
+def _partition_report(
+    membership: SystemMembership,
+    index: GraphIndex,
+    query: Literal["surface", "consumers", "system-deps"],
+    target: System | None = None,
+) -> Mapping[str, _ReportSelection]:
+    """Classify each edge once and route it to its single report owner."""
+    systems_to_report = (target,) if target is not None else membership.systems
+    partitions: dict[str, dict[RowKey, list[_ResolvedRelationship]]] = {
+        system.name: defaultdict(list) for system in systems_to_report
+    }
     resolved = _resolve_supported_relationships(index)
     for relationship, source, destination in resolved:
-        source_in = _in_scope(systems, target, source)
-        destination_in = _in_scope(systems, target, destination)
+        source_membership = membership.classify(source)
+        destination_membership = membership.classify(destination)
+        source_owner = source_membership.system
+        destination_owner = destination_membership.system
+        if (
+            source_owner is not None
+            and destination_owner is not None
+            and source_owner.name == destination_owner.name
+        ):
+            continue
+        owner = source_owner if query == "system-deps" else destination_owner
+        if owner is None or owner.name not in partitions:
+            continue
         row_key: RowKey
         if query == "surface":
-            if relationship.kind not in _SURFACE_KINDS or not destination_in or source_in:
+            if relationship.kind not in _SURFACE_KINDS:
                 continue
-            path = _endpoint_file(systems, destination)
-            if path is None:  # pragma: no cover - in-scope implies a listed file.
+            path = destination_membership.file
+            if path is None:  # pragma: no cover - a system endpoint has a file.
                 continue
             row_key = (path, destination.label)
         elif query == "consumers":
-            if not destination_in or source_in:
-                continue
-            path = _endpoint_file(systems, source)
+            path = source_membership.file
             if path is None:
                 continue
             row_key = (path,)
         else:
-            if not source_in or destination_in:
-                continue
-            membership = classify_endpoint(systems, destination)
-            if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
-                category = f"system: {membership.system.name}"
-            elif membership.kind is EndpointKind.NO_SYSTEM:
-                category = "no_system"
-            else:
-                category = "external"
-            if category == f"system: {target.name}":
-                continue
-            row_key = (category,)
-        grouped[row_key].append((relationship, source, destination))
+            row_key = (_membership_category(destination_membership),)
+        partitions[owner.name][row_key].append((relationship, source, destination))
 
-    ordered_relationships = {
-        row_key: tuple(sorted(edges, key=lambda item: item[0].tuple_key))
-        for row_key, edges in sorted(grouped.items())
-    }
-    records_by_key: dict[RowKey, object] = {}
-    if query == "surface":
-        for row_key, edges in ordered_relationships.items():
-            path, symbol = cast(tuple[str, str], row_key)
-            records_by_key[row_key] = SurfaceRecord(
-                category=f"system: {target.name}",
-                kinds=tuple(sorted({relationship.kind for relationship, _, _ in edges})),
-                path=path,
-                symbol=symbol,
-            )
-    elif query == "consumers":
-        for row_key, edges in ordered_relationships.items():
-            (file,) = cast(tuple[str], row_key)
-            targets = {
-                (destination.label, _endpoint_file(systems, destination), relationship.kind)
-                for relationship, _, destination in edges
-            }
-            records_by_key[row_key] = ConsumersRecord(
-                category=_file_category(systems, file),
-                file=file,
-                kinds=tuple(sorted({relationship.kind for relationship, _, _ in edges})),
-                targets=tuple(
-                    sorted(
-                        (
-                            TargetDetail(label=label, path=path, kind=kind)
-                            for label, path, kind in targets
-                        ),
-                        key=_target_sort_key,
-                    )
-                ),
-            )
-    else:
-        for row_key, edges in ordered_relationships.items():
-            (category,) = cast(tuple[str], row_key)
-            targets = {
-                (destination.label, classify_endpoint(systems, destination).file, relationship.kind)
-                for relationship, _, destination in edges
-            }
-            records_by_key[row_key] = SystemDepsRecord(
-                category=category,
-                targets=tuple(
-                    sorted(
-                        (
-                            TargetDetail(label=label, path=path, kind=kind)
-                            for label, path, kind in targets
-                        ),
-                        key=_target_sort_key,
-                    )
-                ),
-            )
-    return _ReportSelection(
-        records_by_key=MappingProxyType(records_by_key),
-        relationships_by_key=MappingProxyType(ordered_relationships),
-        resolved_relationships=resolved,
-    )
+    selections: dict[str, _ReportSelection] = {}
+    for target in systems_to_report:
+        grouped = partitions[target.name]
+        ordered_relationships = {
+            row_key: tuple(sorted(edges, key=lambda item: item[0].tuple_key))
+            for row_key, edges in sorted(grouped.items())
+        }
+        records_by_key: dict[RowKey, object] = {}
+        if query == "surface":
+            for row_key, edges in ordered_relationships.items():
+                path, symbol = cast(tuple[str, str], row_key)
+                records_by_key[row_key] = SurfaceRecord(
+                    category=f"system: {target.name}",
+                    kinds=tuple(sorted({relationship.kind for relationship, _, _ in edges})),
+                    path=path,
+                    symbol=symbol,
+                )
+        elif query == "consumers":
+            for row_key, edges in ordered_relationships.items():
+                (file,) = cast(tuple[str], row_key)
+                targets = {
+                    (destination.label, _endpoint_file(membership, destination), relationship.kind)
+                    for relationship, _, destination in edges
+                }
+                records_by_key[row_key] = ConsumersRecord(
+                    category=_file_category(membership, file),
+                    file=file,
+                    kinds=tuple(sorted({relationship.kind for relationship, _, _ in edges})),
+                    targets=tuple(
+                        sorted(
+                            (
+                                TargetDetail(label=label, path=path, kind=kind)
+                                for label, path, kind in targets
+                            ),
+                            key=_target_sort_key,
+                        )
+                    ),
+                )
+        else:
+            for row_key, edges in ordered_relationships.items():
+                (category,) = cast(tuple[str], row_key)
+                targets = {
+                    (destination.label, membership.classify(destination).file, relationship.kind)
+                    for relationship, _, destination in edges
+                }
+                records_by_key[row_key] = SystemDepsRecord(
+                    category=category,
+                    targets=tuple(
+                        sorted(
+                            (
+                                TargetDetail(label=label, path=path, kind=kind)
+                                for label, path, kind in targets
+                            ),
+                            key=_target_sort_key,
+                        )
+                    ),
+                )
+        selections[target.name] = _ReportSelection(
+            records_by_key=MappingProxyType(records_by_key),
+            relationships_by_key=MappingProxyType(ordered_relationships),
+            resolved_relationships=resolved,
+        )
+    return MappingProxyType(selections)
 
 
 def _materialize_relationships(
@@ -399,25 +415,14 @@ def render_system_deps_text(records: Sequence[SystemDepsRecord]) -> str:
     return "".join(f"{record.category}  {_render_groups(record.targets)}\n" for record in records)
 
 
-def _in_scope(systems: Sequence[System], target: System, node: Node) -> bool:
-    """Return whether ``node`` derives from a file ``target`` lists (R-04)."""
-    membership = classify_endpoint(systems, node)
-    return (
-        membership.kind is EndpointKind.SYSTEM
-        and membership.system is not None
-        and membership.system.name == target.name
-    )
-
-
-def _endpoint_file(systems: Sequence[System], node: Node) -> str | None:
+def _endpoint_file(membership: SystemMembership, node: Node) -> str | None:
     """Return the classified endpoint's derived file, or ``None`` (external)."""
-    membership = classify_endpoint(systems, node)
-    return membership.file
+    return membership.classify(node).file
 
 
-def _file_category(systems: Sequence[System], file: str) -> str:
+def _file_category(membership: SystemMembership, file: str) -> str:
     """Spell the membership category of one path-carrying file (D-07)."""
-    owner = system_for_file(systems, file)
+    owner = membership.system_for_file(file)
     if owner is None:
         return "no_system"
     return f"system: {owner.name}"
@@ -941,6 +946,7 @@ class ReportingSnapshot:
     document: GraphDocument
     systems: tuple[System, ...]
     index: GraphIndex
+    membership: SystemMembership
 
     def __init__(self, document: GraphDocument, systems: Sequence[System]) -> None:
         if not isinstance(document, GraphDocument):
@@ -952,6 +958,7 @@ class ReportingSnapshot:
         copied_systems = tuple(systems)
         object.__setattr__(self, "document", document)
         object.__setattr__(self, "systems", copied_systems)
+        object.__setattr__(self, "membership", SystemMembership(copied_systems))
         object.__setattr__(self, "index", GraphIndex.build(document))
 
     @classmethod
@@ -996,7 +1003,7 @@ class ReportingSnapshot:
             raise ValueError(f"{query} query requires a system name")
         target = resolve_system(self.systems, system_name)
         selection = _select_report(
-            self.systems,
+            self.membership,
             self.index,
             target,
             cast(Literal["surface", "consumers", "system-deps"], query),
@@ -1016,6 +1023,23 @@ class ReportingSnapshot:
             coverage=coverage,
             relationships=relationship_details,
             row_relationships=row_relationships,
+        )
+
+    def report_rows(
+        self, query: str
+    ) -> Mapping[str, tuple[tuple[Any, ...], Mapping[RowKey, tuple[RelationshipDetail, ...]]]]:
+        """Return every system's ordered rows and contributors without coverage."""
+        if query not in _QUERY_NAMES:
+            raise ValueError(f"unknown system query: {query}")
+        return MappingProxyType(
+            {
+                name: (selection.records, _materialize_relationships(self.document, selection)[1])
+                for name, selection in _partition_report(
+                    self.membership,
+                    self.index,
+                    cast(Literal["surface", "consumers", "system-deps"], query),
+                ).items()
+            }
         )
 
     def relationship_details(self) -> tuple[RelationshipDetail, ...]:
@@ -1059,7 +1083,7 @@ class ReportingSnapshot:
     def _represented_files_by_system(self) -> dict[str, set[str]]:
         represented: dict[str, set[str]] = defaultdict(set)
         for node in self.document.nodes:
-            membership = classify_endpoint(self.systems, node)
+            membership = self.membership.classify(node)
             if (
                 membership.kind is EndpointKind.SYSTEM
                 and membership.system is not None
@@ -1080,13 +1104,13 @@ class ReportingSnapshot:
             membership.file
             for node in self.document.nodes
             if node.node_class.value == "file"
-            and (membership := classify_endpoint(self.systems, node)).kind is EndpointKind.NO_SYSTEM
+            and (membership := self.membership.classify(node)).kind is EndpointKind.NO_SYSTEM
             and membership.file is not None
         }
         unresolved = sum(
             1
             for node in self.index.unresolved_nodes
-            if classify_endpoint(self.systems, node).kind is EndpointKind.SYSTEM
+            if self.membership.classify(node).kind is EndpointKind.SYSTEM
         )
         unassigned_files: dict[str, object] = {
             "scope": "final_graph_file_node_derived_paths",
@@ -1127,8 +1151,8 @@ class ReportingSnapshot:
             target = self.index.nodes.get(relationship.target)
             if source is None or target is None:
                 continue
-            source_membership = classify_endpoint(self.systems, source)
-            target_membership = classify_endpoint(self.systems, target)
+            source_membership = self.membership.classify(source)
+            target_membership = self.membership.classify(target)
             if not (
                 source_membership.kind is EndpointKind.SYSTEM
                 or target_membership.kind is EndpointKind.SYSTEM
@@ -1175,7 +1199,7 @@ class ReportingSnapshot:
         represented = {
             membership.file
             for node in self.document.nodes
-            if (membership := classify_endpoint(self.systems, node)).kind is EndpointKind.SYSTEM
+            if (membership := self.membership.classify(node)).kind is EndpointKind.SYSTEM
             and membership.system is not None
             and membership.system.name == target.name
             and membership.file is not None
@@ -1183,7 +1207,7 @@ class ReportingSnapshot:
         unresolved = sum(
             1
             for node in self.index.unresolved_nodes
-            if (membership := classify_endpoint(self.systems, node)).kind is EndpointKind.SYSTEM
+            if (membership := self.membership.classify(node)).kind is EndpointKind.SYSTEM
             and membership.system is not None
             and membership.system.name == target.name
             and membership.file in declared

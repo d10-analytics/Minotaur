@@ -176,6 +176,9 @@ def _keyed_symbols(document: GraphDocument) -> dict[NodeKey, Node]:
 
 
 def _node_keys(document: GraphDocument) -> dict[str, NodeKey]:
+    labels: dict[str, str] = {}
+    for node in document.nodes:
+        labels.setdefault(node.id, node.label)
     result: dict[str, NodeKey] = {}
     for node in document.nodes:
         key: NodeKey
@@ -183,7 +186,7 @@ def _node_keys(document: GraphDocument) -> dict[str, NodeKey]:
             key = ("symbol", node.symbol_kind or "unknown", node.label)
         elif node.node_class == NodeClass.UNRESOLVED_REFERENCE:
             origin = node.identity.originating_node
-            origin_label = _node_label(document, origin) if origin is not None else ""
+            origin_label = _node_label(labels, origin) if origin is not None else ""
             key = ("unresolved", origin_label, node.reference_text or node.label)
         elif node.node_class == NodeClass.FILE:
             key = ("file", node.path or node.label)
@@ -213,11 +216,10 @@ def _keyed_relationships(document: GraphDocument) -> dict[RelationshipKey, Relat
     return result
 
 
-def _node_label(document: GraphDocument, node_id: str | None) -> str:
+def _node_label(labels: dict[str, str], node_id: str | None) -> str:
     if node_id is None:
         return ""
-    node = document.node_by_id(node_id)
-    return node.label if node is not None else node_id
+    return labels.get(node_id, node_id)
 
 
 def _display_key(key: NodeKey) -> str:

@@ -14,7 +14,7 @@ from minotaur.graph_model.location import Location
 from minotaur.language_interpreter.call_expressions import CallExpressionObservation
 from minotaur.query.correspondence import CorrespondenceIndex
 from minotaur.query.graph_comparison import relationship_display_id
-from minotaur.system import EndpointKind, System, classify_endpoint
+from minotaur.system import EndpointKind, System, SystemMembership
 
 if TYPE_CHECKING:
     from minotaur.query.system import ReportingSnapshot
@@ -156,26 +156,6 @@ class CallComparison:
         }
 
 
-def _relation_ids(
-    observation: CallExpressionObservation,
-    index: CorrespondenceIndex | None,
-) -> tuple[str, ...]:
-    if index is None:
-        return (_fallback_relationship_id(observation),)
-    location = _location_key(observation.callee_location)
-    matches: set[str] = set()
-    for key, occurrences in index.relationships_by_key.items():
-        if key[2] != "calls":
-            continue
-        for occurrence in occurrences:
-            for evidence in occurrence.relationship.evidence:
-                if any(_location_key(site) == location for site in evidence.locations):
-                    matches.add(relationship_display_id(key))
-    if len(matches) > 1:
-        raise CallCorrespondenceAmbiguityError(observation, matches)
-    return tuple(matches) or (_fallback_relationship_id(observation),)
-
-
 def _normalize(
     observations: Sequence[CallExpressionObservation],
     index: CorrespondenceIndex | None,
@@ -186,12 +166,25 @@ def _normalize(
     comparison is per relationship and per normalized expression, so a call
     that merely moves within its file still belongs to the same group.
     """
+    relations_by_location: dict[tuple[object, ...], set[str]] = defaultdict(set)
+    if index is not None:
+        for key, occurrences in index.relationships_by_key.items():
+            if key[2] != "calls":
+                continue
+            relation_id = relationship_display_id(key)
+            for occurrence in occurrences:
+                for evidence in occurrence.relationship.evidence:
+                    for site in evidence.locations:
+                        relations_by_location[_location_key(site)].add(relation_id)
     grouped: dict[str, list[CallExpressionObservation]] = defaultdict(list)
     for observation in observations:
         if not isinstance(observation, CallExpressionObservation):
             raise TypeError("call observations must be CallExpressionObservation values")
-        for relation_id in _relation_ids(observation, index):
-            grouped[relation_id].append(observation)
+        matches = relations_by_location.get(_location_key(observation.callee_location), set())
+        if len(matches) > 1:
+            raise CallCorrespondenceAmbiguityError(observation, matches)
+        relation_id = next(iter(matches)) if matches else _fallback_relationship_id(observation)
+        grouped[relation_id].append(observation)
     return grouped
 
 
@@ -212,12 +205,13 @@ def _relationship_memberships(
     if index is None:
         return {}
     declared_systems = snapshot.systems if snapshot is not None else (systems or ())
+    classifier = SystemMembership(declared_systems)
     result: dict[str, frozenset[str]] = {}
     for key, occurrences in index.relationship_groups.items():
         names: set[str] = set()
         for occurrence in occurrences:
             for endpoint in (occurrence.source, occurrence.target):
-                membership = classify_endpoint(declared_systems, endpoint)
+                membership = classifier.classify(endpoint)
                 if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
                     names.add(membership.system.name)
         result[relationship_display_id(key)] = frozenset(names)

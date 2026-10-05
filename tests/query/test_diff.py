@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 from minotaur import cli
+from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import Location, Position, Range
-from minotaur.query.diff import DiffResult, Relocation, render_text
+from minotaur.graph_model.node import Node
+from minotaur.graph_model.provenance import CoordinateEncoding
+from minotaur.query.diff import DiffResult, Relocation, diff, render_text
 
 
 def _write(root: Path, relative: str, content: str) -> None:
@@ -92,3 +97,75 @@ def test_diff_keeps_unresolved_relationship_when_origin_id_relocates(
     assert payload["relationships_added"] == []
     assert payload["relationships_removed"] == []
     assert any(item["symbol"] == "mod.caller" for item in payload["relocated"])
+
+
+class _CountingNodes(tuple[Node, ...]):
+    yielded = 0
+
+    def __iter__(self) -> Iterator[Node]:
+        for node in super().__iter__():
+            self.yielded += 1
+            yield node
+
+
+def test_diff_unresolved_origin_lookup_has_linear_node_iteration() -> None:
+    from test_system_diff import _call, _symbol, _unresolved
+
+    origins = tuple(_symbol(f"origin_{index}", "mod.py", index) for index in range(100))
+    unresolved = tuple(
+        _unresolved(origin, "mod.py", 100 + index) for index, origin in enumerate(origins)
+    )
+    nodes = _CountingNodes((*unresolved, *origins))
+    document = GraphDocument(
+        CoordinateEncoding.UTF_8,
+        nodes,
+        tuple(_call(origin, target) for origin, target in zip(origins, unresolved, strict=True)),
+    )
+    # Exclude the model's construction-time type validation from query work.
+    nodes.yielded = 0
+
+    result = diff(document, document)
+
+    assert result == DiffResult()
+    assert nodes.yielded <= 8 * len(nodes)
+
+
+def test_diff_unresolved_origin_uses_first_duplicate_id_label() -> None:
+    from test_system_diff import _call, _symbol, _unresolved
+
+    first = _symbol("a", "mod.py", 0)
+    duplicate = replace(first, label="b")
+    parent = _symbol("parent", "mod.py", 1)
+    unresolved = _unresolved(first, "mod.py", 2)
+    relationships = (_call(parent, unresolved),)
+    old = GraphDocument(
+        CoordinateEncoding.UTF_8, (first, duplicate, parent, unresolved), relationships
+    )
+    new = GraphDocument(CoordinateEncoding.UTF_8, (first, parent, unresolved), relationships)
+
+    result = diff(old, new)
+
+    assert result.relationships_added == ()
+    assert result.relationships_removed == ()
+
+
+def test_diff_missing_unresolved_origins_keep_distinct_raw_ids() -> None:
+    from test_system_diff import _call, _symbol, _unresolved
+
+    parent = _symbol("parent", "mod.py", 0)
+    old_origin = _symbol("origin", "mod.py", 1)
+    new_origin = _symbol("origin", "mod.py", 2)
+    old_target = _unresolved(old_origin, "mod.py", 3)
+    new_target = _unresolved(new_origin, "mod.py", 3)
+    old = GraphDocument(
+        CoordinateEncoding.UTF_8, (parent, old_target), (_call(parent, old_target),)
+    )
+    new = GraphDocument(
+        CoordinateEncoding.UTF_8, (parent, new_target), (_call(parent, new_target),)
+    )
+
+    result = diff(old, new)
+
+    assert len(result.relationships_added) == 1
+    assert len(result.relationships_removed) == 1
+    assert result.relationships_added == result.relationships_removed

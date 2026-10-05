@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 
 from minotaur.config import read_toml_bytes, read_toml_file
 from minotaur.graph_model.identity import is_valid_node_id_format
@@ -233,10 +234,7 @@ def system_for_file(systems: Sequence[System], file: str) -> System | None:
     listing system when listed, else ``None`` (``no_system``).  No package,
     module, or directory name ever implies membership (AR-03).
     """
-    for system in systems:
-        if file in system.files:
-            return system
-    return None
+    return SystemMembership(systems).system_for_file(file)
 
 
 class EndpointKind(Enum):
@@ -279,13 +277,42 @@ def classify_endpoint(systems: Sequence[System], node: Node) -> EndpointMembersh
     the exact-file membership test; no label, package, or module name ever
     implies membership (AR-03).
     """
-    derived = _node_file(node)
-    if derived is None:
-        return EndpointMembership(kind=EndpointKind.EXTERNAL)
-    system = system_for_file(systems, derived)
-    if system is None:
-        return EndpointMembership(kind=EndpointKind.NO_SYSTEM, file=derived)
-    return EndpointMembership(kind=EndpointKind.SYSTEM, system=system, file=derived)
+    return SystemMembership(systems).classify(node)
+
+
+@dataclass(frozen=True, slots=True)
+class SystemMembership:
+    """Prepared exact-file membership with declaration-order precedence.
+
+    The read-only lookup belongs to this value's lifetime. Hand-built system
+    sequences may overlap; the first listing wins just as for a linear scan.
+    """
+
+    systems: tuple[System, ...]
+    _by_file: Mapping[str, System] = dataclass_field(compare=False, repr=False)
+
+    def __init__(self, systems: Sequence[System]) -> None:
+        copied_systems = tuple(systems)
+        by_file: dict[str, System] = {}
+        for system in copied_systems:
+            for file in system.files:
+                by_file.setdefault(file, system)
+        object.__setattr__(self, "systems", copied_systems)
+        object.__setattr__(self, "_by_file", MappingProxyType(by_file))
+
+    def system_for_file(self, file: str) -> System | None:
+        """Return the first declaring system, or None for an unlisted file."""
+        return self._by_file.get(file)
+
+    def classify(self, node: Node) -> EndpointMembership:
+        """Classify an endpoint using the shared location-first file derivation."""
+        derived = _node_file(node)
+        if derived is None:
+            return EndpointMembership(kind=EndpointKind.EXTERNAL)
+        system = self.system_for_file(derived)
+        if system is None:
+            return EndpointMembership(kind=EndpointKind.NO_SYSTEM, file=derived)
+        return EndpointMembership(kind=EndpointKind.SYSTEM, system=system, file=derived)
 
 
 @dataclass(frozen=True, slots=True)
