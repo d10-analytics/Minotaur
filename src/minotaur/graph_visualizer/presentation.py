@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from minotaur.graph_model.node import Node
 from minotaur.graph_visualizer.source import prepare_comparison_excerpts
-from minotaur.system import EndpointKind, System, classify_endpoint
+from minotaur.system import EndpointKind, System, SystemMembership
 
 
 def build_presentation(
@@ -34,10 +34,11 @@ def build_presentation(
     relationships = cast(list[dict[str, Any]], canonical["relationships"])
     if systems and {node.id for node in document_nodes} != {node["id"] for node in nodes}:
         raise ValueError("system presentation requires every canonical node")
+    system_membership = SystemMembership(systems)
     node_systems = {
         node.id: membership.system.name
         for node in document_nodes
-        if (membership := classify_endpoint(systems, node)).kind is EndpointKind.SYSTEM
+        if (membership := system_membership.classify(node)).kind is EndpointKind.SYSTEM
         and membership.system is not None
     }
     node_classes = sorted({node["node_class"] for node in nodes})
