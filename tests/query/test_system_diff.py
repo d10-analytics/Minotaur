@@ -991,6 +991,7 @@ def test_node_and_relationship_observation_changes_remain_neutral() -> None:
 def test_comparison_local_index_work_is_linear(count, mode, monkeypatch):
     from collections.abc import Mapping
 
+    from minotaur.query import call_diff, system_diff
     from minotaur.query.correspondence import CorrespondenceIndex
 
     source = _symbol("source", "a.py")
@@ -999,12 +1000,59 @@ def test_comparison_local_index_work_is_linear(count, mode, monkeypatch):
         ("a.toml", "A", ("a.py", "b.py") if mode == "internal" else ("a.py",)),
         ("b.toml", "B", ("unused.py",) if mode == "internal" else ("b.py",)),
     )
-    edges = tuple(_call(source, target) for target in targets)
+    sites = tuple(Location("a.py", Range(Position(i, 4), Position(i, 10))) for i in range(count))
+    edges = tuple(
+        replace(
+            _call(source, target),
+            evidence=(Evidence(Provenance.STATIC_ANALYSIS, locations=(site,)),),
+        )
+        for target, site in zip(targets, sites, strict=True)
+    )
+    observations = tuple(
+        CallExpressionObservation("python", site, site, f"call-{i}") for i, site in enumerate(sites)
+    )
+    new_observations = observations[:-1] if mode == "changed" else observations
     old = _snapshot((source, *targets), edges, systems)
     new = _snapshot((source, *targets), edges[:-1] if mode == "changed" else edges, systems)
     projections = []
     traversed = 0
     original_details = ReportingSnapshot.relationship_details
+    original_location_key = call_diff._location_key
+    original_prepare = system_diff.prepare_correspondence
+    location_calls = 0
+    whole_graph_keys = 0
+    whole_graph_walks = 0
+
+    def location_key(location):
+        nonlocal location_calls
+        location_calls += 1
+        return original_location_key(location)
+
+    class CountedWholeGraph(Mapping):
+        def __init__(self, values):
+            self.values = values
+
+        def __len__(self):
+            return len(self.values)
+
+        def __getitem__(self, key):
+            return self.values[key]
+
+        def __iter__(self):
+            nonlocal whole_graph_walks
+            for key in self.values:
+                whole_graph_walks += 1
+                yield key
+
+    def prepare(document, **kwargs):
+        nonlocal whole_graph_keys
+        index = original_prepare(document, **kwargs)
+        if kwargs.get("whole_graph"):
+            whole_graph_keys += len(index.relationships_by_key)
+            return replace(
+                index, relationships_by_key=CountedWholeGraph(index.relationships_by_key)
+            )
+        return index
 
     def details(snapshot):
         projections.append(snapshot)
@@ -1032,7 +1080,29 @@ def test_comparison_local_index_work_is_linear(count, mode, monkeypatch):
         "relationship_groups",
         property(lambda index: CountedGroups(index.relationships_by_key)),
     )
-    result = compare_systems(old, new)
+    monkeypatch.setattr(call_diff, "_location_key", location_key)
+    monkeypatch.setattr(system_diff, "prepare_correspondence", prepare)
+    result = compare_systems(
+        old,
+        new,
+        old_call_observations=observations,
+        new_call_observations=new_observations,
+    )
+    evidence_locations = sum(
+        len(evidence.locations)
+        for snapshot in (old, new)
+        for relationship in snapshot.document.relationships
+        if relationship.kind == "calls"
+        for evidence in relationship.evidence
+    )
+    assert location_calls <= 4 * (len(observations) + len(new_observations) + evidence_locations)
+    assert whole_graph_keys == len(edges) + len(new.document.relationships)
+    assert whole_graph_walks <= 3 * whole_graph_keys
+    assert len(result.call_changes) == count
+    assert sum(item.status == "removed" for item in result.call_changes) == (mode == "changed")
+    assert sum(item.status == "unchanged" for item in result.call_changes) == count - (
+        mode == "changed"
+    )
     assert result.changed is (mode == "changed")
     assert sum(item is old for item in projections) == (0 if mode == "internal" else 1)
     assert sum(item is new for item in projections) == (0 if mode == "internal" else 1)
