@@ -1034,7 +1034,11 @@ class ReportingSnapshot:
         return MappingProxyType(
             {
                 name: (selection.records, _materialize_relationships(self.document, selection)[1])
-                for name, selection in _partition_report(self.membership, self.index, query).items()
+                for name, selection in _partition_report(
+                    self.membership,
+                    self.index,
+                    cast(Literal["surface", "consumers", "system-deps"], query),
+                ).items()
             }
         )
 
