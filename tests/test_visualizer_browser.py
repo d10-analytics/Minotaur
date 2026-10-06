@@ -11,15 +11,23 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.evidence import Evidence
+from minotaur.graph_model.location import Location
+from minotaur.graph_model.node import Node
+from minotaur.graph_model.provenance import CoordinateEncoding
+from minotaur.graph_model.relationship import Relationship
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import (
     build_comparison_presentation,
     build_presentation,
 )
+from minotaur.language_interpreter.emission import symbol_node
 from minotaur.query.call_diff import CallChange, CallLimitation
 from minotaur.query.graph_comparison import (
     GraphNodeChange,
     GraphRelationshipChange,
+    compare_graphs,
     endpoint_eligibility,
 )
 from minotaur.query.system_diff import SystemDiffResult
@@ -1422,6 +1430,16 @@ def _comparison_location(path: str, line: int, length: int = 4) -> dict[str, obj
     }
 
 
+def _comparison_source_node(node_id: str) -> Node:
+    return symbol_node(
+        node_id,
+        "function",
+        Location.from_dict(_comparison_location(f"{node_id}.py", 0)),
+        "minotaur-browser-test",
+        "python",
+    )
+
+
 def _comparison_node(
     node_id: str,
     *,
@@ -1442,13 +1460,11 @@ def _comparison_node(
     """
 
     def side(system: str | None) -> dict[str, object]:
+        node = _comparison_source_node(node_id).to_dict()
+        node["label"] = label or node_id
+        node["location"] = _comparison_location(path or f"{node_id}.py", line)
         return {
-            "node": {
-                "node_class": "symbol",
-                "label": label or node_id,
-                "symbol_kind": "function",
-                "location": _comparison_location(path or f"{node_id}.py", line),
-            },
+            "node": node,
             "system": system,
         }
 
@@ -1475,8 +1491,31 @@ def _comparison_edge(
     after: bool = True,
     before_systems: tuple[str | None, str | None] = ("A", "A"),
     after_systems: tuple[str | None, str | None] = ("A", "A"),
+    before_evidence: list[list[dict[str, object]]] | None = None,
+    after_evidence: list[list[dict[str, object]]] | None = None,
 ) -> GraphRelationshipChange:
-    payload = {"source": source, "target": target, "kind": kind, "evidence": []}
+    def side(occurrences: list[list[dict[str, object]]] | None) -> object:
+        if occurrences is None:
+            occurrences = [
+                [
+                    {
+                        "provenance": "static-analysis",
+                        "locations": [_comparison_location(f"{source}.py", 0)],
+                    }
+                ]
+            ]
+        payloads = []
+        for evidence in occurrences:
+            payload = Relationship(
+                _comparison_source_node(source).id,
+                _comparison_source_node(target).id,
+                kind,
+                tuple(Evidence.from_dict(record) for record in evidence),
+            ).to_dict()
+            payload["evidence"] = sorted(payload["evidence"], key=repr)
+            payloads.append(payload)
+        return payloads[0] if len(payloads) == 1 else tuple(sorted(payloads, key=repr))
+
     involved = sorted({name for pair in (before_systems, after_systems) for name in pair if name})
     return GraphRelationshipChange(
         edge_id,
@@ -1486,13 +1525,93 @@ def _comparison_edge(
         status,
         tuple([status] if status != "unchanged" else []),
         tuple(involved),
-        dict(payload) if before else None,
-        dict(payload) if after else None,
+        side(before_evidence) if before else None,
+        side(after_evidence) if after else None,
         endpoint_eligibility(
             (before_systems,) if before else (),
             (after_systems,) if after else (),
         ),
     )
+
+
+@pytest.mark.parametrize("override", [False, True], ids=["default-evidence", "custom-evidence"])
+def test_comparison_helpers_match_real_comparator_payloads(override: bool) -> None:
+    nodes = tuple(_comparison_source_node(name) for name in ("source", "target"))
+    default = {
+        "provenance": "static-analysis",
+        "locations": [_comparison_location("source.py", 0)],
+    }
+    before_evidence = [default, {"provenance": "imported-graph"}] if override else [default]
+    after_evidence = list(reversed(before_evidence))
+    before_relationship = Relationship(
+        nodes[0].id,
+        nodes[1].id,
+        "calls",
+        tuple(Evidence.from_dict(record) for record in before_evidence),
+    )
+    after_relationship = Relationship(
+        nodes[0].id,
+        nodes[1].id,
+        "calls",
+        tuple(Evidence.from_dict(record) for record in after_evidence),
+    )
+    result = compare_graphs(
+        GraphDocument(CoordinateEncoding.UTF_8, nodes=nodes, relationships=(before_relationship,)),
+        GraphDocument(CoordinateEncoding.UTF_8, nodes=nodes, relationships=(after_relationship,)),
+    )
+    actual_nodes = {change.before["node"]["id"]: change for change in result.nodes}
+    assert set(actual_nodes) == {node.id for node in nodes}
+    for name, node in zip(("source", "target"), nodes, strict=True):
+        helper = _comparison_node(name, before_system=None, after_system=None)
+        actual = actual_nodes[node.id]
+        assert helper.before == actual.before
+        assert helper.after == actual.after
+        assert helper.to_dict().keys() == actual.to_dict().keys()
+    helper_edge = _comparison_edge(
+        "edge",
+        "source",
+        "target",
+        before_systems=(None, None),
+        after_systems=(None, None),
+        before_evidence=[before_evidence] if override else None,
+        after_evidence=[after_evidence] if override else None,
+    )
+    assert len(result.relationships) == 1
+    actual_edge = result.relationships[0]
+    assert helper_edge.before == actual_edge.before
+    assert helper_edge.after == actual_edge.after
+    assert helper_edge.eligibility == actual_edge.eligibility
+    assert helper_edge.to_dict().keys() == actual_edge.to_dict().keys()
+
+
+def test_comparison_fixture_overrides_preserve_identity_and_grouped_evidence() -> None:
+    default_node = _comparison_source_node("source")
+    changed = _comparison_node("source", label="display", path="other.py", line=7)
+    assert changed.before["node"]["id"] == default_node.id
+    assert changed.before["node"]["identity"] == default_node.to_dict()["identity"]
+    assert changed.before["node"]["label"] == "display"
+    assert changed.before["node"]["location"]["path"] == "other.py"
+    assert changed.before["node"]["location"]["range"]["start"]["line"] == 7
+    occurrences = [
+        [{"provenance": "static-analysis"}, {"provenance": "imported-graph"}],
+        [{"provenance": "curated-rule", "rule": {"id": "fixture-rule"}}],
+    ]
+    edge = _comparison_edge(
+        "edge",
+        "source",
+        "target",
+        before_evidence=occurrences,
+        after_evidence=list(reversed(occurrences)),
+    )
+    assert isinstance(edge.before, tuple)
+    assert edge.before == edge.after
+    payloads = edge.to_dict()["before"]
+    assert [item["source"] for item in payloads] == [default_node.id, default_node.id]
+    assert [item["target"] for item in payloads] == [_comparison_source_node("target").id] * 2
+    assert [[record["provenance"] for record in item["evidence"]] for item in payloads] == [
+        ["curated-rule"],
+        ["imported-graph", "static-analysis"],
+    ]
 
 
 def _comparison_presentation(
