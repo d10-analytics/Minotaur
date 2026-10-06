@@ -1466,6 +1466,54 @@ def test_comparison_header_shows_captured_historical_revision_identities() -> No
         browser.close()
 
 
+@pytest.mark.parametrize("artifact_kind", ["committed", "fresh"])
+def test_ordinary_explorer_hides_comparison_controls(tmp_path: Path, artifact_kind: str) -> None:
+    artifact = ROOT / "examples/python-workflow/minotaur-graph.html"
+    if artifact_kind == "fresh":
+        html = artifact.read_text(encoding="utf-8")
+        prefix = '<script id="minotaur-presentation" type="application/json">'
+        presentation = json.loads(html.split(prefix, 1)[1].split("</script>", 1)[0])
+        artifact = tmp_path / "explorer.html"
+        artifact.write_bytes(render_html(presentation))
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(artifact.as_uri())
+        page.wait_for_function("() => window.minotaurVisualizer?.cy")
+        for selector in ("#revision-control", "#emphasis-control"):
+            control = page.locator(selector)
+            assert control.evaluate("element => getComputedStyle(element).display") == "none"
+            assert not control.is_visible()
+        browser.close()
+
+
+@pytest.mark.parametrize("empty_revisions", [False, True], ids=["named", "empty"])
+def test_comparison_reveals_controls_and_hides_empty_revisions(
+    tmp_path: Path, empty_revisions: bool
+) -> None:
+    presentation = _comparison_presentation(
+        [_comparison_node("node")],
+        [],
+        changed=False,
+        revisions={"old": "", "new": ""} if empty_revisions else {"old": "old", "new": "new"},
+    )
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        _open_comparison(page, tmp_path, presentation, "comparison-controls.html")
+        for selector in ("#revision-control", "#emphasis-control"):
+            control = page.locator(selector)
+            assert control.is_visible()
+            assert control.evaluate("element => getComputedStyle(element).display") == "flex"
+        revisions = page.locator("#comparison-revisions")
+        assert revisions.is_visible() is not empty_revisions
+        assert revisions.evaluate("element => getComputedStyle(element).display") == (
+            "none" if empty_revisions else "flex"
+        )
+        browser.close()
+
+
 def test_graph_only_artifact_hides_comparison_revision_header() -> None:
     """An ordinary graph view never shows comparison-only revision identity."""
     artifact = ROOT / "examples" / "system-walkthrough" / "minotaur-graph.html"
