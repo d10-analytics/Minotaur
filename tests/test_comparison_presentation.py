@@ -199,10 +199,21 @@ def test_production_comparison_payload_retains_per_side_membership_and_eligibili
 def test_comparison_html_is_inert_and_ordinary_graph_presentation_stays_separate() -> None:
     result = _comparison()
     payload = build_comparison_presentation(result)
-    payload["graph"]["nodes"][0]["before"]["node"]["label"] = "</script><script>alert(1)</script>"
+    text = "<!--<script></script> > & \u2028\u2029"
+    node = payload["graph"]["nodes"][0]["before"]["node"]
+    node["label"] = text
+    node["location"]["path"] = text
+    payload["systems"] = [text]
+    payload["excerpts"]["before"]["paths"][text] = {
+        "status": "available",
+        "spans": [{"start": 0, "lines": [text]}],
+    }
     html = render_html(payload).decode("utf-8")
-    assert "</script><script>alert(1)</script>" not in html
-    assert "<\\/script>" in html
+    prefix = '<script id="minotaur-presentation" type="application/json">'
+    embedded = html.split(prefix, 1)[1].split("</script>", 1)[0]
+    assert "<" not in embedded
+    assert json.loads(embedded) == payload
+    assert "> & \\u2028\\u2029" in embedded
 
     ordinary = build_presentation({"nodes": [], "relationships": []})
     assert "comparison" not in ordinary

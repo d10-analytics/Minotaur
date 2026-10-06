@@ -12,7 +12,10 @@ import pytest
 
 from minotaur import cli
 from minotaur.graph_visualizer.html.render import render_html
-from minotaur.graph_visualizer.presentation import build_comparison_presentation
+from minotaur.graph_visualizer.presentation import (
+    build_comparison_presentation,
+    build_presentation,
+)
 from minotaur.query.call_diff import CallChange, CallLimitation
 from minotaur.query.graph_comparison import (
     GraphNodeChange,
@@ -1142,6 +1145,51 @@ def _comparison_presentation(
         new_revision=revision_names.get("new"),
     )
     return build_comparison_presentation(result, excerpts=excerpts)
+
+
+@pytest.mark.parametrize("comparison", [False, True], ids=["ordinary", "comparison"])
+def test_script_tokenizer_sequences_in_payload_preserve_viewer(
+    tmp_path: Path, comparison: bool
+) -> None:
+    text = "<!--<script></script>"
+    excerpts = {
+        "paths": {text: {"status": "available", "spans": [{"start": 0, "lines": [text]}]}},
+        "call_sites": {},
+    }
+    if comparison:
+        presentation = _comparison_presentation(
+            [
+                _comparison_node(
+                    "inert-node",
+                    label=text,
+                    path=text,
+                    before_system=text,
+                    after_system=text,
+                )
+            ],
+            [],
+            changed=False,
+            excerpts={"before": excerpts, "after": excerpts},
+        )
+    else:
+        graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+        graph["nodes"][0]["label"] = text
+        graph["nodes"][0]["location"]["path"] = text
+        presentation = build_presentation(graph, excerpts)
+        presentation["systems"] = [text]
+    artifact = tmp_path / "inert.html"
+    artifact.write_bytes(render_html(presentation))
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(artifact.as_uri())
+        assert page.evaluate("typeof window.minotaurVisualizer !== 'undefined'")
+        assert page.evaluate("window.minotaurVisualizer.cy.nodes().length") == len(
+            presentation["graph"]["nodes"]
+        )
+        assert page.evaluate("document.scripts.length") == 4
+        browser.close()
 
 
 def _open_comparison(

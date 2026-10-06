@@ -116,6 +116,27 @@ def test_renderer_is_self_contained_and_json_safe() -> None:
     assert "textContent" in html
 
 
+def test_renderer_escapes_script_tokenizer_sequences_and_preserves_payload() -> None:
+    text = "<!--<script></script> > & \u2028\u2029"
+    graph = _graph()
+    graph["nodes"][0]["label"] = text
+    graph["nodes"][0]["location"]["path"] = text
+    presentation = build_presentation(
+        graph,
+        {
+            "paths": {text: {"status": "available", "spans": [{"start": 0, "lines": [text]}]}},
+            "call_sites": {},
+        },
+    )
+    presentation["systems"] = [text]
+    html = render_html(presentation).decode("utf-8")
+    prefix = '<script id="minotaur-presentation" type="application/json">'
+    embedded = html.split(prefix, 1)[1].split("</script>", 1)[0]
+    assert "<" not in embedded
+    assert json.loads(embedded) == presentation
+    assert "> & \\u2028\\u2029" in embedded
+
+
 def test_renderer_keeps_template_markers_inside_embedded_source_data() -> None:
     """A source excerpt must not trigger a second template substitution.
 
