@@ -13,7 +13,6 @@ targets = [
   "minotaur/git.py",
   "minotaur/graph_model",
   "minotaur/graph_visualizer/__init__.py",
-  "minotaur/graph_visualizer/contract.py",
   "minotaur/graph_visualizer/html/render.py",
   "minotaur/graph_visualizer/presentation.py",
   "minotaur/graph_visualizer/source.py",

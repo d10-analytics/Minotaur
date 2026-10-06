@@ -90,12 +90,6 @@ def capture_source_bytes(root: Path, paths: Iterable[str]) -> Mapping[str, bytes
     return MappingProxyType(captured)
 
 
-# Descriptive aliases keep the capture boundary discoverable to comparison
-# owners without introducing another source-reading implementation.
-capture_source = capture_source_bytes
-read_captured_source = read_source_bytes
-
-
 def merge_spans(spans: Iterable[tuple[int, int]], line_count: int) -> list[tuple[int, int]]:
     """Clamp, sort, and merge inclusive source line spans."""
     result: list[tuple[int, int]] = []
