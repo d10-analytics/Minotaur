@@ -60,6 +60,14 @@
     return value && typeof value === "object" ? value : null;
   }
 
+  function sideEvidence(record, side) {
+    if (!sidePresent(record, side)) return [];
+    var occurrences = Array.isArray(record[side]) ? record[side] : [record[side]];
+    return occurrences.flatMap(function (occurrence) {
+      return occurrence && Array.isArray(occurrence.evidence) ? occurrence.evidence : [];
+    });
+  }
+
   function sideSystemRecord(record, side) {
     var value = record && record[side];
     if (Array.isArray(value)) value = value[0] || null;
@@ -69,10 +77,14 @@
     return null;
   }
 
+  function preferredSide(record) {
+    var preferred = record && record.default_side === "before" ? "before" : "after";
+    return sidePayload(record, preferred) ? preferred : preferred === "after" ? "before" : "after";
+  }
+
   function preferredPayload(record) {
     if (!comparisonMode) return record;
-    var preferred = record && record.default_side === "before" ? "before" : "after";
-    return sidePayload(record, preferred) || sidePayload(record, preferred === "after" ? "before" : "after") || {};
+    return sidePayload(record, preferredSide(record)) || {};
   }
 
   function recordPresence(record, view) {
@@ -373,7 +385,8 @@
   });
   graph.relationships.forEach(function (rel, i) {
     var displayRelationship = preferredPayload(rel);
-    var evidence = displayRelationship.evidence || [];
+    var evidence = comparisonMode
+      ? sideEvidence(rel, preferredSide(rel)) : displayRelationship.evidence || [];
     var provenance = evidenceProvenance(evidence);
     var colors = edgeColors(rel.kind || displayRelationship.kind);
     elements.push({ group: "edges", data: {
@@ -959,16 +972,6 @@
     return '<span class="kind-badge" style="background:' + colors.bg + ';border:1px solid ' + colors.border + ';color:' + colors.border + '">' + escHtml(label) + '</span>';
   }
 
-  function collectLocations(evidence) {
-    var locs = [];
-    evidence.forEach(function (ev) {
-      if (ev.locations) {
-        ev.locations.forEach(function (loc) { locs.push(loc); });
-      }
-    });
-    return locs;
-  }
-
   function sqlForeignKeyRecords(evidence) {
     return evidence.map(function (record) {
       var extensions = record.extensions || {};
@@ -1060,9 +1063,20 @@
   }
 
   function callSitesForEdge(d, side) {
+    var supporting = new Map();
+    if (comparisonMode) {
+      evidenceLocations(sideEvidence(d.comparison_record, side)).forEach(function (site) {
+        supporting.set(physicalLocationKey(site.location), site.provenance);
+      });
+    }
     return evidenceLocations(rawCallSites(d, side).map(function (association) {
+      var provenance = association.provenance;
+      if (comparisonMode && association.callee) {
+        var matched = supporting.get(physicalLocationKey(association.callee));
+        if (matched !== undefined) provenance = matched;
+      }
       return {
-        locations: [association.location], provenance: association.provenance,
+        locations: [association.location], provenance: provenance,
         caller_start: association.caller_start
       };
     }));
@@ -1426,6 +1440,11 @@
     detailContent.innerHTML = html;
   }
 
+  function provenanceField(evidence) {
+    return '<div class="field"><div class="field-label">Provenance</div><div class="field-value">'
+      + escHtml(evidenceProvenance(evidence).join(", ")) + '</div></div>';
+  }
+
   function showComparisonEdgeDetail(e) {
     var d = e.data();
     var record = d.comparison_record || {};
@@ -1450,12 +1469,26 @@
       setupComparisonSourceRegion(e, record);
       return;
     }
-    var locs = collectLocations(d.evidence);
-    if (locs.length === 0) {
-      html += '<div class="field"><div class="field-label">Location</div><div class="field-value">No source location available</div></div>';
-    } else {
-      html += '<div class="field"><div class="field-label">Location</div><div class="field-value">' + escHtml(locs.map(locationLabel).join(", ")) + '</div></div>';
-    }
+    ["before", "after"].forEach(function (side) {
+      if (!sidePresent(record, side)) return;
+      var evidence = sideEvidence(record, side);
+      html += '<div class="comparison-evidence" data-side="' + side + '">';
+      html += '<div class="field-label">' + sideLabel(side) + ' evidence</div>';
+      html += provenanceField(evidence);
+      if (d.kind === "sql:foreign-key-to" && hasSqlForeignKeyPayload(evidence)) {
+        html += sqlForeignKeyDetails(evidence);
+      } else {
+        var locations = evidenceLocations(evidence);
+        if (!locations.length) {
+          html += '<div class="field"><div class="field-label">Location</div><div class="field-value">No source location available</div></div>';
+        }
+        locations.forEach(function (site) {
+          html += '<div class="evidence-location"><div class="field"><div class="field-label">Location</div><div class="field-value">' + escHtml(locationLabel(site.location)) + '</div></div>';
+          html += '<div class="field"><div class="field-label">Supporting provenance</div><div class="field-value">' + escHtml(site.provenance.join(", ")) + '</div></div></div>';
+        });
+      }
+      html += '</div>';
+    });
     detailContent.innerHTML = html;
   }
 
@@ -1518,19 +1551,20 @@
       container.innerHTML = '<div class="field"><div class="field-label">' + sideLabel(side) + '</div><div class="field-value structural-absent">Not present</div></div>';
       return;
     }
+    var html = provenanceField(sideEvidence(record, side));
     var sites = callSitesForEdge(edge.data(), side);
     if (!sites.length) {
       var unavailableReason = sideExcerptUnavailableReason(side);
-      container.innerHTML = unavailableReason
+      container.innerHTML = html + (unavailableReason
         ? '<div class="excerpt-unavailable">Source unavailable: ' + escHtml(unavailableReason) + '</div>'
-        : '<div class="field"><div class="field-label">' + sideLabel(side) + '</div><div class="field-value">No call site recorded</div></div>';
+        : '<div class="field"><div class="field-label">' + sideLabel(side) + '</div><div class="field-value">No call site recorded</div></div>');
       return;
     }
     if (sideState.site >= sites.length) sideState.site = 0;
     var site = sites[sideState.site];
     var modes = availableContextModes(site);
     if (modes.indexOf(sideState.mode) < 0) sideState.mode = "window";
-    var html = '<div class="field"><div class="field-label">Call sites (' + sites.length + ')</div><select id="call-site-select" aria-label="Call sites">';
+    html += '<div class="field"><div class="field-label">Call sites (' + sites.length + ')</div><select id="call-site-select" aria-label="Call sites">';
     sites.forEach(function (item, index) {
       html += '<option value="' + index + '"' + (index === sideState.site ? " selected" : "") + '>' + (index + 1) + '. ' + escHtml(locationLabel(item.location)) + '</option>';
     });
