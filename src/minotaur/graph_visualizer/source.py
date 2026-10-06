@@ -141,6 +141,13 @@ def prepare_comparison_excerpts(
                     "location": dict(location),
                     "provenance": list(evidence),
                 }
+                callee = observation.get("callee")
+                if (
+                    isinstance(callee, Mapping)
+                    and isinstance(callee.get("path"), str)
+                    and isinstance(callee.get("range"), Mapping)
+                ):
+                    site["callee"] = _plain_mapping(callee)
                 if caller_start is not None:
                     # Merge the caller prefix into the same stored byte span;
                     # rendering after capture release must never need a live
