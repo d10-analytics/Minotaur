@@ -399,7 +399,10 @@ def test_shortcuts_respect_focused_controls_and_keep_body_shortcuts(tmp_path: Pa
         page = browser.new_page()
         page.goto(output.as_uri())
         page.wait_for_function("() => window.minotaurVisualizer?.cy")
-        camera = "() => ({zoom: window.minotaurVisualizer.cy.zoom(), pan: window.minotaurVisualizer.cy.pan()})"
+        camera = (
+            "() => ({zoom: window.minotaurVisualizer.cy.zoom(), "
+            "pan: window.minotaurVisualizer.cy.pan()})"
+        )
         fitted = page.evaluate(camera)
         page.evaluate("window.minotaurVisualizer.cy.panBy({x: 123, y: 57})")
         panned = page.evaluate(camera)
