@@ -390,11 +390,9 @@
     }});
   });
   graph.relationships.forEach(function (rel, i) {
-    // The compact edge style has one provenance label, but the full evidence
-    // array remains on the element so inspection never loses additional facts.
     var displayRelationship = preferredPayload(rel);
     var evidence = displayRelationship.evidence || [];
-    var provenance = evidence.length > 0 ? evidence[0].provenance : "unknown";
+    var provenance = evidenceProvenance(evidence);
     var colors = edgeColors(rel.kind || displayRelationship.kind);
     elements.push({ group: "edges", data: {
       id: comparisonMode ? rel.id : "edge-" + i,
@@ -1047,26 +1045,42 @@
     return d.call_sites || [];
   }
 
-  function callSitesForEdge(d, side) {
-    // Evidence records may independently support the same physical call. The
-    // selector represents a location a reader can inspect, not each producer's
-    // record, while provenance remains visible as the reason it is supported.
+  function evidenceProvenance(evidence) {
+    return Array.from(new Set(evidence.flatMap(function (record) {
+      return record.provenance || [];
+    })));
+  }
+
+  function evidenceLocations(evidence) {
+    // One physical location may be supported by several evidence records.
+    // Preserve first-seen location and provenance order without dropping facts.
     var sites = new Map();
-    rawCallSites(d, side).forEach(function (association) {
-      var key = physicalLocationKey(association.location);
-      var site = sites.get(key);
-      if (!site) {
-        site = { location: association.location, provenance: [], caller_start: association.caller_start };
-        sites.set(key, site);
-      }
-      if (site.provenance.indexOf(association.provenance) === -1) {
-        site.provenance.push(association.provenance);
-      }
-      if (site.caller_start === undefined && association.caller_start !== undefined) {
-        site.caller_start = association.caller_start;
-      }
+    evidence.forEach(function (record) {
+      (record.locations || []).forEach(function (location) {
+        var key = physicalLocationKey(location);
+        var site = sites.get(key);
+        if (!site) {
+          site = { location: location, provenance: [] };
+          sites.set(key, site);
+        }
+        evidenceProvenance([record]).forEach(function (provenance) {
+          if (site.provenance.indexOf(provenance) === -1) site.provenance.push(provenance);
+        });
+        if (site.caller_start === undefined && record.caller_start !== undefined) {
+          site.caller_start = record.caller_start;
+        }
+      });
     });
     return Array.from(sites.values());
+  }
+
+  function callSitesForEdge(d, side) {
+    return evidenceLocations(rawCallSites(d, side).map(function (association) {
+      return {
+        locations: [association.location], provenance: association.provenance,
+        caller_start: association.caller_start
+      };
+    }));
   }
 
   function excerptLines(path, start, end, paths) {
@@ -1277,14 +1291,14 @@
     var c = EDGE_KIND_COLORS[d.kind] || { bg: "#ddd", border: "#999" };
     var srcLabel = e.source().data("label");
     var tgtLabel = e.target().data("label");
-    var locs = collectLocations(d.evidence);
+    var locs = evidenceLocations(d.evidence);
     var sites = d.kind === "calls" ? callSitesForEdge(d, null) : [];
 
     var html = badgeHtml(d.kind, c);
     html += '<h3>' + escHtml(srcLabel) + ' → ' + escHtml(tgtLabel) + '</h3>';
 
     html += '<div class="field"><div class="field-label">Provenance</div>';
-    html += '<div class="field-value">' + escHtml(d.provenance) + '</div></div>';
+    html += '<div class="field-value">' + escHtml(d.provenance.join(", ")) + '</div></div>';
 
     if (d.kind === "sql:foreign-key-to" && hasSqlForeignKeyPayload(d.evidence)) {
       html += sqlForeignKeyDetails(d.evidence);
@@ -1302,16 +1316,20 @@
       html += '<div class="field-value">No source location available</div></div>';
     } else if (locs.length === 1) {
       html += '<div class="field"><div class="field-label">Location</div>';
-      html += '<div class="field-value">' + escHtml(locationLabel(locs[0])) + '</div></div>';
+      html += '<div class="field-value">' + escHtml(locationLabel(locs[0].location)) + '</div></div>';
+      html += '<div class="field"><div class="field-label">Supporting provenance</div>';
+      html += '<div class="field-value">' + escHtml(locs[0].provenance.join(", ")) + '</div></div>';
     } else {
-      html += '<div class="field"><div class="field-label">Call Sites (' + locs.length + ')</div>';
+      html += '<div class="field"><div class="field-label">Locations (' + locs.length + ')</div>';
       html += '<div class="site-tabs" id="site-tabs">';
       locs.forEach(function (_, i) {
         html += '<button class="site-tab' + (i === 0 ? ' active' : '') + '" data-idx="' + i + '">' + (i + 1) + '</button>';
       });
       html += '</div>';
       html += '<div class="field-label">Location</div>';
-      html += '<div class="field-value" id="site-location">' + escHtml(locationLabel(locs[0])) + '</div>';
+      html += '<div class="field-value" id="site-location">' + escHtml(locationLabel(locs[0].location)) + '</div>';
+      html += '<div class="field-label">Supporting provenance</div>';
+      html += '<div class="field-value" id="site-provenance">' + escHtml(locs[0].provenance.join(", ")) + '</div>';
       html += '</div>';
     }
 
@@ -1344,7 +1362,7 @@
         });
       });
       updateSite();
-    } else if (locs.length > 1) {
+    } else if (document.getElementById("site-tabs")) {
       var tabContainer = document.getElementById("site-tabs");
       tabContainer.addEventListener("click", function (evt) {
         var tab = evt.target.closest(".site-tab");
@@ -1352,7 +1370,8 @@
         var idx = Number(tab.dataset.idx);
         tabContainer.querySelectorAll(".site-tab").forEach(function (t) { t.classList.remove("active"); });
         tab.classList.add("active");
-        document.getElementById("site-location").textContent = locationLabel(locs[idx]);
+        document.getElementById("site-location").textContent = locationLabel(locs[idx].location);
+        document.getElementById("site-provenance").textContent = locs[idx].provenance.join(", ");
       });
     }
   }
@@ -1682,10 +1701,9 @@
     var e = evt.target;
     var d = e.data();
     var text = d.kind;
-    var locs = collectLocations(d.evidence);
-    if (locs.length > 0) {
-      locs.forEach(function (loc) { text += "\n" + locationLabel(loc); });
-    }
+    evidenceLocations(d.evidence).forEach(function (site) {
+      text += "\n" + locationLabel(site.location);
+    });
     tooltipEl.textContent = text;
     tooltipEl.style.display = "block";
   });
