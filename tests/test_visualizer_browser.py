@@ -388,6 +388,60 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(
     assert all(url.startswith("file:") for url in requested)
 
 
+def test_shortcuts_respect_focused_controls_and_keep_body_shortcuts(tmp_path: Path) -> None:
+    graph_path = ROOT / "examples/synthetic-graphs/provenance-demo.json"
+    output = tmp_path / "view.html"
+    assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        page.wait_for_function("() => window.minotaurVisualizer?.cy")
+        camera = "() => ({zoom: window.minotaurVisualizer.cy.zoom(), pan: window.minotaurVisualizer.cy.pan()})"
+        fitted = page.evaluate(camera)
+        page.evaluate("window.minotaurVisualizer.cy.panBy({x: 123, y: 57})")
+        panned = page.evaluate(camera)
+        assert panned != fitted
+        system_filter = page.locator("#system-filter")
+        assert all(
+            not label.lower().startswith("f")
+            for label in system_filter.locator("option").all_text_contents()
+        )
+        system_filter.focus()
+        page.keyboard.press("f")
+        assert page.evaluate(camera) == panned
+        system_filter.evaluate("element => element.blur()")
+        assert page.evaluate("document.activeElement.tagName") == "BODY"
+        page.keyboard.press("f")
+        assert page.evaluate(camera) == fitted
+
+        _click_visible_edge_and_show_details(page)
+        details = page.locator("#detail-content").inner_text()
+        search = page.locator("#search")
+        search.fill("foo")
+        checkbox = page.locator('#edge-filters input[type="checkbox"]').first
+        checkbox.focus()
+        page.keyboard.press("Escape")
+        assert search.input_value() == "foo"
+        assert page.locator("#detail-content").inner_text() == details
+
+        site_select = page.locator("#call-site-select")
+        site_select.focus()
+        page.keyboard.press("Escape")
+        assert page.locator("#detail-content").inner_text() == details
+        assert search.input_value() == "foo"
+        search.focus()
+        page.keyboard.press("Escape")
+        assert search.input_value() == ""
+        assert not search.evaluate("element => element === document.activeElement")
+        assert page.locator("#detail-content").inner_text() == details
+        assert page.evaluate("document.activeElement.tagName") == "BODY"
+        page.keyboard.press("Escape")
+        assert "Select a node or edge" in page.locator("#detail-content").inner_text()
+        browser.close()
+
+
 def test_checked_in_python_workflow_artifact_opens_without_external_requests() -> None:
     """The public example remains usable as an offline download/open artifact."""
     artifact = ROOT / "examples/python-workflow/minotaur-graph.html"
