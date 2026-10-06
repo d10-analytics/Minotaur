@@ -958,6 +958,71 @@ def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_pat
         browser.close()
 
 
+def test_comparison_cross_system_classes_follow_revision_endpoint_membership(tmp_path: Path) -> None:
+    nodes = [
+        _comparison_node("m1", before_system="A", after_system="A"),
+        _comparison_node("m2", status="changed", before_system="A", after_system="B"),
+        _comparison_node("m3", before_system="B", after_system="B"),
+        _comparison_node("m4", before_system=None, after_system=None),
+        _comparison_node("m5", status="changed", before_system="B", after_system="A"),
+    ]
+    relationships = [
+        _comparison_edge(
+            "e1", "m1", "m2", before_systems=("A", "A"), after_systems=("A", "B")
+        ),
+        _comparison_edge(
+            "e2", "m3", "m2", status="added", before=False, after_systems=("B", "B")
+        ),
+        _comparison_edge(
+            "e3", "m1", "m4", before_systems=("A", None), after_systems=("A", None)
+        ),
+        _comparison_edge(
+            "e5", "m2", "m5", before_systems=("A", "B"), after_systems=("B", "A")
+        ),
+    ]
+    presentation = _comparison_presentation(nodes, relationships, changed=True)
+    expected = {
+        "": {
+            "before": {"e1": False, "e2": False, "e3": False, "e5": True},
+            "after": {"e1": True, "e2": False, "e3": False, "e5": True},
+            "combined": {"e1": False, "e2": False, "e3": False, "e5": True},
+        },
+        "A": {
+            "before": {"e1": False, "e2": False, "e3": True, "e5": True},
+            "after": {"e1": True, "e2": False, "e3": True, "e5": True},
+            "combined": {"e1": False, "e2": False, "e3": True, "e5": True},
+        },
+        "B": {
+            "before": {"e1": False, "e2": False, "e3": False, "e5": True},
+            "after": {"e1": True, "e2": False, "e3": False, "e5": True},
+            "combined": {"e1": True, "e2": False, "e3": False, "e5": True},
+        },
+    }
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        _open_comparison(page, tmp_path, presentation, "cross-system.html")
+        for system, views in expected.items():
+            page.locator("#system-filter").select_option(system)
+            if system:
+                page.locator("#cross-system-connections").check()
+            for view, classes in views.items():
+                page.locator("#revision-view").select_option(view)
+                actual = page.evaluate(
+                    """() => Object.fromEntries(window.minotaurVisualizer.cy.edges().map(
+                        edge => [edge.id(), edge.hasClass('cross-system')]
+                    ))"""
+                )
+                assert actual == classes, (system, view)
+                assert page.evaluate(
+                    """() => window.minotaurVisualizer.cy.nodes().not('.system-container').every(
+                        node => !Object.hasOwn(node.data(), 'system')
+                            && !Object.hasOwn(node.data(), 'systems')
+                    )"""
+                )
+        browser.close()
+
+
 def test_comparison_empty_filter_view_keeps_controls_safe(tmp_path: Path) -> None:
     """An empty comparison view remains safe for reset, direction, and switches."""
 
