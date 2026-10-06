@@ -268,13 +268,10 @@
 
   function comparisonNodeData(record) {
     var value = preferredPayload(record);
-    var systems = Array.isArray(record.involved_systems) ? record.involved_systems : [];
     return {
       id: record.id,
       label: value.label || record.id,
       node_class: value.node_class || "symbol",
-      system: systems[0] || "",
-      systems: systems,
       symbol_kind: value.symbol_kind || "",
       path: value.path || (value.location ? value.location.path : ""),
       reference_text: value.reference_text || "",
@@ -532,6 +529,23 @@
       }
       return !edgeHasInternalSide(edge, selectedSystem, view)
         && edgeTouchesSystemInView(edge, selectedSystem, view);
+    }
+    if (comparisonMode) {
+      var record = edge.data("comparison_record");
+      var sides = revisionView === "combined" ? ["before", "after"] : [revisionView];
+      var crosses = false;
+      var internal = false;
+      sides.forEach(function (side) {
+        if (!sidePresent(record, side)) return;
+        var sources = sideEndpointSystems(record, side, "source");
+        var targets = sideEndpointSystems(record, side, "target");
+        var sharesSystem = sources.some(function (system) {
+          return targets.indexOf(system) >= 0;
+        });
+        internal = internal || sharesSystem;
+        crosses = crosses || (sources.length > 0 && targets.length > 0 && !sharesSystem);
+      });
+      return !internal && crosses;
     }
     var sourceSystem = edge.source().data("system");
     var targetSystem = edge.target().data("system");
