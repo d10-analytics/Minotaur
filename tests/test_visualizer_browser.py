@@ -2598,3 +2598,187 @@ def test_unselected_system_leaves_the_comparison_filter_on_all_systems(
 
         assert page.locator("#system-filter").input_value() == ""
         browser.close()
+
+
+@pytest.mark.parametrize("added", [False, True], ids=["changed", "added"])
+def test_comparison_reference_evidence_is_complete_and_side_specific(
+    tmp_path: Path, added: bool
+) -> None:
+    before = [[{"provenance": "static-analysis", "locations": [_comparison_location("old.py", 1)]}]]
+    after = [
+        [{"provenance": "imported-graph", "locations": [_comparison_location("new.py", 2)]}],
+        [
+            {
+                "provenance": "curated-rule",
+                "rule": {"id": "test-rule"},
+                "locations": [_comparison_location("new.py", 3)],
+            }
+        ],
+    ]
+    presentation = _comparison_presentation(
+        [_comparison_node("caller"), _comparison_node("target")],
+        [
+            _comparison_edge(
+                "edge:reference",
+                "caller",
+                "target",
+                kind="references",
+                status="added" if added else "changed",
+                before=not added,
+                before_evidence=before,
+                after_evidence=after,
+            )
+        ],
+        changed=True,
+    )
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "side-evidence.html")
+        _click_edge_by_id(page, "edge:reference")
+        after_panel = page.locator('.comparison-evidence[data-side="after"]')
+        assert after_panel.locator(".field-value").all_text_contents() == [
+            "curated-rule, imported-graph",
+            "new.py:4:1",
+            "curated-rule",
+            "new.py:3:1",
+            "imported-graph",
+        ]
+        before_panel = page.locator('.comparison-evidence[data-side="before"]')
+        if added:
+            assert before_panel.count() == 0
+            assert page.locator(".structural-absent").all_text_contents() == ["Not present"]
+        else:
+            assert before_panel.locator(".field-value").all_text_contents() == [
+                "static-analysis",
+                "old.py:2:1",
+                "static-analysis",
+            ]
+        point = page.evaluate("""() => {
+            const cy = window.minotaurVisualizer.cy;
+            const point = cy.getElementById('edge:reference').renderedMidpoint();
+            const bounds = cy.container().getBoundingClientRect();
+            return {x: bounds.left + point.x, y: bounds.top + point.y};
+        }""")
+        page.mouse.move(0, 0)
+        page.mouse.move(point["x"], point["y"])
+        page.wait_for_selector("#tooltip", state="visible")
+        assert page.locator("#tooltip").text_content().splitlines() == [
+            "references",
+            "new.py:4:1",
+            "new.py:3:1",
+        ]
+        browser.close()
+
+
+def test_comparison_call_source_revision_shows_its_own_provenance(tmp_path: Path) -> None:
+    presentation = _comparison_presentation(
+        [_comparison_node("caller"), _comparison_node("target")],
+        [
+            _comparison_edge(
+                "edge:call",
+                "caller",
+                "target",
+                status="changed",
+                before_evidence=[[{"provenance": "static-analysis"}]],
+                after_evidence=[[{"provenance": "imported-graph"}]],
+            )
+        ],
+        changed=True,
+    )
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "call-provenance.html")
+        _click_edge_by_id(page, "edge:call")
+        assert page.locator("#source-revision").input_value() == "after"
+        assert page.locator("#comparison-side-detail .field-value").all_text_contents() == [
+            "imported-graph",
+            "No call site recorded",
+        ]
+        camera = _comparison_camera(page)
+        view = page.locator("#revision-view").input_value()
+        page.locator("#source-revision").select_option("before")
+        assert page.locator("#comparison-side-detail .field-value").all_text_contents() == [
+            "static-analysis",
+            "No call site recorded",
+        ]
+        assert _comparison_camera(page) == camera
+        assert page.locator("#revision-view").input_value() == view
+        browser.close()
+
+
+def test_comparison_real_call_sites_match_callee_evidence_and_fall_back(tmp_path: Path) -> None:
+    callees = {line: _comparison_location("app.py", line) for line in range(1, 6)}
+    observations = {
+        line: {
+            "language": "python",
+            "callee": callee,
+            "expression": _comparison_location("app.py", line, length=12),
+        }
+        for line, callee in callees.items()
+    }
+    presentation = _comparison_presentation(
+        [_comparison_node("caller", path="app.py"), _comparison_node("target")],
+        [
+            _comparison_edge(
+                "edge:call",
+                "caller",
+                "target",
+                status="changed",
+                before_evidence=[
+                    [
+                        {"provenance": "imported-graph", "locations": [callees[1]]},
+                        {"provenance": "static-analysis", "locations": [callees[2]]},
+                    ]
+                ],
+                after_evidence=[
+                    [
+                        {
+                            "provenance": "curated-rule",
+                            "rule": {"id": "test-rule"},
+                            "locations": [callees[3]],
+                        }
+                    ],
+                    [{"provenance": "static-analysis", "locations": [callees[4]]}],
+                ],
+            )
+        ],
+        changed=True,
+        calls=[
+            {
+                "id": "edge:call",
+                "status": "changed",
+                "reasons": ["expression_changed"],
+                "before": tuple(observations[line] for line in (1, 2, 5)),
+                "after": tuple(observations[line] for line in (3, 4)),
+            }
+        ],
+    )
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "callee-evidence.html")
+        _click_edge_by_id(page, "edge:call")
+        assert page.locator("#source-revision").input_value() == "after"
+        camera = _comparison_camera(page)
+        for side, lines, expected in (
+            ("after", (3, 4), ("curated-rule", "static-analysis")),
+            (
+                "before",
+                (1, 2, 5),
+                ("imported-graph", "static-analysis", "imported-graph, static-analysis"),
+            ),
+        ):
+            page.locator("#source-revision").select_option(side)
+            assert page.locator("#call-site-select option").all_text_contents() == [
+                f"{index + 1}. app.py:{line + 1}:1" for index, line in enumerate(lines)
+            ]
+            for index, provenance in enumerate(expected):
+                page.locator("#call-site-select").select_option(str(index))
+                field = page.locator("#call-site-detail .field").filter(
+                    has=page.get_by_text("Supporting provenance", exact=True)
+                )
+                assert field.locator(".field-value").inner_text() == provenance
+            assert _comparison_camera(page) == camera
+        browser.close()
