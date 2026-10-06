@@ -404,6 +404,109 @@ def test_checked_in_python_workflow_artifact_opens_without_external_requests() -
     assert all(url.startswith("file:") for url in requested)
 
 
+@pytest.mark.parametrize("kind", ["calls", "references"])
+def test_edge_inspector_keeps_provenance_without_locations(tmp_path: Path, kind: str) -> None:
+    graph = json.loads((ROOT / "examples/synthetic-graphs/provenance-demo.json").read_text())
+    graph["relationships"][0]["kind"] = kind
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    output = tmp_path / "view.html"
+    assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        _click_visible_edge_and_show_details(page)
+        assert (
+            page.get_by_text("Provenance", exact=True)
+            .locator("..")
+            .locator(".field-value")
+            .inner_text()
+            == "imported-graph, static-analysis"
+        )
+        assert (
+            page.get_by_text("Supporting provenance", exact=True)
+            .locator("..")
+            .locator(".field-value")
+            .inner_text()
+            == "static-analysis"
+        )
+        assert (
+            page.get_by_text("Location", exact=True)
+            .locator("..")
+            .locator(".field-value")
+            .inner_text()
+            == "src/checkout.py:5:12"
+        )
+        if kind == "calls":
+            assert page.locator("#call-site-select option").all_text_contents() == [
+                "1. src/checkout.py:5:12"
+            ]
+        browser.close()
+
+
+def test_non_call_locations_merge_provenance_and_hover_locations(tmp_path: Path) -> None:
+    graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+    relationship = graph["relationships"][0]
+    relationship["kind"] = "references"
+    first_location = relationship["evidence"][0]["locations"][0]
+    second_location = {
+        "path": "src/checkout.py",
+        "range": {
+            "start": {"line": 6, "character": 11},
+            "end": {"line": 6, "character": 25},
+        },
+    }
+    relationship["evidence"] = [
+        {"provenance": "curated-rule", "rule": {"id": "test-rule"}, "locations": [first_location]},
+        {"provenance": "static-analysis", "locations": [first_location]},
+        {"provenance": "imported-graph", "locations": [second_location]},
+    ]
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    output = tmp_path / "view.html"
+    assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        edge = _click_visible_edge_and_show_details(page)
+        assert edge["kind"] == "references"
+        assert (
+            page.get_by_text("Provenance", exact=True)
+            .locator("..")
+            .locator(".field-value")
+            .inner_text()
+            == "curated-rule, static-analysis, imported-graph"
+        )
+        assert page.get_by_text("Locations (2)", exact=True).is_visible()
+        assert page.locator("#site-tabs button").count() == 2
+        assert page.locator("#site-location").inner_text() == "src/checkout.py:5:12"
+        assert page.locator("#site-provenance").inner_text() == "curated-rule, static-analysis"
+        page.locator("#site-tabs button").nth(1).click()
+        assert page.locator("#site-location").inner_text() == "src/checkout.py:7:12"
+        assert page.locator("#site-provenance").inner_text() == "imported-graph"
+        point = page.evaluate(
+            """id => {
+                const cy = window.minotaurVisualizer.cy;
+                const point = cy.getElementById(id).renderedMidpoint();
+                const bounds = cy.container().getBoundingClientRect();
+                return {x: bounds.left + point.x, y: bounds.top + point.y};
+            }""",
+            edge["id"],
+        )
+        page.mouse.move(point["x"], point["y"])
+        playwright.expect(page.locator("#tooltip")).to_be_visible()
+        assert page.locator("#tooltip").text_content().splitlines() == [
+            "references",
+            "src/checkout.py:5:12",
+            "src/checkout.py:7:12",
+        ]
+        browser.close()
+
+
 def test_sql_fk_pointer_details_keep_mapping_and_payload_free_records_separate(
     tmp_path: Path,
 ) -> None:
