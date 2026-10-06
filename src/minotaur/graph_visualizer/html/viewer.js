@@ -566,6 +566,16 @@
     containers.remove();
   }
 
+  function systemGroupingKey(node) {
+    if (!comparisonMode) return node.data("system") || "";
+    // Place surviving nodes using After membership, falling back to Before
+    // for removed or unassigned nodes. Never combine revision memberships.
+    var record = node.data("comparison_record");
+    var placement = sideSystems(record, "after");
+    if (!placement.length) placement = sideSystems(record, "before");
+    return placement[0] || "";
+  }
+
   function createSystemContainers(selectedSystem) {
     var groups = new Map();
     var containerNodes = comparisonMode
@@ -574,25 +584,18 @@
       })
       : cy.nodes(":visible").not(".system-container");
     containerNodes.forEach(function (node) {
-      var name = node.data("system") || "External / Unassigned";
-      if (comparisonMode) {
-        // V-08 placement: a node that survives into After is placed in its
-        // After system; a removed node keeps its Before system. Membership is
-        // read per side, never from the cross-revision union.
-        var record = node.data("comparison_record");
-        var placement = sideSystems(record, "after");
-        if (!placement.length) placement = sideSystems(record, "before");
-        name = placement[0] || "External / Unassigned";
-      }
+      var name = systemGroupingKey(node);
       if (!groups.has(name)) groups.set(name, cy.collection());
       groups.set(name, groups.get(name).union(node));
     });
     Array.from(groups.keys()).sort().forEach(function (name) {
-      var id = "system-container:" + name;
+      var id = name ? "system-container:" + name : "unassigned-system-container";
+      var label = name || (systemNames.indexOf("External / Unassigned") >= 0
+        ? "External / Unassigned (undeclared)" : "External / Unassigned");
       cy.add({
         group: "nodes",
         data: {
-          id: id, label: name, node_class: "system-container", system: name,
+          id: id, label: label, node_class: "system-container", system: name,
           container_color: systemContainerColor(name)
         },
         classes: "system-container "
@@ -1899,7 +1902,7 @@
       }
       var boundaryGroups = new Map();
       boundaryNodes.forEach(function (node) {
-        var name = node.data("system") || "External / Unassigned";
+        var name = systemGroupingKey(node);
         if (!boundaryGroups.has(name)) boundaryGroups.set(name, []);
         boundaryGroups.get(name).push(node);
       });
