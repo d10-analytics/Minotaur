@@ -755,6 +755,87 @@ def test_system_walkthrough_preview_generator_captures_boundary_view(tmp_path: P
     assert len(png) > 10_000
 
 
+def test_ordinary_context_mode_persists_until_unavailable_or_edge_reselected(
+    tmp_path: Path,
+) -> None:
+    graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+    graph["relationships"][0]["evidence"][0]["locations"].extend(
+        [
+            {
+                "path": "src/checkout.py",
+                "range": {
+                    "start": {"line": 70, "character": 11},
+                    "end": {"line": 70, "character": 25},
+                },
+            },
+            {
+                "path": "src/other.py",
+                "range": {
+                    "start": {"line": 20, "character": 0},
+                    "end": {"line": 20, "character": 5},
+                },
+            },
+        ]
+    )
+    source_root = tmp_path / "source"
+    (source_root / "src").mkdir(parents=True)
+    for filename in ("checkout.py", "other.py"):
+        (source_root / "src" / filename).write_text(
+            "\n".join(f"line {line}" for line in range(100)), encoding="utf-8"
+        )
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    output = tmp_path / "view.html"
+    assert (
+        cli.main(
+            [
+                "visualize",
+                "--input",
+                str(graph_path),
+                "--output",
+                str(output),
+                "--source-root",
+                str(source_root),
+            ]
+        )
+        == 0
+    )
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        _click_visible_edge_and_show_details(page)
+        sites = page.locator("#call-site-select")
+        mode = page.locator("#context-mode")
+        assert sites.locator("option").all_text_contents() == [
+            "1. src/checkout.py:5:12",
+            "2. src/checkout.py:71:12",
+            "3. src/other.py:21:1",
+        ]
+        assert mode.input_value() == "window"
+        mode.select_option("caller")
+        sites.select_option("1")
+        assert mode.input_value() == "caller"
+        assert page.locator("#call-site-detail .code-number").first.inner_text() == "3"
+        assert page.locator("#call-site-detail .code-text").first.inner_text() == "line 2"
+        assert page.locator(".call-site-highlight .code-number").all_text_contents() == ["71"]
+        sites.select_option("2")
+        assert mode.locator("option").all_text_contents() == ["Call-site window"]
+        assert mode.input_value() == "window"
+        assert page.locator("#call-site-detail .code-number").first.inner_text() == "1"
+        sites.select_option("0")
+        assert mode.input_value() == "window"
+        mode.select_option("caller")
+        mode.evaluate("element => element.blur()")
+        page.keyboard.press("Escape")
+        assert "Select a node or edge" in page.locator("#detail-content").inner_text()
+        _click_visible_edge_and_show_details(page)
+        assert mode.input_value() == "window"
+        assert page.locator("#call-site-detail .code-number").first.inner_text() == "1"
+        browser.close()
+
+
 def test_call_site_context_is_unavailable_without_a_root_and_has_no_caller_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
