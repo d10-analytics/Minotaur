@@ -175,24 +175,6 @@
       }
       return [];
     }
-    var payloadValue = sidePayload(record, side);
-    var candidates = [];
-    if (payloadValue) {
-      candidates = payloadValue.systems || payloadValue.involved_systems || payloadValue.system || [];
-    }
-    if (typeof candidates === "string") return candidates ? [candidates] : [];
-    if (Array.isArray(candidates) && candidates.length) {
-      return candidates.filter(function (name) { return typeof name === "string" && name; });
-    }
-    var mapped = payload.node_systems && payload.node_systems[record.id];
-    if (mapped && typeof mapped === "object" && !Array.isArray(mapped)) {
-      var mappedSide = mapped[side];
-      if (typeof mappedSide === "string") return [mappedSide];
-      if (Array.isArray(mappedSide) && mappedSide.length) return mappedSide;
-    }
-    if (Array.isArray(mapped)) return mapped;
-    if (typeof mapped === "string") return [mapped];
-    return Array.isArray(record.involved_systems) ? record.involved_systems : [];
   }
 
   function sideEndpointSystems(record, side, endpoint) {
