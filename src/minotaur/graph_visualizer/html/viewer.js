@@ -1107,6 +1107,10 @@
     return rows;
   }
 
+  function availableContextModes(site) {
+    return site.caller_start === undefined ? ["window"] : ["window", "caller"];
+  }
+
   function renderCallSite(site, mode, paths, originNote) {
     var location = site.location;
     var range = location.range;
@@ -1339,13 +1343,16 @@
       var siteSelect = document.getElementById("call-site-select");
       var modeSelect = document.getElementById("context-mode");
       var siteDetail = document.getElementById("call-site-detail");
+      var contextMode = "window";
       function updateSite() {
         var site = sites[Number(siteSelect.value)];
-        modeSelect.innerHTML = '<option value="window">Call-site window</option>';
-        if (site.caller_start !== undefined) {
-          modeSelect.innerHTML += '<option value="caller">Caller start → call</option>';
-        }
-        siteDetail.innerHTML = renderCallSite(site, modeSelect.value);
+        var modes = availableContextModes(site);
+        if (modes.indexOf(contextMode) < 0) contextMode = "window";
+        modeSelect.innerHTML = modes.map(function (mode) {
+          return '<option value="' + mode + '">' + (mode === "caller" ? "Caller start → call" : "Call-site window") + '</option>';
+        }).join("");
+        modeSelect.value = contextMode;
+        siteDetail.innerHTML = renderCallSite(site, contextMode);
         // Wait until the new code rows have layout before scrolling; otherwise
         // a newly selected site can remain off-screen in a long excerpt.
         window.requestAnimationFrame(function () {
@@ -1355,7 +1362,8 @@
       }
       siteSelect.addEventListener("change", updateSite);
       modeSelect.addEventListener("change", function () {
-        siteDetail.innerHTML = renderCallSite(sites[Number(siteSelect.value)], modeSelect.value);
+        contextMode = modeSelect.value;
+        siteDetail.innerHTML = renderCallSite(sites[Number(siteSelect.value)], contextMode);
         window.requestAnimationFrame(function () {
           var highlighted = siteDetail.querySelector(".call-site-highlight");
           if (highlighted) highlighted.scrollIntoView({ block: "center" });
@@ -1535,7 +1543,7 @@
     }
     if (sideState.site >= sites.length) sideState.site = 0;
     var site = sites[sideState.site];
-    var modes = site.caller_start === undefined ? ["window"] : ["window", "caller"];
+    var modes = availableContextModes(site);
     if (modes.indexOf(sideState.mode) < 0) sideState.mode = "window";
     var html = '<div class="field"><div class="field-label">Call sites (' + sites.length + ')</div><select id="call-site-select" aria-label="Call sites">';
     sites.forEach(function (item, index) {
