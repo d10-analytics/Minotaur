@@ -1939,8 +1939,10 @@
 
   // --- Keyboard shortcuts ---
   document.addEventListener("keydown", function (evt) {
-    if (evt.target.tagName === "INPUT") {
-      if (evt.key === "Escape") { searchEl.value = ""; searchEl.blur(); doSearch(); }
+    if (["INPUT", "SELECT", "TEXTAREA"].indexOf(evt.target.tagName) >= 0) {
+      if (evt.key === "Escape" && evt.target === searchEl) {
+        searchEl.value = ""; searchEl.blur(); doSearch();
+      }
       return;
     }
     if (evt.key === "Escape") {
