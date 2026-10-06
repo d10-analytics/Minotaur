@@ -389,7 +389,8 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(
 
 
 def test_shortcuts_respect_focused_controls_and_keep_body_shortcuts(tmp_path: Path) -> None:
-    graph_path = ROOT / "examples/synthetic-graphs/provenance-demo.json"
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_bytes((ROOT / "examples/synthetic-graphs/provenance-demo.json").read_bytes())
     output = tmp_path / "view.html"
     assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
 
