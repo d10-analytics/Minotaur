@@ -220,6 +220,70 @@ def test_comparison_html_is_inert_and_ordinary_graph_presentation_stays_separate
     assert ordinary["graph"] == {"nodes": [], "relationships": []}
 
 
+def test_comparison_sites_preserve_distinct_callee_and_expression_locations() -> None:
+    comparison = _comparison()
+    callees = {line: _location("app.py", line) for line in range(1, 6)}
+    expressions = {
+        line: {
+            "path": "app.py",
+            "range": {"start": callee["range"]["start"], "end": {"line": line, "character": 20}},
+        }
+        for line, callee in callees.items()
+    }
+    observations = {
+        line: {"language": "python", "callee": callees[line], "expression": expressions[line]}
+        for line in callees
+    }
+    expression_only = {"language": "python", "expression": _location("other.py", 6)}
+    relationship = comparison.relationships[0]
+    before = dict(relationship.before)
+    before["evidence"] = [
+        {"provenance": "imported-graph", "locations": [callees[1]]},
+        {"provenance": "static-analysis", "locations": [callees[2]]},
+    ]
+    after = tuple(
+        {
+            **dict(relationship.after),
+            "evidence": [evidence],
+        }
+        for evidence in (
+            {"provenance": "curated-rule", "rule": {"id": "test-rule"}, "locations": [callees[3]]},
+            {"provenance": "static-analysis", "locations": [callees[4]]},
+        )
+    )
+    comparison = replace(
+        comparison,
+        relationships=(replace(relationship, before=before, after=after),),
+        call_changes=(
+            CallChange(
+                relationship.id,
+                "changed",
+                before=tuple(observations[line] for line in (1, 2, 5)) + (expression_only,),
+                after=tuple(observations[line] for line in (3, 4)),
+            ),
+        ),
+    )
+    excerpts = prepare_comparison_excerpts(comparison, {"before": {}, "after": {}})
+    for side, lines, provenance in (
+        ("before", (1, 2, 5), ["imported-graph", "static-analysis"]),
+        ("after", (3, 4), []),
+    ):
+        sites = excerpts[side]["call_sites"][relationship.id]
+        for site, line in zip(sites, lines, strict=False):
+            assert site == {
+                "location": expressions[line],
+                "callee": callees[line],
+                "provenance": provenance,
+                "caller_start": 0,
+            }
+            assert site["location"] != site["callee"]
+        assert len(sites) == len(lines) + (side == "before")
+    assert excerpts["before"]["call_sites"][relationship.id][-1] == {
+        "location": expression_only["expression"],
+        "provenance": ["imported-graph", "static-analysis"],
+    }
+
+
 def test_comparison_call_site_does_not_use_cross_file_caller_context() -> None:
     comparison = _comparison()
     nodes = list(comparison.nodes)
