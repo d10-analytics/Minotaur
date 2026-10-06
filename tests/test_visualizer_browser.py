@@ -678,6 +678,106 @@ def test_graph_format_documents_sql_fk_evidence_contract() -> None:
         assert phrase in documentation
 
 
+@pytest.mark.parametrize("comparison", [False, True], ids=["ordinary", "comparison"])
+@pytest.mark.parametrize("declared_name", ["External / Unassigned", "declared"])
+def test_unassigned_containers_do_not_collide_with_declared_systems(
+    tmp_path: Path, comparison: bool, declared_name: str
+) -> None:
+    membership = {"checkout": "checkout", "declared": declared_name, "unassigned": None}
+    if comparison:
+        presentation = _comparison_presentation(
+            [
+                _comparison_node(node_id, before_system=system, after_system=system)
+                for node_id, system in membership.items()
+            ],
+            [
+                _comparison_edge(
+                    "edge:" + target,
+                    "checkout",
+                    target,
+                    before_systems=("checkout", membership[target]),
+                    after_systems=("checkout", membership[target]),
+                )
+                for target in ("declared", "unassigned")
+            ],
+            changed=False,
+        )
+    else:
+        presentation = build_presentation(
+            {
+                "nodes": [
+                    {"id": node_id, "label": node_id, "node_class": "symbol"}
+                    for node_id in membership
+                ],
+                "relationships": [
+                    {"source": "checkout", "target": target, "kind": "calls", "evidence": []}
+                    for target in ("declared", "unassigned")
+                ],
+            }
+        )
+        presentation["systems"] = ["checkout", declared_name]
+        presentation["node_systems"] = {
+            node_id: system for node_id, system in membership.items() if system is not None
+        }
+    artifact = tmp_path / "containers.html"
+    artifact.write_bytes(render_html(presentation))
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(artifact.as_uri())
+        page.locator("#system-filter").select_option("checkout")
+        page.locator("#cross-system-connections").check()
+        page.wait_for_function(
+            "() => window.minotaurVisualizer.cy.nodes('.system-container').length > 0"
+        )
+        containers = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes('.system-container').map(
+                node => [node.id(), node.data('label')]
+            ))"""
+        )
+        assert containers == {
+            "system-container:checkout": "checkout",
+            "system-container:" + declared_name: declared_name,
+            "unassigned-system-container": (
+                "External / Unassigned (undeclared)"
+                if declared_name == "External / Unassigned"
+                else "External / Unassigned"
+            ),
+        }
+        for node_id, container_id in (
+            ("declared", "system-container:" + declared_name),
+            ("unassigned", "unassigned-system-container"),
+        ):
+            if comparison:
+                assert page.evaluate(
+                    """([nodeId, containerId]) => {
+                        const cy = window.minotaurVisualizer.cy;
+                        const box = cy.getElementById(nodeId).boundingBox({includeLabels:true});
+                        const center = cy.getElementById(containerId).position();
+                        return Math.abs(center.x - (box.x1 + box.x2) / 2) < 0.01
+                            && Math.abs(center.y - (box.y1 + box.y2) / 2) < 0.01;
+                    }""",
+                    [node_id, container_id],
+                )
+            else:
+                assert page.evaluate(
+                    "id => window.minotaurVisualizer.cy.getElementById(id)"
+                    ".children().map(n => n.id())",
+                    container_id,
+                ) == [node_id]
+        page.locator("#system-filter").select_option(declared_name)
+        page.wait_for_function(
+            "name => window.minotaurVisualizer.cy.nodes('.selected-system-container')"
+            ".map(n => n.id()).join() === 'system-container:' + name",
+            arg=declared_name,
+        )
+        assert page.evaluate(
+            "window.minotaurVisualizer.cy.nodes('.selected-system-container').map(n => n.id())"
+        ) == ["system-container:" + declared_name]
+        browser.close()
+
+
 def test_checked_in_system_walkthrough_exposes_configured_boundary_view() -> None:
     """The public system example exercises focus, boundaries, and offline use."""
     artifact = ROOT / "examples/system-walkthrough/minotaur-graph.html"
