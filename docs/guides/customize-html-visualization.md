@@ -72,7 +72,9 @@ The left details panel stays visible while the graph is explored. Click a node
 or edge to populate it; click the canvas or press Escape to clear it. Drag its
 full-height right-hand divider, or use its arrow/Home/End keys, to adjust its
 width. Node connections use separate relationship and target rows so long
-qualified names wrap within the chosen width.
+qualified names wrap within the chosen width. Edge details list every supporting
+provenance and each location with its provenance. Shortcuts are ignored while a
+control has focus, while Escape in search clears it.
 
 ## Compare two revisions visually
 
@@ -99,7 +101,10 @@ relationship-kind filters, search, and color modes, and adds:
 - **Graph view** switches the whole map between **Combined**, **Before**, and
   **After**. This is a graph-level view. It changes which revision's structure
   is drawn while keeping the layout stationary, so the same node stays in the
-  same place as you switch.
+  same place as you switch. With All Systems selected, an edge is marked
+  cross-system when both endpoints belong to declared systems that differ on
+  the viewed revision, and in Combined only when it crosses on at least one
+  revision and is internal on neither.
 - **Emphasize changes** dims unchanged structure and leaves added, removed, and
   changed structure at full opacity. Node-class and relationship-kind colors
   keep their meaning, so a dimmed node is still recognizable as the kind it is.
