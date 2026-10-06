@@ -958,7 +958,9 @@ def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_pat
         browser.close()
 
 
-def test_comparison_cross_system_classes_follow_revision_endpoint_membership(tmp_path: Path) -> None:
+def test_comparison_cross_system_classes_follow_revision_endpoint_membership(
+    tmp_path: Path,
+) -> None:
     nodes = [
         _comparison_node("m1", before_system="A", after_system="A"),
         _comparison_node("m2", status="changed", before_system="A", after_system="B"),
@@ -967,18 +969,10 @@ def test_comparison_cross_system_classes_follow_revision_endpoint_membership(tmp
         _comparison_node("m5", status="changed", before_system="B", after_system="A"),
     ]
     relationships = [
-        _comparison_edge(
-            "e1", "m1", "m2", before_systems=("A", "A"), after_systems=("A", "B")
-        ),
-        _comparison_edge(
-            "e2", "m3", "m2", status="added", before=False, after_systems=("B", "B")
-        ),
-        _comparison_edge(
-            "e3", "m1", "m4", before_systems=("A", None), after_systems=("A", None)
-        ),
-        _comparison_edge(
-            "e5", "m2", "m5", before_systems=("A", "B"), after_systems=("B", "A")
-        ),
+        _comparison_edge("e1", "m1", "m2", before_systems=("A", "A"), after_systems=("A", "B")),
+        _comparison_edge("e2", "m3", "m2", status="added", before=False, after_systems=("B", "B")),
+        _comparison_edge("e3", "m1", "m4", before_systems=("A", None), after_systems=("A", None)),
+        _comparison_edge("e5", "m2", "m5", before_systems=("A", "B"), after_systems=("B", "A")),
     ]
     presentation = _comparison_presentation(nodes, relationships, changed=True)
     expected = {
