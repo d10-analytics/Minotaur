@@ -1,13 +1,12 @@
-"""The project-configuration guide must document every shipped behavior.
+"""The configuration and graph-trust documentation must state every claim.
 
-The guide is prose, and prose cannot be executed, so this module proves
+The documents are prose, and prose cannot be executed, so this module proves
 content presence the same way the repository's other text-assertion tests do
 (``tests/test_graph_model_loading.py`` reads source and ``pyproject.toml``
-text rather than importing a parser): each named test reads
-``docs/guides/project-configuration.md`` and asserts the exact claim the
-guide must keep.  One named test guards each behavior the configuration
-slice ships, and every test fails if the guide file is absent or that
-behavior is removed from it.
+text rather than importing a parser): each named test reads a document under
+``docs/`` and asserts the exact claim it must keep.  One named test guards each
+behavior the configuration and trust slices ship, and every test fails if the
+documented claim is removed from its document.
 """
 
 from __future__ import annotations
@@ -16,6 +15,10 @@ import re
 from pathlib import Path
 
 GUIDE = Path(__file__).parents[1] / "docs/guides/project-configuration.md"
+FRESHNESS = Path(__file__).parents[1] / "docs/concepts/freshness.md"
+GRAPH_FORMAT = Path(__file__).parents[1] / "docs/formats/minotaur-graph-v1.md"
+KNOWN_FIELDS_START = "The known fields inside `[minotaur]` are:"
+KNOWN_FIELDS_END = "Any other field is unknown"
 
 
 def _guide_text() -> str:
@@ -27,6 +30,11 @@ def _guide_text() -> str:
     disappears, not when the paragraph is re-wrapped.
     """
     return re.sub(r"\s+", " ", GUIDE.read_text(encoding="utf-8")).strip()
+
+
+def _document_text(path: Path) -> str:
+    """Read one document with the same whitespace collapse as the guide."""
+    return re.sub(r"\s+", " ", path.read_text(encoding="utf-8")).strip()
 
 
 def test_guide_file_exists() -> None:
@@ -265,3 +273,83 @@ def test_guide_documents_foreign_key_mapping_rejection_and_warning_boundaries() 
         "repeated observations for one source table and target text remain one coalesced generic"
         in text
     )
+
+
+def test_guide_documents_config_folder_confinement() -> None:
+    text = _guide_text()
+    assert "`root`, `graph`, and `systems_dir` must each resolve" in text
+    assert "with links followed" in text
+    assert "inside the folder that contains the configuration file" in text
+    assert "refused before any read or write" in text
+    assert "`configured <field> escapes the config folder`" in text
+
+
+def test_guide_documents_config_symlink_anchoring_at_the_link_folder() -> None:
+    text = _guide_text()
+    assert "anchors at the folder that holds the link, not" in text
+    assert "the folder that holds the link's target" in text
+
+
+def test_guide_documents_systems_mode_config_folder_confinement() -> None:
+    text = _guide_text()
+    assert "`query diff --systems` confines" in text
+    assert "for the working copy and for the committed configuration captured" in text
+    assert "every compared revision" in text
+    assert "cannot be compared on either side" in text
+
+
+def test_guide_documents_systems_folder_confinement() -> None:
+    text = _guide_text()
+    assert "system's child folder and its `system.toml` must each resolve inside" in text
+    assert "`system folder escapes the systems folder`" in text
+    assert "`system definition escapes the systems folder`" in text
+    assert "both before the definition is read" in text
+
+
+def test_guide_documents_every_quoted_target_file_key_spelling() -> None:
+    text = _guide_text()
+    assert "must be quoted, in every spelling TOML accepts" in text
+    assert "`[minotaur.sql.foreign_key_target_files]` table" in text
+    assert "quoted-segment or whitespace-padded header" in text
+    assert "dotted keys under `[minotaur.sql]`, `[minotaur]`, or no header at all" in text
+    assert "inline table nested at any enclosing level" in text
+    assert "`invalid minotaur.sql.foreign_key_target_files: target keys must be quoted`" in text
+
+
+def test_guide_lists_foreign_key_target_files_in_the_sql_known_fields() -> None:
+    text = _guide_text()
+    fields = text.split(KNOWN_FIELDS_START, 1)[1].split(KNOWN_FIELDS_END, 1)[0]
+    assert "`foreign_key_target_files`" in fields
+
+
+def test_guide_states_root_alone_does_not_reanchor_configured_targets() -> None:
+    text = _guide_text()
+    assert "`--root` alone, however, does not re-anchor the configured `targets`" in text
+    assert "pass the targets explicitly" in text
+    assert "or keep the configured graph while analyzing a different root" not in text
+
+
+TRUST_CLAIMS = (
+    "trusted without re-analysis",
+    "Anyone who can write the graph's directory, or commit to the clone, controls",
+    "`--validate` checks structure only",
+    "`analyze --force` to regenerate the graph from current source",
+)
+
+
+def test_guide_documents_committed_graph_trust() -> None:
+    text = _guide_text()
+    for claim in TRUST_CLAIMS:
+        assert claim in text
+
+
+def test_freshness_documents_committed_graph_trust() -> None:
+    text = _document_text(FRESHNESS)
+    for claim in TRUST_CLAIMS:
+        assert claim in text
+
+
+def test_graph_format_documents_committed_graph_trust() -> None:
+    text = _document_text(GRAPH_FORMAT)
+    for claim in TRUST_CLAIMS:
+        assert claim in text
