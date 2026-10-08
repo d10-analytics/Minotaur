@@ -240,10 +240,17 @@ def _write_config(
     systems: Path,
     targets: tuple[str, ...] = _TARGETS,
 ) -> Path:
+    source_root = destination.parent / "src"
+    shutil.copytree(
+        SOURCE_ROOT,
+        source_root,
+        ignore=shutil.ignore_patterns("__pycache__", "*.egg-info"),
+        dirs_exist_ok=True,
+    )
     destination.write_text(
         "[minotaur]\n"
         "schema_version = 1\n"
-        f"root = {json.dumps(str(SOURCE_ROOT))}\n"
+        f"root = {json.dumps(str(source_root))}\n"
         f"graph = {json.dumps(str(graph))}\n"
         f"systems_dir = {json.dumps(str(systems))}\n"
         f"targets = {json.dumps(list(targets))}\n",

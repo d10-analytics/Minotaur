@@ -491,3 +491,27 @@ def test_systems_details_json_routes_named_boundary_connections(
         "relationship_extensions",
         "evidence",
     } == set(connections[0]["relationships"][0])
+
+
+def test_systems_refuses_an_escaping_systems_dir_before_reading_outside_definitions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A systems_dir outside the config folder exits 2 before any definition read."""
+    root = _repo(tmp_path)
+    _write(root, "app.py", "value = 1\n")
+    _write(tmp_path / "outside-systems", "x/system.toml", "invalid [ toml\n")
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["."]\nsystems_dir = "../outside-systems"\n',
+    )
+    monkeypatch.chdir(root)
+
+    status, out, err = _systems(capsys, root, root / "graph.json")
+
+    assert status == 2
+    assert out == ""
+    assert "configured systems_dir escapes the config folder" in err
+    assert "../outside-systems" in err
+    assert "invalid TOML" not in err

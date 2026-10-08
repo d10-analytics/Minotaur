@@ -1143,10 +1143,10 @@ def test_analyze_clean_skip_runs_no_git_probes(
 ) -> None:
     root = tmp_path / "source"
     selected = _write(root, "selected.py", "value = 1\n")
-    output = tmp_path / "graph.json"
+    output = root / "graph.json"
     config = _write_config(
         root,
-        _MINOTAUR_CONFIG + 'root = "."\ngraph = "../graph.json"\ntargets = ["selected.py"]\n',
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "graph.json"\ntargets = ["selected.py"]\n',
     )
     assert _run(root, output, selected).returncode == 0
 
@@ -3023,6 +3023,119 @@ def test_visualize_without_input_renders_content_from_the_config_graph(
 
     assert completed.returncode == 0, completed.stderr
     assert "def app" in (root / "config.html").read_text(encoding="utf-8")
+
+
+def test_analyze_refuses_an_escaping_graph_before_any_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A config graph outside the config folder exits 2 before any graph write."""
+    root = _config_repo(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    _write(root, "app.py", "value = 1\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "../victim/x.json"\ntargets = ["app.py"]\n',
+    )
+    monkeypatch.chdir(root)
+
+    assert cli.main(["analyze"]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "configured graph escapes the config folder" in captured.err
+    assert "../victim/x.json" in captured.err
+    assert str((victim / "x.json").resolve()) in captured.err
+    assert f"(allowed folder is {root.resolve()})" in captured.err
+    assert not (victim / "x.json").exists()
+    assert not stamp_path(victim / "x.json").exists()
+
+
+def test_visualize_refuses_an_escaping_graph_before_loading_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The confinement refusal wins over a graph-load error from the outside file."""
+    root = _config_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "g.json").write_text("not json", encoding="utf-8")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "../outside/g.json"\ntargets = ["app.py"]\n',
+    )
+    monkeypatch.chdir(root)
+
+    status = cli.main(["visualize", "--output", str(root / "view.html")])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert "configured graph escapes the config folder" in captured.err
+    assert "not valid JSON" not in captured.err
+    assert not (root / "view.html").exists()
+
+
+def test_committed_diff_refuses_an_escaping_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Committed diff resolves the located config and names the escaping root."""
+    root = _config_repo(tmp_path)
+    _write(root, "app.py", "value = 1\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "../elsewhere"\ntargets = ["app.py"]\n',
+    )
+    monkeypatch.chdir(root)
+
+    status = cli.main(["query", "diff"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert "configured root escapes the config folder" in captured.err
+    assert "../elsewhere" in captured.err
+
+
+def _linked_config_project(tmp_path: Path) -> tuple[Path, Path]:
+    """A project whose config link sits in ``proj`` and targets a file in ``shared``."""
+    proj = tmp_path / "proj"
+    shared = tmp_path / "shared"
+    proj.mkdir()
+    shared.mkdir()
+    _write(proj, "a.py", "value = 1\n")
+    _write(shared, "base.toml", '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n')
+    (proj / ".minotaur.toml").symlink_to(shared / "base.toml")
+    return proj, shared
+
+
+def test_linked_config_analyze_walk_up_anchors_at_the_link_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Walk-up discovery of a linked config anchors at the link's own folder."""
+    proj, shared = _linked_config_project(tmp_path)
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["analyze"]) == 0
+
+    graph = json.loads((proj / "minotaur-graph.json").read_text(encoding="utf-8"))
+    assert _file_paths(graph) == {"a.py"}
+    assert sorted(path.name for path in shared.iterdir()) == ["base.toml"]
+
+
+def test_linked_config_analyze_explicit_path_matches_walk_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit link path anchors at the link's folder just like walk-up."""
+    proj, shared = _linked_config_project(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert cli.main(["analyze", "--config", str(proj / ".minotaur.toml")]) == 0
+
+    graph = json.loads((proj / "minotaur-graph.json").read_text(encoding="utf-8"))
+    assert _file_paths(graph) == {"a.py"}
+    assert sorted(path.name for path in shared.iterdir()) == ["base.toml"]
 
 
 def test_equals_form_missing_config_exits_two_beside_a_valid_walk_up_config(

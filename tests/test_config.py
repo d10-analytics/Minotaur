@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import json
 import os
 import re
 import subprocess
@@ -377,7 +378,7 @@ def test_relative_config_values_anchor_at_the_declared_root(tmp_path: Path) -> N
     cfg = _write(
         tmp_path,
         "cfg/.minotaur.toml",
-        '[minotaur]\nschema_version = 1\nroot = "../proj"\n'
+        '[minotaur]\nschema_version = 1\nroot = "proj"\n'
         'targets = ["a.py", "sub/b.py"]\ngraph = "out/g.json"\n',
     )
     cfg.parent.mkdir(parents=True, exist_ok=True)
@@ -385,7 +386,7 @@ def test_relative_config_values_anchor_at_the_declared_root(tmp_path: Path) -> N
 
     resolved = resolve_config(tmp_path / "cfg")
 
-    project_root = (tmp_path / "proj").resolve()
+    project_root = (tmp_path / "cfg" / "proj").resolve()
     assert resolved.root == project_root
     assert resolved.targets == (
         (project_root / "a.py").resolve(),
@@ -549,13 +550,13 @@ def test_configured_systems_dir_is_accepted_and_anchored_at_the_declared_root(
     _write(
         tmp_path,
         "cfg/.minotaur.toml",
-        '[minotaur]\nschema_version = 1\nroot = "../proj"\n'
+        '[minotaur]\nschema_version = 1\nroot = "proj"\n'
         'targets = ["a.py"]\nsystems_dir = "systems"\n',
     )
 
     resolved = resolve_config(tmp_path / "cfg")
 
-    project_root = (tmp_path / "proj").resolve()
+    project_root = (tmp_path / "cfg" / "proj").resolve()
     assert resolved.systems_dir == (project_root / "systems").resolve()
 
 
@@ -566,12 +567,12 @@ def test_omitted_systems_dir_defaults_to_docs_systems_under_the_declared_root(
     _write(
         tmp_path,
         "cfg/.minotaur.toml",
-        '[minotaur]\nschema_version = 1\nroot = "../proj"\ntargets = ["a.py"]\n',
+        '[minotaur]\nschema_version = 1\nroot = "proj"\ntargets = ["a.py"]\n',
     )
 
     resolved = resolve_config(tmp_path / "cfg")
 
-    project_root = (tmp_path / "proj").resolve()
+    project_root = (tmp_path / "cfg" / "proj").resolve()
     assert resolved.systems_dir == (project_root / "docs" / "systems").resolve()
 
 
@@ -598,6 +599,242 @@ def test_configless_explicit_root_still_emits_a_docs_systems_default(
 
     assert resolved.config_file is None
     assert resolved.systems_dir == root / "docs" / "systems"
+
+
+# ---------------------------------------------------------------------------
+# Config-folder confinement and link-folder anchoring
+# ---------------------------------------------------------------------------
+
+
+def _refused_config(cfg: Path, body: str) -> tuple[ConfigError, Path]:
+    """Write ``body`` as ``cfg/.minotaur.toml`` and return its refusal and path."""
+    source = _write(cfg, ".minotaur.toml", body)
+    with pytest.raises(ConfigError) as error:
+        resolve_config(cfg)
+    return error.value, source
+
+
+def _assert_escapes_config_folder(
+    error: ConfigError, *, field: str, raw: str, resolved: Path, folder: Path, source: Path
+) -> None:
+    """A confinement refusal names the field, raw value, real path, folder and source."""
+    message = str(error)
+    assert f"configured {field} escapes the config folder" in message
+    assert raw in message
+    assert str(resolved) in message
+    assert f"(allowed folder is {folder})" in message
+    assert str(source) in message
+
+
+def test_config_sourced_values_outside_the_config_folder_are_refused(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (tmp_path / "victim").mkdir()
+    outside_src = tmp_path / "outside-src"
+    outside_src.mkdir()
+    outside_etc = tmp_path / "etc"
+    outside_etc.mkdir()
+    outside_graph = tmp_path / "outside-graph.json"
+
+    scenarios = [
+        ('root = "../victim_home"\n', "root", "../victim_home", tmp_path / "victim_home"),
+        (f"root = {json.dumps(str(outside_src))}\n", "root", str(outside_src), outside_src),
+        (
+            'graph = "../victim/x.json"\n',
+            "graph",
+            "../victim/x.json",
+            tmp_path / "victim" / "x.json",
+        ),
+        (
+            f"graph = {json.dumps(str(outside_graph))}\n",
+            "graph",
+            str(outside_graph),
+            outside_graph,
+        ),
+        (
+            f"systems_dir = {json.dumps(str(outside_etc))}\n",
+            "systems_dir",
+            str(outside_etc),
+            outside_etc,
+        ),
+    ]
+
+    for declaration, field, raw, resolved in scenarios:
+        body = '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n' + declaration
+        error, source = _refused_config(cfg, body)
+        _assert_escapes_config_folder(
+            error,
+            field=field,
+            raw=raw,
+            resolved=resolved.resolve(),
+            folder=cfg.resolve(),
+            source=source,
+        )
+
+
+def test_links_whose_targets_leave_the_config_folder_are_refused(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    outside_src = tmp_path / "outside-src"
+    outside_src.mkdir()
+    (outside_src / "mod.py").write_text("value = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_systems = tmp_path / "outside-systems"
+    outside_systems.mkdir()
+    (cfg / "src-link").symlink_to(outside_src)
+    (cfg / "out-link").symlink_to(outside)
+    (cfg / "sys-link").symlink_to(outside_systems)
+    (cfg / "dangling.json").symlink_to(outside / "missing.json")
+
+    scenarios = [
+        ('root = "src-link"\n', "root", "src-link", outside_src),
+        ('graph = "out-link/g.json"\n', "graph", "out-link/g.json", outside / "g.json"),
+        ('systems_dir = "sys-link"\n', "systems_dir", "sys-link", outside_systems),
+        ('graph = "dangling.json"\n', "graph", "dangling.json", outside / "missing.json"),
+    ]
+
+    for declaration, field, raw, resolved in scenarios:
+        body = '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n' + declaration
+        error, source = _refused_config(cfg, body)
+        _assert_escapes_config_folder(
+            error,
+            field=field,
+            raw=raw,
+            resolved=resolved.resolve(),
+            folder=cfg.resolve(),
+            source=source,
+        )
+
+
+def test_a_link_that_resolves_inside_the_config_folder_is_allowed(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "real-systems").mkdir()
+    (cfg / "sys-link").symlink_to("real-systems")
+    _write(
+        cfg,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\nsystems_dir = "sys-link"\n',
+    )
+
+    resolved = resolve_config(cfg)
+
+    assert resolved.systems_dir == (cfg / "real-systems").resolve()
+
+
+def test_linked_config_anchors_at_the_link_folder(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    base = _write(
+        shared,
+        "base.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\ngraph = "g.json"\n',
+    )
+    (proj / ".minotaur.toml").symlink_to(base)
+
+    resolved = resolve_config(proj)
+
+    assert resolved.config_file == proj.resolve() / ".minotaur.toml"
+    assert resolved.root == proj.resolve()
+    assert resolved.graph == (proj / "g.json").resolve()
+
+    error, source = _refused_config(
+        proj,
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\ngraph = "../shared/g.json"\n',
+    )
+
+    _assert_escapes_config_folder(
+        error,
+        field="graph",
+        raw="../shared/g.json",
+        resolved=(shared / "g.json").resolve(),
+        folder=proj.resolve(),
+        source=source,
+    )
+
+
+def test_confinement_reports_root_then_graph_then_targets_then_systems_dir(
+    tmp_path: Path,
+) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+
+    error, _ = _refused_config(
+        cfg,
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n'
+        'root = "../victim_home"\ngraph = "../victim/g.json"\n',
+    )
+    assert "configured root escapes the config folder" in str(error)
+    assert "configured graph escapes the config folder" not in str(error)
+
+    error, _ = _refused_config(
+        cfg,
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n'
+        'graph = "../victim/g.json"\nsystems_dir = "../victim/systems"\n',
+    )
+    assert "configured graph escapes the config folder" in str(error)
+    assert "configured systems_dir escapes the config folder" not in str(error)
+
+    error, _ = _refused_config(
+        cfg,
+        '[minotaur]\nschema_version = 1\ntargets = ["../esc.py"]\n'
+        'systems_dir = "../victim/systems"\n',
+    )
+    assert "config target escapes root" in str(error)
+    assert "configured systems_dir escapes the config folder" not in str(error)
+
+
+def test_explicit_cli_values_are_never_confinement_checked(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    _write(
+        cfg,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "proj"\ntargets = ["a.py"]\n',
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    resolved = resolve_config(cfg, explicit_root=outside, explicit_graph=outside / "g.json")
+
+    assert resolved.root == outside
+    assert resolved.graph == outside / "g.json"
+
+
+def test_an_escaping_config_is_refused_even_beside_an_explicit_graph(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    error, source = _refused_config(
+        cfg,
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\ngraph = "../victim/g.json"\n',
+    )
+
+    _assert_escapes_config_folder(
+        error,
+        field="graph",
+        raw="../victim/g.json",
+        resolved=(tmp_path / "victim" / "g.json").resolve(),
+        folder=cfg.resolve(),
+        source=source,
+    )
+
+    with pytest.raises(ConfigError, match="configured graph escapes the config folder"):
+        resolve_config(cfg, explicit_graph=tmp_path / "explicit.json")
+
+
+def test_repository_config_resolves_inside_the_repository() -> None:
+    repository = Path(__file__).parents[1].resolve()
+
+    resolved = resolve_config(repository)
+
+    assert resolved.config_file == repository / ".minotaur.toml"
+    assert resolved.root == (repository / "src").resolve()
+    assert resolved.graph == (repository / "minotaur-system-definitions.json").resolve()
+    assert resolved.systems_dir == (repository / "docs" / "systems").resolve()
+    assert resolved.targets is not None
 
 
 def test_parse_config_bytes_preserves_raw_values_without_source_access(
