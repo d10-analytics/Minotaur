@@ -637,6 +637,72 @@ def test_prepare_comparison_rejects_current_graph_escape_before_producer(
     assert not called
 
 
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        (
+            'root = ".."\ngraph = "g.json"\ntargets = ["app.py"]\nsystems_dir = "systems"\n',
+            "root",
+        ),
+        (
+            'root = "."\ngraph = "../g.json"\ntargets = ["app.py"]\nsystems_dir = "../systems"\n',
+            "graph",
+        ),
+        (
+            'root = "."\ngraph = "g.json"\ntargets = ["app.py"]\nsystems_dir = "../systems"\n',
+            "systems_dir",
+        ),
+    ],
+)
+def test_prepare_comparison_refuses_declarations_outside_the_config_folder(
+    tmp_path: Path, body: str, field: str
+) -> None:
+    """A config below the worktree root confines every declared route."""
+    root, _, _ = _repository(tmp_path)
+    _write(root, "sub/.minotaur.toml", "[minotaur]\nschema_version = 1\n" + body)
+    producer_calls: list[object] = []
+
+    def producer(*args: object, **kwargs: object) -> object:
+        producer_calls.append(args)
+        raise AssertionError("producer must not run")
+
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root / "sub", None, producer)  # type: ignore[arg-type]
+
+    assert f"configured {field} escapes the config folder (allowed folder is sub)" in str(
+        error.value
+    )
+    assert "current input" in str(error.value)
+    assert producer_calls == []
+
+
+def test_prepare_comparison_allows_declarations_inside_the_config_folder(
+    tmp_path: Path,
+) -> None:
+    """In-folder values below the worktree root compare normally."""
+    root, _, _ = _repository(tmp_path)
+    _write(root, "sub/app.py", "def app():\n    return 2\n")
+    _write(
+        root,
+        "sub/docs/systems/core/system.toml",
+        'schema_version = 1\nname = "core"\nfiles = ["app.py"]\n',
+    )
+    _write(
+        root,
+        "sub/.minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app.py"]\nsystems_dir = "docs/systems"\n',
+    )
+    _commit(root, "confined sub config")
+
+    prepared = prepare_comparison(root / "sub", None, _produce_selection)
+
+    assert prepared.current.normalized_root == "sub"
+    assert prepared.current.normalized_graph == "sub/graph.json"
+    assert prepared.current.normalized_systems_dir == "sub/docs/systems"
+    assert prepared.new_snapshot.document.nodes
+
+
 def test_prepare_comparison_preserves_current_parse_cause_and_path(
     tmp_path: Path,
 ) -> None:

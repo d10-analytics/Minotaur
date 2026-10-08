@@ -33,6 +33,7 @@ from minotaur.system import (
     InvalidSystemName,
     MissingField,
     System,
+    SystemDefinitionError,
     UnknownSystem,
     UnknownSystemField,
     UnsupportedSchemaVersion,
@@ -247,6 +248,88 @@ def test_committed_graph_and_sidecar_inside_system_directory_are_ignored(tmp_pat
     (system_dir / "graph.json.sha256").write_text("0" * 64 + "\n", encoding="ascii")
 
     assert system.load_systems(systems_dir) == (System(name="auth", files=("src/auth/api.py",)),)
+
+
+# ---------------------------------------------------------------------------
+# System-folder confinement: links may not leave the resolved systems_dir
+# ---------------------------------------------------------------------------
+
+
+def test_load_systems_refuses_a_child_folder_link_outside_the_systems_folder(
+    tmp_path: Path,
+) -> None:
+    """A linked child directory is refused before its valid definition is read."""
+    systems_dir = tmp_path / "systems"
+    systems_dir.mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "system.toml").write_text(_VALID, encoding="utf-8")
+    link = systems_dir / "evil"
+    link.symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(SystemDefinitionError) as error:
+        system.load_systems(systems_dir)
+
+    assert isinstance(error.value, ValueError)
+    message = str(error.value)
+    assert "system folder escapes the systems folder" in message
+    assert str(link) in message
+    assert str(victim.resolve()) in message
+    assert str(systems_dir.resolve()) in message
+
+
+def test_load_systems_refuses_a_definition_link_outside_before_reading_it(
+    tmp_path: Path,
+) -> None:
+    """A linked system.toml is refused before the outside invalid TOML is parsed."""
+    systems_dir = tmp_path / "systems"
+    definition_directory = systems_dir / "core"
+    definition_directory.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "system.toml").write_text("not even toml [[[\n", encoding="utf-8")
+    link = definition_directory / "system.toml"
+    link.symlink_to(outside / "system.toml")
+
+    with pytest.raises(SystemDefinitionError) as error:
+        system.load_systems(systems_dir)
+
+    assert isinstance(error.value, ValueError)
+    message = str(error.value)
+    assert "system definition escapes the systems folder" in message
+    assert "invalid TOML" not in message
+    assert str(link) in message
+    assert str((outside / "system.toml").resolve()) in message
+    assert str(systems_dir.resolve()) in message
+
+
+def test_load_systems_allows_in_folder_links_and_skips_a_dangling_child(
+    tmp_path: Path,
+) -> None:
+    """A child link inside systems_dir loads and a dangling child link is a stray."""
+    systems_dir = tmp_path / "systems"
+    nested = systems_dir / "nested" / "real"
+    nested.mkdir(parents=True)
+    (nested / "system.toml").write_text(
+        'schema_version = 1\nname = "alias"\nfiles = ["src/alias.py"]\n', encoding="utf-8"
+    )
+    alias = systems_dir / "alias"
+    alias.symlink_to(Path("nested") / "real", target_is_directory=True)
+    shared = systems_dir / "shared.toml"
+    shared.write_text(
+        'schema_version = 1\nname = "linked"\nfiles = ["src/linked.py"]\n', encoding="utf-8"
+    )
+    linked_directory = systems_dir / "linked"
+    linked_directory.mkdir()
+    (linked_directory / "system.toml").symlink_to(shared)
+    (systems_dir / "dangling").symlink_to(tmp_path / "missing")
+
+    loaded = system.load_systems(systems_dir)
+
+    assert [(item.name, item.definition_directory) for item in loaded] == [
+        ("alias", alias),
+        ("linked", linked_directory),
+    ]
 
 
 # ---------------------------------------------------------------------------

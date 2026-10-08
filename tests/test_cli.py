@@ -2575,6 +2575,92 @@ def test_committed_scope_diff_missing_target_omits_working_directory_hint(
     assert completed.stdout == ""
 
 
+def test_analyze_scope_refuses_a_child_folder_link_outside_before_writing(
+    tmp_path: Path,
+) -> None:
+    """A system folder link out of systems_dir never writes beside its target."""
+    root = _scope_project(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "system.toml").write_text(
+        'schema_version = 1\nname = "evil"\nfiles = ["src/auth/api.py"]\n', encoding="utf-8"
+    )
+    link = root / "docs" / "systems" / "evil"
+    link.symlink_to(victim, target_is_directory=True)
+
+    completed = _run_in(root, "analyze", "--scope", "evil")
+
+    assert completed.returncode == 2
+    assert "system folder escapes the systems folder" in completed.stderr
+    assert str(victim.resolve()) in completed.stderr
+    assert not (victim / "graph.json").exists()
+    assert not (victim / "graph.json.sha256").exists()
+
+
+def test_scope_read_routes_refuse_a_child_folder_link_outside(tmp_path: Path) -> None:
+    """Query, committed diff and visualize refuse before the outside TOML is parsed."""
+    root = _scope_project(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "system.toml").write_text("not valid [[[\n", encoding="utf-8")
+    (root / "docs" / "systems" / "evil").symlink_to(victim, target_is_directory=True)
+    assert _run_in(root, "analyze").returncode == 0
+
+    for arguments in (("query", "systems"), ("query", "diff", "--scope", "evil")):
+        completed = _run_in(root, *arguments)
+        assert completed.returncode == 2, arguments
+        assert "system folder escapes the systems folder" in completed.stderr
+        assert "invalid TOML" not in completed.stderr
+
+    output = root / "docs" / "systems" / "overview.html"
+    completed = _run_in(
+        root, "visualize", "--input", str(root / "graph.json"), "--output", str(output)
+    )
+
+    assert completed.returncode == 2
+    assert "system folder escapes the systems folder" in completed.stderr
+    assert "invalid TOML" not in completed.stderr
+    assert not output.exists()
+
+
+def test_query_systems_refuses_a_definition_link_outside_before_parsing(tmp_path: Path) -> None:
+    """A linked system.toml out of systems_dir is refused before its TOML is parsed."""
+    root = _scope_project(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "system.toml").write_text("not valid [[[\n", encoding="utf-8")
+    definition = root / "docs" / "systems" / "core"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").symlink_to(outside / "system.toml")
+
+    completed = _run_in(root, "query", "systems")
+
+    assert completed.returncode == 2
+    assert "system definition escapes the systems folder" in completed.stderr
+    assert "invalid TOML" not in completed.stderr
+
+
+def test_analyze_config_below_root_refuses_root_outside_the_config_folder(
+    tmp_path: Path,
+) -> None:
+    """The ordinary route refuses a config-below-root declaration by field."""
+    root = _config_repo(tmp_path, "parity-repo")
+    _write(root, "app.py", "def app():\n    return 1\n")
+    _write(
+        root,
+        "sub/.minotaur.toml",
+        _MINOTAUR_CONFIG + 'root = ".."\ngraph = "g.json"\ntargets = ["app.py"]\n',
+    )
+    assert _git(root, "add", ".").returncode == 0
+    assert _git(root, "commit", "-m", "parity fixture").returncode == 0
+
+    completed = _run_in(root / "sub", "analyze")
+
+    assert completed.returncode == 2
+    assert "configured root escapes the config folder" in completed.stderr
+    assert "allowed folder is" in completed.stderr
+
+
 def test_analyze_scope_has_whole_repo_skip_refresh_and_force_lifecycle(tmp_path: Path) -> None:
     root = _scope_project(tmp_path)
     output = root / "docs" / "systems" / "auth" / "graph.json"

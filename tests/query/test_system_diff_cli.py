@@ -71,6 +71,46 @@ def _configured_sql_repo(tmp_path: Path) -> Path:
     return root
 
 
+def _sub_configured_repo(tmp_path: Path) -> Path:
+    """A Git repository whose config sits below the worktree root in ``sub``."""
+    root = _repo(tmp_path)
+    app = root / "sub" / "app"
+    app.mkdir(parents=True)
+    (app / "__init__.py").write_text("", encoding="utf-8")
+    (app / "api.py").write_text("def receive():\n    return 1\n", encoding="utf-8")
+    definition = root / "sub" / "systems" / "core"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "core"\nfiles = ["app/api.py"]\n', encoding="utf-8"
+    )
+    (root / "sub" / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app/api.py"]\nsystems_dir = "systems"\n',
+        encoding="utf-8",
+    )
+    return root
+
+
+def _invalid_systems_dir(directory: Path) -> None:
+    """Create one child system folder holding an unparseable definition."""
+    definition = directory / "core"
+    definition.mkdir(parents=True, exist_ok=True)
+    (definition / "system.toml").write_text("not valid [[[\n", encoding="utf-8")
+
+
+def _counting_producer(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Install a producer that delegates to the real one and records each call."""
+    original = cli._produce_selection
+    calls: list[object] = []
+
+    def counting_producer(*args: object, **kwargs: object) -> object:
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_produce_selection", counting_producer)
+    return calls
+
+
 def _state(root: Path) -> dict[str, object]:
     """Capture every comparison input plus Git index and porcelain state."""
     tracked = subprocess.run(
@@ -864,6 +904,222 @@ def test_systems_historical_gitlink_is_rejected_after_current_route_passes(
     assert "before revision" in captured.err
     assert "Gitlink" in captured.err
     _assert_state(root, before)
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("traversal", "unresolved traversal in systems root"),
+        ("absolute", "systems root escapes the selected worktree"),
+        (
+            "config-folder",
+            "configured systems_dir escapes the config folder (allowed folder is sub)",
+        ),
+    ],
+)
+def test_systems_diff_route_inspection_precedes_the_config_folder_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+    expected: str,
+) -> None:
+    """Route escapes report first; only an in-worktree escape names the folder."""
+    if case == "config-folder":
+        root = _sub_configured_repo(tmp_path)
+        _invalid_systems_dir(root / "systems")
+        config_path = root / "sub" / ".minotaur.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                'systems_dir = "systems"', 'systems_dir = "../systems"'
+            ),
+            encoding="utf-8",
+        )
+        cwd = root / "sub"
+    else:
+        root = _configured_repo(tmp_path)
+        if case == "traversal":
+            outside = tmp_path / "outside-systems"
+            value = "../outside-systems"
+        else:
+            outside = tmp_path / "absolute-systems"
+            value = str(outside)
+        _invalid_systems_dir(outside)
+        config_path = root / ".minotaur.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8") + f'systems_dir = "{value}"\n',
+            encoding="utf-8",
+        )
+        cwd = root
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "escaping systems root")
+    monkeypatch.chdir(cwd)
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert expected in captured.err
+    assert "invalid TOML" not in captured.err
+
+
+def test_systems_diff_refuses_a_config_below_root_outside_its_folder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The comparison route applies the config-folder rule to a nested config."""
+    root = _sub_configured_repo(tmp_path)
+    config_path = root / "sub" / ".minotaur.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace('root = "."', 'root = ".."'),
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "escaping root")
+    monkeypatch.chdir(root / "sub")
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "configured root escapes the config folder (allowed folder is sub)" in captured.err
+
+
+def test_systems_diff_live_side_refuses_out_of_folder_graph_before_production(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A live working-tree escape is attributed to ``current input`` before production."""
+    root = _sub_configured_repo(tmp_path)
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    config_path = root / "sub" / ".minotaur.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'graph = "graph.json"', 'graph = "../g.json"'
+        ),
+        encoding="utf-8",
+    )
+    calls = _counting_producer(monkeypatch)
+    monkeypatch.chdir(root / "sub")
+    before = _state(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "current input" in captured.err
+    assert "after input" not in captured.err
+    assert "configured graph escapes the config folder" in captured.err
+    assert calls == []
+    _assert_state(root, before)
+
+
+def test_systems_diff_before_revision_refuses_out_of_folder_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A captured ``HEAD`` config is refused on the before side before production."""
+    root = _sub_configured_repo(tmp_path)
+    config_path = root / "sub" / ".minotaur.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace('root = "."', 'root = ".."'),
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "escaping head")
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace('root = ".."', 'root = "."'),
+        encoding="utf-8",
+    )
+    calls = _counting_producer(monkeypatch)
+    monkeypatch.chdir(root / "sub")
+    before = _state(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "before input revision 'HEAD'" in captured.err
+    assert "configured root escapes the config folder" in captured.err
+    assert calls == []
+    _assert_state(root, before)
+
+
+def test_systems_diff_after_revision_refuses_out_of_folder_systems_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A named revision's escape is refused after the in-folder side is analyzed."""
+    root = _sub_configured_repo(tmp_path)
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "in-folder old")
+    old = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+    ).stdout.strip()
+    config_path = root / "sub" / ".minotaur.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'systems_dir = "systems"', 'systems_dir = "../systems"'
+        ),
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "escaping new")
+    new = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+    ).stdout.strip()
+    calls = _counting_producer(monkeypatch)
+    monkeypatch.chdir(root / "sub")
+    before = _state(root)
+
+    assert cli.main(["query", "diff", "--systems", old, new]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "after input revision" in captured.err
+    assert new in captured.err
+    assert "configured systems_dir escapes the config folder" in captured.err
+    assert len(calls) == 1
+    _assert_state(root, before)
+
+
+def test_systems_diff_allows_a_config_below_root_with_in_folder_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A confined nested config still compares and leaves the tree unchanged."""
+    root = _sub_configured_repo(tmp_path)
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    monkeypatch.chdir(root / "sub")
+    before = _state(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 0
+    captured = capsys.readouterr()
+    assert "no system differences" in captured.out
+    assert captured.err == ""
+    _assert_state(root, before)
+
+
+def test_systems_diff_refuses_a_linked_child_under_systems_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Systems mode still refuses every linked child folder as a symbolic link."""
+    root = _sub_configured_repo(tmp_path)
+    (root / "sub" / "systems" / "alias").symlink_to(
+        root / "sub" / "systems" / "core", target_is_directory=True
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "linked system folder")
+    monkeypatch.chdir(root / "sub")
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "symbolic link" in captured.err
 
 
 def test_systems_pinned_read_failure_is_attributed_before_output(
