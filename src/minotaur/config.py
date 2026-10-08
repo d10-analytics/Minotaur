@@ -293,6 +293,11 @@ def read_toml_bytes(data: bytes, *, source: Path | str) -> dict[str, object]:
         raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
         raise ConfigError(f"invalid TOML in {source}: {error}") from error
+    except RecursionError:
+        # The parser recurses once per nesting level and reaches the
+        # interpreter limit before reporting a syntax error; surface that as
+        # this boundary's error rather than a raw traceback.
+        raise ConfigError(f"TOML nests too deeply: {source}") from None
     if not isinstance(raw, dict):
         raise ConfigError(f"TOML document must be a table: {source}")
     return _TomlDocument(raw, text)
@@ -454,36 +459,81 @@ def _validate_sql_settings(raw: object, source: Path | str) -> SqlSettings:
         raise ConfigError(f"invalid minotaur.sql.{field}: {error} (in {source})") from error
 
 
+_FOREIGN_KEY_TARGET_FILES_PATH = ("minotaur", "sql", "foreign_key_target_files")
+
+
 def _validate_foreign_key_target_file_key_quotes(
     raw: Mapping[str, object], *, source: Path | str
 ) -> None:
     """Require quoted keys in the one config field whose names are SQL targets.
 
-    TOML parsing intentionally turns bare and quoted keys into the same string.
-    The generic reader therefore retains the original text, and only project
-    configuration validation inspects that text for this documented grammar.
+    TOML parsing intentionally turns bare and quoted keys into the same
+    string.  The generic reader therefore retains the original text, and only
+    project configuration validation inspects that text for this documented
+    grammar.  Every key landing under the target-files table is checked,
+    including dotted keys and inline tables nested at an enclosing level.
     """
     if not isinstance(raw, _TomlDocument):
         return
-    for path, value_start in _toml_code_assignments(raw.text):
-        if path != ("minotaur", "sql", "foreign_key_target_files") or raw.text[value_start] != "{":
-            continue
-        contents = _inline_table_contents(raw.text, value_start)
-        if contents is None:
-            continue
-        for entry in _split_inline_table_entries(contents):
-            if entry.strip() and not entry.lstrip().startswith(("'", '"')):
-                raise ConfigError(
-                    "invalid minotaur.sql.foreign_key_target_files: "
-                    f"target keys must be quoted (in {source})"
-                )
+    for path, quoted, value_start in _toml_code_assignments(raw.text):
+        _validate_target_file_key_path(raw.text, path, quoted, value_start, source)
 
 
-def _toml_code_assignments(text: str) -> tuple[tuple[tuple[str, ...], int], ...]:
-    """Return TOML assignments whose keys occur outside comments and strings."""
-    assignments: list[tuple[tuple[str, ...], int]] = []
+def _validate_target_file_key_path(
+    text: str,
+    path: tuple[str, ...],
+    quoted: tuple[bool, ...],
+    value_start: int,
+    source: Path | str,
+) -> None:
+    """Reject a bare key at or below the target-files table in one key path."""
+    target = _FOREIGN_KEY_TARGET_FILES_PATH
+    if path[: len(target)] == target:
+        for index in range(len(target), len(path)):
+            if not quoted[index]:
+                _refuse_unquoted_target_file_key(source)
+        if len(path) == len(target) and text[value_start] == "{":
+            _check_target_file_inline_table(text, path, quoted, value_start, source)
+        return
+    if len(path) < len(target) and path == target[: len(path)] and text[value_start] == "{":
+        _check_target_file_inline_table(text, path, quoted, value_start, source)
+
+
+def _check_target_file_inline_table(
+    text: str,
+    path: tuple[str, ...],
+    quoted: tuple[bool, ...],
+    value_start: int,
+    source: Path | str,
+) -> None:
+    """Check an inline table assigned at or above the target-files path."""
+    for key_path, key_quoted, entry_value_start in _toml_inline_table_assignments(
+        text, value_start
+    ):
+        _validate_target_file_key_path(
+            text, path + key_path, quoted + key_quoted, entry_value_start, source
+        )
+
+
+def _refuse_unquoted_target_file_key(source: Path | str) -> None:
+    """Raise the documented refusal for one unquoted target-file key."""
+    raise ConfigError(
+        f"invalid minotaur.sql.foreign_key_target_files: target keys must be quoted (in {source})"
+    )
+
+
+def _toml_code_assignments(
+    text: str,
+) -> tuple[tuple[tuple[str, ...], tuple[bool, ...], int], ...]:
+    """Return TOML assignments whose keys occur outside comments and strings.
+
+    Each entry carries the combined table-plus-key path, whether each path
+    segment was quoted, and the offset of the value's first character.
+    """
+    assignments: list[tuple[tuple[str, ...], tuple[bool, ...], int]] = []
     multiline_delimiter: str | None = None
     table_path: tuple[str, ...] = ()
+    table_quoted: tuple[bool, ...] = ()
     offset = 0
     for line in text.splitlines(keepends=True):
         content = line.rstrip("\r\n")
@@ -494,8 +544,10 @@ def _toml_code_assignments(text: str) -> tuple[tuple[tuple[str, ...], int], ...]
             continue
         assignment = _toml_line_assignment(content)
         if assignment is not None:
-            key_path, value_start = assignment
-            assignments.append((table_path + key_path, offset + value_start))
+            key_path, key_quoted, value_start = assignment
+            assignments.append(
+                (table_path + key_path, table_quoted + key_quoted, offset + value_start)
+            )
             delimiter = _opening_multiline_delimiter(content, value_start)
             if (
                 delimiter is not None
@@ -506,26 +558,28 @@ def _toml_code_assignments(text: str) -> tuple[tuple[tuple[str, ...], int], ...]
         else:
             header = _toml_table_header(content)
             if header is not None:
-                table_path = header
+                table_path, table_quoted = header
         offset += len(line)
     return tuple(assignments)
 
 
-def _toml_line_assignment(line: str) -> tuple[tuple[str, ...], int] | None:
+def _toml_line_assignment(
+    line: str,
+) -> tuple[tuple[str, ...], tuple[bool, ...], int] | None:
     """Recognize one ordinary TOML key/value line without interpreting values."""
     index = _skip_toml_whitespace(line, 0)
     if index == len(line) or line[index] == "#":
         return None
-    key_path, index = _toml_key_path(line, index)
+    key_path, quoted, index = _toml_key_path(line, index)
     if key_path is None:
         return None
     index = _skip_toml_whitespace(line, index)
     if index == len(line) or line[index] != "=":
         return None
-    return key_path, _skip_toml_whitespace(line, index + 1)
+    return key_path, quoted, _skip_toml_whitespace(line, index + 1)
 
 
-def _toml_table_header(line: str) -> tuple[str, ...] | None:
+def _toml_table_header(line: str) -> tuple[tuple[str, ...], tuple[bool, ...]] | None:
     """Recognize one TOML table or array-table header outside values and comments."""
     index = _skip_toml_whitespace(line, 0)
     if index == len(line) or line[index] != "[":
@@ -533,7 +587,9 @@ def _toml_table_header(line: str) -> tuple[str, ...] | None:
     array_table = line.startswith("[[", index)
     opening_length = 2 if array_table else 1
     closing = "]]" if array_table else "]"
-    key_path, index = _toml_key_path(line, _skip_toml_whitespace(line, index + opening_length))
+    key_path, quoted, index = _toml_key_path(
+        line, _skip_toml_whitespace(line, index + opening_length)
+    )
     if key_path is None:
         return None
     index = _skip_toml_whitespace(line, index)
@@ -542,39 +598,46 @@ def _toml_table_header(line: str) -> tuple[str, ...] | None:
     index = _skip_toml_whitespace(line, index + len(closing))
     if index != len(line) and line[index] != "#":
         return None
-    return key_path
+    return key_path, quoted
 
 
-def _toml_key_path(line: str, index: int) -> tuple[tuple[str, ...] | None, int]:
-    """Read a dotted TOML key path with bare or quoted components."""
-    name, index = _toml_key_segment(line, index)
+def _toml_key_path(line: str, index: int) -> tuple[tuple[str, ...] | None, tuple[bool, ...], int]:
+    """Read a dotted TOML key path with bare or quoted components.
+
+    The quoted-ness of every segment is retained so callers can apply grammar
+    that distinguishes a bare key from a quoted one, which the parsed mapping
+    alone cannot express.
+    """
+    name, is_quoted, index = _toml_key_segment(line, index)
     if name is None:
-        return None, index
+        return None, (), index
     names = [name]
+    quoted = [is_quoted]
     while True:
         index = _skip_toml_whitespace(line, index)
         if index == len(line) or line[index] != ".":
-            return tuple(names), index
-        name, index = _toml_key_segment(line, _skip_toml_whitespace(line, index + 1))
+            return tuple(names), tuple(quoted), index
+        name, is_quoted, index = _toml_key_segment(line, _skip_toml_whitespace(line, index + 1))
         if name is None:
-            return None, index
+            return None, (), index
         names.append(name)
+        quoted.append(is_quoted)
 
 
-def _toml_key_segment(line: str, index: int) -> tuple[str | None, int]:
+def _toml_key_segment(line: str, index: int) -> tuple[str | None, bool, int]:
     """Read one bare or quoted TOML key segment from a code position."""
     if index == len(line):
-        return None, index
+        return None, False, index
     quote = line[index]
     if quote in {"'", '"'}:
         end = _find_toml_quote(line, quote, index + 1)
         if end is None:
-            return None, index
-        return line[index + 1 : end], end + 1
+            return None, False, index
+        return line[index + 1 : end], True, end + 1
     start = index
     while index < len(line) and (line[index].isalnum() or line[index] in {"_", "-"}):
         index += 1
-    return (line[start:index] or None), index
+    return (line[start:index] or None), False, index
 
 
 def _skip_toml_whitespace(value: str, index: int) -> int:
@@ -642,9 +705,31 @@ def _inline_table_contents(text: str, opening_brace: int) -> str | None:
     return None
 
 
-def _split_inline_table_entries(contents: str) -> tuple[str, ...]:
-    """Split an inline table on its top-level commas without parsing values."""
-    entries: list[str] = []
+def _toml_inline_table_assignments(
+    text: str, opening_brace: int
+) -> tuple[tuple[tuple[str, ...], tuple[bool, ...], int], ...]:
+    """Return one inline table's entries as key paths and value offsets.
+
+    ``opening_brace`` is the offset of the table's ``{``.  Each returned value
+    offset is absolute in ``text`` so nested inline tables descend in place.
+    """
+    contents = _inline_table_contents(text, opening_brace)
+    if contents is None:
+        return ()
+    base = opening_brace + 1
+    assignments: list[tuple[tuple[str, ...], tuple[bool, ...], int]] = []
+    for start, end in _inline_table_entry_spans(contents):
+        parsed = _toml_line_assignment(contents[start:end])
+        if parsed is None:
+            continue
+        key_path, quoted, value_offset = parsed
+        assignments.append((key_path, quoted, base + start + value_offset))
+    return tuple(assignments)
+
+
+def _inline_table_entry_spans(contents: str) -> tuple[tuple[int, int], ...]:
+    """Return the top-level comma-separated entry spans of an inline table."""
+    spans: list[tuple[int, int]] = []
     start = 0
     nested = 0
     quote: str | None = None
@@ -665,10 +750,10 @@ def _split_inline_table_entries(contents: str) -> tuple[str, ...]:
         elif character in "]}":
             nested -= 1
         elif character == "," and nested == 0:
-            entries.append(contents[start:index])
+            spans.append((start, index))
             start = index + 1
-    entries.append(contents[start:])
-    return tuple(entries)
+    spans.append((start, len(contents)))
+    return tuple(spans)
 
 
 def _validate_migration_pattern(pattern: object) -> None:
