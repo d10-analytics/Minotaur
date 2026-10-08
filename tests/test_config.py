@@ -464,6 +464,101 @@ def test_target_file_quoted_keys_ignore_comments_and_string_values(tmp_path: Pat
 @pytest.mark.parametrize(
     "declaration",
     [
+        pytest.param(
+            '[minotaur.sql."foreign\\u005fkey_target_files"]\nParent = "schema/parent.sql"\n',
+            id="quoted-table-segment",
+        ),
+        pytest.param(
+            'sql."foreign\\u005fkey_target_files".Parent = "schema/parent.sql"\n',
+            id="quoted-dotted-segment",
+        ),
+        pytest.param(
+            'sql = { "foreign\\u005fkey_target_files" = { Parent = "schema/parent.sql" } }\n',
+            id="quoted-inline-segment",
+        ),
+    ],
+)
+def test_escaped_target_file_segment_still_refuses_a_bare_key(
+    tmp_path: Path, declaration: str
+) -> None:
+    """A quoted basic segment decodes to the same key the parser produced."""
+    text = '[minotaur]\nschema_version = 1\ntargets = ["src"]\n' + declaration
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
+def test_escaped_target_file_segment_accepts_a_quoted_key(tmp_path: Path) -> None:
+    """The escaped spelling reaches the target table and resolves a quoted key."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        '[minotaur.sql."foreign\\u005fkey_target_files"]\n'
+        '"Parent" = "schema/parent.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == {"parent": "schema/parent.sql"}
+    assert dict(located.sql.foreign_key_target_files) == {"parent": "schema/parent.sql"}
+
+
+def test_literal_target_file_segment_keeps_its_escapes_literal() -> None:
+    """A single-quoted segment defines no escapes, so it names a different key."""
+    data = (
+        b'[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        b"[minotaur.sql.'foreign\\u005fkey_target_files']\n"
+        b'Parent = "schema/parent.sql"\n'
+    )
+
+    with pytest.raises(ConfigError) as error:
+        config.parse_config_bytes(data, source="literal.toml")
+
+    assert "target keys must be quoted" not in str(error.value)
+    assert "unknown SQL config field" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+            '[metadata]\nnotes = [\n"""\n'
+            "[minotaur.sql.foreign_key_target_files]\n"
+            'Parent = "schema/parent.sql"\n"""\n]\n',
+            id="basic-multiline",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = ['src']\n"
+            "[metadata]\nnotes = [\n'''\n"
+            "[minotaur.sql.foreign_key_target_files]\n"
+            "Parent = 'schema/parent.sql'\n''']\n",
+            id="literal-multiline",
+        ),
+    ],
+)
+def test_array_nested_multiline_string_contents_stay_ignored(tmp_path: Path, text: str) -> None:
+    """A multiline string nested in an array is content, not a table header."""
+    _write(tmp_path, ".minotaur.toml", text)
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == {}
+    assert dict(located.sql.foreign_key_target_files) == {}
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
         'migration_patterns = "migrations/**/*.sql"',
         'migration_patterns = ["migrations/**/*.sql", 1]',
         'migration_patterns = ["migrations\\\\**/*.sql"]',
