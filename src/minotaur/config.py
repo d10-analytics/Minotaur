@@ -528,7 +528,10 @@ def _toml_code_assignments(
     """Return TOML assignments whose keys occur outside comments and strings.
 
     Each entry carries the combined table-plus-key path, whether each path
-    segment was quoted, and the offset of the value's first character.
+    segment was quoted, and the offset of the value's first character.  A
+    multiline string may open anywhere inside a value (an array element, for
+    example), so every line that is not itself a header or assignment is also
+    scanned for a delimiter that continues on the next line.
     """
     assignments: list[tuple[tuple[str, ...], tuple[bool, ...], int]] = []
     multiline_delimiter: str | None = None
@@ -538,27 +541,27 @@ def _toml_code_assignments(
     for line in text.splitlines(keepends=True):
         content = line.rstrip("\r\n")
         if multiline_delimiter is not None:
-            if _find_multiline_delimiter(content, multiline_delimiter, 0) is not None:
-                multiline_delimiter = None
-            offset += len(line)
-            continue
-        assignment = _toml_line_assignment(content)
-        if assignment is not None:
-            key_path, key_quoted, value_start = assignment
-            assignments.append(
-                (table_path + key_path, table_quoted + key_quoted, offset + value_start)
+            end = _find_multiline_delimiter(content, multiline_delimiter, 0)
+            if end is None:
+                offset += len(line)
+                continue
+            multiline_delimiter = _toml_open_multiline_delimiter(
+                content, end + len(multiline_delimiter)
             )
-            delimiter = _opening_multiline_delimiter(content, value_start)
-            if (
-                delimiter is not None
-                and _find_multiline_delimiter(content, delimiter, value_start + len(delimiter))
-                is None
-            ):
-                multiline_delimiter = delimiter
         else:
-            header = _toml_table_header(content)
-            if header is not None:
-                table_path, table_quoted = header
+            assignment = _toml_line_assignment(content)
+            if assignment is not None:
+                key_path, key_quoted, value_start = assignment
+                assignments.append(
+                    (table_path + key_path, table_quoted + key_quoted, offset + value_start)
+                )
+                multiline_delimiter = _toml_open_multiline_delimiter(content, value_start)
+            else:
+                header = _toml_table_header(content)
+                if header is not None:
+                    table_path, table_quoted = header
+                else:
+                    multiline_delimiter = _toml_open_multiline_delimiter(content, 0)
         offset += len(line)
     return tuple(assignments)
 
@@ -625,7 +628,12 @@ def _toml_key_path(line: str, index: int) -> tuple[tuple[str, ...] | None, tuple
 
 
 def _toml_key_segment(line: str, index: int) -> tuple[str | None, bool, int]:
-    """Read one bare or quoted TOML key segment from a code position."""
+    """Read one bare or quoted TOML key segment from a code position.
+
+    A quoted basic segment is decoded so that comparison against a required
+    key path uses the same text the TOML parser produced; a literal segment
+    keeps its raw text because it defines no escapes.
+    """
     if index == len(line):
         return None, False, index
     quote = line[index]
@@ -633,11 +641,59 @@ def _toml_key_segment(line: str, index: int) -> tuple[str | None, bool, int]:
         end = _find_toml_quote(line, quote, index + 1)
         if end is None:
             return None, False, index
-        return line[index + 1 : end], True, end + 1
+        inner = line[index + 1 : end]
+        if quote == '"':
+            inner = _unescape_toml_basic_string(inner)
+        return inner, True, end + 1
     start = index
     while index < len(line) and (line[index].isalnum() or line[index] in {"_", "-"}):
         index += 1
     return (line[start:index] or None), False, index
+
+
+_TOML_STRING_ESCAPES = {
+    "b": "\b",
+    "t": "\t",
+    "n": "\n",
+    "f": "\f",
+    "r": "\r",
+    '"': '"',
+    "\\": "\\",
+}
+
+
+def _unescape_toml_basic_string(value: str) -> str:
+    """Decode the escape sequences of a TOML basic-string body.
+
+    Keys are single-line, so a multiline line-ending backslash cannot reach
+    this helper; the single-character and Unicode escapes are decoded.  A
+    sequence outside the grammar is left untouched because the document has
+    already parsed successfully.
+    """
+    if "\\" not in value:
+        return value
+    decoded: list[str] = []
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character != "\\" or index + 1 == len(value):
+            decoded.append(character)
+            index += 1
+            continue
+        escape = value[index + 1]
+        if escape in _TOML_STRING_ESCAPES:
+            decoded.append(_TOML_STRING_ESCAPES[escape])
+            index += 2
+            continue
+        if escape in {"u", "U"}:
+            width = 4 if escape == "u" else 8
+            digits = value[index + 2 : index + 2 + width]
+            decoded.append(chr(int(digits, 16)))
+            index += 2 + width
+            continue
+        decoded.append(character)
+        index += 1
+    return "".join(decoded)
 
 
 def _skip_toml_whitespace(value: str, index: int) -> int:
@@ -646,10 +702,32 @@ def _skip_toml_whitespace(value: str, index: int) -> int:
     return index
 
 
-def _opening_multiline_delimiter(line: str, value_start: int) -> str | None:
-    for delimiter in ('"""', "'''"):
-        if line.startswith(delimiter, value_start):
-            return delimiter
+def _toml_open_multiline_delimiter(line: str, start: int) -> str | None:
+    """Return a multiline delimiter opened but not closed at/after ``start``.
+
+    Single-line strings and comments are skipped, so only a genuine opening
+    delimiter at a code position is reported.  Valid TOML guarantees that an
+    unterminated delimiter encountered here continues on the next line.
+    """
+    index = start
+    while index < len(line):
+        character = line[index]
+        if character == "#":
+            return None
+        if line.startswith('"""', index) or line.startswith("'''", index):
+            delimiter = line[index : index + 3]
+            end = _find_multiline_delimiter(line, delimiter, index + 3)
+            if end is None:
+                return delimiter
+            index = end + 3
+            continue
+        if character in {"'", '"'}:
+            end = _find_toml_quote(line, character, index + 1)
+            if end is None:
+                return None
+            index = end + 1
+            continue
+        index += 1
     return None
 
 
