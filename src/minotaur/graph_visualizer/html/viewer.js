@@ -60,6 +60,14 @@
     return value && typeof value === "object" ? value : null;
   }
 
+  function sideEvidence(record, side) {
+    if (!sidePresent(record, side)) return [];
+    var occurrences = Array.isArray(record[side]) ? record[side] : [record[side]];
+    return occurrences.flatMap(function (occurrence) {
+      return occurrence && Array.isArray(occurrence.evidence) ? occurrence.evidence : [];
+    });
+  }
+
   function sideSystemRecord(record, side) {
     var value = record && record[side];
     if (Array.isArray(value)) value = value[0] || null;
@@ -69,10 +77,14 @@
     return null;
   }
 
+  function preferredSide(record) {
+    var preferred = record && record.default_side === "before" ? "before" : "after";
+    return sidePayload(record, preferred) ? preferred : preferred === "after" ? "before" : "after";
+  }
+
   function preferredPayload(record) {
     if (!comparisonMode) return record;
-    var preferred = record && record.default_side === "before" ? "before" : "after";
-    return sidePayload(record, preferred) || sidePayload(record, preferred === "after" ? "before" : "after") || {};
+    return sidePayload(record, preferredSide(record)) || {};
   }
 
   function recordPresence(record, view) {
@@ -175,24 +187,6 @@
       }
       return [];
     }
-    var payloadValue = sidePayload(record, side);
-    var candidates = [];
-    if (payloadValue) {
-      candidates = payloadValue.systems || payloadValue.involved_systems || payloadValue.system || [];
-    }
-    if (typeof candidates === "string") return candidates ? [candidates] : [];
-    if (Array.isArray(candidates) && candidates.length) {
-      return candidates.filter(function (name) { return typeof name === "string" && name; });
-    }
-    var mapped = payload.node_systems && payload.node_systems[record.id];
-    if (mapped && typeof mapped === "object" && !Array.isArray(mapped)) {
-      var mappedSide = mapped[side];
-      if (typeof mappedSide === "string") return [mappedSide];
-      if (Array.isArray(mappedSide) && mappedSide.length) return mappedSide;
-    }
-    if (Array.isArray(mapped)) return mapped;
-    if (typeof mapped === "string") return [mapped];
-    return Array.isArray(record.involved_systems) ? record.involved_systems : [];
   }
 
   function sideEndpointSystems(record, side, endpoint) {
@@ -268,13 +262,10 @@
 
   function comparisonNodeData(record) {
     var value = preferredPayload(record);
-    var systems = Array.isArray(record.involved_systems) ? record.involved_systems : [];
     return {
       id: record.id,
       label: value.label || record.id,
       node_class: value.node_class || "symbol",
-      system: systems[0] || "",
-      systems: systems,
       symbol_kind: value.symbol_kind || "",
       path: value.path || (value.location ? value.location.path : ""),
       reference_text: value.reference_text || "",
@@ -393,11 +384,10 @@
     }});
   });
   graph.relationships.forEach(function (rel, i) {
-    // The compact edge style has one provenance label, but the full evidence
-    // array remains on the element so inspection never loses additional facts.
     var displayRelationship = preferredPayload(rel);
-    var evidence = displayRelationship.evidence || [];
-    var provenance = evidence.length > 0 ? evidence[0].provenance : "unknown";
+    var evidence = comparisonMode
+      ? sideEvidence(rel, preferredSide(rel)) : displayRelationship.evidence || [];
+    var provenance = evidenceProvenance(evidence);
     var colors = edgeColors(rel.kind || displayRelationship.kind);
     elements.push({ group: "edges", data: {
       id: comparisonMode ? rel.id : "edge-" + i,
@@ -533,6 +523,23 @@
       return !edgeHasInternalSide(edge, selectedSystem, view)
         && edgeTouchesSystemInView(edge, selectedSystem, view);
     }
+    if (comparisonMode) {
+      var record = edge.data("comparison_record");
+      var sides = revisionView === "combined" ? ["before", "after"] : [revisionView];
+      var crosses = false;
+      var internal = false;
+      sides.forEach(function (side) {
+        if (!sidePresent(record, side)) return;
+        var sources = sideEndpointSystems(record, side, "source");
+        var targets = sideEndpointSystems(record, side, "target");
+        var sharesSystem = sources.some(function (system) {
+          return targets.indexOf(system) >= 0;
+        });
+        internal = internal || sharesSystem;
+        crosses = crosses || (sources.length > 0 && targets.length > 0 && !sharesSystem);
+      });
+      return !internal && crosses;
+    }
     var sourceSystem = edge.source().data("system");
     var targetSystem = edge.target().data("system");
     if (selectedSystem !== "") {
@@ -554,6 +561,16 @@
     containers.remove();
   }
 
+  function systemGroupingKey(node) {
+    if (!comparisonMode) return node.data("system") || "";
+    // Place surviving nodes using After membership, falling back to Before
+    // for removed or unassigned nodes. Never combine revision memberships.
+    var record = node.data("comparison_record");
+    var placement = sideSystems(record, "after");
+    if (!placement.length) placement = sideSystems(record, "before");
+    return placement[0] || "";
+  }
+
   function createSystemContainers(selectedSystem) {
     var groups = new Map();
     var containerNodes = comparisonMode
@@ -562,25 +579,18 @@
       })
       : cy.nodes(":visible").not(".system-container");
     containerNodes.forEach(function (node) {
-      var name = node.data("system") || "External / Unassigned";
-      if (comparisonMode) {
-        // V-08 placement: a node that survives into After is placed in its
-        // After system; a removed node keeps its Before system. Membership is
-        // read per side, never from the cross-revision union.
-        var record = node.data("comparison_record");
-        var placement = sideSystems(record, "after");
-        if (!placement.length) placement = sideSystems(record, "before");
-        name = placement[0] || "External / Unassigned";
-      }
+      var name = systemGroupingKey(node);
       if (!groups.has(name)) groups.set(name, cy.collection());
       groups.set(name, groups.get(name).union(node));
     });
     Array.from(groups.keys()).sort().forEach(function (name) {
-      var id = "system-container:" + name;
+      var id = name ? "system-container:" + name : "unassigned-system-container";
+      var label = name || (systemNames.indexOf("External / Unassigned") >= 0
+        ? "External / Unassigned (undeclared)" : "External / Unassigned");
       cy.add({
         group: "nodes",
         data: {
-          id: id, label: name, node_class: "system-container", system: name,
+          id: id, label: label, node_class: "system-container", system: name,
           container_color: systemContainerColor(name)
         },
         classes: "system-container "
@@ -962,16 +972,6 @@
     return '<span class="kind-badge" style="background:' + colors.bg + ';border:1px solid ' + colors.border + ';color:' + colors.border + '">' + escHtml(label) + '</span>';
   }
 
-  function collectLocations(evidence) {
-    var locs = [];
-    evidence.forEach(function (ev) {
-      if (ev.locations) {
-        ev.locations.forEach(function (loc) { locs.push(loc); });
-      }
-    });
-    return locs;
-  }
-
   function sqlForeignKeyRecords(evidence) {
     return evidence.map(function (record) {
       var extensions = record.extensions || {};
@@ -1033,26 +1033,53 @@
     return d.call_sites || [];
   }
 
-  function callSitesForEdge(d, side) {
-    // Evidence records may independently support the same physical call. The
-    // selector represents a location a reader can inspect, not each producer's
-    // record, while provenance remains visible as the reason it is supported.
+  function evidenceProvenance(evidence) {
+    return Array.from(new Set(evidence.flatMap(function (record) {
+      return record.provenance || [];
+    })));
+  }
+
+  function evidenceLocations(evidence) {
+    // One physical location may be supported by several evidence records.
+    // Preserve first-seen location and provenance order without dropping facts.
     var sites = new Map();
-    rawCallSites(d, side).forEach(function (association) {
-      var key = physicalLocationKey(association.location);
-      var site = sites.get(key);
-      if (!site) {
-        site = { location: association.location, provenance: [], caller_start: association.caller_start };
-        sites.set(key, site);
-      }
-      if (site.provenance.indexOf(association.provenance) === -1) {
-        site.provenance.push(association.provenance);
-      }
-      if (site.caller_start === undefined && association.caller_start !== undefined) {
-        site.caller_start = association.caller_start;
-      }
+    evidence.forEach(function (record) {
+      (record.locations || []).forEach(function (location) {
+        var key = physicalLocationKey(location);
+        var site = sites.get(key);
+        if (!site) {
+          site = { location: location, provenance: [] };
+          sites.set(key, site);
+        }
+        evidenceProvenance([record]).forEach(function (provenance) {
+          if (site.provenance.indexOf(provenance) === -1) site.provenance.push(provenance);
+        });
+        if (site.caller_start === undefined && record.caller_start !== undefined) {
+          site.caller_start = record.caller_start;
+        }
+      });
     });
     return Array.from(sites.values());
+  }
+
+  function callSitesForEdge(d, side) {
+    var supporting = new Map();
+    if (comparisonMode) {
+      evidenceLocations(sideEvidence(d.comparison_record, side)).forEach(function (site) {
+        supporting.set(physicalLocationKey(site.location), site.provenance);
+      });
+    }
+    return evidenceLocations(rawCallSites(d, side).map(function (association) {
+      var provenance = association.provenance;
+      if (comparisonMode && association.callee) {
+        var matched = supporting.get(physicalLocationKey(association.callee));
+        if (matched !== undefined) provenance = matched;
+      }
+      return {
+        locations: [association.location], provenance: provenance,
+        caller_start: association.caller_start
+      };
+    }));
   }
 
   function excerptLines(path, start, end, paths) {
@@ -1077,6 +1104,10 @@
     });
     if (cursor < end) rows.push({ omitted: true, start: cursor, end: end });
     return rows;
+  }
+
+  function availableContextModes(site) {
+    return site.caller_start === undefined ? ["window"] : ["window", "caller"];
   }
 
   function renderCallSite(site, mode, paths, originNote) {
@@ -1263,14 +1294,14 @@
     var c = EDGE_KIND_COLORS[d.kind] || { bg: "#ddd", border: "#999" };
     var srcLabel = e.source().data("label");
     var tgtLabel = e.target().data("label");
-    var locs = collectLocations(d.evidence);
+    var locs = evidenceLocations(d.evidence);
     var sites = d.kind === "calls" ? callSitesForEdge(d, null) : [];
 
     var html = badgeHtml(d.kind, c);
     html += '<h3>' + escHtml(srcLabel) + ' → ' + escHtml(tgtLabel) + '</h3>';
 
     html += '<div class="field"><div class="field-label">Provenance</div>';
-    html += '<div class="field-value">' + escHtml(d.provenance) + '</div></div>';
+    html += '<div class="field-value">' + escHtml(d.provenance.join(", ")) + '</div></div>';
 
     if (d.kind === "sql:foreign-key-to" && hasSqlForeignKeyPayload(d.evidence)) {
       html += sqlForeignKeyDetails(d.evidence);
@@ -1288,16 +1319,20 @@
       html += '<div class="field-value">No source location available</div></div>';
     } else if (locs.length === 1) {
       html += '<div class="field"><div class="field-label">Location</div>';
-      html += '<div class="field-value">' + escHtml(locationLabel(locs[0])) + '</div></div>';
+      html += '<div class="field-value">' + escHtml(locationLabel(locs[0].location)) + '</div></div>';
+      html += '<div class="field"><div class="field-label">Supporting provenance</div>';
+      html += '<div class="field-value">' + escHtml(locs[0].provenance.join(", ")) + '</div></div>';
     } else {
-      html += '<div class="field"><div class="field-label">Call Sites (' + locs.length + ')</div>';
+      html += '<div class="field"><div class="field-label">Locations (' + locs.length + ')</div>';
       html += '<div class="site-tabs" id="site-tabs">';
       locs.forEach(function (_, i) {
         html += '<button class="site-tab' + (i === 0 ? ' active' : '') + '" data-idx="' + i + '">' + (i + 1) + '</button>';
       });
       html += '</div>';
       html += '<div class="field-label">Location</div>';
-      html += '<div class="field-value" id="site-location">' + escHtml(locationLabel(locs[0])) + '</div>';
+      html += '<div class="field-value" id="site-location">' + escHtml(locationLabel(locs[0].location)) + '</div>';
+      html += '<div class="field-label">Supporting provenance</div>';
+      html += '<div class="field-value" id="site-provenance">' + escHtml(locs[0].provenance.join(", ")) + '</div>';
       html += '</div>';
     }
 
@@ -1307,13 +1342,16 @@
       var siteSelect = document.getElementById("call-site-select");
       var modeSelect = document.getElementById("context-mode");
       var siteDetail = document.getElementById("call-site-detail");
+      var contextMode = "window";
       function updateSite() {
         var site = sites[Number(siteSelect.value)];
-        modeSelect.innerHTML = '<option value="window">Call-site window</option>';
-        if (site.caller_start !== undefined) {
-          modeSelect.innerHTML += '<option value="caller">Caller start → call</option>';
-        }
-        siteDetail.innerHTML = renderCallSite(site, modeSelect.value);
+        var modes = availableContextModes(site);
+        if (modes.indexOf(contextMode) < 0) contextMode = "window";
+        modeSelect.innerHTML = modes.map(function (mode) {
+          return '<option value="' + mode + '">' + (mode === "caller" ? "Caller start → call" : "Call-site window") + '</option>';
+        }).join("");
+        modeSelect.value = contextMode;
+        siteDetail.innerHTML = renderCallSite(site, contextMode);
         // Wait until the new code rows have layout before scrolling; otherwise
         // a newly selected site can remain off-screen in a long excerpt.
         window.requestAnimationFrame(function () {
@@ -1323,14 +1361,15 @@
       }
       siteSelect.addEventListener("change", updateSite);
       modeSelect.addEventListener("change", function () {
-        siteDetail.innerHTML = renderCallSite(sites[Number(siteSelect.value)], modeSelect.value);
+        contextMode = modeSelect.value;
+        siteDetail.innerHTML = renderCallSite(sites[Number(siteSelect.value)], contextMode);
         window.requestAnimationFrame(function () {
           var highlighted = siteDetail.querySelector(".call-site-highlight");
           if (highlighted) highlighted.scrollIntoView({ block: "center" });
         });
       });
       updateSite();
-    } else if (locs.length > 1) {
+    } else if (document.getElementById("site-tabs")) {
       var tabContainer = document.getElementById("site-tabs");
       tabContainer.addEventListener("click", function (evt) {
         var tab = evt.target.closest(".site-tab");
@@ -1338,7 +1377,8 @@
         var idx = Number(tab.dataset.idx);
         tabContainer.querySelectorAll(".site-tab").forEach(function (t) { t.classList.remove("active"); });
         tab.classList.add("active");
-        document.getElementById("site-location").textContent = locationLabel(locs[idx]);
+        document.getElementById("site-location").textContent = locationLabel(locs[idx].location);
+        document.getElementById("site-provenance").textContent = locs[idx].provenance.join(", ");
       });
     }
   }
@@ -1400,6 +1440,11 @@
     detailContent.innerHTML = html;
   }
 
+  function provenanceField(evidence) {
+    return '<div class="field"><div class="field-label">Provenance</div><div class="field-value">'
+      + escHtml(evidenceProvenance(evidence).join(", ")) + '</div></div>';
+  }
+
   function showComparisonEdgeDetail(e) {
     var d = e.data();
     var record = d.comparison_record || {};
@@ -1424,12 +1469,26 @@
       setupComparisonSourceRegion(e, record);
       return;
     }
-    var locs = collectLocations(d.evidence);
-    if (locs.length === 0) {
-      html += '<div class="field"><div class="field-label">Location</div><div class="field-value">No source location available</div></div>';
-    } else {
-      html += '<div class="field"><div class="field-label">Location</div><div class="field-value">' + escHtml(locs.map(locationLabel).join(", ")) + '</div></div>';
-    }
+    ["before", "after"].forEach(function (side) {
+      if (!sidePresent(record, side)) return;
+      var evidence = sideEvidence(record, side);
+      html += '<div class="comparison-evidence" data-side="' + side + '">';
+      html += '<div class="field-label">' + sideLabel(side) + ' evidence</div>';
+      html += provenanceField(evidence);
+      if (d.kind === "sql:foreign-key-to" && hasSqlForeignKeyPayload(evidence)) {
+        html += sqlForeignKeyDetails(evidence);
+      } else {
+        var locations = evidenceLocations(evidence);
+        if (!locations.length) {
+          html += '<div class="field"><div class="field-label">Location</div><div class="field-value">No source location available</div></div>';
+        }
+        locations.forEach(function (site) {
+          html += '<div class="evidence-location"><div class="field"><div class="field-label">Location</div><div class="field-value">' + escHtml(locationLabel(site.location)) + '</div></div>';
+          html += '<div class="field"><div class="field-label">Supporting provenance</div><div class="field-value">' + escHtml(site.provenance.join(", ")) + '</div></div></div>';
+        });
+      }
+      html += '</div>';
+    });
     detailContent.innerHTML = html;
   }
 
@@ -1492,19 +1551,20 @@
       container.innerHTML = '<div class="field"><div class="field-label">' + sideLabel(side) + '</div><div class="field-value structural-absent">Not present</div></div>';
       return;
     }
+    var html = provenanceField(sideEvidence(record, side));
     var sites = callSitesForEdge(edge.data(), side);
     if (!sites.length) {
       var unavailableReason = sideExcerptUnavailableReason(side);
-      container.innerHTML = unavailableReason
+      container.innerHTML = html + (unavailableReason
         ? '<div class="excerpt-unavailable">Source unavailable: ' + escHtml(unavailableReason) + '</div>'
-        : '<div class="field"><div class="field-label">' + sideLabel(side) + '</div><div class="field-value">No call site recorded</div></div>';
+        : '<div class="field"><div class="field-label">' + sideLabel(side) + '</div><div class="field-value">No call site recorded</div></div>');
       return;
     }
     if (sideState.site >= sites.length) sideState.site = 0;
     var site = sites[sideState.site];
-    var modes = site.caller_start === undefined ? ["window"] : ["window", "caller"];
+    var modes = availableContextModes(site);
     if (modes.indexOf(sideState.mode) < 0) sideState.mode = "window";
-    var html = '<div class="field"><div class="field-label">Call sites (' + sites.length + ')</div><select id="call-site-select" aria-label="Call sites">';
+    html += '<div class="field"><div class="field-label">Call sites (' + sites.length + ')</div><select id="call-site-select" aria-label="Call sites">';
     sites.forEach(function (item, index) {
       html += '<option value="' + index + '"' + (index === sideState.site ? " selected" : "") + '>' + (index + 1) + '. ' + escHtml(locationLabel(item.location)) + '</option>';
     });
@@ -1668,10 +1728,9 @@
     var e = evt.target;
     var d = e.data();
     var text = d.kind;
-    var locs = collectLocations(d.evidence);
-    if (locs.length > 0) {
-      locs.forEach(function (loc) { text += "\n" + locationLabel(loc); });
-    }
+    evidenceLocations(d.evidence).forEach(function (site) {
+      text += "\n" + locationLabel(site.location);
+    });
     tooltipEl.textContent = text;
     tooltipEl.style.display = "block";
   });
@@ -1859,7 +1918,7 @@
       }
       var boundaryGroups = new Map();
       boundaryNodes.forEach(function (node) {
-        var name = node.data("system") || "External / Unassigned";
+        var name = systemGroupingKey(node);
         if (!boundaryGroups.has(name)) boundaryGroups.set(name, []);
         boundaryGroups.get(name).push(node);
       });
@@ -1907,8 +1966,10 @@
 
   // --- Keyboard shortcuts ---
   document.addEventListener("keydown", function (evt) {
-    if (evt.target.tagName === "INPUT") {
-      if (evt.key === "Escape") { searchEl.value = ""; searchEl.blur(); doSearch(); }
+    if (["INPUT", "SELECT", "TEXTAREA"].indexOf(evt.target.tagName) >= 0) {
+      if (evt.key === "Escape" && evt.target === searchEl) {
+        searchEl.value = ""; searchEl.blur(); doSearch();
+      }
       return;
     }
     if (evt.key === "Escape") {

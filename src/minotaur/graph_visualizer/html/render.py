@@ -10,7 +10,7 @@ from importlib.resources import files
 def render_html(presentation: Mapping[str, object]) -> bytes:
     """Return a complete UTF-8 HTML document without touching the filesystem.
 
-    JSON is placed in a non-executing script element with ``</`` neutralized,
+    JSON is placed in a non-executing script element with every ``<`` escaped,
     and all user-originating display values are later assigned through DOM text
     APIs in ``viewer.js``. No graph string becomes HTML markup. Resources are
     embedded instead of linked so the output remains inspectable after a user
@@ -18,7 +18,7 @@ def render_html(presentation: Mapping[str, object]) -> bytes:
     """
     directory = files("minotaur.graph_visualizer").joinpath("html")
     payload = json.dumps(presentation, ensure_ascii=True, separators=(",", ":")).replace(
-        "</", "<\\/"
+        "<", "\\u003c"
     )
     template = directory.joinpath("template.html").read_text(encoding="utf-8")
     replacements = {

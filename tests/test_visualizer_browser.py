@@ -11,12 +11,23 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.evidence import Evidence
+from minotaur.graph_model.location import Location
+from minotaur.graph_model.node import Node
+from minotaur.graph_model.provenance import CoordinateEncoding
+from minotaur.graph_model.relationship import Relationship
 from minotaur.graph_visualizer.html.render import render_html
-from minotaur.graph_visualizer.presentation import build_comparison_presentation
+from minotaur.graph_visualizer.presentation import (
+    build_comparison_presentation,
+    build_presentation,
+)
+from minotaur.language_interpreter.emission import symbol_node
 from minotaur.query.call_diff import CallChange, CallLimitation
 from minotaur.query.graph_comparison import (
     GraphNodeChange,
     GraphRelationshipChange,
+    compare_graphs,
     endpoint_eligibility,
 )
 from minotaur.query.system_diff import SystemDiffResult
@@ -385,6 +396,64 @@ def test_generated_file_artifact_filters_search_and_shows_edge_details(
     assert all(url.startswith("file:") for url in requested)
 
 
+def test_shortcuts_respect_focused_controls_and_keep_body_shortcuts(tmp_path: Path) -> None:
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_bytes((ROOT / "examples/synthetic-graphs/provenance-demo.json").read_bytes())
+    output = tmp_path / "view.html"
+    assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        page.wait_for_function("() => window.minotaurVisualizer?.cy")
+        camera = (
+            "() => ({zoom: window.minotaurVisualizer.cy.zoom(), "
+            "pan: window.minotaurVisualizer.cy.pan()})"
+        )
+        fitted = page.evaluate(camera)
+        page.evaluate("window.minotaurVisualizer.cy.panBy({x: 123, y: 57})")
+        panned = page.evaluate(camera)
+        assert panned != fitted
+        system_filter = page.locator("#system-filter")
+        assert all(
+            not label.lower().startswith("f")
+            for label in system_filter.locator("option").all_text_contents()
+        )
+        system_filter.focus()
+        page.keyboard.press("f")
+        assert page.evaluate(camera) == panned
+        system_filter.evaluate("element => element.blur()")
+        assert page.evaluate("document.activeElement.tagName") == "BODY"
+        page.keyboard.press("f")
+        assert page.evaluate(camera) == fitted
+
+        _click_visible_edge_and_show_details(page)
+        details = page.locator("#detail-content").inner_text()
+        search = page.locator("#search")
+        search.fill("foo")
+        checkbox = page.locator('#edge-filters input[type="checkbox"]').first
+        checkbox.focus()
+        page.keyboard.press("Escape")
+        assert search.input_value() == "foo"
+        assert page.locator("#detail-content").inner_text() == details
+
+        site_select = page.locator("#call-site-select")
+        site_select.focus()
+        page.keyboard.press("Escape")
+        assert page.locator("#detail-content").inner_text() == details
+        assert search.input_value() == "foo"
+        search.focus()
+        page.keyboard.press("Escape")
+        assert search.input_value() == ""
+        assert not search.evaluate("element => element === document.activeElement")
+        assert page.locator("#detail-content").inner_text() == details
+        assert page.evaluate("document.activeElement.tagName") == "BODY"
+        page.keyboard.press("Escape")
+        assert "Select a node or edge" in page.locator("#detail-content").inner_text()
+        browser.close()
+
+
 def test_checked_in_python_workflow_artifact_opens_without_external_requests() -> None:
     """The public example remains usable as an offline download/open artifact."""
     artifact = ROOT / "examples/python-workflow/minotaur-graph.html"
@@ -399,6 +468,109 @@ def test_checked_in_python_workflow_artifact_opens_without_external_requests() -
         assert edge["kind"] in page.locator("#detail-content").inner_text()
         browser.close()
     assert all(url.startswith("file:") for url in requested)
+
+
+@pytest.mark.parametrize("kind", ["calls", "references"])
+def test_edge_inspector_keeps_provenance_without_locations(tmp_path: Path, kind: str) -> None:
+    graph = json.loads((ROOT / "examples/synthetic-graphs/provenance-demo.json").read_text())
+    graph["relationships"][0]["kind"] = kind
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    output = tmp_path / "view.html"
+    assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        _click_visible_edge_and_show_details(page)
+        assert (
+            page.get_by_text("Provenance", exact=True)
+            .locator("..")
+            .locator(".field-value")
+            .inner_text()
+            == "imported-graph, static-analysis"
+        )
+        assert (
+            page.get_by_text("Supporting provenance", exact=True)
+            .locator("..")
+            .locator(".field-value")
+            .inner_text()
+            == "static-analysis"
+        )
+        assert (
+            page.get_by_text("Location", exact=True)
+            .locator("..")
+            .locator(".field-value")
+            .inner_text()
+            == "src/checkout.py:5:12"
+        )
+        if kind == "calls":
+            assert page.locator("#call-site-select option").all_text_contents() == [
+                "1. src/checkout.py:5:12"
+            ]
+        browser.close()
+
+
+def test_non_call_locations_merge_provenance_and_hover_locations(tmp_path: Path) -> None:
+    graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+    relationship = graph["relationships"][0]
+    relationship["kind"] = "references"
+    first_location = relationship["evidence"][0]["locations"][0]
+    second_location = {
+        "path": "src/checkout.py",
+        "range": {
+            "start": {"line": 6, "character": 11},
+            "end": {"line": 6, "character": 25},
+        },
+    }
+    relationship["evidence"] = [
+        {"provenance": "curated-rule", "rule": {"id": "test-rule"}, "locations": [first_location]},
+        {"provenance": "static-analysis", "locations": [first_location]},
+        {"provenance": "imported-graph", "locations": [second_location]},
+    ]
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    output = tmp_path / "view.html"
+    assert cli.main(["visualize", "--input", str(graph_path), "--output", str(output)]) == 0
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        edge = _click_visible_edge_and_show_details(page)
+        assert edge["kind"] == "references"
+        assert (
+            page.get_by_text("Provenance", exact=True)
+            .locator("..")
+            .locator(".field-value")
+            .inner_text()
+            == "curated-rule, static-analysis, imported-graph"
+        )
+        assert page.get_by_text("Locations (2)", exact=True).is_visible()
+        assert page.locator("#site-tabs button").count() == 2
+        assert page.locator("#site-location").inner_text() == "src/checkout.py:5:12"
+        assert page.locator("#site-provenance").inner_text() == "curated-rule, static-analysis"
+        page.locator("#site-tabs button").nth(1).click()
+        assert page.locator("#site-location").inner_text() == "src/checkout.py:7:12"
+        assert page.locator("#site-provenance").inner_text() == "imported-graph"
+        point = page.evaluate(
+            """id => {
+                const cy = window.minotaurVisualizer.cy;
+                const point = cy.getElementById(id).renderedMidpoint();
+                const bounds = cy.container().getBoundingClientRect();
+                return {x: bounds.left + point.x, y: bounds.top + point.y};
+            }""",
+            edge["id"],
+        )
+        page.mouse.move(point["x"], point["y"])
+        playwright.expect(page.locator("#tooltip")).to_be_visible()
+        assert page.locator("#tooltip").text_content().splitlines() == [
+            "references",
+            "src/checkout.py:5:12",
+            "src/checkout.py:7:12",
+        ]
+        browser.close()
 
 
 def test_sql_fk_pointer_details_keep_mapping_and_payload_free_records_separate(
@@ -514,6 +686,106 @@ def test_graph_format_documents_sql_fk_evidence_contract() -> None:
         assert phrase in documentation
 
 
+@pytest.mark.parametrize("comparison", [False, True], ids=["ordinary", "comparison"])
+@pytest.mark.parametrize("declared_name", ["External / Unassigned", "declared"])
+def test_unassigned_containers_do_not_collide_with_declared_systems(
+    tmp_path: Path, comparison: bool, declared_name: str
+) -> None:
+    membership = {"checkout": "checkout", "declared": declared_name, "unassigned": None}
+    if comparison:
+        presentation = _comparison_presentation(
+            [
+                _comparison_node(node_id, before_system=system, after_system=system)
+                for node_id, system in membership.items()
+            ],
+            [
+                _comparison_edge(
+                    "edge:" + target,
+                    "checkout",
+                    target,
+                    before_systems=("checkout", membership[target]),
+                    after_systems=("checkout", membership[target]),
+                )
+                for target in ("declared", "unassigned")
+            ],
+            changed=False,
+        )
+    else:
+        presentation = build_presentation(
+            {
+                "nodes": [
+                    {"id": node_id, "label": node_id, "node_class": "symbol"}
+                    for node_id in membership
+                ],
+                "relationships": [
+                    {"source": "checkout", "target": target, "kind": "calls", "evidence": []}
+                    for target in ("declared", "unassigned")
+                ],
+            }
+        )
+        presentation["systems"] = ["checkout", declared_name]
+        presentation["node_systems"] = {
+            node_id: system for node_id, system in membership.items() if system is not None
+        }
+    artifact = tmp_path / "containers.html"
+    artifact.write_bytes(render_html(presentation))
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(artifact.as_uri())
+        page.locator("#system-filter").select_option("checkout")
+        page.locator("#cross-system-connections").check()
+        page.wait_for_function(
+            "() => window.minotaurVisualizer.cy.nodes('.system-container').length > 0"
+        )
+        containers = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes('.system-container').map(
+                node => [node.id(), node.data('label')]
+            ))"""
+        )
+        assert containers == {
+            "system-container:checkout": "checkout",
+            "system-container:" + declared_name: declared_name,
+            "unassigned-system-container": (
+                "External / Unassigned (undeclared)"
+                if declared_name == "External / Unassigned"
+                else "External / Unassigned"
+            ),
+        }
+        for node_id, container_id in (
+            ("declared", "system-container:" + declared_name),
+            ("unassigned", "unassigned-system-container"),
+        ):
+            if comparison:
+                assert page.evaluate(
+                    """([nodeId, containerId]) => {
+                        const cy = window.minotaurVisualizer.cy;
+                        const box = cy.getElementById(nodeId).boundingBox({includeLabels:true});
+                        const center = cy.getElementById(containerId).position();
+                        return Math.abs(center.x - (box.x1 + box.x2) / 2) < 0.01
+                            && Math.abs(center.y - (box.y1 + box.y2) / 2) < 0.01;
+                    }""",
+                    [node_id, container_id],
+                )
+            else:
+                assert page.evaluate(
+                    "id => window.minotaurVisualizer.cy.getElementById(id)"
+                    ".children().map(n => n.id())",
+                    container_id,
+                ) == [node_id]
+        page.locator("#system-filter").select_option(declared_name)
+        page.wait_for_function(
+            "name => window.minotaurVisualizer.cy.nodes('.selected-system-container')"
+            ".map(n => n.id()).join() === 'system-container:' + name",
+            arg=declared_name,
+        )
+        assert page.evaluate(
+            "window.minotaurVisualizer.cy.nodes('.selected-system-container').map(n => n.id())"
+        ) == ["system-container:" + declared_name]
+        browser.close()
+
+
 def test_checked_in_system_walkthrough_exposes_configured_boundary_view() -> None:
     """The public system example exercises focus, boundaries, and offline use."""
     artifact = ROOT / "examples/system-walkthrough/minotaur-graph.html"
@@ -589,6 +861,87 @@ def test_system_walkthrough_preview_generator_captures_boundary_view(tmp_path: P
     assert png.startswith(b"\x89PNG\r\n\x1a\n")
     assert struct.unpack(">II", png[16:24]) == (1440, 900)
     assert len(png) > 10_000
+
+
+def test_ordinary_context_mode_persists_until_unavailable_or_edge_reselected(
+    tmp_path: Path,
+) -> None:
+    graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+    graph["relationships"][0]["evidence"][0]["locations"].extend(
+        [
+            {
+                "path": "src/checkout.py",
+                "range": {
+                    "start": {"line": 70, "character": 11},
+                    "end": {"line": 70, "character": 25},
+                },
+            },
+            {
+                "path": "src/other.py",
+                "range": {
+                    "start": {"line": 20, "character": 0},
+                    "end": {"line": 20, "character": 5},
+                },
+            },
+        ]
+    )
+    source_root = tmp_path / "source"
+    (source_root / "src").mkdir(parents=True)
+    for filename in ("checkout.py", "other.py"):
+        (source_root / "src" / filename).write_text(
+            "\n".join(f"line {line}" for line in range(100)), encoding="utf-8"
+        )
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    output = tmp_path / "view.html"
+    assert (
+        cli.main(
+            [
+                "visualize",
+                "--input",
+                str(graph_path),
+                "--output",
+                str(output),
+                "--source-root",
+                str(source_root),
+            ]
+        )
+        == 0
+    )
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(output.as_uri())
+        _click_visible_edge_and_show_details(page)
+        sites = page.locator("#call-site-select")
+        mode = page.locator("#context-mode")
+        assert sites.locator("option").all_text_contents() == [
+            "1. src/checkout.py:5:12",
+            "2. src/checkout.py:71:12",
+            "3. src/other.py:21:1",
+        ]
+        assert mode.input_value() == "window"
+        mode.select_option("caller")
+        sites.select_option("1")
+        assert mode.input_value() == "caller"
+        assert page.locator("#call-site-detail .code-number").first.inner_text() == "3"
+        assert page.locator("#call-site-detail .code-text").first.inner_text() == "line 2"
+        assert page.locator(".call-site-highlight .code-number").all_text_contents() == ["71"]
+        sites.select_option("2")
+        assert mode.locator("option").all_text_contents() == ["Call-site window"]
+        assert mode.input_value() == "window"
+        assert page.locator("#call-site-detail .code-number").first.inner_text() == "1"
+        sites.select_option("0")
+        assert mode.input_value() == "window"
+        mode.select_option("caller")
+        mode.evaluate("element => element.blur()")
+        page.keyboard.press("Escape")
+        assert "Select a node or edge" in page.locator("#detail-content").inner_text()
+        _click_visible_edge_and_show_details(page)
+        assert mode.input_value() == "window"
+        assert page.locator("#call-site-detail .code-number").first.inner_text() == "1"
+        browser.close()
 
 
 def test_call_site_context_is_unavailable_without_a_root_and_has_no_caller_mode(
@@ -955,6 +1308,65 @@ def test_comparison_revision_switches_retain_union_layout_and_side_edges(tmp_pat
         browser.close()
 
 
+def test_comparison_cross_system_classes_follow_revision_endpoint_membership(
+    tmp_path: Path,
+) -> None:
+    nodes = [
+        _comparison_node("m1", before_system="A", after_system="A"),
+        _comparison_node("m2", status="changed", before_system="A", after_system="B"),
+        _comparison_node("m3", before_system="B", after_system="B"),
+        _comparison_node("m4", before_system=None, after_system=None),
+        _comparison_node("m5", status="changed", before_system="B", after_system="A"),
+    ]
+    relationships = [
+        _comparison_edge("e1", "m1", "m2", before_systems=("A", "A"), after_systems=("A", "B")),
+        _comparison_edge("e2", "m3", "m2", status="added", before=False, after_systems=("B", "B")),
+        _comparison_edge("e3", "m1", "m4", before_systems=("A", None), after_systems=("A", None)),
+        _comparison_edge("e5", "m2", "m5", before_systems=("A", "B"), after_systems=("B", "A")),
+    ]
+    presentation = _comparison_presentation(nodes, relationships, changed=True)
+    expected = {
+        "": {
+            "before": {"e1": False, "e2": False, "e3": False, "e5": True},
+            "after": {"e1": True, "e2": False, "e3": False, "e5": True},
+            "combined": {"e1": False, "e2": False, "e3": False, "e5": True},
+        },
+        "A": {
+            "before": {"e1": False, "e2": False, "e3": True, "e5": True},
+            "after": {"e1": True, "e2": False, "e3": True, "e5": True},
+            "combined": {"e1": False, "e2": False, "e3": True, "e5": True},
+        },
+        "B": {
+            "before": {"e1": False, "e2": False, "e3": False, "e5": True},
+            "after": {"e1": True, "e2": False, "e3": False, "e5": True},
+            "combined": {"e1": True, "e2": False, "e3": False, "e5": True},
+        },
+    }
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        _open_comparison(page, tmp_path, presentation, "cross-system.html")
+        for system, views in expected.items():
+            page.locator("#system-filter").select_option(system)
+            if system:
+                page.locator("#cross-system-connections").check()
+            for view, classes in views.items():
+                page.locator("#revision-view").select_option(view)
+                actual = page.evaluate(
+                    """() => Object.fromEntries(window.minotaurVisualizer.cy.edges().map(
+                        edge => [edge.id(), edge.hasClass('cross-system')]
+                    ))"""
+                )
+                assert actual == classes, (system, view)
+                assert page.evaluate(
+                    """() => window.minotaurVisualizer.cy.nodes().not('.system-container').every(
+                        node => !Object.hasOwn(node.data(), 'system')
+                            && !Object.hasOwn(node.data(), 'systems')
+                    )"""
+                )
+        browser.close()
+
+
 def test_comparison_empty_filter_view_keeps_controls_safe(tmp_path: Path) -> None:
     """An empty comparison view remains safe for reset, direction, and switches."""
 
@@ -1018,6 +1430,16 @@ def _comparison_location(path: str, line: int, length: int = 4) -> dict[str, obj
     }
 
 
+def _comparison_source_node(node_id: str) -> Node:
+    return symbol_node(
+        node_id,
+        "function",
+        Location.from_dict(_comparison_location(f"{node_id}.py", 0)),
+        "minotaur-browser-test",
+        "python",
+    )
+
+
 def _comparison_node(
     node_id: str,
     *,
@@ -1038,13 +1460,11 @@ def _comparison_node(
     """
 
     def side(system: str | None) -> dict[str, object]:
+        node = _comparison_source_node(node_id).to_dict()
+        node["label"] = label or node_id
+        node["location"] = _comparison_location(path or f"{node_id}.py", line)
         return {
-            "node": {
-                "node_class": "symbol",
-                "label": label or node_id,
-                "symbol_kind": "function",
-                "location": _comparison_location(path or f"{node_id}.py", line),
-            },
+            "node": node,
             "system": system,
         }
 
@@ -1071,8 +1491,31 @@ def _comparison_edge(
     after: bool = True,
     before_systems: tuple[str | None, str | None] = ("A", "A"),
     after_systems: tuple[str | None, str | None] = ("A", "A"),
+    before_evidence: list[list[dict[str, object]]] | None = None,
+    after_evidence: list[list[dict[str, object]]] | None = None,
 ) -> GraphRelationshipChange:
-    payload = {"source": source, "target": target, "kind": kind, "evidence": []}
+    def side(occurrences: list[list[dict[str, object]]] | None) -> object:
+        if occurrences is None:
+            occurrences = [
+                [
+                    {
+                        "provenance": "static-analysis",
+                        "locations": [_comparison_location(f"{source}.py", 0)],
+                    }
+                ]
+            ]
+        payloads = []
+        for evidence in occurrences:
+            payload = Relationship(
+                _comparison_source_node(source).id,
+                _comparison_source_node(target).id,
+                kind,
+                tuple(Evidence.from_dict(record) for record in evidence),
+            ).to_dict()
+            payload["evidence"] = sorted(payload["evidence"], key=repr)
+            payloads.append(payload)
+        return payloads[0] if len(payloads) == 1 else tuple(sorted(payloads, key=repr))
+
     involved = sorted({name for pair in (before_systems, after_systems) for name in pair if name})
     return GraphRelationshipChange(
         edge_id,
@@ -1082,13 +1525,93 @@ def _comparison_edge(
         status,
         tuple([status] if status != "unchanged" else []),
         tuple(involved),
-        dict(payload) if before else None,
-        dict(payload) if after else None,
+        side(before_evidence) if before else None,
+        side(after_evidence) if after else None,
         endpoint_eligibility(
             (before_systems,) if before else (),
             (after_systems,) if after else (),
         ),
     )
+
+
+@pytest.mark.parametrize("override", [False, True], ids=["default-evidence", "custom-evidence"])
+def test_comparison_helpers_match_real_comparator_payloads(override: bool) -> None:
+    nodes = tuple(_comparison_source_node(name) for name in ("source", "target"))
+    default = {
+        "provenance": "static-analysis",
+        "locations": [_comparison_location("source.py", 0)],
+    }
+    before_evidence = [default, {"provenance": "imported-graph"}] if override else [default]
+    after_evidence = list(reversed(before_evidence))
+    before_relationship = Relationship(
+        nodes[0].id,
+        nodes[1].id,
+        "calls",
+        tuple(Evidence.from_dict(record) for record in before_evidence),
+    )
+    after_relationship = Relationship(
+        nodes[0].id,
+        nodes[1].id,
+        "calls",
+        tuple(Evidence.from_dict(record) for record in after_evidence),
+    )
+    result = compare_graphs(
+        GraphDocument(CoordinateEncoding.UTF_8, nodes=nodes, relationships=(before_relationship,)),
+        GraphDocument(CoordinateEncoding.UTF_8, nodes=nodes, relationships=(after_relationship,)),
+    )
+    actual_nodes = {change.before["node"]["id"]: change for change in result.nodes}
+    assert set(actual_nodes) == {node.id for node in nodes}
+    for name, node in zip(("source", "target"), nodes, strict=True):
+        helper = _comparison_node(name, before_system=None, after_system=None)
+        actual = actual_nodes[node.id]
+        assert helper.before == actual.before
+        assert helper.after == actual.after
+        assert helper.to_dict().keys() == actual.to_dict().keys()
+    helper_edge = _comparison_edge(
+        "edge",
+        "source",
+        "target",
+        before_systems=(None, None),
+        after_systems=(None, None),
+        before_evidence=[before_evidence] if override else None,
+        after_evidence=[after_evidence] if override else None,
+    )
+    assert len(result.relationships) == 1
+    actual_edge = result.relationships[0]
+    assert helper_edge.before == actual_edge.before
+    assert helper_edge.after == actual_edge.after
+    assert helper_edge.eligibility == actual_edge.eligibility
+    assert helper_edge.to_dict().keys() == actual_edge.to_dict().keys()
+
+
+def test_comparison_fixture_overrides_preserve_identity_and_grouped_evidence() -> None:
+    default_node = _comparison_source_node("source")
+    changed = _comparison_node("source", label="display", path="other.py", line=7)
+    assert changed.before["node"]["id"] == default_node.id
+    assert changed.before["node"]["identity"] == default_node.to_dict()["identity"]
+    assert changed.before["node"]["label"] == "display"
+    assert changed.before["node"]["location"]["path"] == "other.py"
+    assert changed.before["node"]["location"]["range"]["start"]["line"] == 7
+    occurrences = [
+        [{"provenance": "static-analysis"}, {"provenance": "imported-graph"}],
+        [{"provenance": "curated-rule", "rule": {"id": "fixture-rule"}}],
+    ]
+    edge = _comparison_edge(
+        "edge",
+        "source",
+        "target",
+        before_evidence=occurrences,
+        after_evidence=list(reversed(occurrences)),
+    )
+    assert isinstance(edge.before, tuple)
+    assert edge.before == edge.after
+    payloads = edge.to_dict()["before"]
+    assert [item["source"] for item in payloads] == [default_node.id, default_node.id]
+    assert [item["target"] for item in payloads] == [_comparison_source_node("target").id] * 2
+    assert [[record["provenance"] for record in item["evidence"]] for item in payloads] == [
+        ["curated-rule"],
+        ["imported-graph", "static-analysis"],
+    ]
 
 
 def _comparison_presentation(
@@ -1142,6 +1665,51 @@ def _comparison_presentation(
         new_revision=revision_names.get("new"),
     )
     return build_comparison_presentation(result, excerpts=excerpts)
+
+
+@pytest.mark.parametrize("comparison", [False, True], ids=["ordinary", "comparison"])
+def test_script_tokenizer_sequences_in_payload_preserve_viewer(
+    tmp_path: Path, comparison: bool
+) -> None:
+    text = "<!--<script></script>"
+    excerpts = {
+        "paths": {text: {"status": "available", "spans": [{"start": 0, "lines": [text]}]}},
+        "call_sites": {},
+    }
+    if comparison:
+        presentation = _comparison_presentation(
+            [
+                _comparison_node(
+                    "inert-node",
+                    label=text,
+                    path=text,
+                    before_system=text,
+                    after_system=text,
+                )
+            ],
+            [],
+            changed=False,
+            excerpts={"before": excerpts, "after": excerpts},
+        )
+    else:
+        graph = json.loads((ROOT / "examples/synthetic-graphs/small-workflow.json").read_text())
+        graph["nodes"][0]["label"] = text
+        graph["nodes"][0]["location"]["path"] = text
+        presentation = build_presentation(graph, excerpts)
+        presentation["systems"] = [text]
+    artifact = tmp_path / "inert.html"
+    artifact.write_bytes(render_html(presentation))
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(artifact.as_uri())
+        assert page.evaluate("typeof window.minotaurVisualizer !== 'undefined'")
+        assert page.evaluate("window.minotaurVisualizer.cy.nodes().length") == len(
+            presentation["graph"]["nodes"]
+        )
+        assert page.evaluate("document.scripts.length") == 4
+        browser.close()
 
 
 def _open_comparison(
@@ -1415,6 +1983,54 @@ def test_comparison_header_shows_captured_historical_revision_identities() -> No
             "Before: v1.0 · 134b138",
             "After: v2.0 · a2b78dd",
         ]
+        browser.close()
+
+
+@pytest.mark.parametrize("artifact_kind", ["committed", "fresh"])
+def test_ordinary_explorer_hides_comparison_controls(tmp_path: Path, artifact_kind: str) -> None:
+    artifact = ROOT / "examples/python-workflow/minotaur-graph.html"
+    if artifact_kind == "fresh":
+        html = artifact.read_text(encoding="utf-8")
+        prefix = '<script id="minotaur-presentation" type="application/json">'
+        presentation = json.loads(html.split(prefix, 1)[1].split("</script>", 1)[0])
+        artifact = tmp_path / "explorer.html"
+        artifact.write_bytes(render_html(presentation))
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        page.goto(artifact.as_uri())
+        page.wait_for_function("() => window.minotaurVisualizer?.cy")
+        for selector in ("#revision-control", "#emphasis-control"):
+            control = page.locator(selector)
+            assert control.evaluate("element => getComputedStyle(element).display") == "none"
+            assert not control.is_visible()
+        browser.close()
+
+
+@pytest.mark.parametrize("empty_revisions", [False, True], ids=["named", "empty"])
+def test_comparison_reveals_controls_and_hides_empty_revisions(
+    tmp_path: Path, empty_revisions: bool
+) -> None:
+    presentation = _comparison_presentation(
+        [_comparison_node("node")],
+        [],
+        changed=False,
+        revisions={"old": "", "new": ""} if empty_revisions else {"old": "old", "new": "new"},
+    )
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page()
+        _open_comparison(page, tmp_path, presentation, "comparison-controls.html")
+        for selector in ("#revision-control", "#emphasis-control"):
+            control = page.locator(selector)
+            assert control.is_visible()
+            assert control.evaluate("element => getComputedStyle(element).display") == "flex"
+        revisions = page.locator("#comparison-revisions")
+        assert revisions.is_visible() is not empty_revisions
+        assert revisions.evaluate("element => getComputedStyle(element).display") == (
+            "none" if empty_revisions else "flex"
+        )
         browser.close()
 
 
@@ -1981,4 +2597,188 @@ def test_unselected_system_leaves_the_comparison_filter_on_all_systems(
         page.wait_for_timeout(400)
 
         assert page.locator("#system-filter").input_value() == ""
+        browser.close()
+
+
+@pytest.mark.parametrize("added", [False, True], ids=["changed", "added"])
+def test_comparison_reference_evidence_is_complete_and_side_specific(
+    tmp_path: Path, added: bool
+) -> None:
+    before = [[{"provenance": "static-analysis", "locations": [_comparison_location("old.py", 1)]}]]
+    after = [
+        [{"provenance": "imported-graph", "locations": [_comparison_location("new.py", 2)]}],
+        [
+            {
+                "provenance": "curated-rule",
+                "rule": {"id": "test-rule"},
+                "locations": [_comparison_location("new.py", 3)],
+            }
+        ],
+    ]
+    presentation = _comparison_presentation(
+        [_comparison_node("caller"), _comparison_node("target")],
+        [
+            _comparison_edge(
+                "edge:reference",
+                "caller",
+                "target",
+                kind="references",
+                status="added" if added else "changed",
+                before=not added,
+                before_evidence=before,
+                after_evidence=after,
+            )
+        ],
+        changed=True,
+    )
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "side-evidence.html")
+        _click_edge_by_id(page, "edge:reference")
+        after_panel = page.locator('.comparison-evidence[data-side="after"]')
+        assert after_panel.locator(".field-value").all_text_contents() == [
+            "curated-rule, imported-graph",
+            "new.py:4:1",
+            "curated-rule",
+            "new.py:3:1",
+            "imported-graph",
+        ]
+        before_panel = page.locator('.comparison-evidence[data-side="before"]')
+        if added:
+            assert before_panel.count() == 0
+            assert page.locator(".structural-absent").all_text_contents() == ["Not present"]
+        else:
+            assert before_panel.locator(".field-value").all_text_contents() == [
+                "static-analysis",
+                "old.py:2:1",
+                "static-analysis",
+            ]
+        point = page.evaluate("""() => {
+            const cy = window.minotaurVisualizer.cy;
+            const point = cy.getElementById('edge:reference').renderedMidpoint();
+            const bounds = cy.container().getBoundingClientRect();
+            return {x: bounds.left + point.x, y: bounds.top + point.y};
+        }""")
+        page.mouse.move(0, 0)
+        page.mouse.move(point["x"], point["y"])
+        page.wait_for_selector("#tooltip", state="visible")
+        assert page.locator("#tooltip").text_content().splitlines() == [
+            "references",
+            "new.py:4:1",
+            "new.py:3:1",
+        ]
+        browser.close()
+
+
+def test_comparison_call_source_revision_shows_its_own_provenance(tmp_path: Path) -> None:
+    presentation = _comparison_presentation(
+        [_comparison_node("caller"), _comparison_node("target")],
+        [
+            _comparison_edge(
+                "edge:call",
+                "caller",
+                "target",
+                status="changed",
+                before_evidence=[[{"provenance": "static-analysis"}]],
+                after_evidence=[[{"provenance": "imported-graph"}]],
+            )
+        ],
+        changed=True,
+    )
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "call-provenance.html")
+        _click_edge_by_id(page, "edge:call")
+        assert page.locator("#source-revision").input_value() == "after"
+        assert page.locator("#comparison-side-detail .field-value").all_text_contents() == [
+            "imported-graph",
+            "No call site recorded",
+        ]
+        camera = _comparison_camera(page)
+        view = page.locator("#revision-view").input_value()
+        page.locator("#source-revision").select_option("before")
+        assert page.locator("#comparison-side-detail .field-value").all_text_contents() == [
+            "static-analysis",
+            "No call site recorded",
+        ]
+        assert _comparison_camera(page) == camera
+        assert page.locator("#revision-view").input_value() == view
+        browser.close()
+
+
+def test_comparison_real_call_sites_match_callee_evidence_and_fall_back(tmp_path: Path) -> None:
+    callees = {line: _comparison_location("app.py", line) for line in range(1, 6)}
+    observations = {
+        line: {
+            "language": "python",
+            "callee": callee,
+            "expression": _comparison_location("app.py", line, length=12),
+        }
+        for line, callee in callees.items()
+    }
+    presentation = _comparison_presentation(
+        [_comparison_node("caller", path="app.py"), _comparison_node("target")],
+        [
+            _comparison_edge(
+                "edge:call",
+                "caller",
+                "target",
+                status="changed",
+                before_evidence=[
+                    [
+                        {"provenance": "imported-graph", "locations": [callees[1]]},
+                        {"provenance": "static-analysis", "locations": [callees[2]]},
+                    ]
+                ],
+                after_evidence=[
+                    [
+                        {
+                            "provenance": "curated-rule",
+                            "rule": {"id": "test-rule"},
+                            "locations": [callees[3]],
+                        }
+                    ],
+                    [{"provenance": "static-analysis", "locations": [callees[4]]}],
+                ],
+            )
+        ],
+        changed=True,
+        calls=[
+            {
+                "id": "edge:call",
+                "status": "changed",
+                "reasons": ["expression_changed"],
+                "before": tuple(observations[line] for line in (1, 2, 5)),
+                "after": tuple(observations[line] for line in (3, 4)),
+            }
+        ],
+    )
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "callee-evidence.html")
+        _click_edge_by_id(page, "edge:call")
+        assert page.locator("#source-revision").input_value() == "after"
+        camera = _comparison_camera(page)
+        for side, lines, expected in (
+            ("after", (3, 4), ("curated-rule", "static-analysis")),
+            (
+                "before",
+                (1, 2, 5),
+                ("imported-graph", "static-analysis", "imported-graph, static-analysis"),
+            ),
+        ):
+            page.locator("#source-revision").select_option(side)
+            assert page.locator("#call-site-select option").all_text_contents() == [
+                f"{index + 1}. app.py:{line + 1}:1" for index, line in enumerate(lines)
+            ]
+            for index, provenance in enumerate(expected):
+                page.locator("#call-site-select").select_option(str(index))
+                field = page.locator("#call-site-detail .field").filter(
+                    has=page.get_by_text("Supporting provenance", exact=True)
+                )
+                assert field.locator(".field-value").inner_text() == provenance
+            assert _comparison_camera(page) == camera
         browser.close()

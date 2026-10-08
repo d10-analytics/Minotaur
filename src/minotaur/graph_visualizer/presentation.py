@@ -179,8 +179,3 @@ def _comparison_record(item: object) -> dict[str, object]:
     else:
         payload["default_side"] = "after"
     return payload
-
-
-# Short aliases make the comparison owner explicit without duplicating the
-# payload construction path.
-build_comparison = build_comparison_presentation

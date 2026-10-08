@@ -575,6 +575,24 @@ def test_customize_html_documents_comparison_controls_and_limits() -> None:
     assert "`After: v2.0 · a2b78dd`" in text
 
 
+def test_customize_html_documents_boundaries_provenance_and_shortcut_focus() -> None:
+    text = _collapsed(CUSTOMIZE)
+    assert (
+        "With All Systems selected, an edge is marked cross-system when both endpoints "
+        "belong to declared systems that differ on the viewed revision, and in Combined "
+        "only when it crosses on at least one revision and is internal on neither." in text
+    )
+    assert (
+        "Edge details list every supporting provenance and each location with its "
+        "provenance, except SQL foreign-key edges that carry column mappings, which "
+        "list each evidence record separately." in text
+    )
+    assert (
+        "Shortcuts are ignored while a form field (text box, checkbox or menu) has "
+        "focus, while Escape in search clears it." in text
+    )
+
+
 def test_system_definitions_guide_documents_per_revision_source_selection() -> None:
     text = _collapsed(QUERY_GUIDE)
     assert "minotaur query diff --systems BEFORE AFTER" in text
