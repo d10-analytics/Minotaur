@@ -338,6 +338,129 @@ def test_dotted_sql_foreign_key_target_file_mapping_still_requires_quoted_keys()
         config.parse_config_bytes(data, source="dotted.toml")
 
 
+_TARGET_KEY_REFUSAL = "invalid minotaur.sql.foreign_key_target_files: target keys must be quoted"
+
+
+def _foreign_key_config(spelling: int, key: str) -> str:
+    """Return one target-files spelling with ``key`` as its target-key literal.
+
+    Spellings 7 and 8 declare the base fields in the same form as the target
+    key; the others extend a base ``[minotaur]`` table.
+    """
+    base = '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+    value = '"schema/parent.sql"'
+    if spelling == 1:
+        return base + f"[minotaur.sql.foreign_key_target_files]\n{key} = {value}\n"
+    if spelling == 2:
+        return base + f'["minotaur"."sql"."foreign_key_target_files"]\n{key} = {value}\n'
+    if spelling == 3:
+        return base + f"[ minotaur . sql . foreign_key_target_files ]\n{key} = {value}\n"
+    if spelling == 4:
+        return base + f"[minotaur.sql]\nforeign_key_target_files.{key} = {value}\n"
+    if spelling == 5:
+        return base + f"sql.foreign_key_target_files.{key} = {value}\n"
+    if spelling == 6:
+        return base + f"sql = {{ foreign_key_target_files = {{ {key} = {value} }} }}\n"
+    if spelling == 7:
+        return (
+            'minotaur.schema_version = 1\nminotaur.targets = ["src"]\n'
+            f"minotaur.sql.foreign_key_target_files.{key} = {value}\n"
+        )
+    if spelling == 8:
+        return (
+            'minotaur = { schema_version = 1, targets = ["src"], '
+            f"sql = {{ foreign_key_target_files = {{ {key} = {value} }} }} }}\n"
+        )
+    raise AssertionError(f"unknown spelling: {spelling}")
+
+
+@pytest.mark.parametrize("spelling", range(1, 9))
+def test_every_target_file_key_spelling_refuses_a_bare_key(tmp_path: Path, spelling: int) -> None:
+    """Each accepted TOML spelling checks the quoted-key grammar on both routes."""
+    text = _foreign_key_config(spelling, "Parent")
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
+@pytest.mark.parametrize("spelling", range(1, 9))
+@pytest.mark.parametrize("key", ['"Parent"', "'Parent'"])
+def test_every_target_file_key_spelling_accepts_a_quoted_key(
+    tmp_path: Path, spelling: int, key: str
+) -> None:
+    """Each spelling resolves the same mapping when the target key is quoted."""
+    text = _foreign_key_config(spelling, key)
+    _write(tmp_path, ".minotaur.toml", text)
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == {"parent": "schema/parent.sql"}
+    assert dict(located.sql.foreign_key_target_files) == {"parent": "schema/parent.sql"}
+
+
+def test_target_file_table_refuses_a_bare_key_beside_a_quoted_key(tmp_path: Path) -> None:
+    """One bare key is refused even when another key in the same table is quoted."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        "[minotaur.sql.foreign_key_target_files]\n"
+        '"Parent" = "schema/parent.sql"\nOther = "schema/other.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
+def test_target_file_table_accepts_two_quoted_keys(tmp_path: Path) -> None:
+    """A table whose keys are all quoted resolves each target on both routes."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        "[minotaur.sql.foreign_key_target_files]\n"
+        '"Parent" = "schema/parent.sql"\n\'Other\' = "schema/other.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+    expected = {"parent": "schema/parent.sql", "other": "schema/other.sql"}
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == expected
+    assert dict(located.sql.foreign_key_target_files) == expected
+
+
+def test_target_file_quoted_keys_ignore_comments_and_string_values(tmp_path: Path) -> None:
+    """A comment line and a string value containing the field text do not trigger."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        "[minotaur.sql.foreign_key_target_files]\n"
+        '# Parent = "x"\n'
+        '"Parent" = "schema/parent.sql"\n'
+        '"Note" = "see Parent = note.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+    expected = {"parent": "schema/parent.sql", "note": "see Parent = note.sql"}
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == expected
+    assert dict(located.sql.foreign_key_target_files) == expected
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
@@ -1341,6 +1464,31 @@ def test_read_toml_file_parse_failure_raises_config_error_naming_the_path(
 
     with pytest.raises(ConfigError, match=re.escape(str(broken))):
         config.read_toml_file(broken)
+
+
+def test_read_toml_bytes_reports_excessive_nesting_without_a_cause() -> None:
+    """A document deeper than the parser supports fails as the attributed error.
+
+    ``RecursionError`` is not a ``ValueError``, so without the handler it would
+    escape every caller; the raised error must suppress the parser context.
+    """
+    data = b"x = " + b"[" * 5000 + b"]" * 5000
+
+    with pytest.raises(ConfigError) as error:
+        config.read_toml_bytes(data, source="blob")
+
+    assert str(error.value) == "TOML nests too deeply: blob"
+    assert error.value.__cause__ is None
+    assert error.value.__suppress_context__ is True
+
+
+def test_read_toml_bytes_still_reports_ordinary_malformed_toml() -> None:
+    """Shallow malformed TOML keeps the decode-error message, not the depth one."""
+    with pytest.raises(ConfigError) as error:
+        config.read_toml_bytes(b"[minotaur\n", source="shallow.toml")
+
+    assert "invalid TOML in shallow.toml" in str(error.value)
+    assert "nests too deeply" not in str(error.value)
 
 
 # ---------------------------------------------------------------------------

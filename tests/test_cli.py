@@ -625,6 +625,24 @@ def test_bare_sql_foreign_key_target_mapping_key_exits_two_without_output(tmp_pa
     assert not stamp_path(root / "graph.json").exists()
 
 
+def test_analyze_reports_a_deeply_nested_config_toml(tmp_path: Path) -> None:
+    """A config past the interpreter nesting limit exits 2 with its path, no traceback."""
+    root = _config_repo(tmp_path)
+    config_path = _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n'
+        "nested = " + "[" * 5000 + "]" * 5000 + "\n",
+    )
+
+    completed = _run_in(root, "analyze")
+
+    assert completed.returncode == 2
+    assert f"TOML nests too deeply: {config_path}" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert not (root / "g.json").exists()
+    assert not stamp_path(root / "g.json").exists()
+
+
 def test_sql_orphan_diagnostic_renderer_preserves_payload_order() -> None:
     diagnostic = Diagnostic(
         DiagnosticCode.ORPHANED_FOREIGN_KEY,

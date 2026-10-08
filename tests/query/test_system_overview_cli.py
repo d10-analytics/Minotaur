@@ -191,6 +191,35 @@ def test_systems_strict_load_rejects_malformed_declaration_before_refresh(
     assert graph.read_bytes() == original_graph
 
 
+def test_systems_reports_a_deeply_nested_system_definition(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A definition past the interpreter nesting limit exits 2 with its path, no traceback."""
+    root, graph = _tree(tmp_path)
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["."]\n',
+    )
+    definition = root / "docs" / "systems" / "deep" / "system.toml"
+    definition.parent.mkdir(parents=True, exist_ok=True)
+    definition.write_text(
+        'schema_version = 1\nname = "deep"\nfiles = ["orders/mod.py"]\n'
+        "nested = " + "{a = " * 3000 + "1" + "}" * 3000 + "\n",
+        encoding="utf-8",
+    )
+    original_graph = graph.read_bytes()
+
+    status, out, err = _systems(capsys, root, graph)
+
+    assert status == 2
+    assert out == ""
+    assert f"TOML nests too deeply: {definition}" in err
+    assert "Traceback" not in err
+    assert "refreshing graph" not in err
+    assert graph.read_bytes() == original_graph
+
+
 @pytest.mark.parametrize(
     "name",
     [
