@@ -825,6 +825,44 @@ def test_an_escaping_config_is_refused_even_beside_an_explicit_graph(tmp_path: P
         resolve_config(cfg, explicit_graph=tmp_path / "explicit.json")
 
 
+def test_a_sibling_folder_that_only_shares_the_config_folder_prefix_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Containment is per path component, never a string prefix.
+
+    ``cfg2`` and ``cfg-extra`` begin with the textual prefix of ``cfg`` but are
+    not under it, so a lexical ``startswith`` check would wrongly accept them
+    for every confined field.
+    """
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (tmp_path / "cfg2").mkdir()
+    (tmp_path / "cfg-extra").mkdir()
+
+    scenarios = [
+        ('root = "../cfg2/proj"\n', "root", "../cfg2/proj", tmp_path / "cfg2" / "proj"),
+        ('graph = "../cfg2/g.json"\n', "graph", "../cfg2/g.json", tmp_path / "cfg2" / "g.json"),
+        (
+            'systems_dir = "../cfg-extra/systems"\n',
+            "systems_dir",
+            "../cfg-extra/systems",
+            tmp_path / "cfg-extra" / "systems",
+        ),
+    ]
+
+    for declaration, field, raw, resolved in scenarios:
+        body = '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n' + declaration
+        error, source = _refused_config(cfg, body)
+        _assert_escapes_config_folder(
+            error,
+            field=field,
+            raw=raw,
+            resolved=resolved.resolve(),
+            folder=cfg.resolve(),
+            source=source,
+        )
+
+
 def test_repository_config_resolves_inside_the_repository() -> None:
     repository = Path(__file__).parents[1].resolve()
 
