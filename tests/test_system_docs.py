@@ -584,8 +584,8 @@ def test_customize_html_documents_boundaries_provenance_and_shortcut_focus() -> 
     )
     assert (
         "Edge details list every supporting provenance and each location with its "
-        "provenance, except SQL foreign-key edges, which list each evidence record "
-        "separately." in text
+        "provenance, except SQL foreign-key edges that carry column mappings, which "
+        "list each evidence record separately." in text
     )
     assert (
         "Shortcuts are ignored while a form field (text box, checkbox or menu) has "

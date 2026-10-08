@@ -73,9 +73,10 @@ or edge to populate it; click the canvas or press Escape to clear it. Drag its
 full-height right-hand divider, or use its arrow/Home/End keys, to adjust its
 width. Node connections use separate relationship and target rows so long
 qualified names wrap within the chosen width. Edge details list every supporting
-provenance and each location with its provenance, except SQL foreign-key edges,
-which list each evidence record separately. Shortcuts are ignored while a form
-field (text box, checkbox or menu) has focus, while Escape in search clears it.
+provenance and each location with its provenance, except SQL foreign-key edges
+that carry column mappings, which list each evidence record separately.
+Shortcuts are ignored while a form field (text box, checkbox or menu) has
+focus, while Escape in search clears it.
 
 ## Compare two revisions visually
 
