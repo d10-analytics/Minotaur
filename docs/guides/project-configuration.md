@@ -44,8 +44,9 @@ The known fields inside `[minotaur]` are:
   system definitions. It defaults to `docs/systems` inside the declared
   project root.
 * `sql` — optional table containing SQL analysis settings. Its supported
-  `view_depth_threshold` integer defaults to `3` and must be positive, and its
-  optional `migration_patterns` list defaults to empty.
+  `view_depth_threshold` integer defaults to `3` and must be positive, its
+  optional `migration_patterns` list defaults to empty, and its optional
+  `foreign_key_target_files` mapping defaults to empty.
 
 Any other field is unknown to the current contract and is rejected, so a
 configuration can never silently carry fields the shipped commands do not
@@ -142,6 +143,16 @@ literal, root-relative POSIX paths ending in `.sql`; they cannot be absolute,
 contain `.` or `..` path components, use backslashes, or contain glob
 characters. A mapping is not a glob and does not infer ownership from a
 filename.
+
+Every key under `foreign_key_target_files` must be quoted, in every spelling
+TOML accepts: an inline table as above, a
+`[minotaur.sql.foreign_key_target_files]` table including a quoted-segment or
+whitespace-padded header, dotted keys under `[minotaur.sql]`, `[minotaur]`, or
+no header at all, and an inline table nested at any enclosing level such as
+`sql = { foreign_key_target_files = { "Parent" = "schema/parent.sql" } }` under
+`[minotaur]` or a top-level `minotaur = { ... }`. A bare (unquoted) key is
+refused before any source analysis or graph write with
+`invalid minotaur.sql.foreign_key_target_files: target keys must be quoted`.
 
 Invalid `foreign_key_target_files` syntax or values are rejected before source
 analysis, graph loading, or graph writing with status `2` and an error naming
@@ -243,11 +254,13 @@ CLI value always wins for its own field:
   configuration.
 
 Because merging is field by field, you can override just the graph path while
-keeping the configured root and targets, or keep the configured graph while
-analyzing a different root. An explicit CLI value keeps its own spelling: a
-relative value stays relative and is interpreted from the working directory,
-and an absolute value stays absolute, exactly as before configuration
-existed.
+keeping the configured root and targets. `--root` alone, however, does not
+re-anchor the configured `targets`: without explicit positional `TARGET`
+arguments they stay resolved against the configured `root`, so to analyze a
+different root pass the targets explicitly. An explicit CLI value keeps its
+own spelling: a relative value stays relative and is interpreted from the
+working directory, and an absolute value stays absolute, exactly as before
+configuration existed.
 
 An explicit `analyze --output` is ownership-checked even when it names the
 configured `graph`: if the existing loadable graph records a different target
@@ -299,6 +312,43 @@ the appropriate path from the declared root.
 Config-sourced `targets` must stay inside the declared project `root`: a
 target that resolves outside the root is rejected before any source analysis,
 with an error naming the offending target and root.
+
+## Path confinement
+
+Config-sourced paths cannot reach outside the folder that contains the
+configuration file. `root`, `graph`, and `systems_dir` must each resolve —
+with links followed — inside the folder that contains the configuration file,
+and a value whose real location leaves that folder is refused before any read
+or write with `configured <field> escapes the config folder`. The allowed
+folder is the configuration file's own folder and nothing wider: confinement
+never probes Git, so it never widens to a Git work-tree root. A configuration
+file that is itself a symlink anchors at the folder that holds the link, not
+the folder that holds the link's target.
+
+The same rule bounds systems-mode comparison. `query diff --systems` confines
+`root`, `graph`, and `systems_dir` to the configuration file's folder for the
+working copy and for the committed configuration captured from every compared
+revision, so a revision whose committed configuration points outside its own
+folder cannot be compared on either side; commit a confined configuration at
+the revision being diffed. The `graph` coordinate is compared lexically there,
+so a saved-graph link stays allowed even though the other config-sourced paths
+follow links.
+
+Within `systems_dir`, a system's child folder and its `system.toml` must each
+resolve inside `systems_dir`. A child folder whose real location leaves it is
+refused with `system folder escapes the systems folder`, and a `system.toml`
+whose real location leaves it is refused with
+`system definition escapes the systems folder`, both before the definition is
+read. A dangling child link is not a directory and is skipped as a stray.
+
+## Trusting a committed graph
+
+A committed graph whose bytes match its sidecar digest is trusted without
+re-analysis: Minotaur loads it without re-analyzing the source it describes.
+Anyone who can write the graph's directory, or commit to the clone, controls
+what those hashes match; the trusted read does not re-derive them. `--validate`
+checks structure only, not whether the graph still matches the source. Run
+`analyze --force` to regenerate the graph from current source.
 
 ## Configuration errors
 

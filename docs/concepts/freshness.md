@@ -48,6 +48,13 @@ literal because agents commonly parse these messages and JSON fields.
 | Run `query context` | no graph refresh; per-file hash comparison only | `_run_context` and `context` in `minotaur/cli.py` and `minotaur/query/context.py` (AC-18: `test_context_does_not_call_source_drift_and_no_refresh_is_a_noop`) | Text begins `[file changed since analysis]` when bytes differ (`[file hash unavailable]` when the file cannot be read), or the JSON envelope's `results[0].stale` is `true` (`hash_available: false` for the unreadable case) — `context` has no top-level `stale` array; exit `0` | Read the marker as a current-source warning, not as a graph refresh |
 | Run `query context --no-refresh` | latent no-op | The shared parser accepts the option, but `_run_context` never reads it (`minotaur/cli.py`; AC-18: `test_context_does_not_call_source_drift_and_no_refresh_is_a_noop`) | Stdout, stderr, and exit code are byte-identical to `context` without the flag | Do not rely on the flag to suppress context's per-file hash marker |
 
+A committed graph whose bytes match its sidecar digest is trusted without
+re-analysis: Minotaur loads it without re-analyzing the source it describes.
+Anyone who can write the graph's directory, or commit to the clone, controls
+what those hashes match; the trusted read does not re-derive them. `--validate`
+checks structure only, not whether the graph still matches the source. Run
+`analyze --force` to regenerate the graph from current source.
+
 ## Row notes
 
 ### Tracked supported-source edit
