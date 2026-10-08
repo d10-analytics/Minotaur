@@ -12,6 +12,8 @@ immediate child *directory* of ``systems_dir`` that contains a
 subdirectory and a stray file anywhere under ``systems_dir`` are narrative
 and never define anything.  Narrative documentation may coexist inside a
 system directory; everything except the definition file is ignored (AR-02).
+A child folder, or a definition file, whose real location (links followed)
+leaves the resolved ``systems_dir`` is refused before it is read.
 
 Loading is deterministic and strict (R-03): directories are scanned in
 sorted order, every read and TOML parse goes exclusively through the config
@@ -179,18 +181,37 @@ def load_systems(systems_dir: Path) -> tuple[System, ...]:
     fully parsed and validated before the cross-system checks run, so an
     invalid file anywhere fails the whole load (R-03) deterministically, and
     the returned systems are ordered by declared name.
+
+    A child directory, or a ``system.toml``, whose real location with links
+    followed is outside the resolved ``systems_dir`` raises
+    :class:`SystemDefinitionError` before the definition is read; a dangling
+    child link is not a directory and stays skipped as a stray.
     """
     if not systems_dir.is_dir():
         return ()
+    resolved_systems_dir = systems_dir.resolve()
     loaded: list[_LoadedSystem] = []
     for child in sorted(systems_dir.iterdir(), key=lambda entry: entry.name):
         if not child.is_dir():
             continue  # D-03/AR-02: a stray file under systems_dir defines nothing.
+        _refuse_outside_systems_folder(child, resolved_systems_dir, label="system folder")
         definition = child / _SYSTEM_FILENAME
         if not definition.is_file():
             continue  # D-03: a directory without system.toml defines no system.
+        _refuse_outside_systems_folder(definition, resolved_systems_dir, label="system definition")
         loaded.append(_validate_definition(read_toml_file(definition), source=definition))
     return _finalize_systems(loaded)
+
+
+def _refuse_outside_systems_folder(path: Path, systems_dir: Path, *, label: str) -> None:
+    """Refuse a candidate whose real location (links followed) leaves ``systems_dir``."""
+    resolved = path.resolve()
+    if resolved == systems_dir or systems_dir in resolved.parents:
+        return
+    raise SystemDefinitionError(
+        f"{label} escapes the systems folder: {path} resolves to {resolved} "
+        f"(systems folder is {systems_dir})"
+    )
 
 
 def load_systems_data(

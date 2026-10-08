@@ -867,6 +867,33 @@ def _captured_declaration_path(
     return root / relative
 
 
+def _refuse_outside_config_folder(
+    config_route: _CurrentRoute,
+    root_route: _CurrentRoute,
+    graph_route: _CurrentRoute,
+    systems_route: _CurrentRoute,
+) -> None:
+    """Refuse a declared route whose normalized coordinate leaves the config folder.
+
+    Route inspection has already rejected worktree escapes, links, and
+    unresolved traversal, so only the narrower config-folder bound remains.
+    The graph route is compared lexically because comparison deliberately
+    allows a saved-graph link and never reads it.
+    """
+    folder = _coordinate_parts(config_route.coordinate)[:-1]
+    allowed = _route_coordinate(folder)
+    for field, route in (
+        ("root", root_route),
+        ("graph", graph_route),
+        ("systems_dir", systems_route),
+    ):
+        if _coordinate_parts(route.coordinate)[: len(folder)] != folder:
+            raise _current_error(
+                route.path,
+                f"configured {field} escapes the config folder (allowed folder is {allowed})",
+            )
+
+
 def _captured_analysis(
     snapshot: RevisionSnapshot,
     config_coordinate: str,
@@ -907,6 +934,7 @@ def _captured_analysis(
         )
         systems_path = _captured_declaration_path(snapshot, root, root_path, raw_config.systems_dir)
         systems_route = _inspect_current_route(root, systems_path, label="systems root")
+        _refuse_outside_config_folder(config_route, root_route, graph_route, systems_route)
 
         analyzed_targets: list[Path] = []
         metadata_targets: list[Path] = []
@@ -1028,9 +1056,12 @@ def _validate_live_current_contract(worktree: Path, selected_config: _CurrentRou
     )
     if root_route.entry is None or not stat.S_ISDIR(root_route.entry.st_mode):
         raise _current_error(root_path, "analysis root is not an ordinary directory")
-    _lexical_declaration(worktree, root_path, current_config.graph, label="configured graph")
+    graph_route = _lexical_declaration(
+        worktree, root_path, current_config.graph, label="configured graph"
+    )
     systems_path = _declaration_path(worktree, root_path, current_config.systems_dir)
     systems_route = _inspect_current_route(worktree, systems_path, label="systems root")
+    _refuse_outside_config_folder(selected_config, root_route, graph_route, systems_route)
     _current_systems(worktree, systems_route)
     root_parts = _coordinate_parts(root_route.coordinate)
     for raw_target in current_config.targets:
