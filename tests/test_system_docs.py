@@ -583,11 +583,13 @@ def test_customize_html_documents_boundaries_provenance_and_shortcut_focus() -> 
         "only when it crosses on at least one revision and is internal on neither." in text
     )
     assert (
-        "Edge details list every supporting provenance and each location with its provenance."
-        in text
+        "Edge details list every supporting provenance and each location with its "
+        "provenance, except SQL foreign-key edges, which list each evidence record "
+        "separately." in text
     )
     assert (
-        "Shortcuts are ignored while a control has focus, while Escape in search clears it." in text
+        "Shortcuts are ignored while a form field (text box, checkbox or menu) has "
+        "focus, while Escape in search clears it." in text
     )
 
 
