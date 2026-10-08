@@ -20,10 +20,10 @@ two configs.
 Validation rejects an unsupported ``schema_version``, unknown fields, wrong
 types, missing required fields (``schema_version``, ``targets``), empty
 ``targets``, a ``--config`` path that does not exist, and config-sourced
-targets that escape the declared project ``root`` before any resolved set is
-returned.  Config-sourced paths are anchored and emitted absolute and
-canonical, while explicit CLI-provided values pass through unmodified and win
-per field.
+``root``, ``graph``, ``systems_dir`` or targets whose real location leaves the
+config file's folder before any resolved set is returned.  Config-sourced paths
+are anchored and emitted absolute and canonical, while explicit CLI-provided
+values pass through unmodified and win per field.
 
 TOML is read only through the guarded ``tomllib``/``tomli`` shim: Python 3.11+
 uses the standard-library ``tomllib`` and the conditional dependency installs
@@ -181,18 +181,23 @@ def find_config(start: Path, *, config: Path | None = None) -> Path | None:
     enclosing Git work-tree root per the discovery boundary; ``None`` means no
     config governs the resolution. Git discovery failures raise :class:`ConfigError`;
     unavailable Git leaves discovery unbounded.
+
+    The returned path is the selected entry's own path: the resolved directory
+    that holds it, followed by the entry name.  A symlinked ``.minotaur.toml``
+    is therefore reported at the link's location rather than at its target, so
+    the config's folder stays the folder the user selected.
     """
     if config is not None:
         selected = config if config.is_absolute() else start / config
         if not selected.is_file():
             raise ConfigError(f"config file does not exist: {config}")
-        return selected.resolve()
+        return selected.parent.resolve() / selected.name
     boundary = _git_work_tree_root(start)
     current = start.resolve()
     while True:
         candidate = current / _CONFIG_FILENAME
         if candidate.is_file():
-            return candidate.resolve()
+            return current / _CONFIG_FILENAME
         if boundary is not None and current == boundary:
             return None
         parent = current.parent
@@ -216,8 +221,11 @@ def resolve_config(
     file), parses and fully validates it when one exists (a config present in
     the tree is validated even when every flag is fully explicit), anchors all
     config-sourced paths, and merges the result field by field with explicit
-    values winning.  Explicit CLI values pass through unmodified: a relative
-    value stays relative and an absolute value stays absolute.  The resolved
+    values winning.  Anchoring confines ``root``, ``graph`` and ``systems_dir``
+    to the config file's folder (a linked config uses the link's own folder),
+    refusing an escaping value before any resolved set is returned.  Explicit
+    CLI values pass through unmodified: a relative value stays relative and an
+    absolute value stays absolute.  The resolved
     ``root`` and ``graph`` always exist; when neither the config nor an
     explicit value supplies one, a :class:`ConfigError` naming the field is
     raised rather than returning a partial contract.  ``systems_dir`` is the
@@ -360,10 +368,18 @@ def _validate_config(raw: Mapping[str, object], *, source: Path | str) -> Valida
 
 
 def _anchor_config(validated: ValidatedConfig, *, source: Path) -> _ParsedConfig:
-    """Apply ordinary disk anchoring to one validated declaration."""
-    config_dir = source.resolve().parent
+    """Apply ordinary disk anchoring to one validated declaration.
+
+    Every config-sourced path is anchored and then confined to the folder that
+    holds the config file (links followed).  The check order is ``root``,
+    ``graph``, the declared-root containment of each target, then
+    ``systems_dir``, so the first escape is the one reported.
+    """
+    config_dir = source.parent.resolve()
     config_root = (config_dir / validated.root).resolve()
+    _refuse_outside_config_folder("root", validated.root, config_root, config_dir, source)
     graph = (config_root / validated.graph).resolve()
+    _refuse_outside_config_folder("graph", validated.graph, graph, config_dir, source)
     anchored: list[Path] = []
     for raw_target in validated.targets:
         target = (config_root / raw_target).resolve()
@@ -375,12 +391,31 @@ def _anchor_config(validated: ValidatedConfig, *, source: Path) -> _ParsedConfig
             ) from error
         anchored.append(target)
     systems_dir = (config_root / validated.systems_dir).resolve()
+    _refuse_outside_config_folder(
+        "systems_dir", validated.systems_dir, systems_dir, config_dir, source
+    )
     return _ParsedConfig(
         root=config_root,
         graph=graph,
         targets=tuple(anchored),
         systems_dir=systems_dir,
         sql=validated.sql,
+    )
+
+
+def _refuse_outside_config_folder(
+    field: str, raw: str, resolved: Path, folder: Path, source: Path
+) -> None:
+    """Refuse a config-sourced path whose real location leaves the config folder.
+
+    ``resolved`` is already canonical, so a link whose target lies outside
+    ``folder`` is refused even when the link name itself sits inside it.
+    """
+    if resolved == folder or folder in resolved.parents:
+        return
+    raise ConfigError(
+        f"configured {field} escapes the config folder: {raw} resolves to {resolved} "
+        f"(allowed folder is {folder}) (in {source})"
     )
 
 
