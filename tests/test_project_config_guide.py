@@ -296,6 +296,9 @@ def test_guide_documents_systems_mode_config_folder_confinement() -> None:
     assert "for the working copy and for the committed configuration captured" in text
     assert "every compared revision" in text
     assert "cannot be compared on either side" in text
+    assert "systems mode does not follow links on its other routes" in text
+    assert "a link that stays inside the configuration folder, is refused there" in text
+    assert "even though the other config-sourced paths follow links" not in text
 
 
 def test_guide_documents_systems_folder_confinement() -> None:
