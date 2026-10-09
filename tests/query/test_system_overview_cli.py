@@ -191,6 +191,35 @@ def test_systems_strict_load_rejects_malformed_declaration_before_refresh(
     assert graph.read_bytes() == original_graph
 
 
+def test_systems_reports_a_deeply_nested_system_definition(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A definition past the interpreter nesting limit exits 2 with its path, no traceback."""
+    root, graph = _tree(tmp_path)
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["."]\n',
+    )
+    definition = root / "docs" / "systems" / "deep" / "system.toml"
+    definition.parent.mkdir(parents=True, exist_ok=True)
+    definition.write_text(
+        'schema_version = 1\nname = "deep"\nfiles = ["orders/mod.py"]\n'
+        "nested = " + "{a = " * 3000 + "1" + "}" * 3000 + "\n",
+        encoding="utf-8",
+    )
+    original_graph = graph.read_bytes()
+
+    status, out, err = _systems(capsys, root, graph)
+
+    assert status == 2
+    assert out == ""
+    assert f"TOML nests too deeply: {definition}" in err
+    assert "Traceback" not in err
+    assert "refreshing graph" not in err
+    assert graph.read_bytes() == original_graph
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -491,3 +520,27 @@ def test_systems_details_json_routes_named_boundary_connections(
         "relationship_extensions",
         "evidence",
     } == set(connections[0]["relationships"][0])
+
+
+def test_systems_refuses_an_escaping_systems_dir_before_reading_outside_definitions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A systems_dir outside the config folder exits 2 before any definition read."""
+    root = _repo(tmp_path)
+    _write(root, "app.py", "value = 1\n")
+    _write(tmp_path / "outside-systems", "x/system.toml", "invalid [ toml\n")
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["."]\nsystems_dir = "../outside-systems"\n',
+    )
+    monkeypatch.chdir(root)
+
+    status, out, err = _systems(capsys, root, root / "graph.json")
+
+    assert status == 2
+    assert out == ""
+    assert "configured systems_dir escapes the config folder" in err
+    assert "../outside-systems" in err
+    assert "invalid TOML" not in err

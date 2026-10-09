@@ -625,6 +625,24 @@ def test_bare_sql_foreign_key_target_mapping_key_exits_two_without_output(tmp_pa
     assert not stamp_path(root / "graph.json").exists()
 
 
+def test_analyze_reports_a_deeply_nested_config_toml(tmp_path: Path) -> None:
+    """A config past the interpreter nesting limit exits 2 with its path, no traceback."""
+    root = _config_repo(tmp_path)
+    config_path = _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n'
+        "nested = " + "[" * 5000 + "]" * 5000 + "\n",
+    )
+
+    completed = _run_in(root, "analyze")
+
+    assert completed.returncode == 2
+    assert f"TOML nests too deeply: {config_path}" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert not (root / "g.json").exists()
+    assert not stamp_path(root / "g.json").exists()
+
+
 def test_sql_orphan_diagnostic_renderer_preserves_payload_order() -> None:
     diagnostic = Diagnostic(
         DiagnosticCode.ORPHANED_FOREIGN_KEY,
@@ -1143,10 +1161,10 @@ def test_analyze_clean_skip_runs_no_git_probes(
 ) -> None:
     root = tmp_path / "source"
     selected = _write(root, "selected.py", "value = 1\n")
-    output = tmp_path / "graph.json"
+    output = root / "graph.json"
     config = _write_config(
         root,
-        _MINOTAUR_CONFIG + 'root = "."\ngraph = "../graph.json"\ntargets = ["selected.py"]\n',
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "graph.json"\ntargets = ["selected.py"]\n',
     )
     assert _run(root, output, selected).returncode == 0
 
@@ -2557,6 +2575,92 @@ def test_committed_scope_diff_missing_target_omits_working_directory_hint(
     assert completed.stdout == ""
 
 
+def test_analyze_scope_refuses_a_child_folder_link_outside_before_writing(
+    tmp_path: Path,
+) -> None:
+    """A system folder link out of systems_dir never writes beside its target."""
+    root = _scope_project(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "system.toml").write_text(
+        'schema_version = 1\nname = "evil"\nfiles = ["src/auth/api.py"]\n', encoding="utf-8"
+    )
+    link = root / "docs" / "systems" / "evil"
+    link.symlink_to(victim, target_is_directory=True)
+
+    completed = _run_in(root, "analyze", "--scope", "evil")
+
+    assert completed.returncode == 2
+    assert "system folder escapes the systems folder" in completed.stderr
+    assert str(victim.resolve()) in completed.stderr
+    assert not (victim / "graph.json").exists()
+    assert not (victim / "graph.json.sha256").exists()
+
+
+def test_scope_read_routes_refuse_a_child_folder_link_outside(tmp_path: Path) -> None:
+    """Query, committed diff and visualize refuse before the outside TOML is parsed."""
+    root = _scope_project(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "system.toml").write_text("not valid [[[\n", encoding="utf-8")
+    (root / "docs" / "systems" / "evil").symlink_to(victim, target_is_directory=True)
+    assert _run_in(root, "analyze").returncode == 0
+
+    for arguments in (("query", "systems"), ("query", "diff", "--scope", "evil")):
+        completed = _run_in(root, *arguments)
+        assert completed.returncode == 2, arguments
+        assert "system folder escapes the systems folder" in completed.stderr
+        assert "invalid TOML" not in completed.stderr
+
+    output = root / "docs" / "systems" / "overview.html"
+    completed = _run_in(
+        root, "visualize", "--input", str(root / "graph.json"), "--output", str(output)
+    )
+
+    assert completed.returncode == 2
+    assert "system folder escapes the systems folder" in completed.stderr
+    assert "invalid TOML" not in completed.stderr
+    assert not output.exists()
+
+
+def test_query_systems_refuses_a_definition_link_outside_before_parsing(tmp_path: Path) -> None:
+    """A linked system.toml out of systems_dir is refused before its TOML is parsed."""
+    root = _scope_project(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "system.toml").write_text("not valid [[[\n", encoding="utf-8")
+    definition = root / "docs" / "systems" / "core"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").symlink_to(outside / "system.toml")
+
+    completed = _run_in(root, "query", "systems")
+
+    assert completed.returncode == 2
+    assert "system definition escapes the systems folder" in completed.stderr
+    assert "invalid TOML" not in completed.stderr
+
+
+def test_analyze_config_below_root_refuses_root_outside_the_config_folder(
+    tmp_path: Path,
+) -> None:
+    """The ordinary route refuses a config-below-root declaration by field."""
+    root = _config_repo(tmp_path, "parity-repo")
+    _write(root, "app.py", "def app():\n    return 1\n")
+    _write(
+        root,
+        "sub/.minotaur.toml",
+        _MINOTAUR_CONFIG + 'root = ".."\ngraph = "g.json"\ntargets = ["app.py"]\n',
+    )
+    assert _git(root, "add", ".").returncode == 0
+    assert _git(root, "commit", "-m", "parity fixture").returncode == 0
+
+    completed = _run_in(root / "sub", "analyze")
+
+    assert completed.returncode == 2
+    assert "configured root escapes the config folder" in completed.stderr
+    assert "allowed folder is" in completed.stderr
+
+
 def test_analyze_scope_has_whole_repo_skip_refresh_and_force_lifecycle(tmp_path: Path) -> None:
     root = _scope_project(tmp_path)
     output = root / "docs" / "systems" / "auth" / "graph.json"
@@ -3023,6 +3127,119 @@ def test_visualize_without_input_renders_content_from_the_config_graph(
 
     assert completed.returncode == 0, completed.stderr
     assert "def app" in (root / "config.html").read_text(encoding="utf-8")
+
+
+def test_analyze_refuses_an_escaping_graph_before_any_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A config graph outside the config folder exits 2 before any graph write."""
+    root = _config_repo(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    _write(root, "app.py", "value = 1\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "../victim/x.json"\ntargets = ["app.py"]\n',
+    )
+    monkeypatch.chdir(root)
+
+    assert cli.main(["analyze"]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "configured graph escapes the config folder" in captured.err
+    assert "../victim/x.json" in captured.err
+    assert str((victim / "x.json").resolve()) in captured.err
+    assert f"(allowed folder is {root.resolve()})" in captured.err
+    assert not (victim / "x.json").exists()
+    assert not stamp_path(victim / "x.json").exists()
+
+
+def test_visualize_refuses_an_escaping_graph_before_loading_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The confinement refusal wins over a graph-load error from the outside file."""
+    root = _config_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "g.json").write_text("not json", encoding="utf-8")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "."\ngraph = "../outside/g.json"\ntargets = ["app.py"]\n',
+    )
+    monkeypatch.chdir(root)
+
+    status = cli.main(["visualize", "--output", str(root / "view.html")])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert "configured graph escapes the config folder" in captured.err
+    assert "not valid JSON" not in captured.err
+    assert not (root / "view.html").exists()
+
+
+def test_committed_diff_refuses_an_escaping_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Committed diff resolves the located config and names the escaping root."""
+    root = _config_repo(tmp_path)
+    _write(root, "app.py", "value = 1\n")
+    _write_config(
+        root,
+        _MINOTAUR_CONFIG + 'root = "../elsewhere"\ntargets = ["app.py"]\n',
+    )
+    monkeypatch.chdir(root)
+
+    status = cli.main(["query", "diff"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert "configured root escapes the config folder" in captured.err
+    assert "../elsewhere" in captured.err
+
+
+def _linked_config_project(tmp_path: Path) -> tuple[Path, Path]:
+    """A project whose config link sits in ``proj`` and targets a file in ``shared``."""
+    proj = tmp_path / "proj"
+    shared = tmp_path / "shared"
+    proj.mkdir()
+    shared.mkdir()
+    _write(proj, "a.py", "value = 1\n")
+    _write(shared, "base.toml", '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n')
+    (proj / ".minotaur.toml").symlink_to(shared / "base.toml")
+    return proj, shared
+
+
+def test_linked_config_analyze_walk_up_anchors_at_the_link_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Walk-up discovery of a linked config anchors at the link's own folder."""
+    proj, shared = _linked_config_project(tmp_path)
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["analyze"]) == 0
+
+    graph = json.loads((proj / "minotaur-graph.json").read_text(encoding="utf-8"))
+    assert _file_paths(graph) == {"a.py"}
+    assert sorted(path.name for path in shared.iterdir()) == ["base.toml"]
+
+
+def test_linked_config_analyze_explicit_path_matches_walk_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit link path anchors at the link's folder just like walk-up."""
+    proj, shared = _linked_config_project(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert cli.main(["analyze", "--config", str(proj / ".minotaur.toml")]) == 0
+
+    graph = json.loads((proj / "minotaur-graph.json").read_text(encoding="utf-8"))
+    assert _file_paths(graph) == {"a.py"}
+    assert sorted(path.name for path in shared.iterdir()) == ["base.toml"]
 
 
 def test_equals_form_missing_config_exits_two_beside_a_valid_walk_up_config(

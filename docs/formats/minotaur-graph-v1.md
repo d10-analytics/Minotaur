@@ -380,6 +380,13 @@ trusted path by `from_dict` and `validate_document`; the sole divergence was
 absent-optional state — benign, but it is the concrete shape the accepted
 risk names.
 
+A committed graph whose bytes match its sidecar digest is trusted without
+re-analysis: Minotaur loads it without re-analyzing the source it describes.
+Anyone who can write the graph's directory, or commit to the clone, controls
+what those hashes match; the trusted read does not re-derive them. `--validate`
+checks structure only, not whether the graph still matches the source. Run
+`analyze --force` to regenerate the graph from current source.
+
 The first read of an unstamped graph writes an untracked
 `<GRAPH>.sha256` beside it. If a downstream repository commits its graph, it
 should commit the sidecar with it or add `*.json.sha256` to its `.gitignore`.

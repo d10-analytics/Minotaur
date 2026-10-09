@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import json
 import os
 import re
 import subprocess
@@ -337,6 +338,321 @@ def test_dotted_sql_foreign_key_target_file_mapping_still_requires_quoted_keys()
         config.parse_config_bytes(data, source="dotted.toml")
 
 
+_TARGET_KEY_REFUSAL = "invalid minotaur.sql.foreign_key_target_files: target keys must be quoted"
+
+
+def _foreign_key_config(spelling: int, key: str) -> str:
+    """Return one target-files spelling with ``key`` as its target-key literal.
+
+    Spellings 7 and 8 declare the base fields in the same form as the target
+    key; the others extend a base ``[minotaur]`` table.
+    """
+    base = '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+    value = '"schema/parent.sql"'
+    if spelling == 1:
+        return base + f"[minotaur.sql.foreign_key_target_files]\n{key} = {value}\n"
+    if spelling == 2:
+        return base + f'["minotaur"."sql"."foreign_key_target_files"]\n{key} = {value}\n'
+    if spelling == 3:
+        return base + f"[ minotaur . sql . foreign_key_target_files ]\n{key} = {value}\n"
+    if spelling == 4:
+        return base + f"[minotaur.sql]\nforeign_key_target_files.{key} = {value}\n"
+    if spelling == 5:
+        return base + f"sql.foreign_key_target_files.{key} = {value}\n"
+    if spelling == 6:
+        return base + f"sql = {{ foreign_key_target_files = {{ {key} = {value} }} }}\n"
+    if spelling == 7:
+        return (
+            'minotaur.schema_version = 1\nminotaur.targets = ["src"]\n'
+            f"minotaur.sql.foreign_key_target_files.{key} = {value}\n"
+        )
+    if spelling == 8:
+        return (
+            'minotaur = { schema_version = 1, targets = ["src"], '
+            f"sql = {{ foreign_key_target_files = {{ {key} = {value} }} }} }}\n"
+        )
+    raise AssertionError(f"unknown spelling: {spelling}")
+
+
+@pytest.mark.parametrize("spelling", range(1, 9))
+def test_every_target_file_key_spelling_refuses_a_bare_key(tmp_path: Path, spelling: int) -> None:
+    """Each accepted TOML spelling checks the quoted-key grammar on both routes."""
+    text = _foreign_key_config(spelling, "Parent")
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
+@pytest.mark.parametrize("spelling", range(1, 9))
+@pytest.mark.parametrize("key", ['"Parent"', "'Parent'"])
+def test_every_target_file_key_spelling_accepts_a_quoted_key(
+    tmp_path: Path, spelling: int, key: str
+) -> None:
+    """Each spelling resolves the same mapping when the target key is quoted."""
+    text = _foreign_key_config(spelling, key)
+    _write(tmp_path, ".minotaur.toml", text)
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == {"parent": "schema/parent.sql"}
+    assert dict(located.sql.foreign_key_target_files) == {"parent": "schema/parent.sql"}
+
+
+def test_target_file_table_refuses_a_bare_key_beside_a_quoted_key(tmp_path: Path) -> None:
+    """One bare key is refused even when another key in the same table is quoted."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        "[minotaur.sql.foreign_key_target_files]\n"
+        '"Parent" = "schema/parent.sql"\nOther = "schema/other.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
+def test_target_file_table_accepts_two_quoted_keys(tmp_path: Path) -> None:
+    """A table whose keys are all quoted resolves each target on both routes."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        "[minotaur.sql.foreign_key_target_files]\n"
+        '"Parent" = "schema/parent.sql"\n\'Other\' = "schema/other.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+    expected = {"parent": "schema/parent.sql", "other": "schema/other.sql"}
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == expected
+    assert dict(located.sql.foreign_key_target_files) == expected
+
+
+def test_target_file_quoted_keys_ignore_comments_and_string_values(tmp_path: Path) -> None:
+    """A comment line and a string value containing the field text do not trigger."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        "[minotaur.sql.foreign_key_target_files]\n"
+        '# Parent = "x"\n'
+        '"Parent" = "schema/parent.sql"\n'
+        '"Note" = "see Parent = note.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+    expected = {"parent": "schema/parent.sql", "note": "see Parent = note.sql"}
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == expected
+    assert dict(located.sql.foreign_key_target_files) == expected
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        pytest.param(
+            '[minotaur.sql."foreign\\u005fkey_target_files"]\nParent = "schema/parent.sql"\n',
+            id="quoted-table-segment",
+        ),
+        pytest.param(
+            'sql."foreign\\u005fkey_target_files".Parent = "schema/parent.sql"\n',
+            id="quoted-dotted-segment",
+        ),
+        pytest.param(
+            'sql = { "foreign\\u005fkey_target_files" = { Parent = "schema/parent.sql" } }\n',
+            id="quoted-inline-segment",
+        ),
+    ],
+)
+def test_escaped_target_file_segment_still_refuses_a_bare_key(
+    tmp_path: Path, declaration: str
+) -> None:
+    """A quoted basic segment decodes to the same key the parser produced."""
+    text = '[minotaur]\nschema_version = 1\ntargets = ["src"]\n' + declaration
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
+def test_escaped_target_file_segment_accepts_a_quoted_key(tmp_path: Path) -> None:
+    """The escaped spelling reaches the target table and resolves a quoted key."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        '[minotaur.sql."foreign\\u005fkey_target_files"]\n'
+        '"Parent" = "schema/parent.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == {"parent": "schema/parent.sql"}
+    assert dict(located.sql.foreign_key_target_files) == {"parent": "schema/parent.sql"}
+
+
+def test_literal_target_file_segment_keeps_its_escapes_literal() -> None:
+    """A single-quoted segment defines no escapes, so it names a different key."""
+    data = (
+        b'[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        b"[minotaur.sql.'foreign\\u005fkey_target_files']\n"
+        b'Parent = "schema/parent.sql"\n'
+    )
+
+    with pytest.raises(ConfigError) as error:
+        config.parse_config_bytes(data, source="literal.toml")
+
+    assert "target keys must be quoted" not in str(error.value)
+    assert "unknown SQL config field" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+            '[metadata]\nnotes = [\n"""\n'
+            "[minotaur.sql.foreign_key_target_files]\n"
+            'Parent = "schema/parent.sql"\n"""\n]\n',
+            id="basic-multiline",
+        ),
+        pytest.param(
+            "[minotaur]\nschema_version = 1\ntargets = ['src']\n"
+            "[metadata]\nnotes = [\n'''\n"
+            "[minotaur.sql.foreign_key_target_files]\n"
+            "Parent = 'schema/parent.sql'\n''']\n",
+            id="literal-multiline",
+        ),
+    ],
+)
+def test_array_nested_multiline_string_contents_stay_ignored(tmp_path: Path, text: str) -> None:
+    """A multiline string nested in an array is content, not a table header."""
+    _write(tmp_path, ".minotaur.toml", text)
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == {}
+    assert dict(located.sql.foreign_key_target_files) == {}
+
+
+def _array_element_header_trap(before: str = "", after: str = "]") -> str:
+    """Return a bare dotted target key preceded by a header-shaped array element.
+
+    The ``["q"]`` element is a nested array, not a table header; treating it as
+    one would attribute the dotted keys below to a ``q`` table and hide the bare
+    target key.  A depth that stays open past ``after`` hides the key as well.
+    """
+    return (
+        f'notes = [\n{before}  ["q"]\n{after}\n'
+        'minotaur.schema_version = 1\nminotaur.targets = ["src"]\n'
+        'minotaur.sql.foreign_key_target_files.Parent = "schema/parent.sql"\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(_array_element_header_trap(), id="nested-array-element"),
+        pytest.param(_array_element_header_trap('  "[",\n'), id="basic-string-bracket"),
+        pytest.param(_array_element_header_trap("  '[{',\n"), id="literal-string-bracket"),
+        pytest.param(_array_element_header_trap('  "a", # ]\n'), id="comment-closing-bracket"),
+        pytest.param(_array_element_header_trap('  "a", # [\n'), id="comment-opening-bracket"),
+        pytest.param(_array_element_header_trap('  """\n[\n""",\n'), id="multiline-string-element"),
+        pytest.param(
+            _array_element_header_trap('  { name = "a" },\n  { name = "[" },\n'),
+            id="inline-table-elements",
+        ),
+        pytest.param(_array_element_header_trap('  [\n    "x",\n  ],\n'), id="nested-array-lines"),
+        pytest.param(_array_element_header_trap(after=', """a""""]'), id="extra-closing-quote"),
+        pytest.param(
+            _array_element_header_trap(after=', """\n]\n"""]'), id="string-end-closes-array"
+        ),
+    ],
+)
+def test_multiline_array_elements_never_hide_a_bare_target_key(tmp_path: Path, text: str) -> None:
+    """An element line inside an open array is neither a header nor an assignment."""
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
+@pytest.mark.parametrize("element", ['["minotaur"]', '[["minotaur"]]', "[ 'minotaur' ]"])
+def test_multiline_array_element_does_not_reopen_the_minotaur_table(
+    tmp_path: Path, element: str
+) -> None:
+    """A key below a header-shaped array element stays in the enclosing table."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        f"[tool]\nmatrix = [\n  {element}\n]\n"
+        'sql.foreign_key_target_files.other = "x"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == {}
+    assert dict(located.sql.foreign_key_target_files) == {}
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        pytest.param('[\n  "a",\n]', id="closed-on-own-line"),
+        pytest.param('[\n  [\n    "a"\n  ]]', id="nested-closed-together"),
+        pytest.param('[\n  { name = "a" },\n  { name = "b" }]', id="inline-tables"),
+        pytest.param("[\n  '''\n]\n''']", id="literal-string-end"),
+    ],
+)
+def test_table_header_after_a_closed_multiline_array_is_recognized(
+    tmp_path: Path, array: str
+) -> None:
+    """Closing a multi-line array restores header recognition on the next line."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        f"[tool]\nmatrix = {array}\n"
+        '[minotaur.sql.foreign_key_target_files]\nParent = "schema/parent.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
@@ -377,7 +693,7 @@ def test_relative_config_values_anchor_at_the_declared_root(tmp_path: Path) -> N
     cfg = _write(
         tmp_path,
         "cfg/.minotaur.toml",
-        '[minotaur]\nschema_version = 1\nroot = "../proj"\n'
+        '[minotaur]\nschema_version = 1\nroot = "proj"\n'
         'targets = ["a.py", "sub/b.py"]\ngraph = "out/g.json"\n',
     )
     cfg.parent.mkdir(parents=True, exist_ok=True)
@@ -385,7 +701,7 @@ def test_relative_config_values_anchor_at_the_declared_root(tmp_path: Path) -> N
 
     resolved = resolve_config(tmp_path / "cfg")
 
-    project_root = (tmp_path / "proj").resolve()
+    project_root = (tmp_path / "cfg" / "proj").resolve()
     assert resolved.root == project_root
     assert resolved.targets == (
         (project_root / "a.py").resolve(),
@@ -549,13 +865,13 @@ def test_configured_systems_dir_is_accepted_and_anchored_at_the_declared_root(
     _write(
         tmp_path,
         "cfg/.minotaur.toml",
-        '[minotaur]\nschema_version = 1\nroot = "../proj"\n'
+        '[minotaur]\nschema_version = 1\nroot = "proj"\n'
         'targets = ["a.py"]\nsystems_dir = "systems"\n',
     )
 
     resolved = resolve_config(tmp_path / "cfg")
 
-    project_root = (tmp_path / "proj").resolve()
+    project_root = (tmp_path / "cfg" / "proj").resolve()
     assert resolved.systems_dir == (project_root / "systems").resolve()
 
 
@@ -566,12 +882,12 @@ def test_omitted_systems_dir_defaults_to_docs_systems_under_the_declared_root(
     _write(
         tmp_path,
         "cfg/.minotaur.toml",
-        '[minotaur]\nschema_version = 1\nroot = "../proj"\ntargets = ["a.py"]\n',
+        '[minotaur]\nschema_version = 1\nroot = "proj"\ntargets = ["a.py"]\n',
     )
 
     resolved = resolve_config(tmp_path / "cfg")
 
-    project_root = (tmp_path / "proj").resolve()
+    project_root = (tmp_path / "cfg" / "proj").resolve()
     assert resolved.systems_dir == (project_root / "docs" / "systems").resolve()
 
 
@@ -598,6 +914,280 @@ def test_configless_explicit_root_still_emits_a_docs_systems_default(
 
     assert resolved.config_file is None
     assert resolved.systems_dir == root / "docs" / "systems"
+
+
+# ---------------------------------------------------------------------------
+# Config-folder confinement and link-folder anchoring
+# ---------------------------------------------------------------------------
+
+
+def _refused_config(cfg: Path, body: str) -> tuple[ConfigError, Path]:
+    """Write ``body`` as ``cfg/.minotaur.toml`` and return its refusal and path."""
+    source = _write(cfg, ".minotaur.toml", body)
+    with pytest.raises(ConfigError) as error:
+        resolve_config(cfg)
+    return error.value, source
+
+
+def _assert_escapes_config_folder(
+    error: ConfigError, *, field: str, raw: str, resolved: Path, folder: Path, source: Path
+) -> None:
+    """A confinement refusal names the field, raw value, real path, folder and source."""
+    message = str(error)
+    assert f"configured {field} escapes the config folder" in message
+    assert raw in message
+    assert str(resolved) in message
+    assert f"(allowed folder is {folder})" in message
+    assert str(source) in message
+
+
+def test_config_sourced_values_outside_the_config_folder_are_refused(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (tmp_path / "victim").mkdir()
+    outside_src = tmp_path / "outside-src"
+    outside_src.mkdir()
+    outside_etc = tmp_path / "etc"
+    outside_etc.mkdir()
+    outside_graph = tmp_path / "outside-graph.json"
+
+    scenarios = [
+        ('root = "../victim_home"\n', "root", "../victim_home", tmp_path / "victim_home"),
+        (f"root = {json.dumps(str(outside_src))}\n", "root", str(outside_src), outside_src),
+        (
+            'graph = "../victim/x.json"\n',
+            "graph",
+            "../victim/x.json",
+            tmp_path / "victim" / "x.json",
+        ),
+        (
+            f"graph = {json.dumps(str(outside_graph))}\n",
+            "graph",
+            str(outside_graph),
+            outside_graph,
+        ),
+        (
+            f"systems_dir = {json.dumps(str(outside_etc))}\n",
+            "systems_dir",
+            str(outside_etc),
+            outside_etc,
+        ),
+    ]
+
+    for declaration, field, raw, resolved in scenarios:
+        body = '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n' + declaration
+        error, source = _refused_config(cfg, body)
+        _assert_escapes_config_folder(
+            error,
+            field=field,
+            raw=raw,
+            resolved=resolved.resolve(),
+            folder=cfg.resolve(),
+            source=source,
+        )
+
+
+def test_links_whose_targets_leave_the_config_folder_are_refused(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    outside_src = tmp_path / "outside-src"
+    outside_src.mkdir()
+    (outside_src / "mod.py").write_text("value = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_systems = tmp_path / "outside-systems"
+    outside_systems.mkdir()
+    (cfg / "src-link").symlink_to(outside_src)
+    (cfg / "out-link").symlink_to(outside)
+    (cfg / "sys-link").symlink_to(outside_systems)
+    (cfg / "dangling.json").symlink_to(outside / "missing.json")
+
+    scenarios = [
+        ('root = "src-link"\n', "root", "src-link", outside_src),
+        ('graph = "out-link/g.json"\n', "graph", "out-link/g.json", outside / "g.json"),
+        ('systems_dir = "sys-link"\n', "systems_dir", "sys-link", outside_systems),
+        ('graph = "dangling.json"\n', "graph", "dangling.json", outside / "missing.json"),
+    ]
+
+    for declaration, field, raw, resolved in scenarios:
+        body = '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n' + declaration
+        error, source = _refused_config(cfg, body)
+        _assert_escapes_config_folder(
+            error,
+            field=field,
+            raw=raw,
+            resolved=resolved.resolve(),
+            folder=cfg.resolve(),
+            source=source,
+        )
+
+
+def test_a_link_that_resolves_inside_the_config_folder_is_allowed(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "real-systems").mkdir()
+    (cfg / "sys-link").symlink_to("real-systems")
+    _write(
+        cfg,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\nsystems_dir = "sys-link"\n',
+    )
+
+    resolved = resolve_config(cfg)
+
+    assert resolved.systems_dir == (cfg / "real-systems").resolve()
+
+
+def test_linked_config_anchors_at_the_link_folder(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    base = _write(
+        shared,
+        "base.toml",
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\ngraph = "g.json"\n',
+    )
+    (proj / ".minotaur.toml").symlink_to(base)
+
+    resolved = resolve_config(proj)
+
+    assert resolved.config_file == proj.resolve() / ".minotaur.toml"
+    assert resolved.root == proj.resolve()
+    assert resolved.graph == (proj / "g.json").resolve()
+
+    error, source = _refused_config(
+        proj,
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\ngraph = "../shared/g.json"\n',
+    )
+
+    _assert_escapes_config_folder(
+        error,
+        field="graph",
+        raw="../shared/g.json",
+        resolved=(shared / "g.json").resolve(),
+        folder=proj.resolve(),
+        source=source,
+    )
+
+
+def test_confinement_reports_root_then_graph_then_targets_then_systems_dir(
+    tmp_path: Path,
+) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+
+    error, _ = _refused_config(
+        cfg,
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n'
+        'root = "../victim_home"\ngraph = "../victim/g.json"\n',
+    )
+    assert "configured root escapes the config folder" in str(error)
+    assert "configured graph escapes the config folder" not in str(error)
+
+    error, _ = _refused_config(
+        cfg,
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n'
+        'graph = "../victim/g.json"\nsystems_dir = "../victim/systems"\n',
+    )
+    assert "configured graph escapes the config folder" in str(error)
+    assert "configured systems_dir escapes the config folder" not in str(error)
+
+    error, _ = _refused_config(
+        cfg,
+        '[minotaur]\nschema_version = 1\ntargets = ["../esc.py"]\n'
+        'systems_dir = "../victim/systems"\n',
+    )
+    assert "config target escapes root" in str(error)
+    assert "configured systems_dir escapes the config folder" not in str(error)
+
+
+def test_explicit_cli_values_are_never_confinement_checked(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    _write(
+        cfg,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "proj"\ntargets = ["a.py"]\n',
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    resolved = resolve_config(cfg, explicit_root=outside, explicit_graph=outside / "g.json")
+
+    assert resolved.root == outside
+    assert resolved.graph == outside / "g.json"
+
+
+def test_an_escaping_config_is_refused_even_beside_an_explicit_graph(tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    error, source = _refused_config(
+        cfg,
+        '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\ngraph = "../victim/g.json"\n',
+    )
+
+    _assert_escapes_config_folder(
+        error,
+        field="graph",
+        raw="../victim/g.json",
+        resolved=(tmp_path / "victim" / "g.json").resolve(),
+        folder=cfg.resolve(),
+        source=source,
+    )
+
+    with pytest.raises(ConfigError, match="configured graph escapes the config folder"):
+        resolve_config(cfg, explicit_graph=tmp_path / "explicit.json")
+
+
+def test_a_sibling_folder_that_only_shares_the_config_folder_prefix_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Containment is per path component, never a string prefix.
+
+    ``cfg2`` and ``cfg-extra`` begin with the textual prefix of ``cfg`` but are
+    not under it, so a lexical ``startswith`` check would wrongly accept them
+    for every confined field.
+    """
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (tmp_path / "cfg2").mkdir()
+    (tmp_path / "cfg-extra").mkdir()
+
+    scenarios = [
+        ('root = "../cfg2/proj"\n', "root", "../cfg2/proj", tmp_path / "cfg2" / "proj"),
+        ('graph = "../cfg2/g.json"\n', "graph", "../cfg2/g.json", tmp_path / "cfg2" / "g.json"),
+        (
+            'systems_dir = "../cfg-extra/systems"\n',
+            "systems_dir",
+            "../cfg-extra/systems",
+            tmp_path / "cfg-extra" / "systems",
+        ),
+    ]
+
+    for declaration, field, raw, resolved in scenarios:
+        body = '[minotaur]\nschema_version = 1\ntargets = ["a.py"]\n' + declaration
+        error, source = _refused_config(cfg, body)
+        _assert_escapes_config_folder(
+            error,
+            field=field,
+            raw=raw,
+            resolved=resolved.resolve(),
+            folder=cfg.resolve(),
+            source=source,
+        )
+
+
+def test_repository_config_resolves_inside_the_repository() -> None:
+    repository = Path(__file__).parents[1].resolve()
+
+    resolved = resolve_config(repository)
+
+    assert resolved.config_file == repository / ".minotaur.toml"
+    assert resolved.root == (repository / "src").resolve()
+    assert resolved.graph == (repository / "minotaur-system-definitions.json").resolve()
+    assert resolved.systems_dir == (repository / "docs" / "systems").resolve()
+    assert resolved.targets is not None
 
 
 def test_parse_config_bytes_preserves_raw_values_without_source_access(
@@ -1066,6 +1656,31 @@ def test_read_toml_file_parse_failure_raises_config_error_naming_the_path(
 
     with pytest.raises(ConfigError, match=re.escape(str(broken))):
         config.read_toml_file(broken)
+
+
+def test_read_toml_bytes_reports_excessive_nesting_without_a_cause() -> None:
+    """A document deeper than the parser supports fails as the attributed error.
+
+    ``RecursionError`` is not a ``ValueError``, so without the handler it would
+    escape every caller; the raised error must suppress the parser context.
+    """
+    data = b"x = " + b"[" * 5000 + b"]" * 5000
+
+    with pytest.raises(ConfigError) as error:
+        config.read_toml_bytes(data, source="blob")
+
+    assert str(error.value) == "TOML nests too deeply: blob"
+    assert error.value.__cause__ is None
+    assert error.value.__suppress_context__ is True
+
+
+def test_read_toml_bytes_still_reports_ordinary_malformed_toml() -> None:
+    """Shallow malformed TOML keeps the decode-error message, not the depth one."""
+    with pytest.raises(ConfigError) as error:
+        config.read_toml_bytes(b"[minotaur\n", source="shallow.toml")
+
+    assert "invalid TOML in shallow.toml" in str(error.value)
+    assert "nests too deeply" not in str(error.value)
 
 
 # ---------------------------------------------------------------------------
