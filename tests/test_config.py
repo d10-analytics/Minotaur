@@ -578,25 +578,19 @@ def _array_element_header_trap(before: str = "", after: str = "]") -> str:
         pytest.param(_array_element_header_trap("  '[{',\n"), id="literal-string-bracket"),
         pytest.param(_array_element_header_trap('  "a", # ]\n'), id="comment-closing-bracket"),
         pytest.param(_array_element_header_trap('  "a", # [\n'), id="comment-opening-bracket"),
-        pytest.param(
-            _array_element_header_trap('  """\n[\n""",\n'), id="multiline-string-element"
-        ),
+        pytest.param(_array_element_header_trap('  """\n[\n""",\n'), id="multiline-string-element"),
         pytest.param(
             _array_element_header_trap('  { name = "a" },\n  { name = "[" },\n'),
             id="inline-table-elements",
         ),
         pytest.param(_array_element_header_trap('  [\n    "x",\n  ],\n'), id="nested-array-lines"),
-        pytest.param(
-            _array_element_header_trap(after=', """a""""]'), id="extra-closing-quote"
-        ),
+        pytest.param(_array_element_header_trap(after=', """a""""]'), id="extra-closing-quote"),
         pytest.param(
             _array_element_header_trap(after=', """\n]\n"""]'), id="string-end-closes-array"
         ),
     ],
 )
-def test_multiline_array_elements_never_hide_a_bare_target_key(
-    tmp_path: Path, text: str
-) -> None:
+def test_multiline_array_elements_never_hide_a_bare_target_key(tmp_path: Path, text: str) -> None:
     """An element line inside an open array is neither a header nor an assignment."""
     _write(tmp_path, ".minotaur.toml", text)
     located_path = find_config(tmp_path)
