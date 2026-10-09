@@ -330,9 +330,13 @@ The same rule bounds systems-mode comparison. `query diff --systems` confines
 working copy and for the committed configuration captured from every compared
 revision, so a revision whose committed configuration points outside its own
 folder cannot be compared on either side; commit a confined configuration at
-the revision being diffed. The `graph` coordinate is compared lexically there,
-so a saved-graph link stays allowed even though the other config-sourced paths
-follow links.
+the revision being diffed. The `graph` coordinate is compared lexically there
+and never read, so a saved-graph link in the working copy stays allowed. Unlike
+the other commands, systems mode does not follow links on its other routes: a
+symbolic link on the route to the configuration file, `root`, `systems_dir`, a
+target, a system folder, or a `system.toml` is refused rather than followed, so
+a symlinked configuration file, or a link that stays inside the configuration
+folder, is refused there.
 
 Within `systems_dir`, a system's child folder and its `system.toml` must each
 resolve inside `systems_dir`. A child folder whose real location leaves it is
