@@ -528,13 +528,15 @@ def _toml_code_assignments(
     """Return TOML assignments whose keys occur outside comments and strings.
 
     Each entry carries the combined table-plus-key path, whether each path
-    segment was quoted, and the offset of the value's first character.  A
-    multiline string may open anywhere inside a value (an array element, for
-    example), so every line that is not itself a header or assignment is also
-    scanned for a delimiter that continues on the next line.
+    segment was quoted, and the offset of the value's first character.  A value
+    continues past its line while a multiline string or an array or inline
+    table bracket is still open; such continuation lines are only scanned for
+    those delimiters, never read as headers or assignments, so a nested-array
+    element such as ``["q"]`` cannot pass for a table header.
     """
     assignments: list[tuple[tuple[str, ...], tuple[bool, ...], int]] = []
     multiline_delimiter: str | None = None
+    depth = 0
     table_path: tuple[str, ...] = ()
     table_quoted: tuple[bool, ...] = ()
     offset = 0
@@ -545,9 +547,11 @@ def _toml_code_assignments(
             if end is None:
                 offset += len(line)
                 continue
-            multiline_delimiter = _toml_open_multiline_delimiter(
-                content, end + len(multiline_delimiter)
+            multiline_delimiter, depth = _toml_value_state(
+                content, end + len(multiline_delimiter), depth
             )
+        elif depth > 0:
+            multiline_delimiter, depth = _toml_value_state(content, 0, depth)
         else:
             assignment = _toml_line_assignment(content)
             if assignment is not None:
@@ -555,13 +559,13 @@ def _toml_code_assignments(
                 assignments.append(
                     (table_path + key_path, table_quoted + key_quoted, offset + value_start)
                 )
-                multiline_delimiter = _toml_open_multiline_delimiter(content, value_start)
+                multiline_delimiter, depth = _toml_value_state(content, value_start, 0)
             else:
                 header = _toml_table_header(content)
                 if header is not None:
                     table_path, table_quoted = header
                 else:
-                    multiline_delimiter = _toml_open_multiline_delimiter(content, 0)
+                    multiline_delimiter, depth = _toml_value_state(content, 0, 0)
         offset += len(line)
     return tuple(assignments)
 
@@ -702,40 +706,55 @@ def _skip_toml_whitespace(value: str, index: int) -> int:
     return index
 
 
-def _toml_open_multiline_delimiter(line: str, start: int) -> str | None:
-    """Return a multiline delimiter opened but not closed at/after ``start``.
+def _toml_value_state(line: str, start: int, depth: int) -> tuple[str | None, int]:
+    """Return the value state left open at the end of one line's code.
 
-    Single-line strings and comments are skipped, so only a genuine opening
-    delimiter at a code position is reported.  Valid TOML guarantees that an
-    unterminated delimiter encountered here continues on the next line.
+    ``depth`` counts the array and inline-table brackets already open when the
+    scan begins at ``start``; the result pairs any multiline-string delimiter
+    left unterminated with the bracket depth reached before it.  Single-line
+    strings and comments are skipped, so only brackets and delimiters at code
+    positions count.  Valid TOML guarantees that an unterminated delimiter or
+    bracket encountered here continues on a later line.
     """
     index = start
     while index < len(line):
         character = line[index]
         if character == "#":
-            return None
+            break
         if line.startswith('"""', index) or line.startswith("'''", index):
             delimiter = line[index : index + 3]
             end = _find_multiline_delimiter(line, delimiter, index + 3)
             if end is None:
-                return delimiter
+                return delimiter, depth
             index = end + 3
             continue
         if character in {"'", '"'}:
             end = _find_toml_quote(line, character, index + 1)
             if end is None:
-                return None
+                break
             index = end + 1
             continue
+        if character in {"[", "{"}:
+            depth += 1
+        elif character in {"]", "}"}:
+            depth -= 1
         index += 1
-    return None
+    return None, depth
 
 
 def _find_multiline_delimiter(value: str, delimiter: str, start: int) -> int | None:
+    """Return the offset of the delimiter that closes a multiline string.
+
+    Up to two quote characters directly before the closing delimiter belong to
+    the string, so the closing delimiter is the last three of that run.
+    """
     index = value.find(delimiter, start)
     while index != -1:
         if delimiter == "'''" or _backslash_count(value, index) % 2 == 0:
-            return index
+            run = len(delimiter)
+            while run < 5 and value.startswith(delimiter[0], index + run):
+                run += 1
+            return index + run - len(delimiter)
         index = value.find(delimiter, index + 1)
     return None
 

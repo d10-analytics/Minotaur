@@ -556,6 +556,109 @@ def test_array_nested_multiline_string_contents_stay_ignored(tmp_path: Path, tex
     assert dict(located.sql.foreign_key_target_files) == {}
 
 
+def _array_element_header_trap(before: str = "", after: str = "]") -> str:
+    """Return a bare dotted target key preceded by a header-shaped array element.
+
+    The ``["q"]`` element is a nested array, not a table header; treating it as
+    one would attribute the dotted keys below to a ``q`` table and hide the bare
+    target key.  A depth that stays open past ``after`` hides the key as well.
+    """
+    return (
+        f'notes = [\n{before}  ["q"]\n{after}\n'
+        'minotaur.schema_version = 1\nminotaur.targets = ["src"]\n'
+        'minotaur.sql.foreign_key_target_files.Parent = "schema/parent.sql"\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(_array_element_header_trap(), id="nested-array-element"),
+        pytest.param(_array_element_header_trap('  "[",\n'), id="basic-string-bracket"),
+        pytest.param(_array_element_header_trap("  '[{',\n"), id="literal-string-bracket"),
+        pytest.param(_array_element_header_trap('  "a", # ]\n'), id="comment-closing-bracket"),
+        pytest.param(_array_element_header_trap('  "a", # [\n'), id="comment-opening-bracket"),
+        pytest.param(
+            _array_element_header_trap('  """\n[\n""",\n'), id="multiline-string-element"
+        ),
+        pytest.param(
+            _array_element_header_trap('  { name = "a" },\n  { name = "[" },\n'),
+            id="inline-table-elements",
+        ),
+        pytest.param(_array_element_header_trap('  [\n    "x",\n  ],\n'), id="nested-array-lines"),
+        pytest.param(
+            _array_element_header_trap(after=', """a""""]'), id="extra-closing-quote"
+        ),
+        pytest.param(
+            _array_element_header_trap(after=', """\n]\n"""]'), id="string-end-closes-array"
+        ),
+    ],
+)
+def test_multiline_array_elements_never_hide_a_bare_target_key(
+    tmp_path: Path, text: str
+) -> None:
+    """An element line inside an open array is neither a header nor an assignment."""
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
+@pytest.mark.parametrize("element", ['["minotaur"]', '[["minotaur"]]', "[ 'minotaur' ]"])
+def test_multiline_array_element_does_not_reopen_the_minotaur_table(
+    tmp_path: Path, element: str
+) -> None:
+    """A key below a header-shaped array element stays in the enclosing table."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        f"[tool]\nmatrix = [\n  {element}\n]\n"
+        'sql.foreign_key_target_files.other = "x"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+
+    blob = config.parse_config_bytes(text.encode(), source="blob.toml")
+    located = resolve_config(tmp_path)
+
+    assert dict(blob.sql.foreign_key_target_files) == {}
+    assert dict(located.sql.foreign_key_target_files) == {}
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        pytest.param('[\n  "a",\n]', id="closed-on-own-line"),
+        pytest.param('[\n  [\n    "a"\n  ]]', id="nested-closed-together"),
+        pytest.param('[\n  { name = "a" },\n  { name = "b" }]', id="inline-tables"),
+        pytest.param("[\n  '''\n]\n''']", id="literal-string-end"),
+    ],
+)
+def test_table_header_after_a_closed_multiline_array_is_recognized(
+    tmp_path: Path, array: str
+) -> None:
+    """Closing a multi-line array restores header recognition on the next line."""
+    text = (
+        '[minotaur]\nschema_version = 1\ntargets = ["src"]\n'
+        f"[tool]\nmatrix = {array}\n"
+        '[minotaur.sql.foreign_key_target_files]\nParent = "schema/parent.sql"\n'
+    )
+    _write(tmp_path, ".minotaur.toml", text)
+    located_path = find_config(tmp_path)
+
+    with pytest.raises(ConfigError) as blob:
+        config.parse_config_bytes(text.encode(), source="blob.toml")
+    assert str(blob.value) == f"{_TARGET_KEY_REFUSAL} (in blob.toml)"
+
+    with pytest.raises(ConfigError) as located:
+        resolve_config(tmp_path)
+    assert str(located.value) == f"{_TARGET_KEY_REFUSAL} (in {located_path})"
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
