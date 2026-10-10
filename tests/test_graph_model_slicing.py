@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from minotaur.graph_model.slicing import bfs
 
 
@@ -38,3 +40,17 @@ def test_self_loop_stays_at_depth_zero() -> None:
 def test_seed_missing_from_adjacency_is_the_only_node() -> None:
     adjacency = {"a": {"b"}}
     assert bfs(frozenset({"z"}), adjacency, None) == {"z": 0}
+
+
+REMOVED_SLICING_NAMES = ("slice_document", "SliceDirection", "SliceResult")
+
+
+@pytest.mark.parametrize("name", REMOVED_SLICING_NAMES)
+def test_slicing_name_is_no_longer_importable(name: str) -> None:
+    with pytest.raises(ImportError):
+        exec(f"from minotaur.graph_model.slicing import {name}")
+
+
+def test_reserved_languages_is_no_longer_importable() -> None:
+    with pytest.raises(ImportError):
+        exec("from minotaur.graph_model.provenance import RESERVED_LANGUAGES")
