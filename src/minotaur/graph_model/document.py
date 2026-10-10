@@ -311,12 +311,24 @@ class GraphDocument:
         nodes_data = data.get("nodes")
         if not isinstance(nodes_data, list):
             raise ValueError("document requires a 'nodes' array")
-        nodes = tuple(Node.from_dict(n, memo=location_memo) for n in nodes_data)
+        # D-02/R-02: this is the only site that knows the array index, so the
+        # item type check lives here rather than inside ``Node.from_dict``.
+        node_items: list[Node] = []
+        for index, item in enumerate(nodes_data):
+            if not isinstance(item, dict):
+                raise type_error(f"'nodes' item {index}", item, "an object")
+            node_items.append(Node.from_dict(item, memo=location_memo))
+        nodes = tuple(node_items)
 
         rels_data = data.get("relationships")
         if not isinstance(rels_data, list):
             raise ValueError("document requires a 'relationships' array")
-        relationships = tuple(Relationship.from_dict(r, memo=location_memo) for r in rels_data)
+        relationship_items: list[Relationship] = []
+        for index, item in enumerate(rels_data):
+            if not isinstance(item, dict):
+                raise type_error(f"'relationships' item {index}", item, "an object")
+            relationship_items.append(Relationship.from_dict(item, memo=location_memo))
+        relationships = tuple(relationship_items)
 
         extensions = data.get("extensions")
         if extensions is not None and not isinstance(extensions, dict):

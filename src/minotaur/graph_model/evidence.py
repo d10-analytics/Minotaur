@@ -279,7 +279,15 @@ class Evidence:
                 raise ValueError("'locations' must be an array when present")
             if not locations_data:
                 raise ValueError("'locations' array must be non-empty when present")
-            locations = tuple(Location.from_dict(loc, memo=memo) for loc in locations_data)
+            # D-02/R-02: this is the only site that knows the array index, so
+            # the item type check lives here rather than inside
+            # ``Location.from_dict``.
+            location_items: list[Location] = []
+            for index, item in enumerate(locations_data):
+                if not isinstance(item, dict):
+                    raise type_error(f"'locations' item {index}", item, "an object")
+                location_items.append(Location.from_dict(item, memo=memo))
+            locations = tuple(location_items)
 
         extensions = data.get("extensions")
         if extensions is not None and not isinstance(extensions, dict):
