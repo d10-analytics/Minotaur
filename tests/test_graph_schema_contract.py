@@ -320,19 +320,24 @@ def _wire_with_extensions(extensions: dict[str, dict[str, object]]) -> dict[str,
 
 
 @pytest.mark.parametrize(
-    ("extensions", "instance_path"),
+    ("extensions", "json_path"),
     [
-        ({"x": {"f": 1.5}}, "On instance['nodes'][0]['extensions']['x']['f']"),
-        ({"\U0001f600": {"f": 1}}, "On instance['nodes'][0]['extensions']"),
-        ({"x": {"\U0001d11e": 1}}, "On instance['nodes'][0]['extensions']['x']"),
+        ({"x": {"f": 1.5}}, "$.nodes[0].extensions.x.f"),
+        ({"\U0001f600": {"f": 1}}, "$.nodes[0].extensions"),
+        ({"x": {"\U0001d11e": 1}}, "$.nodes[0].extensions.x"),
     ],
 )
 def test_schema_rejects_non_integer_or_non_bmp_extension_wire_values(
-    extensions: dict[str, dict[str, object]], instance_path: str
+    extensions: dict[str, dict[str, object]], json_path: str
 ) -> None:
+    """``D-01``: the load error names the JSON path, not the instance dump."""
     with pytest.raises(GraphLoadError) as error:
         load_graph_bytes(json.dumps(_wire_with_extensions(extensions)).encode())
-    assert instance_path in str(error.value)
+    message = str(error.value)
+    assert message.startswith(f"{json_path}: ")
+    # ``str(ValidationError)`` appended the schema and the whole instance; the
+    # bounded message must not.
+    assert "On instance" not in message
 
 
 def test_model_guard_owns_float_rejection_when_schema_accepts_json_integer() -> None:

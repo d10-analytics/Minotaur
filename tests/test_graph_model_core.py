@@ -1294,3 +1294,63 @@ def test_replace_cannot_smuggle_a_float_past_the_serializer() -> None:
     node = _guard_node()
     with pytest.raises(ValueError, match=re.escape("node label must be a string, got float")):
         replace(node, label=1.5)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# AC-02 / R-02: ``from_dict`` names the array and index of a non-object item
+# ---------------------------------------------------------------------------
+
+
+def _array_item_document(mutate: object) -> dict[str, object]:
+    document = json.loads((EXAMPLES / "small-workflow.json").read_text(encoding="utf-8"))
+    mutate(document)  # type: ignore[operator]
+    return document
+
+
+def _set_nodes_int(document: dict[str, object]) -> None:
+    document["nodes"] = [1]
+
+
+def _set_nodes_null(document: dict[str, object]) -> None:
+    document["nodes"] = [None]
+
+
+def _set_relationships_int(document: dict[str, object]) -> None:
+    document["relationships"] = [1]
+
+
+def _set_evidence_int(document: dict[str, object]) -> None:
+    relationships = document["relationships"]
+    assert isinstance(relationships, list)
+    relationships[0]["evidence"] = [1]  # type: ignore[index]
+
+
+def _set_locations_int(document: dict[str, object]) -> None:
+    relationships = document["relationships"]
+    assert isinstance(relationships, list)
+    relationships[0]["evidence"][0]["locations"] = [1]  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (_set_nodes_int, "'nodes' item 0 must be an object, got int"),
+        (_set_nodes_null, "'nodes' item 0 must be an object, got NoneType"),
+        (_set_relationships_int, "'relationships' item 0 must be an object, got int"),
+        (_set_evidence_int, "'evidence' item 0 must be an object, got int"),
+        (_set_locations_int, "'locations' item 0 must be an object, got int"),
+    ],
+)
+def test_from_dict_names_the_array_and_index_of_a_non_object_item(
+    mutate: object, message: str
+) -> None:
+    """``D-02``: the item check lives at the array site, so it knows the index.
+
+    ``GraphDocument.from_dict`` is the model boundary: it raises a
+    ``ValueError`` (never a raw ``AttributeError``) whose text names the array
+    and index.
+    """
+    document = _array_item_document(mutate)
+    with pytest.raises(ValueError) as error:
+        GraphDocument.from_dict(document)
+    assert str(error.value) == message
