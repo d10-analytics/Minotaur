@@ -301,14 +301,15 @@ limitation notice, not a detected change. The comparison reports observed
 source facts and membership; it does not infer renames, edit timing, causality,
 or intent.
 
-Same-named declarations are not ambiguous when the analyzer recorded a
-declaration role for them. The comparison distinguishes accessor and overload
+Same-named declarations are not ambiguous when the analyzer recorded different
+declaration roles for them. The comparison distinguishes accessor and overload
 declarations by role: a Python `@property` getter and its `setter` and
 `deleter`, JavaScript `get` and `set` class accessors, and Python `@overload`
 stubs, which are separated from their implementation by the role and from each
-other by source order. Genuine duplicates, overload stubs decorated through an
-import alias such as `@ov`, and a static and an instance JavaScript accessor of
-the same name and kind remain a semantically ambiguous identity and exit `2`.
+other by source order. Genuine duplicates, including two getters or two setters
+for one name, overload stubs decorated through an import alias such as `@ov`,
+and a static and an instance JavaScript accessor of the same name and kind
+remain a semantically ambiguous identity and exit `2`.
 
 ## Strict loading and warnings
 

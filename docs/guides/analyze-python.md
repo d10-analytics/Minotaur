@@ -128,7 +128,7 @@ same-named declarations stay distinguishable when `query diff --systems` pairs
 two revisions. Recognition is syntactic on each decorator's final name:
 
 - `@property` or `@<expr>.property` records `property`;
-- `@<name>.getter`, `@<name>.setter`, and `@<name>.deleter` record `getter`,
+- `@<expr>.getter`, `@<expr>.setter`, and `@<expr>.deleter` record `getter`,
   `setter`, and `deleter`;
 - `@overload`, `@typing.overload`, `@typing_extensions.overload`, or any other
   `@<module>.overload` records `overload`.

@@ -481,8 +481,7 @@ a detected change. The comparison reports accepted source facts only; it does
 not infer renames, causality, edit timing, or intent.
 
 Two symbols with the same file, label, and symbol kind share a semantic
-identity unless the analyzer recorded a declaration role that tells them
-apart. Accessor and overload declarations are distinguished by that role: a
+identity unless the analyzer recorded different declaration roles for them. Accessor and overload declarations are distinguished by that role: a
 Python `@property` getter and its `setter` and `deleter`, JavaScript `get` and
 `set` class accessors, and Python `@overload` stubs, which are separated from
 their implementation by the role and from each other by source order. Genuine

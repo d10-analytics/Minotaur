@@ -178,9 +178,9 @@ selected root-relative targets for either language in the existing
 `extensions["minotaur"]["selection"]` array, with `.` representing the root.
 These values are freshness and diagnostic metadata, not identity inputs or
 core graph facts.
-Both analyzers also record a declaration role on a source-location symbol
-node whose declaration form tells it apart from a same-named sibling, and
-omit the field from every other node. The value is a string:
+Both analyzers also record a declaration role on every source-location symbol
+node whose declaration is a recognised accessor or overload form, whether or
+not it has a same-named sibling, and omit the field from every other node. The value is a string:
 `extensions["minotaur-python"]["declaration_role"]` is one of `property`,
 `getter`, `setter`, `deleter`, or `overload`, and
 `extensions["minotaur-javascript"]["declaration_role"]` is `get` or `set`.
