@@ -67,7 +67,17 @@ _GIT_COMMIT_RE = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 # RFC 3339 timestamp ending in Z (UTC). The schema requires the Z suffix
 # rather than a numeric offset to ensure timestamps are directly comparable
 # without timezone arithmetic.
-_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+#
+# One rule for the whole spelling: this pattern fixes every field and its
+# range, and it is applied with ``re.fullmatch``. ``\d`` is deliberately not
+# used — it matches any Unicode decimal digit, which would admit timestamps
+# that ``fromisoformat`` and every other RFC 3339 reader reject. The schema
+# carries this same pattern anchored with ``^``…``$``; a contract test asserts
+# the two stay equal.
+_RFC3339_UTC_RE = re.compile(
+    r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
+    r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]+)?Z"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,18 +206,19 @@ class GraphDocument:
             )
 
         if self.generated_at is not None:
-            if not _RFC3339_UTC_RE.match(self.generated_at):
-                raise ValueError(
-                    f"generated_at must be an RFC 3339 UTC timestamp ending in 'Z', "
-                    f"got {self.generated_at!r}"
-                )
+            # One rule, one message: the regex owns the field ranges, and
+            # ``fromisoformat`` adds only day-of-month validity (``2026-02-30``
+            # matches the pattern but is not a real date).
+            message = (
+                "generated_at must be a valid RFC 3339 UTC timestamp ending in 'Z', "
+                f"got {self.generated_at!r}"
+            )
+            if not _RFC3339_UTC_RE.fullmatch(self.generated_at):
+                raise ValueError(message)
             try:
                 datetime.fromisoformat(f"{self.generated_at[:-1]}+00:00")
             except ValueError as error:
-                raise ValueError(
-                    "generated_at must be a valid RFC 3339 UTC timestamp, "
-                    f"got {self.generated_at!r}"
-                ) from error
+                raise ValueError(message) from error
         object.__setattr__(self, "extensions", freeze_extensions(self.extensions))
 
     def node_by_id(self, node_id: str) -> Node | None:

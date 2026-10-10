@@ -6,7 +6,6 @@ import functools
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -49,24 +48,6 @@ class LoadedGraph:
         return canonicalize(self.document)
 
 
-# Keep this checker local to the input boundary. The model intentionally does
-# not validate wire-format spellings while it is being constructed; accepting
-# unchecked input anywhere else would make different consumers disagree about
-# what constitutes one canonical graph.
-_FORMAT_CHECKER = jsonschema.FormatChecker()
-
-
-@_FORMAT_CHECKER.checks("date-time")  # type: ignore[untyped-decorator]
-def _is_utc_rfc3339(value: object) -> bool:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        return False
-    try:
-        datetime.fromisoformat(f"{value[:-1]}+00:00")
-    except ValueError:
-        return False
-    return True
-
-
 def stamp_path(graph: Path) -> Path:
     """Return the sidecar digest path for *graph*."""
     return graph.with_name(graph.name + ".sha256")
@@ -93,7 +74,7 @@ def schema() -> dict[str, object]:
 
 def _validate_wire_shape(raw: dict[str, object]) -> None:
     """Run the JSON-schema pass against the packaged v1 schema."""
-    jsonschema.Draft202012Validator(schema(), format_checker=_FORMAT_CHECKER).validate(raw)
+    jsonschema.Draft202012Validator(schema()).validate(raw)
 
 
 def load_graph_bytes(
