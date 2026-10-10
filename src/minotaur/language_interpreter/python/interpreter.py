@@ -2322,6 +2322,43 @@ def _module_node(module: _Module) -> Node:
     )
 
 
+_PROPERTY_ACCESSORS = frozenset({"getter", "setter", "deleter"})
+
+
+def _declaration_role(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """Return the declaration role named by a definition's decorators, if any.
+
+    Several definitions may legitimately share one qualified name: a property
+    getter and its accessors, or ``@overload`` stubs and their implementation.
+    The role tells those same-named definitions apart without changing node
+    identity. Recognition is purely syntactic on the decorator's final name, so
+    ``typing.overload`` and ``t.overload`` are recognised while an import alias
+    such as ``from typing import overload as ov`` is not. Decorators are scanned
+    top to bottom and the first recognised one decides the role.
+    """
+    # EDGE-DECL-003: supports syntactic property, accessor and overload declaration roles.
+    for decorator in statement.decorator_list:
+        if isinstance(decorator, ast.Name):
+            final_name = decorator.id
+        elif isinstance(decorator, ast.Attribute):
+            if decorator.attr in _PROPERTY_ACCESSORS:
+                return decorator.attr
+            final_name = decorator.attr
+        else:
+            continue
+        if final_name in {"property", "overload"}:
+            return final_name
+    return None
+
+
+def _role_extensions(
+    statement: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> dict[str, dict[str, object]] | None:
+    """Return the node extension recording a definition's declaration role."""
+    role = _declaration_role(statement)
+    return None if role is None else {NAMESPACE: {"declaration_role": role}}
+
+
 def _declarations(
     module: _Module,
 ) -> tuple[dict[str, str], dict[ast.stmt, _DeclaredSymbol], list[Node]]:
@@ -2340,6 +2377,9 @@ def _declarations(
                 _location(module.path, statement),
                 NAMESPACE,
                 "python",
+                extensions=(
+                    None if isinstance(statement, ast.ClassDef) else _role_extensions(statement)
+                ),
             )
             declarations[qualified] = node.id
             symbols[statement] = _DeclaredSymbol(node.id, module.module_id)
@@ -2370,6 +2410,7 @@ def _declarations(
                             _location(module.path, member),
                             NAMESPACE,
                             "python",
+                            extensions=_role_extensions(member),
                         )
                         declarations[member_name] = member_node.id
                         class_declarations[member.name] = member_node.id
