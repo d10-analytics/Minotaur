@@ -20,8 +20,9 @@ from minotaur.language_interpreter.workspace import Workspace
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
-# Compare against the final source behavior, including analyzer version stamps.
-BASELINE_COMMIT = "d9b034ebf3ef95c6b9d74eb2bef84f9a06e95af8"
+# Compare against the final source behavior, including analyzer version stamps
+# and the declaration roles recorded on accessor and overload symbol nodes.
+BASELINE_COMMIT = "c22e201ee5bf08d193eb0b897e6a55478a69aa29"
 # Freeze the source validated by the historical viewer and navigation comparisons.
 PRE_STAMP_COMMIT = "c43c45d60605e75ee9013580ba7a59fbf5af88dd"
 VIEWER_ADVANCE_COMMIT = "52a8b29d376e99c582d686dbead579acc438de37"
