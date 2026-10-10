@@ -2,7 +2,7 @@
 
 Graph handling proceeds in phases: parse JSON, validate against the JSON
 Schema, construct the graph model (``GraphDocument.from_dict``), run this
-semantic validator, canonically normalize, then render or slice. The
+semantic validator, then canonically normalize. The
 structural phases reject anything that is wrong about a single object's own
 fields. This module handles what they cannot: rules that need cross-object
 knowledge (do relationship endpoints exist? are node IDs unique?) or

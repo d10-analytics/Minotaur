@@ -1,7 +1,7 @@
 # Graph contract
 
 The graph contract owns graph entities, identity, validation, loading,
-slicing, and serialization. The TOML declaration in `system.toml` is the exact
+and serialization. The TOML declaration in `system.toml` is the exact
 membership authority for this boundary; this README is narrative only and does
 not add fields or relationship declarations. The exact membership authority is
 the TOML declaration in `system.toml`.
