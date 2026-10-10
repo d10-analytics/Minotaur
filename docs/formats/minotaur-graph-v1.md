@@ -178,6 +178,23 @@ selected root-relative targets for either language in the existing
 `extensions["minotaur"]["selection"]` array, with `.` representing the root.
 These values are freshness and diagnostic metadata, not identity inputs or
 core graph facts.
+Both analyzers also record a declaration role on a source-location symbol
+node whose declaration form tells it apart from a same-named sibling, and
+omit the field from every other node. The value is a string:
+`extensions["minotaur-python"]["declaration_role"]` is one of `property`,
+`getter`, `setter`, `deleter`, or `overload`, and
+`extensions["minotaur-javascript"]["declaration_role"]` is `get` or `set`.
+Unlike the freshness and diagnostic metadata above, the declaration role is a
+correspondence identity input. When `query diff --systems` pairs the nodes of
+the old and new revisions, a recognised role joins the symbol's file, label,
+and symbol kind in its semantic key, and an `overload` stub additionally takes
+its zero-based source order among the stubs sharing that key. The role is read
+only from the node's own identity namespace, and only when that namespace is
+`minotaur-python` or `minotaur-javascript`. Any other value, including a
+non-string one, a role stored under a different namespace, and a role on a
+node whose own namespace is neither of those two are ignored, so such a node
+keeps its role-free key. The role is not a node-ID input and does not change
+node labels, symbol kinds, or plain `query diff` results.
 The CLI also records analysis facts in the document's `minotaur` extension:
 `errors` is the integer count of error-severity diagnostics from the run that
 produced the graph, omitted when zero. It is not a stored diagnostic list.

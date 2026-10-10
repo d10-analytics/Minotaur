@@ -64,6 +64,17 @@ expressions do not invent a symbol. Nested function and class declarations do
 not become symbols or `contains` relationships: uses in their bodies, including
 methods of nested classes, retain the nearest enclosing emitted symbol as owner.
 
+A class method declared as a `get` or `set` accessor also carries
+`extensions["minotaur-javascript"]["declaration_role"]` with the value `"get"`
+or `"set"`. `get level()` and `set level(value)` are two method symbols with the
+same label, and the role keeps them distinguishable when `query diff --systems`
+pairs two revisions. Other class methods, including `constructor`, carry no
+role. `static` is not distinguished: `static get level()` records `get` exactly
+as an instance `get level()` does, so a static and an instance accessor of the
+same name and kind in one class still share one identity, and
+`diff --systems` refuses them as ambiguous (exit `2`). The role does not
+change node IDs, labels, or symbol kinds.
+
 ## Supported module imports
 
 The supported ESM binding form is a named import from an exactly relative
