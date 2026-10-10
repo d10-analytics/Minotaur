@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import replace
 
 import pytest
 
 from minotaur.graph_model import validation as validation_module
+from minotaur.graph_model._parsing import hashable_json
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.evidence import Evidence, Producer, Rule
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
+from minotaur.graph_model.loading import GraphLoadError, load_graph_bytes
 from minotaur.graph_model.location import Location, Position, Range, encoded_length, split_lines
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import (
@@ -515,3 +519,97 @@ def test_multi_fault_document_reports_every_finding_in_documented_order() -> Non
         ("position-line-out-of-bounds", ("relationships", 3, *ev0, "start", "line")),
         ("position-line-out-of-bounds", ("relationships", 3, *ev0, "end", "line")),
     ]
+
+
+# --------------------------------------------------------------------------
+# JSON-kind distinction in the evidence attribution key
+# --------------------------------------------------------------------------
+
+# Each pair holds two JSON values that Python's own equality (and therefore
+# an untagged key) conflates, but that are distinct as JSON values. An
+# untagged ``hashable_json`` collapses each pair into one attribution, so the
+# documents below would be rejected as an ``evidence-duplicate``.
+_Extensions = Mapping[str, Mapping[str, object]]
+_JSON_KIND_PAIRS: list[tuple[_Extensions, _Extensions]] = [
+    ({"ns": {"x": True}}, {"ns": {"x": 1}}),
+    ({"ns": {"x": {}}}, {"ns": {"x": []}}),
+    ({"ns": {"x": False}}, {"ns": {"x": 0}}),
+    ({"ns": {"x": {"k": 1}}}, {"ns": {"x": [["k", 1]]}}),
+]
+_JSON_KIND_IDS = ["true-vs-1", "object-vs-array", "false-vs-0", "object-vs-pair-list"]
+
+
+def _static_ext(extensions: _Extensions) -> Evidence:
+    return Evidence(
+        provenance=Provenance.STATIC_ANALYSIS,
+        producer=Producer(name="minotaur-python", version="0.1"),
+        locations=(CALL_SITE,),
+        extensions=extensions,
+    )
+
+
+def _extension_pair_document(left: _Extensions, right: _Extensions) -> GraphDocument:
+    return GraphDocument(
+        coordinate_encoding=CoordinateEncoding.UTF_8,
+        nodes=(CALLER, CALLEE),
+        relationships=(_calls(CALLER, CALLEE, _static_ext(left), _static_ext(right)),),
+    )
+
+
+@pytest.mark.parametrize(("left", "right"), _JSON_KIND_PAIRS, ids=_JSON_KIND_IDS)
+def test_hashable_json_distinguishes_equal_python_values_of_different_json_kinds(
+    left: _Extensions, right: _Extensions
+) -> None:
+    left_key = hashable_json(left)
+    right_key = hashable_json(right)
+
+    assert left_key != right_key
+    # The keys must stay usable as set/dict members.
+    assert len({left_key, right_key}) == 2
+
+
+@pytest.mark.parametrize(("left", "right"), _JSON_KIND_PAIRS, ids=_JSON_KIND_IDS)
+def test_hashable_json_gives_equal_keys_to_values_equal_as_json(
+    left: _Extensions, right: _Extensions
+) -> None:
+    assert hashable_json(left) == hashable_json(json.loads(json.dumps(left)))
+    assert hashable_json(right) == hashable_json(json.loads(json.dumps(right)))
+
+
+def test_hashable_json_does_not_conflate_top_level_json_kinds() -> None:
+    assert hashable_json(True) != hashable_json(1)
+    assert hashable_json(False) != hashable_json(0)
+    assert hashable_json({}) != hashable_json([])
+    assert len({hashable_json({}), hashable_json([])}) == 2
+
+
+@pytest.mark.parametrize(("left", "right"), _JSON_KIND_PAIRS, ids=_JSON_KIND_IDS)
+def test_distinct_json_kinds_in_evidence_extensions_are_not_duplicates(
+    left: _Extensions, right: _Extensions
+) -> None:
+    document = _extension_pair_document(left, right)
+
+    # ``load_graph_bytes`` runs ``validate_document`` naturally; with an
+    # untagged key the second record duplicates the first and the load fails
+    # at ("relationships", 0, "evidence", 1).
+    loaded = load_graph_bytes(json.dumps(document.to_dict()).encode())
+
+    assert ("evidence-duplicate", ("relationships", 0, "evidence", 1)) not in _codes(
+        validate_document(loaded.document)
+    )
+    evidence = loaded.document.relationships[0].evidence
+    assert evidence[0].to_dict()["extensions"] == left
+    assert evidence[1].to_dict()["extensions"] == right
+
+
+def test_identical_evidence_extensions_still_duplicate_and_fail_the_load() -> None:
+    extension: _Extensions = {"ns": {"x": True}}
+    document = _extension_pair_document(extension, extension)
+
+    assert _codes(validate_document(document)) == [
+        ("evidence-duplicate", ("relationships", 0, "evidence", 1))
+    ]
+
+    with pytest.raises(GraphLoadError) as excinfo:
+        load_graph_bytes(json.dumps(document.to_dict()).encode())
+    assert "/relationships/0/evidence/1" in str(excinfo.value)

@@ -106,3 +106,56 @@ def test_documents_groups_equal_extensions_and_keeps_distinct_payloads() -> None
     assert relationship.evidence[1].to_dict()["extensions"] == distinct_payload
     assert relationship.evidence[2].locations == ()
     assert relationship.evidence[2].extensions is None
+
+
+def test_add_separates_observations_that_differ_only_by_json_kind() -> None:
+    source = "node:sha256:" + "1" * 64
+    target = "node:sha256:" + "2" * 64
+    first = _location(2)
+    second = _location(5)
+    accumulator = RelationshipAccumulator()
+    # ``{"x": True}`` and ``{"x": 1}`` are equal under Python equality, so an
+    # untagged attribution key merges these into one observation.
+    accumulator.add(
+        source,
+        target,
+        RelationshipKind.REFERENCES.value,
+        first,
+        {"ns": {"x": True}},
+    )
+    accumulator.add(
+        source,
+        target,
+        RelationshipKind.REFERENCES.value,
+        second,
+        {"ns": {"x": 1}},
+    )
+
+    documents = accumulator.documents(Producer(name="test-interpreter"))
+
+    assert len(documents) == 1
+    relationship = documents[0]
+    assert len(relationship.evidence) == 2
+    assert relationship.evidence[0].to_dict()["extensions"] == {"ns": {"x": True}}
+    assert relationship.evidence[0].locations == (first,)
+    assert relationship.evidence[1].to_dict()["extensions"] == {"ns": {"x": 1}}
+    assert relationship.evidence[1].locations == (second,)
+
+
+def test_add_merges_observations_with_identical_extensions() -> None:
+    source = "node:sha256:" + "1" * 64
+    target = "node:sha256:" + "2" * 64
+    first = _location(2)
+    second = _location(5)
+    extension = {"ns": {"x": True}}
+    accumulator = RelationshipAccumulator()
+    accumulator.add(source, target, RelationshipKind.REFERENCES.value, first, dict(extension))
+    accumulator.add(source, target, RelationshipKind.REFERENCES.value, second, dict(extension))
+
+    documents = accumulator.documents(Producer(name="test-interpreter"))
+
+    assert len(documents) == 1
+    relationship = documents[0]
+    assert len(relationship.evidence) == 1
+    assert relationship.evidence[0].to_dict()["extensions"] == extension
+    assert relationship.evidence[0].locations == (first, second)
