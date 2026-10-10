@@ -2971,6 +2971,24 @@ class Gauge:
 
     def plain(self):
         return 5
+
+
+class Stacked:
+    @property
+    @overload
+    def first(self): ...
+
+    @overload
+    @property
+    def second(self): ...
+
+    @first.setter
+    @property
+    def first(self, value): ...
+
+    @overload
+    @first.getter
+    def first(self): ...
 """
 
 
@@ -2982,6 +3000,8 @@ def test_decorated_definitions_record_syntactic_declaration_roles(
     # definition must carry; ``None`` means the node has no extensions at all.
     # The class decorators include a recognisable ``@overload`` so that a role
     # leaking onto a class is observable.
+    # ``Stacked`` puts two recognised decorators on each method, so only the
+    # topmost recognised decorator may decide the role.
     expected_roles: dict[tuple[str, int], str | None] = {
         ("app", 1): None,
         ("app.parse", 11): "overload",
@@ -3005,6 +3025,11 @@ def test_decorated_definitions_record_syntactic_declaration_roles(
         ("app.Gauge.build", 80): None,
         ("app.Gauge.cached", 84): None,
         ("app.Gauge.plain", 87): None,
+        ("app.Stacked", 91): None,
+        ("app.Stacked.first", 94): "property",
+        ("app.Stacked.second", 98): "overload",
+        ("app.Stacked.first", 102): "setter",
+        ("app.Stacked.first", 106): "overload",
     }
 
     result = analyze_python_workspace(tmp_path)
