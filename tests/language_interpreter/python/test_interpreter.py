@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.identity import compute_node_id
 from minotaur.graph_model.loading import load_graph_file
 from minotaur.graph_model.location import Location, Position, Range
 from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipKind
@@ -2879,6 +2880,164 @@ def test_overload_stubs_and_real_definition_keep_distinct_attribution(
     assert (implementation.id, helper, RelationshipKind.CALLS.value) in relationships
     assert (stub_one.id, helper_c, RelationshipKind.CALLS.value) in relationships
     assert (implementation.id, helper_c, RelationshipKind.CALLS.value) not in relationships
+
+
+_DECLARATION_ROLE_SOURCE = """\
+import builtins
+import functools
+import typing
+import typing as t
+import typing_extensions
+from typing import overload
+from typing import overload as ov
+
+
+@overload
+def parse(value: int) -> int: ...
+
+
+@typing.overload
+def parse(value: str) -> str: ...
+
+
+@typing_extensions.overload
+def parse(value: bytes) -> bytes: ...
+
+
+def parse(value):
+    return value
+
+
+@overload
+async def fetch(value: int) -> int: ...
+
+
+async def fetch(value):
+    return value
+
+
+@ov
+def aliased(value: int) -> int: ...
+
+
+def aliased(value):
+    return value
+
+
+def mark(cls):
+    return cls
+
+
+@mark
+@overload
+class Gauge:
+    @property
+    def level(self):
+        return 1
+
+    @level.setter
+    def level(self, value):
+        pass
+
+    @level.getter
+    def level(self):
+        return 2
+
+    @level.deleter
+    def level(self):
+        pass
+
+    @builtins.property
+    def spelled(self):
+        return 3
+
+    @t.overload
+    def convert(self, value: int) -> int: ...
+
+    def convert(self, value):
+        return value
+
+    @staticmethod
+    @overload
+    def build(value: int) -> int: ...
+
+    @staticmethod
+    def build(value):
+        return value
+
+    @functools.cached_property
+    def cached(self):
+        return 4
+
+    def plain(self):
+        return 5
+"""
+
+
+def test_decorated_definitions_record_syntactic_declaration_roles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "app.py", _DECLARATION_ROLE_SOURCE)
+    # One-based definition lines in the source above, mapped to the role each
+    # definition must carry; ``None`` means the node has no extensions at all.
+    # The class decorators include a recognisable ``@overload`` so that a role
+    # leaking onto a class is observable.
+    expected_roles: dict[tuple[str, int], str | None] = {
+        ("app", 1): None,
+        ("app.parse", 11): "overload",
+        ("app.parse", 15): "overload",
+        ("app.parse", 19): "overload",
+        ("app.parse", 22): None,
+        ("app.fetch", 27): "overload",
+        ("app.fetch", 30): None,
+        ("app.aliased", 35): None,
+        ("app.aliased", 38): None,
+        ("app.mark", 42): None,
+        ("app.Gauge", 48): None,
+        ("app.Gauge.level", 50): "property",
+        ("app.Gauge.level", 54): "setter",
+        ("app.Gauge.level", 58): "getter",
+        ("app.Gauge.level", 62): "deleter",
+        ("app.Gauge.spelled", 66): "property",
+        ("app.Gauge.convert", 70): "overload",
+        ("app.Gauge.convert", 72): None,
+        ("app.Gauge.build", 77): "overload",
+        ("app.Gauge.build", 80): None,
+        ("app.Gauge.cached", 84): None,
+        ("app.Gauge.plain", 87): None,
+    }
+
+    result = analyze_python_workspace(tmp_path)
+    symbols = [node for node in result.document.nodes if node.node_class == NodeClass.SYMBOL]
+    observed = {
+        (node.label, node.location.range.start.line + 1): node.extensions for node in symbols
+    }
+
+    assert len(symbols) == len(expected_roles)
+    assert set(observed) == set(expected_roles)
+    for key, role in expected_roles.items():
+        if role is None:
+            assert observed[key] is None, key
+        else:
+            assert observed[key] == {"minotaur-python": {"declaration_role": role}}, key
+
+    monkeypatch.setattr(python_interpreter, "_role_extensions", lambda statement: None)
+    roleless = analyze_python_workspace(tmp_path)
+    roleless_symbols = [
+        node for node in roleless.document.nodes if node.node_class == NodeClass.SYMBOL
+    ]
+
+    assert all(node.extensions is None for node in roleless_symbols)
+    assert sorted(
+        (node.id, node.label, node.symbol_kind, node.location) for node in symbols
+    ) == sorted((node.id, node.label, node.symbol_kind, node.location) for node in roleless_symbols)
+    for node in symbols:
+        assert node.id == compute_node_id(
+            node.identity,
+            node_class=node.node_class.value,
+            symbol_kind=node.symbol_kind,
+            location=node.location,
+        )
 
 
 def test_duplicate_classes_keep_direct_methods_and_decorator_sources_separate(
