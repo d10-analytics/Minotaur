@@ -189,7 +189,10 @@ Unlike the freshness and diagnostic metadata above, the declaration role is a
 correspondence identity input. When `query diff --systems` pairs the nodes of
 the old and new revisions, a recognised role joins the symbol's file, label,
 and symbol kind in its semantic key, and an `overload` stub additionally takes
-its zero-based source order among the stubs sharing that key. Correspondence
+its zero-based source order among the stubs sharing that key. Stubs therefore
+pair by position, not by signature: adding or removing a stub other than the
+last renumbers the stubs after it, so the last stub is the one reported as
+added or removed. Correspondence
 reads the role only on a source-location symbol node, only from the extension
 under the node's own identity namespace, and only when that namespace is
 `minotaur-python` or `minotaur-javascript`. It recognises any of the seven roles `property`,
