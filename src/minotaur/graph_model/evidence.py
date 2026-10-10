@@ -218,9 +218,8 @@ class Evidence:
         validator uses it for duplicate detection and the canonical serializer
         can use it as the evidence identity when ordering records.
 
-        Two accepted v1 quirks of Python equality apply: JSON ``1`` and
-        ``1.0`` compare equal, and an explicit empty ``extensions: {}`` is
-        distinct from an absent one.
+        One accepted v1 quirk of Python equality remains: an explicit empty
+        ``extensions: {}`` is distinct from an absent one.
         """
         return (self.provenance, self.producer, self.rule, hashable_json(self.extensions))
 

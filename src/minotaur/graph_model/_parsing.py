@@ -38,17 +38,22 @@ def reject_unpaired_surrogates(value: str, context: str) -> None:
 
 
 def hashable_json(value: object) -> object:
-    """Return a hashable, equality-preserving key for a frozen JSON-like value.
+    """Return a hashable key that preserves JSON value identity.
 
-    Mappings become sorted ``(key, value)`` tuples and sequences become
-    tuples, recursively; scalars pass through. Two values are equal under
-    Python equality iff their keys are equal, so this can back a set or dict
-    without changing the equality semantics of the original structures.
+    The key distinguishes JSON values that Python's own equality conflates:
+    a mapping becomes ``("m", sorted (key, key) pairs)`` and a sequence
+    becomes ``("s", (key, ...))``, so an object and an array never collide;
+    a boolean becomes ``("b", value)``, so JSON ``true`` and ``1`` (equal
+    under Python equality) keep distinct keys. Other leaves pass through
+    unchanged. Two values are equal as JSON values iff their keys are equal,
+    so this can back a set or dict without widening the duplicate grain.
     """
     if isinstance(value, Mapping):
-        return tuple(sorted((key, hashable_json(item)) for key, item in value.items()))
+        return ("m", tuple(sorted((key, hashable_json(item)) for key, item in value.items())))
     if isinstance(value, list | tuple):
-        return tuple(hashable_json(item) for item in value)
+        return ("s", tuple(hashable_json(item) for item in value))
+    if isinstance(value, bool):
+        return ("b", value)
     return value
 
 
