@@ -58,7 +58,19 @@ def hashable_json(value: object) -> object:
 
 
 def reject_unknown_fields(data: dict[str, object], allowed: frozenset[str], context: str) -> None:
-    """Reject fields that the v1 schema does not define for ``context``."""
+    """Reject an explicit ``null`` field value, then fields the schema omits.
+
+    The published schema forbids an explicit JSON ``null`` in every model
+    field (``type: null`` appears only inside extension values), but the
+    trusted, sidecar-authorized load skips the schema pass.  This helper is
+    the first check every wire object passes through, so it owns the null rule
+    on both paths.  The check runs before the conforming early return so a
+    conforming object is checked too; ``None in data.values()`` allocates
+    nothing on the accepted path, and only a rejection builds a message.
+    """
+    if None in data.values():
+        field = next(name for name, value in data.items() if value is None)
+        raise ValueError(f"{context} must not set {field!r} to null")
     # ``dict_keys`` can compare itself to the allowed set without materializing
     # a difference set.  Graph loading visits this helper for every model
     # object, so keep the common, conforming path allocation-free and only
