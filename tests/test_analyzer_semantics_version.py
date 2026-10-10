@@ -18,6 +18,7 @@ from minotaur.graph_model.evidence import Producer
 from minotaur.graph_model.loading import load_graph_file, stamp_path
 from minotaur.graph_model.serialization import serialize
 from minotaur.language_interpreter import registry
+from minotaur.query.correspondence import _DECLARATION_ROLES
 from minotaur.query.freshness import AnalyzerChange
 from minotaur.query.system import QueryInvocation
 
@@ -66,6 +67,24 @@ def test_fingerprint_covers_every_registered_interpreter_once(tmp_path: Path) ->
     assert Counter(doc.generated_by.name for doc in documents[:-1]) == expected
     assert documents[-1].generated_by.name == "minotaur"
     assert documents[-1].nodes == ()
+
+
+def test_samples_exercise_every_declaration_role(tmp_path: Path) -> None:
+    roles: dict[str, Counter[str]] = {}
+    for document in _sample_documents(tmp_path):
+        for node in document.nodes:
+            payload = (node.extensions or {}).get(document.generated_by.name, {})
+            if "declaration_role" in payload:
+                roles.setdefault(document.generated_by.name, Counter())[
+                    payload["declaration_role"]
+                ] += 1
+    assert roles == {
+        "minotaur-python": Counter(
+            {"property": 1, "getter": 1, "setter": 1, "deleter": 1, "overload": 3}
+        ),
+        "minotaur-javascript": Counter({"get": 2, "set": 1}),
+    }
+    assert {role for counts in roles.values() for role in counts} == _DECLARATION_ROLES
 
 
 @pytest.mark.parametrize("language", ["python", "javascript", "sql"])

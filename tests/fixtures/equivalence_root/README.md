@@ -2,7 +2,11 @@
 
 A deterministic, committed Python substrate for `scripts/check_equivalence.py`.
 It includes `root_star.py`, a minimal unexecuted source case that keeps the
-harness's module-only root-star analysis non-vacuous.
+harness's module-only root-star analysis non-vacuous, and
+`workflow/declarations.py`, the analyzer-semantics sample for declaration
+roles: a property with explicit getter, setter and deleter accessors, and
+`@overload`/`@typing.overload` stubs beside their implementation. It defines no
+`main` and calls none of the queried symbols.
 
 The tree is small on purpose: every query class in
 `scripts/equivalence_queries.json` has a real, non-empty hit here — several

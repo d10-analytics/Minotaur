@@ -122,6 +122,28 @@ Repeated direct declarations with the same name in one scope remain separate
 nodes, and each node receives its own header and body relationships. Name-based
 calls, loads, and imports resolve to the last definition of that name.
 
+A module-level function or a method declared directly in a class, including an
+`async def`, also records a declaration role when its decorators name one, so
+same-named declarations stay distinguishable when `query diff --systems` pairs
+two revisions. Recognition is syntactic on each decorator's final name:
+
+- `@property` or `@<expr>.property` records `property`;
+- `@<expr>.getter`, `@<expr>.setter`, and `@<expr>.deleter` record `getter`,
+  `setter`, and `deleter`;
+- `@overload`, `@typing.overload`, `@typing_extensions.overload`, or any other
+  `@<module>.overload` records `overload`.
+
+Decorators are scanned top to bottom and the first recognised one decides the
+role. Classes never carry a role, and neither do definitions whose decorators
+are all unrecognised, such as `@functools.cached_property` or a called
+decorator. An overload implementation has no `overload` decorator and so no
+role. Recognition does not follow import aliases: after
+`from typing import overload as ov`, an `@ov` stub records no role, so those
+stubs keep sharing one identity with their implementation and `diff --systems`
+refuses them as ambiguous (exit `2`) rather than guessing. The role is stored
+as `extensions["minotaur-python"]["declaration_role"]` and does not change node
+IDs, labels, or symbol kinds.
+
 The interpreter also records resolvable non-call references as `references`
 relationships. For example, passing a function as `register(handler)` or
 accessing `button.clicked.connect(self.on_click)` records the resolved target

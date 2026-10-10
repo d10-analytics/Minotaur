@@ -480,6 +480,21 @@ system. Missing call-expression evidence on a side is a limitation notice, not
 a detected change. The comparison reports accepted source facts only; it does
 not infer renames, causality, edit timing, or intent.
 
+Two symbols with the same file, label, and symbol kind share a semantic
+identity unless the analyzer recorded different declaration roles for them. Accessor and overload declarations are distinguished by that role: a
+Python `@property` getter and its `setter` and `deleter`, JavaScript `get` and
+`set` class accessors, and Python `@overload` stubs, which are separated from
+their implementation by the role and from each other by source order. Stubs
+therefore pair by position, not by signature: adding or removing a stub other
+than the last renumbers the stubs after it, so the comparison reports the last
+stub as added or removed and pairs each remaining stub with whichever stub now
+holds its position, and reordering stubs alone adds or removes none. Genuine
+duplicates, including two getters or two setters for one name, overload stubs
+decorated through an import alias such as `@ov` after
+`from typing import overload as ov`, and a static and an instance JavaScript
+accessor of the same name and kind remain an ambiguous semantic identity:
+status `2`, an attributed diagnostic, and no report.
+
 Compare the committed graph at `HEAD` with the current working tree through the
 plain committed-reference mode, for either the configured repository selection
 or one committed system graph:

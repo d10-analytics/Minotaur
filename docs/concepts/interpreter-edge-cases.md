@@ -168,3 +168,30 @@ Proof: [`test_conditional_function_redefinitions_remain_unemitted_and_unresolved
 
 Status: NOT_APPLICABLE
 Reason: The bounded SQL slice has no corresponding conditional function declaration operation.
+
+### EDGE-DECL-003 — Same-name accessor and overload declarations carry a declaration role
+
+Question: When several definitions legitimately share one qualified name as property accessors or overload declarations, does each emitted declaration carry a declaration role that tells it apart without changing its node identity?
+
+#### Python — minotaur-python
+
+Status: PARTIAL
+Example: `from typing import overload\n\nclass Gauge:\n    @property\n    def level(self): ...\n    @level.setter\n    def level(self, value): ...\n    @overload\n    def convert(self, value: int) -> int: ...\n    def convert(self, value): ...`
+Expected graph facts: Both `app.Gauge.level` methods are emitted with extensions `{"minotaur-python": {"declaration_role": "property"}}` and `{"minotaur-python": {"declaration_role": "setter"}}`; `getter`, `deleter` and `overload` (including the `typing.overload`, `t.overload` and `typing_extensions.overload` spellings and `async` stubs) are recorded the same way, while implementations, plain methods, classes and other decorators carry no extensions, and node IDs, labels, symbol kinds and locations are identical to analysis without roles. Exclusion: recognition is syntactic on the decorator's final name, so an aliased decorator name such as `from typing import overload as ov` with `@ov` records no role.
+Owner: [`_declaration_role`](../../src/minotaur/language_interpreter/python/interpreter.py); the first recognised decorator, scanned top to bottom, decides the role.
+Marker: # EDGE-DECL-003: supports syntactic property, accessor and overload declaration roles.
+Proof: [`test_decorated_definitions_record_syntactic_declaration_roles`](../../tests/language_interpreter/python/test_interpreter.py); the natural fixture asserts the exact role or absence of extensions for every symbol, the `@ov` exclusion, and identity unchanged against a roleless analysis.
+
+#### JavaScript — minotaur-javascript
+
+Status: PARTIAL
+Example: `export class Gauge {\n  get level() { return this._level; }\n  set level(value) { this._level = value; }\n  reset() {}\n}`
+Expected graph facts: The two `lib.Gauge.level` methods are emitted with extensions `{"minotaur-javascript": {"declaration_role": "get"}}` and `{"minotaur-javascript": {"declaration_role": "set"}}`, so whole-graph correspondence indexes each under its own key; constructors and ordinary methods carry no extensions, and object-literal accessors emit no declaration. Exclusion: `static` is not encoded in the role, so a `static get v` beside an instance `get v` both record role `get` and remain an ambiguous correspondence.
+Owner: [`_collect_declarations`](../../src/minotaur/language_interpreter/javascript/interpreter.py); class `MethodDefinition` members of kind `get` or `set` record that kind as the role.
+Marker: # EDGE-DECL-003: supports class get/set accessor roles; static is not encoded.
+Proof: [`test_class_accessors_record_declaration_roles_for_correspondence`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts exact accessor roles, distinct correspondence keys for the get/set pair, and refusal for twin and static-beside-instance accessors.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no property accessor or overload declarations that share one qualified name.

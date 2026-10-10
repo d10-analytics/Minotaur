@@ -21,6 +21,11 @@ from minotaur.language_interpreter.javascript import interpreter as javascript_i
 from minotaur.language_interpreter.python import analyze_python_files
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
+from minotaur.query.correspondence import (
+    CorrespondenceAmbiguityError,
+    node_key,
+    prepare_whole_graph,
+)
 
 
 def _analyze(tmp_path, files: dict[str, str]):
@@ -1430,3 +1435,63 @@ def test_javascript_module_location_ends_at_last_content_line(
     module = _node(result, "app")
     assert module.location.range.end.line == end_line
     assert module.location.range.end.character == end_character
+
+
+def _plain_extensions(node):
+    if node.extensions is None:
+        return None
+    return {namespace: dict(values) for namespace, values in node.extensions.items()}
+
+
+def test_class_accessors_record_declaration_roles_for_correspondence(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "lib.js": (
+                "export class Gauge {\n"
+                "  constructor() { this._level = 0; }\n"
+                "  get level() { return this._level; }\n"
+                "  set level(value) { this._level = value; }\n"
+                "  static get unit() { return 'm'; }\n"
+                "  reset() { this._level = 0; }\n"
+                "}\n"
+                "const settings = { get size() { return 1; } };\n"
+            )
+        },
+    )
+    assert result.diagnostics == ()
+    gauge = _node(result, "lib.Gauge")
+    members = sorted(
+        (node.location.range.start.line, node.label, _plain_extensions(node))
+        for node in result.document.nodes
+        if node.label.startswith("lib.Gauge.")
+    )
+    assert _plain_extensions(gauge) == {"minotaur-javascript": {"export_kind": "named"}}
+    assert members == [
+        (1, "lib.Gauge.constructor", None),
+        (2, "lib.Gauge.level", {"minotaur-javascript": {"declaration_role": "get"}}),
+        (3, "lib.Gauge.level", {"minotaur-javascript": {"declaration_role": "set"}}),
+        (4, "lib.Gauge.unit", {"minotaur-javascript": {"declaration_role": "get"}}),
+        (5, "lib.Gauge.reset", None),
+    ]
+    assert not any("size" in node.label for node in result.document.nodes)
+
+    prepared = prepare_whole_graph(result.document)
+    level_nodes = [node for node in result.document.nodes if node.label == "lib.Gauge.level"]
+    assert len({node_key(node) for node in level_nodes}) == 2
+    for node in level_nodes:
+        assert prepared.nodes_by_key[node_key(node)] == (node,)
+
+    for name, body in (
+        ("twins.js", "  get v() { return 1; }\n  get v() { return 2; }\n"),
+        ("mixed.js", "  static get v() { return 1; }\n  get v() { return 2; }\n"),
+    ):
+        refused = _analyze(tmp_path, {name: f"export class Pair {{\n{body}}}\n"})
+        label = f"{name.removesuffix('.js')}.Pair.v"
+        duplicates = [node for node in refused.document.nodes if node.label == label]
+        assert [_plain_extensions(node) for node in duplicates] == [
+            {"minotaur-javascript": {"declaration_role": "get"}}
+        ] * 2
+        with pytest.raises(CorrespondenceAmbiguityError) as raised:
+            prepare_whole_graph(refused.document)
+        assert set(raised.value.candidate_ids) == {node.id for node in duplicates}

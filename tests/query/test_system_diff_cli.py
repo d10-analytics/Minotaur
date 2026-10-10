@@ -2494,3 +2494,365 @@ def test_capture_present_admits_only_regular_files_and_directories(tmp_path: Pat
     if hasattr(os, "mkfifo"):
         os.mkfifo(root / "pipe")
         assert cli._capture_present(root, "pipe") is False
+
+
+_ACCESSOR_LIB = """class Box:
+    @property
+    def v(self):
+        return 1
+
+    @v.setter
+    def v(self, value):
+        pass
+"""
+
+_ACCESSOR_CONSUMER = """from app.lib import Box
+
+def use():
+    box = Box()
+    box.v = 2
+    return box.v
+"""
+
+_OVERLOAD_MODULE = """from typing import overload
+
+
+@overload
+def f(x: int) -> int: ...
+@overload
+def f(x: str) -> str: ...
+@overload
+def f(x: bytes) -> bytes: ...
+def f(x):
+    return x
+"""
+
+_LAST_OVERLOAD_STUB = "@overload\ndef f(x: bytes) -> bytes: ...\n"
+
+_JS_ACCESSOR_LIB = """export class Gauge {
+  get level() {
+    return 1;
+  }
+
+  set level(value) {
+    this.value = value;
+  }
+}
+"""
+
+_JS_ACCESSOR_CONSUMER = """import { Gauge } from "./lib.js";
+
+export function read() {
+  const gauge = new Gauge();
+  gauge.level = 2;
+  return gauge.level;
+}
+"""
+
+
+def _systems_repo(
+    tmp_path: Path, files: dict[str, str], systems: dict[str, list[str]], targets: list[str]
+) -> Path:
+    """Commit sources, config and one system definition per named system."""
+    root = _repo(tmp_path)
+    for relative, content in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        f"targets = {json.dumps(targets)}\n",
+        encoding="utf-8",
+    )
+    for name, members in systems.items():
+        definition = root / "docs" / "systems" / name.lower()
+        definition.mkdir(parents=True)
+        (definition / "system.toml").write_text(
+            f"schema_version = 1\nname = {json.dumps(name)}\nfiles = {json.dumps(members)}\n",
+            encoding="utf-8",
+        )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    return root
+
+
+def _accessor_repo(tmp_path: Path) -> Path:
+    return _systems_repo(
+        tmp_path,
+        {"app/__init__.py": "", "app/lib.py": _ACCESSOR_LIB, "consumer.py": _ACCESSOR_CONSUMER},
+        {"App": ["app/lib.py"], "Client": ["consumer.py"]},
+        ["app", "consumer.py"],
+    )
+
+
+def _overload_repo(tmp_path: Path, source: str = _OVERLOAD_MODULE) -> Path:
+    return _systems_repo(
+        tmp_path,
+        {"ov/__init__.py": "", "ov/mod.py": source},
+        {"Ov": ["ov/mod.py"]},
+        ["ov"],
+    )
+
+
+def _node_rows(payload: dict[str, object], status: str) -> list[dict[str, object]]:
+    comparison = payload["comparison"]
+    assert isinstance(comparison, dict)
+    return [node for node in comparison["nodes"] if node["status"] == status]
+
+
+def _row_node(row: dict[str, object]) -> dict[str, object]:
+    side = row["after"] if row["status"] != "removed" else row["before"]
+    # A list here means several occurrences merged under one correspondence key.
+    assert isinstance(side, dict), (row["id"], row["reasons"])
+    node = side["node"]
+    assert isinstance(node, dict)
+    return node
+
+
+def _declaration_role(node: dict[str, object]) -> object:
+    extensions = node.get("extensions") or {}
+    assert isinstance(extensions, dict)
+    namespace = node["identity"]["namespace"]  # type: ignore[index]
+    return (extensions.get(namespace) or {}).get("declaration_role")
+
+
+def _symbol_rows(payload: dict[str, object], label: str) -> list[tuple[str, object]]:
+    """Return (status, role) for every comparison node row carrying ``label``."""
+    comparison = payload["comparison"]
+    assert isinstance(comparison, dict)
+    return sorted(
+        (
+            (row["status"], _declaration_role(_row_node(row)))
+            for row in comparison["nodes"]
+            if _row_node(row).get("label") == label
+        ),
+        key=repr,
+    )
+
+
+def test_systems_python_property_accessors_compare_across_systems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A getter and setter consumed from another system correspond one-to-one."""
+    root = _accessor_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("no system differences\n")
+    assert captured.err == ""
+
+    (root / "consumer.py").write_text(
+        _ACCESSOR_CONSUMER + "\n\ndef extra():\n    return Box()\n", encoding="utf-8"
+    )
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out.splitlines()[0] == (
+        "boundary added: Client.consumer.extra -> App.app.lib.Box (calls)"
+    )
+    assert captured.err == ""
+
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert _symbol_rows(payload, "app.lib.Box.v") == [
+        ("unchanged", "property"),
+        ("unchanged", "setter"),
+    ]
+    assert [_row_node(row)["label"] for row in _node_rows(payload, "added")] == ["consumer.extra"]
+    assert captured.err == ""
+
+
+def test_systems_python_setter_removal_is_one_removed_node_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Removing only the setter removes its own key and leaves the getter matched."""
+    root = _accessor_repo(tmp_path)
+    monkeypatch.chdir(root)
+    getter_only = _ACCESSOR_LIB.split("\n    @v.setter")[0] + "\n"
+    (root / "app" / "lib.py").write_text(getter_only, encoding="utf-8")
+
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    removed = _node_rows(payload, "removed")
+    assert len(removed) == 1
+    node = _row_node(removed[0])
+    assert node["label"] == "app.lib.Box.v"
+    assert _declaration_role(node) == "setter"
+    assert node["location"]["range"]["start"]["line"] == 6  # type: ignore[index]
+    assert _node_rows(payload, "added") == []
+    assert _symbol_rows(payload, "app.lib.Box.v") == [
+        ("removed", "setter"),
+        ("unchanged", "property"),
+    ]
+    assert captured.err == ""
+
+
+def test_systems_line_shift_above_accessors_keeps_every_node_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Accessor identity does not depend on source position."""
+    root = _accessor_repo(tmp_path)
+    monkeypatch.chdir(root)
+    (root / "app" / "lib.py").write_text("\n\n\n" + _ACCESSOR_LIB, encoding="utf-8")
+
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    nodes = payload["comparison"]["nodes"]
+    assert nodes
+    assert all(node["status"] == "unchanged" for node in nodes)
+    assert _symbol_rows(payload, "app.lib.Box.v") == [
+        ("unchanged", "property"),
+        ("unchanged", "setter"),
+    ]
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "duplicate",
+    (
+        "\n    @property\n    def v(self):\n        return 2\n",
+        "\n    @v.setter\n    def v(self, value):\n        pass\n",
+    ),
+    ids=("two-properties", "two-setters"),
+)
+def test_systems_duplicate_property_or_setter_definitions_stay_ambiguous(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    duplicate: str,
+) -> None:
+    """Accessor roles never number genuine duplicates, so refusal stands."""
+    root = _accessor_repo(tmp_path)
+    monkeypatch.chdir(root)
+    (root / "app" / "lib.py").write_text(_ACCESSOR_LIB + duplicate, encoding="utf-8")
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("minotaur: error: ambiguous")
+
+
+def test_systems_overload_stubs_compare_within_named_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Overload stubs and their implementation each keep a distinct identity."""
+    root = _overload_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    assert cli.main(["query", "diff", "--systems", "--system", "Ov"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("no system differences\n")
+    assert captured.err == ""
+
+    (root / "ov" / "mod.py").write_text(
+        _OVERLOAD_MODULE + "\n\ndef g():\n    return f(1)\n", encoding="utf-8"
+    )
+    assert cli.main(["query", "diff", "--systems", "--system", "Ov", "--json"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert [_row_node(row)["label"] for row in _node_rows(payload, "added")] == ["ov.mod.g"]
+    assert _node_rows(payload, "removed") == []
+    assert _node_rows(payload, "changed") == []
+    assert _symbol_rows(payload, "ov.mod.f") == [
+        ("unchanged", "overload"),
+        ("unchanged", "overload"),
+        ("unchanged", "overload"),
+        ("unchanged", None),
+    ]
+    assert captured.err == ""
+
+
+def test_systems_last_overload_stub_removal_removes_its_symbol_and_reference_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The removed stub's unresolved ``overload`` reference keeps its own origin key."""
+    root = _overload_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert _LAST_OVERLOAD_STUB in _OVERLOAD_MODULE
+    (root / "ov" / "mod.py").write_text(
+        _OVERLOAD_MODULE.replace(_LAST_OVERLOAD_STUB, ""), encoding="utf-8"
+    )
+
+    assert cli.main(["query", "diff", "--systems", "--system", "Ov", "--json"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert [row["reasons"] for row in _node_rows(payload, "changed")] == []
+    assert _node_rows(payload, "added") == []
+    removed = sorted(
+        (
+            (
+                _row_node(row)["node_class"],
+                _row_node(row)["label"],
+                _declaration_role(_row_node(row)),
+                _row_node(row)["location"]["range"]["start"]["line"],  # type: ignore[index]
+            )
+            for row in _node_rows(payload, "removed")
+        ),
+        key=repr,
+    )
+    assert removed == [
+        ("symbol", "ov.mod.f", "overload", 8),
+        ("unresolved-reference", "overload", None, 7),
+    ]
+    assert captured.err == ""
+
+
+def test_systems_aliased_overload_spelling_stays_ambiguous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An aliased ``overload`` decorator has no role, so the stubs stay refused."""
+    aliased = _OVERLOAD_MODULE.replace(
+        "from typing import overload", "from typing import overload as ov"
+    ).replace("@overload", "@ov")
+    root = _overload_repo(tmp_path, aliased)
+    monkeypatch.chdir(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("minotaur: error: ambiguous")
+
+
+def test_systems_javascript_class_accessors_compare_across_systems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A JavaScript get/set pair consumed from another system corresponds one-to-one."""
+    root = _systems_repo(
+        tmp_path,
+        {"web/lib.js": _JS_ACCESSOR_LIB, "web/consumer.js": _JS_ACCESSOR_CONSUMER},
+        {"Lib": ["web/lib.js"], "Client": ["web/consumer.js"]},
+        ["web"],
+    )
+    monkeypatch.chdir(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("no system differences\n")
+    assert captured.err == ""
+
+    (root / "web" / "lib.js").write_text(
+        _JS_ACCESSOR_LIB + "\nexport function create() {\n  return new Gauge();\n}\n",
+        encoding="utf-8",
+    )
+    (root / "web" / "consumer.js").write_text(
+        _JS_ACCESSOR_CONSUMER.replace("{ Gauge }", "{ Gauge, create }")
+        + "\nexport function make() {\n  return create();\n}\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    captured = capsys.readouterr()
+    assert (
+        "boundary added: Client.web/consumer.make -> Lib.web/lib.create (calls)"
+        in captured.out.splitlines()
+    )
+    assert captured.err == ""
+
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert _symbol_rows(payload, "web/lib.Gauge.level") == [
+        ("unchanged", "get"),
+        ("unchanged", "set"),
+    ]

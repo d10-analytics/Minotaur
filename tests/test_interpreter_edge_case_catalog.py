@@ -33,6 +33,7 @@ CASE_IDS = (
     "EDGE-BIND-004",
     "EDGE-DECL-001",
     "EDGE-DECL-002",
+    "EDGE-DECL-003",
 )
 STATUS_MATRIX = {
     "EDGE-BIND-001": {
@@ -63,6 +64,11 @@ STATUS_MATRIX = {
     "EDGE-DECL-002": {
         "minotaur-python": "UNSUPPORTED",
         "minotaur-javascript": "UNSUPPORTED",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-DECL-003": {
+        "minotaur-python": "PARTIAL",
+        "minotaur-javascript": "PARTIAL",
         "minotaur-sql": "NOT_APPLICABLE",
     },
 }

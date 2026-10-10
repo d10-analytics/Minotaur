@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 
@@ -1565,3 +1566,381 @@ def test_whole_graph_mode_is_explicit_and_retains_internal_relationships() -> No
     assert len(whole.relationship_groups) == 1
     assert whole.whole_graph is True
     assert correspondence.prepare_correspondence(document).whole_graph is False
+
+
+def _analyzer_symbol(
+    label: str,
+    line: int,
+    *,
+    namespace: str = "minotaur-python",
+    path: str = "src/a.py",
+    kind: str = "function",
+    character: int = 0,
+) -> Node:
+    location = Location(path, Range(Position(line, character), Position(line, character + 1)))
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, namespace)
+    node_id = compute_node_id(
+        identity,
+        node_class=NodeClass.SYMBOL.value,
+        symbol_kind=kind,
+        location=location,
+    )
+    return Node(
+        id=node_id,
+        identity=identity,
+        node_class=NodeClass.SYMBOL,
+        label=label,
+        symbol_kind=kind,
+        location=location,
+    )
+
+
+def _with_role(node: Node, role: object, *, namespace: str | None = None) -> Node:
+    """Record a declaration role the way an analyzer extension would."""
+    return replace(
+        node,
+        extensions={namespace or node.identity.namespace: {"declaration_role": role}},
+    )
+
+
+def _keys_by_candidate(
+    prepared: correspondence.CorrespondenceIndex,
+) -> dict[str, tuple[object, ...]]:
+    keys: dict[str, tuple[object, ...]] = {}
+    for key, candidates in prepared.nodes_by_key.items():
+        for candidate in candidates:
+            keys[candidate.id] = key
+    return keys
+
+
+@pytest.mark.parametrize(
+    ("namespace", "role", "kind"),
+    [
+        ("minotaur-python", "property", "method"),
+        ("minotaur-python", "getter", "method"),
+        ("minotaur-python", "setter", "method"),
+        ("minotaur-python", "deleter", "method"),
+        ("minotaur-python", "get", "method"),
+        ("minotaur-javascript", "get", "method"),
+        ("minotaur-javascript", "set", "method"),
+        ("minotaur-javascript", "property", "function"),
+    ],
+)
+def test_recognised_declaration_role_extends_the_baseline_key(
+    namespace: str, role: str, kind: str
+) -> None:
+    plain = _analyzer_symbol("Gauge.level", 4, namespace=namespace, kind=kind)
+    with_role = _with_role(plain, role)
+    _full_load(_document(with_role))
+
+    baseline = (
+        IdentityBasis.SOURCE_LOCATION.value,
+        NodeClass.SYMBOL.value,
+        namespace,
+        "src/a.py",
+        "Gauge.level",
+        kind,
+    )
+    assert correspondence.node_key(plain) == baseline
+    assert correspondence.node_key(with_role) == (*baseline, role)
+    with pytest.raises(ValueError, match="only an overload"):
+        correspondence.node_key(with_role, ordinal=0)
+
+
+@pytest.mark.parametrize("namespace", ["minotaur-python", "minotaur-javascript"])
+def test_overload_role_key_requires_and_appends_its_ordinal(namespace: str) -> None:
+    plain = _analyzer_symbol("f", 2, namespace=namespace)
+    stub = _with_role(plain, "overload")
+    _full_load(_document(stub))
+
+    with pytest.raises(ValueError, match="requires its ordinal"):
+        correspondence.node_key(stub)
+    for invalid in (-1, True, "0"):
+        with pytest.raises(ValueError, match="non-negative integer"):
+            correspondence.node_key(stub, ordinal=invalid)
+    assert correspondence.node_key(stub, ordinal=0) == (
+        *correspondence.node_key(plain),
+        "overload",
+        0,
+    )
+    assert correspondence.node_key(stub, ordinal=3) == (
+        *correspondence.node_key(plain),
+        "overload",
+        3,
+    )
+    with pytest.raises(ValueError, match="only an overload"):
+        correspondence.node_key(plain, ordinal=0)
+
+
+def _ignored_role_variants() -> list[tuple[str, Node, Node]]:
+    plain = _analyzer_symbol("Gauge.level", 4, kind="method")
+    helper_namespace = _symbol("Gauge.level", 4, kind="method")
+    resource_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, "minotaur-python")
+    resource_location = _location("src/a.py", 4)
+    resource = Node(
+        id=compute_node_id(
+            resource_identity,
+            node_class=NodeClass.RESOURCE.value,
+            location=resource_location,
+        ),
+        identity=resource_identity,
+        node_class=NodeClass.RESOURCE,
+        label="Gauge.level",
+        location=resource_location,
+    )
+    upstream_identity = NodeIdentity(
+        IdentityBasis.UPSTREAM_IDENTIFIER,
+        "minotaur-python",
+        upstream_identifier="pkg.Gauge.level",
+    )
+    upstream = Node(
+        id=compute_node_id(
+            upstream_identity,
+            node_class=NodeClass.SYMBOL.value,
+            symbol_kind="method",
+        ),
+        identity=upstream_identity,
+        node_class=NodeClass.SYMBOL,
+        label="Gauge.level",
+        symbol_kind="method",
+    )
+    return [
+        ("no-extensions", plain, plain),
+        ("role-absent", plain, replace(plain, extensions={"minotaur-python": {"other": "x"}})),
+        ("bogus", plain, _with_role(plain, "bogus")),
+        ("integer", plain, _with_role(plain, 1)),
+        ("boolean", plain, _with_role(plain, True)),
+        ("null", plain, _with_role(plain, None)),
+        ("nested", plain, _with_role(plain, {"role": "getter"})),
+        ("case", plain, _with_role(plain, "Getter")),
+        ("foreign-analyzer", plain, _with_role(plain, "setter", namespace="minotaur-javascript")),
+        ("foreign-tool", plain, _with_role(plain, "overload", namespace="tool")),
+        ("non-minotaur", helper_namespace, _with_role(helper_namespace, "setter")),
+        ("non-minotaur-overload", helper_namespace, _with_role(helper_namespace, "overload")),
+        ("resource", resource, _with_role(resource, "getter")),
+        ("upstream-symbol", upstream, _with_role(upstream, "overload")),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("baseline", "variant"),
+    [pytest.param(base, variant, id=name) for name, base, variant in _ignored_role_variants()],
+)
+def test_unrecognised_or_misplaced_roles_keep_the_exact_baseline_key(
+    baseline: Node, variant: Node
+) -> None:
+    _full_load(_document(variant))
+    assert correspondence.node_key(variant) == correspondence.node_key(baseline)
+    with pytest.raises(ValueError, match="only an overload"):
+        correspondence.node_key(variant, ordinal=0)
+
+
+@pytest.mark.parametrize(
+    ("namespace", "first_role", "second_role"),
+    [
+        ("minotaur-python", "property", "setter"),
+        ("minotaur-python", "property", "deleter"),
+        ("minotaur-python", "getter", "setter"),
+        ("minotaur-javascript", "get", "set"),
+    ],
+)
+def test_whole_graph_accepts_accessor_pairs_sharing_label_and_file(
+    namespace: str, first_role: str, second_role: str
+) -> None:
+    first = _with_role(
+        _analyzer_symbol("Gauge.level", 4, namespace=namespace, kind="method"), first_role
+    )
+    second = _with_role(
+        _analyzer_symbol("Gauge.level", 8, namespace=namespace, kind="method"), second_role
+    )
+    loaded = _full_load(_document(first, second)).document
+
+    prepared = correspondence.prepare_whole_graph(loaded)
+
+    keys = _keys_by_candidate(prepared)
+    assert keys[first.id] != keys[second.id]
+    assert keys[first.id][-1] == first_role
+    assert keys[second.id][-1] == second_role
+    assert prepared.nodes_by_key[keys[first.id]] == (first,)
+    assert prepared.nodes_by_key[keys[second.id]] == (second,)
+
+
+def _duplicate_pairs() -> list[tuple[str, Node, Node]]:
+    def analyzer(line: int) -> Node:
+        return _analyzer_symbol("Gauge.level", line, kind="method")
+
+    def helper(line: int) -> Node:
+        return _symbol("Gauge.level", line, kind="method")
+
+    return [
+        ("two-property", _with_role(analyzer(4), "property"), _with_role(analyzer(8), "property")),
+        ("two-setter", _with_role(analyzer(4), "setter"), _with_role(analyzer(8), "setter")),
+        ("two-roleless", analyzer(4), analyzer(8)),
+        ("two-bogus", _with_role(analyzer(4), "bogus"), _with_role(analyzer(8), "bogus")),
+        ("two-non-string", _with_role(analyzer(4), 1), _with_role(analyzer(8), 2)),
+        (
+            "two-foreign-namespace",
+            _with_role(analyzer(4), "getter", namespace="minotaur-javascript"),
+            _with_role(analyzer(8), "setter", namespace="minotaur-javascript"),
+        ),
+        (
+            "two-non-minotaur-namespace",
+            _with_role(helper(4), "getter"),
+            _with_role(helper(8), "setter"),
+        ),
+        (
+            "two-non-minotaur-overloads",
+            _with_role(helper(4), "overload"),
+            _with_role(helper(8), "overload"),
+        ),
+        ("bogus-and-roleless", _with_role(analyzer(4), "bogus"), analyzer(8)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [pytest.param(first, second, id=name) for name, first, second in _duplicate_pairs()],
+)
+def test_whole_graph_still_refuses_duplicates_without_distinguishing_roles(
+    first: Node, second: Node
+) -> None:
+    loaded = _full_load(_document(first, second)).document
+
+    with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
+        correspondence.prepare_whole_graph(loaded, side="old")
+
+    assert raised.value.endpoint == "node"
+    assert raised.value.side == "old"
+    assert raised.value.candidate_ids == (first.id, second.id)
+
+
+_STUB_LINES = (3, 7, 11)
+
+
+def _overload_family() -> tuple[list[Node], Node]:
+    stubs = [_with_role(_analyzer_symbol("f", line), "overload") for line in _STUB_LINES]
+    implementation = _analyzer_symbol("f", 15)
+    return stubs, implementation
+
+
+def test_whole_graph_numbers_overload_stubs_in_source_order_for_any_input_order() -> None:
+    stubs, implementation = _overload_family()
+    other_file = [
+        _with_role(_analyzer_symbol("f", line, path="src/b.py"), "overload") for line in (1, 5)
+    ]
+    other_label = [_with_role(_analyzer_symbol("g", line), "overload") for line in (20, 24)]
+    same_line = [
+        _with_role(_analyzer_symbol("h", 30, character=character), "overload")
+        for character in (12, 4)
+    ]
+    nodes = [*stubs, implementation, *other_file, *other_label, *same_line]
+    _full_load(_document(*nodes))
+
+    baseline = correspondence.node_key(implementation)
+    expected: dict[str, tuple[object, ...]] = {
+        implementation.id: baseline,
+        **{stub.id: (*baseline, "overload", k) for k, stub in enumerate(stubs)},
+        **{
+            stub.id: (
+                *correspondence.node_key(_analyzer_symbol("f", 0, path="src/b.py")),
+                "overload",
+                k,
+            )
+            for k, stub in enumerate(other_file)
+        },
+        **{
+            stub.id: (*correspondence.node_key(_analyzer_symbol("g", 0)), "overload", k)
+            for k, stub in enumerate(other_label)
+        },
+        same_line[1].id: (*correspondence.node_key(_analyzer_symbol("h", 0)), "overload", 0),
+        same_line[0].id: (*correspondence.node_key(_analyzer_symbol("h", 0)), "overload", 1),
+    }
+
+    rest = [*other_file, *other_label, *same_line]
+    orders = [
+        nodes,
+        list(reversed(nodes)),
+        nodes[1::2] + nodes[::2],
+        *([*family, *rest] for family in itertools.permutations([*stubs, implementation])),
+    ]
+    reference = correspondence.prepare_whole_graph(_document(*nodes)).nodes_by_key
+    assert len(reference) == len(nodes)
+    for order in orders:
+        prepared = correspondence.prepare_whole_graph(_document(*order))
+        assert _keys_by_candidate(prepared) == expected
+        assert prepared.nodes_by_key == reference
+
+
+def test_overload_stub_origins_are_numbered_before_unresolved_occurrences_key_them() -> None:
+    stubs, implementation = _overload_family()
+    target = _analyzer_symbol("target", 30)
+    occurrences = [
+        _unresolved(stub, "overload", line) for stub, line in zip(stubs, _STUB_LINES, strict=True)
+    ]
+    relationships = tuple(_relationship(occurrence, target) for occurrence in occurrences)
+    document = _document(
+        *reversed(stubs),
+        implementation,
+        target,
+        *occurrences,
+        relationships=relationships,
+    )
+
+    for prepared in (
+        _prepare_after_full_load(document),
+        correspondence.prepare_whole_graph(_full_load(document).document),
+    ):
+        keys = _keys_by_candidate(prepared)
+        occurrence_keys = [keys[occurrence.id] for occurrence in occurrences]
+        assert len(set(occurrence_keys)) == 3
+        for k, (stub, occurrence_key) in enumerate(zip(stubs, occurrence_keys, strict=True)):
+            origin_key = prepared.origin_dependencies[occurrence_key]
+            assert origin_key[-2:] == ("overload", k)
+            assert prepared.nodes_by_key[origin_key] == (stub,)
+        requested = {
+            occurrence.key
+            for group in prepared.relationship_groups.values()
+            for occurrence in group
+        }
+        assert len(requested) == 3
+        for relationship_key in requested:
+            assert prepared.validate_required_keys({relationship_key}, side="new") is prepared
+
+
+def test_roleless_overload_shape_still_raises_origin_ambiguity() -> None:
+    stubs = [_analyzer_symbol("f", line) for line in _STUB_LINES]
+    implementation = _analyzer_symbol("f", 15)
+    target = _analyzer_symbol("target", 30)
+    occurrence = _unresolved(stubs[0], "overload", 3)
+    relationship = _relationship(occurrence, target)
+    prepared = _prepare_after_full_load(
+        _document(*stubs, implementation, target, occurrence, relationships=(relationship,))
+    )
+    requested = next(iter(prepared.relationship_groups))
+
+    with pytest.raises(correspondence.CorrespondenceAmbiguityError) as raised:
+        prepared.validate_required_keys({requested}, side="old")
+
+    assert raised.value.origin is True
+    assert raised.value.endpoint == "source"
+    assert raised.value.candidate_ids == (*(stub.id for stub in stubs), implementation.id)
+
+
+def test_whole_graph_edgeless_stub_occurrences_key_their_own_numbered_origin() -> None:
+    stubs, implementation = _overload_family()
+    occurrences = [
+        _unresolved(stub, "overload", line) for stub, line in zip(stubs, _STUB_LINES, strict=True)
+    ]
+
+    prepared = correspondence.prepare_whole_graph(
+        _full_load(_document(implementation, *occurrences, *stubs)).document
+    )
+
+    keys = _keys_by_candidate(prepared)
+    occurrence_keys = [keys[occurrence.id] for occurrence in occurrences]
+    assert len(set(occurrence_keys)) == 3
+    for k, (stub, occurrence_key) in enumerate(zip(stubs, occurrence_keys, strict=True)):
+        origin_key = prepared.origin_dependencies[occurrence_key]
+        assert origin_key == (*correspondence.node_key(implementation), "overload", k)
+        assert prepared.nodes_by_key[origin_key] == (stub,)
+        assert prepared.nodes_by_key[occurrence_key] == (occurrences[k],)

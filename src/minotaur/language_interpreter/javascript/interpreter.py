@@ -298,12 +298,19 @@ def _collect_declarations(
                 method_name = _property_name(key)
                 if method_name is None:
                     continue
+                # EDGE-DECL-003: supports class get/set accessor roles; static is not encoded.
+                accessor_kind = getattr(member, "kind", None)
                 method = symbol_node(
                     f"{class_label}.{method_name}",
                     SymbolKind.METHOD,
                     _node_location(path, member, line_index),
                     NAMESPACE,
                     "javascript",
+                    (
+                        {NAMESPACE: {"declaration_role": accessor_kind}}
+                        if accessor_kind in {"get", "set"}
+                        else None
+                    ),
                 )
                 # Class methods are contained by the class, never by module.
                 bindings.setdefault(
