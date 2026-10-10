@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import jsonschema
@@ -15,6 +16,7 @@ from minotaur.graph_model.loading import (
     GraphLoadError,
     _validate_wire_shape,
     graph_digest,
+    load_graph_blob,
     load_graph_bytes,
     load_graph_file,
     schema,
@@ -648,3 +650,188 @@ def test_extension_key_verdicts_agree_on_trusted_and_full_validation_paths(
         else:
             with pytest.raises(GraphLoadError):
                 load_graph_bytes(content, _skip_schema=skip_schema)
+
+
+# ---------------------------------------------------------------------------
+# R-06 / AC-05: an explicit JSON null is rejected on the trusted path too
+# ---------------------------------------------------------------------------
+#
+# The published schema forbids ``null`` in every model field, but the trusted
+# (sidecar-authorized) load skips the schema pass.  The model layer's shared
+# ``reject_unknown_fields`` owns the rule for both paths, so this enumeration
+# holds every schema property name in every non-extension object of every
+# example graph to the same verdict on both natural load paths.  ``null``
+# inside an extension value stays legal, because the schema's
+# ``extensionValue`` admits ``null`` and the trusted path must agree.
+
+_GRAPH_EXAMPLES = sorted((ROOT / "examples/synthetic-graphs").glob("*.json"))
+
+# A valid source-control envelope: at least one of commit/branch is required,
+# and the commit must be a full lowercase hex identifier.
+_SOURCE_CONTROL_VARIANT: dict[str, object] = {
+    "system": "git",
+    "commit": "0" * 40,
+    "branch": "main",
+}
+
+
+def _schema_property_names() -> tuple[str, ...]:
+    """Every property name declared anywhere in the published schema.
+
+    Collected from every ``properties`` map (including the ``if``/``then``
+    branches), never from a hand-maintained list, so a field added to the
+    schema is probed here automatically.
+    """
+    names: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                names.update(properties)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(schema())
+    return tuple(sorted(names))
+
+
+_SCHEMA_PROPERTY_NAMES = _schema_property_names()
+
+
+def _non_extension_objects(
+    value: object, path: tuple[str | int, ...] = ()
+) -> Iterator[tuple[tuple[str | int, ...], dict[str, object]]]:
+    """Yield ``(json_path, object)`` for every object outside an extension value.
+
+    An ``extensions`` subtree is skipped whole: the schema admits ``null``
+    inside an extension value, so those objects are deliberately not probed.
+    """
+    if isinstance(value, dict):
+        yield path, value
+        for key, item in value.items():
+            if key == "extensions":
+                continue
+            yield from _non_extension_objects(item, (*path, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _non_extension_objects(item, (*path, index))
+
+
+def _graph_variants() -> list[tuple[str, str]]:
+    """Each example graph as ``(label, json_text)``, original and +source_control."""
+    variants: list[tuple[str, str]] = []
+    for example in _GRAPH_EXAMPLES:
+        base_text = example.read_text(encoding="utf-8")
+        variants.append((example.name, base_text))
+        with_source_control = json.loads(base_text)
+        with_source_control["source_control"] = dict(_SOURCE_CONTROL_VARIANT)
+        variants.append((example.name + "+source_control", json.dumps(with_source_control)))
+    return variants
+
+
+def _null_cells() -> list[tuple[str, str, tuple[str | int, ...], str]]:
+    """``(label, graph_json, object_path, property_name)`` for every probe."""
+    cells: list[tuple[str, str, tuple[str | int, ...], str]] = []
+    for label, text in _graph_variants():
+        for object_path, _ in _non_extension_objects(json.loads(text)):
+            for name in _SCHEMA_PROPERTY_NAMES:
+                cells.append((label, text, object_path, name))
+    return cells
+
+
+_NULL_CELLS = _null_cells()
+
+
+def _object_at(document: object, path: tuple[str | int, ...]) -> dict[str, object]:
+    target = document
+    for segment in path:
+        assert isinstance(target, (dict, list))
+        target = target[segment]  # type: ignore[index]
+    assert isinstance(target, dict)
+    return target
+
+
+def test_null_enumeration_covers_the_trusted_only_fields() -> None:
+    """The probe must include the fields the baseline trusted path accepted.
+
+    ``F-14`` found these four accepted only on the trusted path when set to
+    ``null``; covering them is what makes the enumeration fail without the
+    model-layer check.
+    """
+    cells = {(label, object_path, name) for label, _, object_path, name in _NULL_CELLS}
+    assert ("provenance-demo.json", ("nodes", 0), "language") in cells
+    assert ("small-workflow.json", ("nodes", 0), "language") in cells
+    assert ("small-workflow.json", ("relationships", 0, "evidence", 0), "producer") in cells
+    assert (
+        "small-workflow.json",
+        ("relationships", 0, "evidence", 0),
+        "extensions",
+    ) in cells
+    assert (
+        "provenance-demo.json",
+        ("relationships", 0, "evidence", 0, "producer"),
+        "version",
+    ) in cells
+
+
+def test_null_in_every_schema_property_fails_both_load_paths() -> None:
+    """Every non-extension object rejects a ``null`` model field on both paths.
+
+    The matching sidecar is the natural trusted trigger, so the assertion
+    fails without the model-layer check; ``validate=True`` exercises the
+    schema-first path.
+    """
+    for label, text, object_path, name in _NULL_CELLS:
+        document = json.loads(text)
+        cell = (label, object_path, name)
+        _object_at(document, object_path)[name] = None
+
+        assert list(_validator().iter_errors(document)), cell
+
+        content = json.dumps(document).encode()
+        sidecar = graph_digest(content).encode()
+
+        with pytest.raises(GraphLoadError) as trusted:
+            load_graph_blob(content, sidecar)
+        assert f"must not set {name!r} to null" in str(trusted.value), cell
+
+        with pytest.raises(GraphLoadError):
+            load_graph_blob(content, validate=True)
+
+
+@pytest.mark.parametrize("label", [label for label, _ in _graph_variants()])
+def test_unmodified_examples_load_on_both_paths(label: str) -> None:
+    text = dict(_graph_variants())[label]
+    content = text.encode()
+    sidecar = graph_digest(content).encode()
+    load_graph_blob(content, sidecar)
+    load_graph_blob(content, validate=True)
+
+
+def test_null_language_fails_the_stamped_load_graph_file_path(tmp_path: Path) -> None:
+    """At least one stamped ``load_graph_file`` cell carries the null rule."""
+    document = _small_workflow()
+    _nodes(document)[0]["language"] = None
+    graph_path = tmp_path / "minotaur-graph.json"
+    graph_path.write_text(json.dumps(document), encoding="utf-8")
+    stamp_path(graph_path).write_text(graph_digest(graph_path.read_bytes()), encoding="utf-8")
+
+    with pytest.raises(GraphLoadError, match="must not set 'language' to null"):
+        load_graph_file(graph_path)
+    with pytest.raises(GraphLoadError):
+        load_graph_file(graph_path, validate=True)
+
+
+def test_null_inside_extension_values_stays_legal_on_both_paths() -> None:
+    """An extension value ``{"ns": {"v": null}}`` must not be over-rejected."""
+    document = _wire_with_extensions({"ns": {"v": None}})
+    _validator().validate(document)
+
+    content = json.dumps(document).encode()
+    sidecar = graph_digest(content).encode()
+    load_graph_blob(content, sidecar)
+    load_graph_blob(content, validate=True)
