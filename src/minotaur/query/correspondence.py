@@ -63,13 +63,37 @@ def _derived_file(node: Node) -> str | None:
     return node.path
 
 
-def node_key(node: Node, *, origin: NodeKey | None = None) -> NodeKey:
-    """Build the complete semantic key for one node.
+_DECLARATION_ROLE_NAMESPACES = frozenset({"minotaur-python", "minotaur-javascript"})
+_DECLARATION_ROLE_FIELD = "declaration_role"
+_OVERLOAD_ROLE = "overload"
+_DECLARATION_ROLES = frozenset(
+    {"property", "getter", "setter", "deleter", _OVERLOAD_ROLE, "get", "set"}
+)
 
-    The returned nested tuple contains every field in the approved identity
-    domain.  Resource ``symbol_kind`` is intentionally retained only on the
-    original node and never enters its correspondence key.
+
+def _declaration_role(node: Node) -> str | None:
+    """Return the recognised declaration role recorded by a Minotaur analyzer.
+
+    The role is an identity input only for a source-location symbol whose own
+    namespace is one of the Minotaur analyzer namespaces, and only when it is
+    stored under that same namespace as a string from the closed role set.
+    Anything else is ignored so that genuine duplicates stay ambiguous.
     """
+    identity = node.identity
+    if identity.basis != IdentityBasis.SOURCE_LOCATION or node.node_class != NodeClass.SYMBOL:
+        return None
+    if identity.namespace not in _DECLARATION_ROLE_NAMESPACES or not node.extensions:
+        return None
+    payload = node.extensions.get(identity.namespace)
+    if not isinstance(payload, Mapping):
+        return None
+    role = payload.get(_DECLARATION_ROLE_FIELD)
+    if isinstance(role, str) and role in _DECLARATION_ROLES:
+        return role
+    return None
+
+
+def _role_free_key(node: Node, origin: NodeKey | None) -> NodeKey:
     identity = node.identity
     basis = identity.basis
     if basis == IdentityBasis.SOURCE_LOCATION:
@@ -109,6 +133,45 @@ def node_key(node: Node, *, origin: NodeKey | None = None) -> NodeKey:
             _derived_file(node),
         )
     raise ValueError(f"unsupported identity basis {basis!r}")
+
+
+def _pre_ordinal_key(node: Node, *, origin: NodeKey | None = None) -> NodeKey:
+    """Return the key with any declaration role but without an overload ordinal."""
+    fields = _role_free_key(node, origin)
+    role = _declaration_role(node)
+    if role is not None:
+        fields += (role,)
+    return fields
+
+
+def node_key(
+    node: Node,
+    *,
+    origin: NodeKey | None = None,
+    ordinal: int | None = None,
+) -> NodeKey:
+    """Build the complete semantic key for one node.
+
+    The returned nested tuple contains every field in the approved identity
+    domain.  Resource ``symbol_kind`` is intentionally retained only on the
+    original node and never enters its correspondence key.
+
+    A source-location symbol carrying a recognised declaration role appends
+    that role, so a getter and its setter, or JavaScript ``get``/``set``
+    accessors, have distinct keys.  Role ``overload`` additionally appends the
+    zero-based ``ordinal`` of the stub among nodes sharing the rest of its key;
+    it is required for such a node and rejected for every other node.
+    """
+    fields = _pre_ordinal_key(node, origin=origin)
+    if _declaration_role(node) != _OVERLOAD_ROLE:
+        if ordinal is not None:
+            raise ValueError("only an overload declaration correspondence key takes an ordinal")
+        return fields
+    if ordinal is None:
+        raise ValueError("overload declaration correspondence key requires its ordinal")
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 0:
+        raise ValueError("overload declaration ordinal must be a non-negative integer")
+    return (*fields, ordinal)
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,11 +432,24 @@ def prepare_correspondence(
 
     by_id = {node.id: node for node in document.nodes}
     ordinary_keys: dict[str, NodeKey] = {}
+    overloads: dict[NodeKey, list[Node]] = defaultdict(list)
+    for node in document.nodes:
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE:
+            continue
+        if _declaration_role(node) == _OVERLOAD_ROLE:
+            overloads[_pre_ordinal_key(node)].append(node)
+        else:
+            ordinary_keys[node.id] = node_key(node)
+    # Overload stubs are numbered by source position before any unresolved
+    # occurrence derives its origin key from ``ordinary_keys``; numbering them
+    # later would merge every stub's occurrences under one unindexed origin.
+    for stubs in overloads.values():
+        for ordinal, node in enumerate(sorted(stubs, key=_node_sort)):
+            ordinary_keys[node.id] = node_key(node, ordinal=ordinal)
     groups: dict[NodeKey, list[Node]] = defaultdict(list)
     for node in document.nodes:
-        if node.node_class != NodeClass.UNRESOLVED_REFERENCE:
-            key = node_key(node)
-            ordinary_keys[node.id] = key
+        key = ordinary_keys.get(node.id)
+        if key is not None:
             groups[key].append(node)
 
     origin_dependencies: dict[NodeKey, NodeKey] = {}
