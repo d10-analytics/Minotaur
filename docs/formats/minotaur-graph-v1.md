@@ -29,11 +29,15 @@ zero-based and ranges are half-open: the start is included and the end is
 excluded. A user interface converts lines to one-based values for display.
 
 `generated_by`, `generated_at`, and `source_control` are optional snapshot
-context. When present, `generated_at` is UTC RFC 3339; Git commits are full
-lowercase 40- or 64-character IDs. These fields are neither node identity nor
-history. Minotaur-written graphs record the analyzer semantics version in
-`generated_by.version`; freshness compares this version for graphs with a
-recorded, non-empty source selection. This is separate from the graph schema
+context. When present, `generated_at` is a UTC RFC 3339 timestamp ending in
+`Z`. The schema `pattern` and the model's `re.fullmatch` check the same pattern,
+so both paths agree on the field ranges; only the model separately verifies
+day-of-month validity with `datetime.fromisoformat`, so a well-formed but
+impossible date such as `2026-02-30T00:00:00Z` is rejected on the model path
+alone. Git commits are full lowercase 40- or 64-character IDs. These fields are
+neither node identity nor history. Minotaur-written graphs record the analyzer
+semantics version in `generated_by.version`; freshness compares this version
+for graphs with a recorded, non-empty source selection. This is separate from the graph schema
 version and from interpreter evidence producer metadata.
 
 ## Locations
@@ -274,7 +278,10 @@ nested extension objects. Fractional values are not part of the v1 format; use
 a scaled integer when exact fractional semantics are needed, and document the
 scale in the extension's contract. Values that do not need arithmetic may be
 represented as strings. Extension integers are limited to
-`[-2^63, 2^64-1]`, the range that `orjson` decodes as integers.
+`[-2^63, 2^64-1]`, the range that `orjson` decodes as integers; that 64-bit
+range is retained. The canonical JCS bytes match ECMAScript `JSON.stringify`
+only for integers within ±(2^53 − 1); a larger integer inside the 64-bit range
+is still serialized exactly as its decimal form.
 
 Extension metadata has a production nesting limit of 64 containers. The limit
 applies only to recursive JSON objects and arrays inside an `extensions`
@@ -301,12 +308,21 @@ Here `settings` is container 1, `stages` is container 2, and the object in the
 array is container 3; the `example` namespace object does not count. A value
 with 64 such nested containers is accepted. The 65th is rejected during
 construction and on both graph-loading paths with `extension nesting at
+/<pointer> exceeds 64 levels`. Input that is far deeper (for example 500 levels)
+is rejected with the same verdict but not always the same message: the validated
+path's schema pass reaches its recursion boundary first and reports `graph input
+nests deeper than the loader supports (extension objects)`, while the trusted
+path, which skips that pass, reports the precise `extension nesting at
 /<pointer> exceeds 64 levels`.
 
-As of 2026-08-23, v1 constraints are tightened so that extension values cannot
-contain non-integer numbers and extension object keys must remain within the
-Basic Multilingual Plane. The model enforces these rules on every load and
-construction path, while the schema enforces them for third-party wire input.
+Extension values cannot contain non-integer numbers, and extension object keys
+must remain within the Basic Multilingual Plane. The model enforces these rules
+on every load and construction path. For third-party wire input, JSON Schema
+rejects fractional numbers but accepts a number with a zero fraction such as
+`4.0`, which satisfies `type: integer`; only the model rejects every float
+representation. Calendar validity is likewise a model-only check: the schema's
+`generated_at` pattern accepts `2026-02-30T00:00:00Z`, and only the model
+rejects it.
 
 Array order does not change graph meaning. A canonical serializer sorts nodes
 by ID, relationships by `(source, target, kind)`, locations by path and range,
@@ -331,11 +347,16 @@ contract anyway:
 - Lone-surrogate escapes such as `"\ud800"` — likewise rejected while
   decoding with the same prefix.
 - Deeply nested extension objects or arrays — rejected at the deterministic
-  production limit of 64 containers described above, before either load path
-  reaches a stack-dependent validator cliff. `orjson` still rejects JSON that
-  itself exceeds its 1024-level decoder limit (`graph input is not valid JSON:
-  depth limit exceeded`); the loader also retains its `RecursionError` boundary
-  as a safeguard for other recursive validation paths.
+  production limit of 64 containers described above, so no accepted document
+  reaches a stack-dependent validator cliff. Input far beyond the limit (for
+  example 500 levels) still fails, but the two paths report it differently: the
+  validated path's schema pass exhausts its recursion budget first (`graph input
+  nests deeper than the loader supports (extension objects)`) while the trusted
+  path, which skips that pass, names the precise `extension nesting at
+  /<pointer> exceeds 64 levels`; the verdict is the same. `orjson` still rejects
+  JSON that itself exceeds its 1024-level decoder limit (`graph input is not
+  valid JSON: depth limit exceeded`); the loader also retains its
+  `RecursionError` boundary as a safeguard for other recursive validation paths.
 - Integer literals outside `[-2^63, 2^64-1]` — **not** a decode error.
   `orjson` decodes such a literal as a floating-point value. The model layer
   then rejects it as a non-integer, because every place a v1 document may hold
@@ -393,17 +414,19 @@ stamps the graph it just serialized without running `validate_document` at
 all — its node IDs are correct by construction, because it computes each one
 with `compute_node_id` from the same document it writes. Its absence or a digest mismatch does not indicate
 corruption; it only means the next read performs the full validation pass
-instead of a fast trusted load. The accepted risk (D-07) is that a graph whose
-contents were altered and whose sidecar was regenerated can bypass node-ID
-recomputation on the trusted path. A matching sidecar is trusted regardless of
-who wrote it: directory write access, not Minotaur authorship, is the trust
-boundary. Use `--validate` for untrusted input. One known instance bounds
-the exposure (review of `spec/trusted-graph-load`, 2026-08-23): a 17-mutation
-fuzz of stamped, schema-violating graphs found 16 rejected identically on the
-trusted path by `from_dict` and `validate_document`; the sole divergence was
-`"language": null`, which the schema rejects but `from_dict` accepts as the
-absent-optional state — benign, but it is the concrete shape the accepted
-risk names.
+instead of a fast trusted load. The accepted risk is that a graph whose contents
+were altered and whose sidecar was regenerated can bypass node-ID recomputation
+on the trusted path. A matching sidecar is trusted regardless of who wrote it:
+directory write access, not Minotaur authorship, is the trust boundary. Use
+`--validate` for untrusted input. The trusted path still rejects an explicit
+`null` in any model field exactly as the validated path does — one check runs
+before the conforming early return, so every wire object is covered, and only
+`null` inside an extension value stays legal. The remaining known divergences
+are the skipped node-ID verification itself, which is the accepted risk, and a
+difference in the message reported for deeply nested extension input: for the
+same rejected document the trusted path names the precise `extension nesting at
+/<pointer> exceeds 64 levels` while the validated path reports `graph input
+nests deeper than the loader supports (extension objects)`.
 
 A committed graph whose bytes match its sidecar digest is trusted without
 re-analysis: Minotaur loads it without re-analyzing the source it describes.

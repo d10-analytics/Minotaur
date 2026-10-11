@@ -2,7 +2,7 @@
 
 This module sits after semantic validation in the processing pipeline:
 parse JSON → schema validation → model construction → semantic validation →
-**canonical normalization** → render or slice.
+**canonical normalization**.
 
 Canonical normalization produces a deterministic dict (and optionally JCS
 bytes) from a validated ``GraphDocument``. Two independently assembled

@@ -3905,3 +3905,111 @@ def test_stdout_writer_closes_redirect_descriptor_even_when_duplication_fails(
     with pytest.raises(OSError) as closed:
         os.fstat(redirects[0])
     assert closed.value.errno == errno.EBADF
+
+
+# ---------------------------------------------------------------------------
+# CLI exit codes and stderr for unloadable graph files
+# ---------------------------------------------------------------------------
+
+_SMALL_WORKFLOW = Path(__file__).parents[1] / "examples/synthetic-graphs/small-workflow.json"
+
+
+def _mutated_graph(mutate: object) -> dict[str, object]:
+    document = json.loads(_SMALL_WORKFLOW.read_text(encoding="utf-8"))
+    mutate(document)  # type: ignore[operator]
+    return document
+
+
+def _write_graph(graph_path: Path, document: dict[str, object]) -> bytes:
+    data = json.dumps(document).encode()
+    graph_path.write_bytes(data)
+    return data
+
+
+def test_visualize_reports_a_bounded_schema_error_for_a_missing_field(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unstamped malformed graph gives exit 2 and small stderr."""
+    document = json.loads(_SMALL_WORKFLOW.read_text(encoding="utf-8"))
+    base_nodes = document["nodes"]
+    assert isinstance(base_nodes, list) and base_nodes
+    document["nodes"] = [base_nodes[index % len(base_nodes)] for index in range(2000)]
+    document.pop("coordinate_encoding")
+    graph_path = tmp_path / "graph.json"
+    _write_graph(graph_path, document)
+    assert not stamp_path(graph_path).exists()
+
+    status = cli.main(
+        ["visualize", "--input", str(graph_path), "--output", str(tmp_path / "out.html")]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    # A full schema-and-instance dump for this input would exceed 1 KiB; the
+    # bounded message keeps stderr inside the budget.
+    assert len(captured.err.encode("utf-8")) < 1024
+    assert "coordinate_encoding" in captured.err
+    assert "$:" in captured.err
+
+
+def test_visualize_rejects_a_stamped_non_object_node(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The trusted path exits 2 naming the array and index."""
+    graph_path = tmp_path / "graph.json"
+    data = _write_graph(graph_path, _mutated_graph(_set_nodes_item_int))
+    stamp_path(graph_path).write_text(f"{hashlib.sha256(data).hexdigest()}\n", encoding="utf-8")
+
+    status = cli.main(
+        ["visualize", "--input", str(graph_path), "--output", str(tmp_path / "out.html")]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "'nodes' item 0 must be an object, got int" in captured.err
+
+
+def test_visualize_validate_rejects_a_stamped_non_object_node_by_json_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--validate`` reports the schema's JSON path, not the model text."""
+    graph_path = tmp_path / "graph.json"
+    data = _write_graph(graph_path, _mutated_graph(_set_nodes_item_int))
+    stamp_path(graph_path).write_text(f"{hashlib.sha256(data).hexdigest()}\n", encoding="utf-8")
+
+    status = cli.main(
+        [
+            "visualize",
+            "--input",
+            str(graph_path),
+            "--output",
+            str(tmp_path / "out.html"),
+            "--validate",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "$.nodes[0]" in captured.err
+    assert "'nodes' item 0" not in captured.err
+
+
+def test_analyze_refuses_an_existing_output_that_is_an_unloadable_stamped_graph(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unloadable existing output is not a clean-skip; it is refused."""
+    root = tmp_path / "source"
+    _write(root, "app.py", "x = 1\n")
+    output = tmp_path / "graph.json"
+    data = _write_graph(output, _mutated_graph(_set_nodes_item_int))
+    stamp_path(output).write_text(f"{hashlib.sha256(data).hexdigest()}\n", encoding="utf-8")
+
+    status = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "output already exists (pass --force to replace it)" in captured.err
+
+
+def _set_nodes_item_int(document: dict[str, object]) -> None:
+    document["nodes"] = [1]

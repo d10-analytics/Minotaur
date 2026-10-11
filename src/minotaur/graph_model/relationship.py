@@ -147,7 +147,14 @@ class Relationship:
             raise ValueError("relationship requires an 'evidence' array")
         if not evidence_data:
             raise ValueError("relationship 'evidence' array must be non-empty")
-        evidence = tuple(Evidence.from_dict(ev, memo=memo) for ev in evidence_data)
+        # This is the only site that knows the array index, so the
+        # item type check lives here rather than inside ``Evidence.from_dict``.
+        evidence_items: list[Evidence] = []
+        for index, item in enumerate(evidence_data):
+            if not isinstance(item, dict):
+                raise type_error(f"'evidence' item {index}", item, "an object")
+            evidence_items.append(Evidence.from_dict(item, memo=memo))
+        evidence = tuple(evidence_items)
 
         extensions = data.get("extensions")
         if extensions is not None and not isinstance(extensions, dict):

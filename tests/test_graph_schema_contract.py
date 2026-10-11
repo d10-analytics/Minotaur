@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import jsonschema
 import pytest
 
 from minotaur import cli
-from minotaur.graph_model.document import GraphDocument
-from minotaur.graph_model.loading import _FORMAT_CHECKER, GraphLoadError, load_graph_bytes, schema
+from minotaur.graph_model.document import _RFC3339_UTC_RE, GraphDocument
+from minotaur.graph_model.loading import (
+    GraphLoadError,
+    _validate_wire_shape,
+    graph_digest,
+    load_graph_blob,
+    load_graph_bytes,
+    load_graph_file,
+    schema,
+    stamp_path,
+)
 from minotaur.graph_model.validation import IssueCode, validate_document
 
 ROOT = Path(__file__).parents[1]
@@ -18,7 +29,14 @@ INVALID_FIXTURES = ROOT / "tests/fixtures/minotaur-graph-v1/invalid"
 
 
 def _validator() -> jsonschema.Draft202012Validator:
-    return jsonschema.Draft202012Validator(schema(), format_checker=_FORMAT_CHECKER)
+    """The published schema read exactly as the loader reads it.
+
+    ``format: date-time`` is an annotation only: the generated_at rule lives
+    in the schema ``pattern``, which is the model's own pattern anchored with
+    ``^``…``$``. No ``format_checker`` is supplied, so the validator's verdict
+    is the schema's alone.
+    """
+    return jsonschema.Draft202012Validator(schema())
 
 
 @pytest.mark.parametrize(
@@ -263,6 +281,163 @@ def test_unresolved_reference_node_may_carry_only_its_own_basis() -> None:
 
 
 # ---------------------------------------------------------------------------
+# generated_at — one rule shared by the schema and the model
+# ---------------------------------------------------------------------------
+
+_GENERATED_AT_MESSAGE = "generated_at must be a valid RFC 3339 UTC timestamp ending in 'Z'"
+
+_REJECTED_GENERATED_AT = [
+    "2026-01-01T00:00Z",  # no seconds
+    "2026-01-01 00:00:00Z",  # space instead of "T"
+    "٢٠٢٦-01-01T00:00:00Z",  # Arabic-Indic digits ("\d" would accept them)
+    "2026-99-99T99:99:99Z",  # every field out of range
+]
+
+_ACCEPTED_GENERATED_AT = [
+    "2026-01-01T00:00:00Z",
+    "2026-08-16T20:00:00.123Z",
+]
+
+
+def _wire_with_generated_at(value: str) -> dict[str, object]:
+    document = _small_workflow()
+    document["generated_at"] = value
+    return document
+
+
+def test_generated_at_schema_pattern_is_the_anchored_model_pattern() -> None:
+    """The schema and the model cannot drift: one pattern, one anchor rule.
+
+    Fails if either the schema ``pattern`` or ``_RFC3339_UTC_RE`` changes
+    without the other.
+    """
+    properties = schema()["properties"]
+    assert isinstance(properties, dict)
+    generated_at = properties["generated_at"]
+    assert isinstance(generated_at, dict)
+    assert generated_at["pattern"] == "^" + _RFC3339_UTC_RE.pattern + "$"
+    assert generated_at["format"] == "date-time"
+
+
+def test_generated_at_schema_pattern_rejects_trailing_newline_under_ecma_anchoring() -> None:
+    """``$`` is read with ECMA semantics (as ``\\Z``), as the path rule is.
+
+    ``jsonschema`` evaluates ``pattern`` with ``re.search``, where Python's
+    ``$`` also matches before a final newline; the model's ``re.fullmatch``
+    does not. Read the way the ecosystem reads it (``$`` as ``\\Z``), the
+    schema pattern agrees with the model and rejects the trailing newline.
+    """
+    generated_at = schema()["properties"]["generated_at"]
+    assert isinstance(generated_at, dict)
+    pattern = generated_at["pattern"]
+    assert isinstance(pattern, str)
+    assert pattern.endswith("$")
+    ecma_pattern = pattern[:-1] + r"\Z"
+    assert re.search(ecma_pattern, "2026-01-01T00:00:00Z\n") is None
+    assert re.search(ecma_pattern, "2026-01-01T00:00:00Z") is not None
+
+
+@pytest.mark.parametrize("value", _REJECTED_GENERATED_AT)
+def test_generated_at_rejection_agrees_across_schema_model_and_load_paths(
+    value: str, tmp_path: Path
+) -> None:
+    document = _wire_with_generated_at(value)
+
+    schema_errors = list(_validator().iter_errors(document))
+    assert [error.json_path for error in schema_errors] == ["$.generated_at"]
+
+    with pytest.raises(ValueError, match=_GENERATED_AT_MESSAGE):
+        GraphDocument.from_dict(document)
+
+    graph_path = tmp_path / "minotaur-graph.json"
+    graph_path.write_text(json.dumps(document), encoding="utf-8")
+    # The sidecar matches the exact bytes, so the schema pass is skipped and
+    # the model owns the verdict on the trusted path.
+    stamp_path(graph_path).write_text(graph_digest(graph_path.read_bytes()), encoding="utf-8")
+    with pytest.raises(GraphLoadError, match=_GENERATED_AT_MESSAGE):
+        load_graph_file(graph_path)
+    with pytest.raises(GraphLoadError, match="generated_at"):
+        load_graph_file(graph_path, validate=True)
+
+
+@pytest.mark.parametrize("value", _REJECTED_GENERATED_AT)
+def test_load_graph_bytes_rejects_generated_at_and_names_the_field(value: str) -> None:
+    """The bounded schema error names ``$.generated_at`` rather than dumping."""
+    with pytest.raises(GraphLoadError, match=r"\$\.generated_at"):
+        load_graph_bytes(json.dumps(_wire_with_generated_at(value)).encode())
+
+
+def test_trailing_newline_generated_at_is_rejected_on_every_path(tmp_path: Path) -> None:
+    """Python's ``$`` accepts a final newline; the model and ECMA ``$`` do not.
+
+    E.g. ``"2026-01-01T00:00:00Z\\n"`` passes ``Draft202012Validator`` (which
+    uses ``re.search``), so the model's ``re.fullmatch`` is what rejects it —
+    on the matching-sidecar and ``validate=True`` paths alike.
+    """
+    document = _wire_with_generated_at("2026-01-01T00:00:00Z\n")
+    _validator().validate(document)  # the plain validator accepts it
+
+    with pytest.raises(ValueError, match=_GENERATED_AT_MESSAGE):
+        GraphDocument.from_dict(document)
+
+    graph_path = tmp_path / "minotaur-graph.json"
+    graph_path.write_text(json.dumps(document), encoding="utf-8")
+    stamp_path(graph_path).write_text(graph_digest(graph_path.read_bytes()), encoding="utf-8")
+    with pytest.raises(GraphLoadError, match=_GENERATED_AT_MESSAGE):
+        load_graph_file(graph_path)
+    with pytest.raises(GraphLoadError, match=_GENERATED_AT_MESSAGE):
+        load_graph_file(graph_path, validate=True)
+
+
+@pytest.mark.parametrize("value", _ACCEPTED_GENERATED_AT)
+def test_generated_at_accepted_by_schema_and_model(value: str) -> None:
+    document = _wire_with_generated_at(value)
+    _validator().validate(document)
+    assert GraphDocument.from_dict(document).generated_at == value
+
+
+def test_calendar_invalid_generated_at_is_the_model_s_alone() -> None:
+    """``2026-02-30`` is a well-formed spelling but not a real day."""
+    document = _wire_with_generated_at("2026-02-30T00:00:00Z")
+
+    _validator().validate(document)  # the schema cannot express day validity
+    _validate_wire_shape(document)  # shape pass agrees
+
+    with pytest.raises(ValueError, match=_GENERATED_AT_MESSAGE):
+        GraphDocument.from_dict(document)
+
+
+@pytest.mark.parametrize(
+    ("value", "schema_accepts"),
+    [
+        ("2026-01-01T00:00:00Z", True),
+        ("2026-08-16T20:00:00.123Z", True),
+        # Fails if a date-time format checker is reintroduced at the boundary.
+        ("2026-02-30T00:00:00Z", True),
+        ("2026-01-01T00:00Z", False),
+        ("2026-01-01 00:00:00Z", False),
+        # Fails if the schema pattern (or the model regex) falls back to "\d".
+        ("٢٠٢٦-01-01T00:00:00Z", False),
+        ("2026-99-99T99:99:99Z", False),
+    ],
+)
+def test_validate_wire_shape_generated_at_verdicts(value: str, schema_accepts: bool) -> None:
+    document = _wire_with_generated_at(value)
+    if schema_accepts:
+        _validate_wire_shape(document)
+    else:
+        with pytest.raises(jsonschema.ValidationError):
+            _validate_wire_shape(document)
+
+
+def test_loading_no_longer_owns_a_second_generated_at_rule() -> None:
+    import minotaur.graph_model.loading as loading
+
+    assert not hasattr(loading, "_FORMAT_CHECKER")
+    assert not hasattr(loading, "_is_utc_rfc3339")
+
+
+# ---------------------------------------------------------------------------
 # AC-15 — Writer output satisfies the published v1 schema
 # ---------------------------------------------------------------------------
 
@@ -290,10 +465,10 @@ def _analyze_workspace(root: Path, graph_path: Path, *targets: Path) -> None:
 def test_fresh_analyze_output_satisfies_published_v1_schema(tmp_path: Path) -> None:
     """``analyze`` output must pass the published JSON schema.
 
-    ``R-02`` removes the only runtime moment the writer's output met the
-    schema (``D-09``).  This test is the explicit CI replacement, using the
-    same ``_FORMAT_CHECKER`` that the loader boundary uses so the contract
-    test and the load boundary cannot disagree about ``date-time``.
+    The plain ``Draft202012Validator(schema())`` is the same validator the
+    loader boundary uses, so the contract test and the load boundary cannot
+    disagree about ``generated_at``: its rule is the schema ``pattern``
+    (``format: date-time`` is an annotation), not a separate format checker.
     """
     source = tmp_path / "src" / "example.py"
     source.parent.mkdir(parents=True)
@@ -304,8 +479,8 @@ def test_fresh_analyze_output_satisfies_published_v1_schema(tmp_path: Path) -> N
 
     raw = json.loads(graph_path.read_text(encoding="utf-8"))
 
-    # Schema validation with the shared format checker
-    validator = jsonschema.Draft202012Validator(schema(), format_checker=_FORMAT_CHECKER)
+    # Schema validation with the same plain validator the loader uses
+    validator = jsonschema.Draft202012Validator(schema())
     validator.validate(raw)
 
     # Sanity: the graph is non-trivial — at least one node was emitted
@@ -320,19 +495,24 @@ def _wire_with_extensions(extensions: dict[str, dict[str, object]]) -> dict[str,
 
 
 @pytest.mark.parametrize(
-    ("extensions", "instance_path"),
+    ("extensions", "json_path"),
     [
-        ({"x": {"f": 1.5}}, "On instance['nodes'][0]['extensions']['x']['f']"),
-        ({"\U0001f600": {"f": 1}}, "On instance['nodes'][0]['extensions']"),
-        ({"x": {"\U0001d11e": 1}}, "On instance['nodes'][0]['extensions']['x']"),
+        ({"x": {"f": 1.5}}, "$.nodes[0].extensions.x.f"),
+        ({"\U0001f600": {"f": 1}}, "$.nodes[0].extensions"),
+        ({"x": {"\U0001d11e": 1}}, "$.nodes[0].extensions.x"),
     ],
 )
 def test_schema_rejects_non_integer_or_non_bmp_extension_wire_values(
-    extensions: dict[str, dict[str, object]], instance_path: str
+    extensions: dict[str, dict[str, object]], json_path: str
 ) -> None:
+    """The load error names the JSON path, not the instance dump."""
     with pytest.raises(GraphLoadError) as error:
         load_graph_bytes(json.dumps(_wire_with_extensions(extensions)).encode())
-    assert instance_path in str(error.value)
+    message = str(error.value)
+    assert message.startswith(f"{json_path}: ")
+    # ``str(ValidationError)`` appended the schema and the whole instance; the
+    # bounded message must not.
+    assert "On instance" not in message
 
 
 def test_model_guard_owns_float_rejection_when_schema_accepts_json_integer() -> None:
@@ -470,3 +650,188 @@ def test_extension_key_verdicts_agree_on_trusted_and_full_validation_paths(
         else:
             with pytest.raises(GraphLoadError):
                 load_graph_bytes(content, _skip_schema=skip_schema)
+
+
+# ---------------------------------------------------------------------------
+# An explicit JSON null is rejected on the trusted path too
+# ---------------------------------------------------------------------------
+#
+# The published schema forbids ``null`` in every model field, but the trusted
+# (sidecar-authorized) load skips the schema pass.  The model layer's shared
+# ``reject_unknown_fields`` owns the rule for both paths, so this enumeration
+# holds every schema property name in every non-extension object of every
+# example graph to the same verdict on both natural load paths.  ``null``
+# inside an extension value stays legal, because the schema's
+# ``extensionValue`` admits ``null`` and the trusted path must agree.
+
+_GRAPH_EXAMPLES = sorted((ROOT / "examples/synthetic-graphs").glob("*.json"))
+
+# A valid source-control envelope: at least one of commit/branch is required,
+# and the commit must be a full lowercase hex identifier.
+_SOURCE_CONTROL_VARIANT: dict[str, object] = {
+    "system": "git",
+    "commit": "0" * 40,
+    "branch": "main",
+}
+
+
+def _schema_property_names() -> tuple[str, ...]:
+    """Every property name declared anywhere in the published schema.
+
+    Collected from every ``properties`` map (including the ``if``/``then``
+    branches), never from a hand-maintained list, so a field added to the
+    schema is probed here automatically.
+    """
+    names: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                names.update(properties)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(schema())
+    return tuple(sorted(names))
+
+
+_SCHEMA_PROPERTY_NAMES = _schema_property_names()
+
+
+def _non_extension_objects(
+    value: object, path: tuple[str | int, ...] = ()
+) -> Iterator[tuple[tuple[str | int, ...], dict[str, object]]]:
+    """Yield ``(json_path, object)`` for every object outside an extension value.
+
+    An ``extensions`` subtree is skipped whole: the schema admits ``null``
+    inside an extension value, so those objects are deliberately not probed.
+    """
+    if isinstance(value, dict):
+        yield path, value
+        for key, item in value.items():
+            if key == "extensions":
+                continue
+            yield from _non_extension_objects(item, (*path, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _non_extension_objects(item, (*path, index))
+
+
+def _graph_variants() -> list[tuple[str, str]]:
+    """Each example graph as ``(label, json_text)``, original and +source_control."""
+    variants: list[tuple[str, str]] = []
+    for example in _GRAPH_EXAMPLES:
+        base_text = example.read_text(encoding="utf-8")
+        variants.append((example.name, base_text))
+        with_source_control = json.loads(base_text)
+        with_source_control["source_control"] = dict(_SOURCE_CONTROL_VARIANT)
+        variants.append((example.name + "+source_control", json.dumps(with_source_control)))
+    return variants
+
+
+def _null_cells() -> list[tuple[str, str, tuple[str | int, ...], str]]:
+    """``(label, graph_json, object_path, property_name)`` for every probe."""
+    cells: list[tuple[str, str, tuple[str | int, ...], str]] = []
+    for label, text in _graph_variants():
+        for object_path, _ in _non_extension_objects(json.loads(text)):
+            for name in _SCHEMA_PROPERTY_NAMES:
+                cells.append((label, text, object_path, name))
+    return cells
+
+
+_NULL_CELLS = _null_cells()
+
+
+def _object_at(document: object, path: tuple[str | int, ...]) -> dict[str, object]:
+    target = document
+    for segment in path:
+        assert isinstance(target, (dict, list))
+        target = target[segment]  # type: ignore[index]
+    assert isinstance(target, dict)
+    return target
+
+
+def test_null_enumeration_covers_the_trusted_only_fields() -> None:
+    """The probe must include the fields only the model layer can refuse.
+
+    These four fields reach the trusted path's model checks as ``null`` without
+    any schema pass to reject them; covering them is what makes the
+    enumeration fail without the model-layer check.
+    """
+    cells = {(label, object_path, name) for label, _, object_path, name in _NULL_CELLS}
+    assert ("provenance-demo.json", ("nodes", 0), "language") in cells
+    assert ("small-workflow.json", ("nodes", 0), "language") in cells
+    assert ("small-workflow.json", ("relationships", 0, "evidence", 0), "producer") in cells
+    assert (
+        "small-workflow.json",
+        ("relationships", 0, "evidence", 0),
+        "extensions",
+    ) in cells
+    assert (
+        "provenance-demo.json",
+        ("relationships", 0, "evidence", 0, "producer"),
+        "version",
+    ) in cells
+
+
+def test_null_in_every_schema_property_fails_both_load_paths() -> None:
+    """Every non-extension object rejects a ``null`` model field on both paths.
+
+    The matching sidecar is the natural trusted trigger, so the assertion
+    fails without the model-layer check; ``validate=True`` exercises the
+    schema-first path.
+    """
+    for label, text, object_path, name in _NULL_CELLS:
+        document = json.loads(text)
+        cell = (label, object_path, name)
+        _object_at(document, object_path)[name] = None
+
+        assert list(_validator().iter_errors(document)), cell
+
+        content = json.dumps(document).encode()
+        sidecar = graph_digest(content).encode()
+
+        with pytest.raises(GraphLoadError) as trusted:
+            load_graph_blob(content, sidecar)
+        assert f"must not set {name!r} to null" in str(trusted.value), cell
+
+        with pytest.raises(GraphLoadError):
+            load_graph_blob(content, validate=True)
+
+
+@pytest.mark.parametrize("label", [label for label, _ in _graph_variants()])
+def test_unmodified_examples_load_on_both_paths(label: str) -> None:
+    text = dict(_graph_variants())[label]
+    content = text.encode()
+    sidecar = graph_digest(content).encode()
+    load_graph_blob(content, sidecar)
+    load_graph_blob(content, validate=True)
+
+
+def test_null_language_fails_the_stamped_load_graph_file_path(tmp_path: Path) -> None:
+    """At least one stamped ``load_graph_file`` cell carries the null rule."""
+    document = _small_workflow()
+    _nodes(document)[0]["language"] = None
+    graph_path = tmp_path / "minotaur-graph.json"
+    graph_path.write_text(json.dumps(document), encoding="utf-8")
+    stamp_path(graph_path).write_text(graph_digest(graph_path.read_bytes()), encoding="utf-8")
+
+    with pytest.raises(GraphLoadError, match="must not set 'language' to null"):
+        load_graph_file(graph_path)
+    with pytest.raises(GraphLoadError):
+        load_graph_file(graph_path, validate=True)
+
+
+def test_null_inside_extension_values_stays_legal_on_both_paths() -> None:
+    """An extension value ``{"ns": {"v": null}}`` must not be over-rejected."""
+    document = _wire_with_extensions({"ns": {"v": None}})
+    _validator().validate(document)
+
+    content = json.dumps(document).encode()
+    sidecar = graph_digest(content).encode()
+    load_graph_blob(content, sidecar)
+    load_graph_blob(content, validate=True)

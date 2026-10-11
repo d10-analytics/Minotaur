@@ -38,22 +38,40 @@ def reject_unpaired_surrogates(value: str, context: str) -> None:
 
 
 def hashable_json(value: object) -> object:
-    """Return a hashable, equality-preserving key for a frozen JSON-like value.
+    """Return a hashable key that preserves JSON value identity.
 
-    Mappings become sorted ``(key, value)`` tuples and sequences become
-    tuples, recursively; scalars pass through. Two values are equal under
-    Python equality iff their keys are equal, so this can back a set or dict
-    without changing the equality semantics of the original structures.
+    The key distinguishes JSON values that Python's own equality conflates:
+    a mapping becomes ``("m", sorted (key, value-key) pairs)`` and a sequence
+    becomes ``("s", (key, ...))``, so an object and an array never collide;
+    a boolean becomes ``("b", value)``, so JSON ``true`` and ``1`` (equal
+    under Python equality) keep distinct keys. Other leaves pass through
+    unchanged. Two values are equal as JSON values iff their keys are equal,
+    so this can back a set or dict without widening the duplicate grain.
     """
     if isinstance(value, Mapping):
-        return tuple(sorted((key, hashable_json(item)) for key, item in value.items()))
+        return ("m", tuple(sorted((key, hashable_json(item)) for key, item in value.items())))
     if isinstance(value, list | tuple):
-        return tuple(hashable_json(item) for item in value)
+        return ("s", tuple(hashable_json(item) for item in value))
+    if isinstance(value, bool):
+        return ("b", value)
     return value
 
 
 def reject_unknown_fields(data: dict[str, object], allowed: frozenset[str], context: str) -> None:
-    """Reject fields that the v1 schema does not define for ``context``."""
+    """Reject an explicit ``null`` field value, then fields the schema omits.
+
+    The published schema forbids an explicit JSON ``null`` in every model
+    field (``type: null`` appears only inside extension values), but the
+    trusted, sidecar-authorized load skips the schema pass.  This helper is
+    the first check every wire object passes through, so it owns the null rule
+    on both paths.  The check runs before the conforming early return so a
+    conforming object is checked too; ``None in data.values()`` builds no
+    list or message on the accepted path, and only a rejection builds a
+    message.
+    """
+    if None in data.values():
+        field = next(name for name, value in data.items() if value is None)
+        raise ValueError(f"{context} must not set {field!r} to null")
     # ``dict_keys`` can compare itself to the allowed set without materializing
     # a difference set.  Graph loading visits this helper for every model
     # object, so keep the common, conforming path allocation-free and only

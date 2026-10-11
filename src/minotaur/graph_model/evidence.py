@@ -218,9 +218,8 @@ class Evidence:
         validator uses it for duplicate detection and the canonical serializer
         can use it as the evidence identity when ordering records.
 
-        Two accepted v1 quirks of Python equality apply: JSON ``1`` and
-        ``1.0`` compare equal, and an explicit empty ``extensions: {}`` is
-        distinct from an absent one.
+        One accepted v1 quirk of Python equality remains: an explicit empty
+        ``extensions: {}`` is distinct from an absent one.
         """
         return (self.provenance, self.producer, self.rule, hashable_json(self.extensions))
 
@@ -279,7 +278,15 @@ class Evidence:
                 raise ValueError("'locations' must be an array when present")
             if not locations_data:
                 raise ValueError("'locations' array must be non-empty when present")
-            locations = tuple(Location.from_dict(loc, memo=memo) for loc in locations_data)
+            # This is the only site that knows the array index, so
+            # the item type check lives here rather than inside
+            # ``Location.from_dict``.
+            location_items: list[Location] = []
+            for index, item in enumerate(locations_data):
+                if not isinstance(item, dict):
+                    raise type_error(f"'locations' item {index}", item, "an object")
+                location_items.append(Location.from_dict(item, memo=memo))
+            locations = tuple(location_items)
 
         extensions = data.get("extensions")
         if extensions is not None and not isinstance(extensions, dict):

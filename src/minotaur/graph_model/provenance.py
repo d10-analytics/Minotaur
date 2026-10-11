@@ -207,22 +207,6 @@ class IdentityBasis(Enum):
     RESOURCE_KEY = "resource-key"
 
 
-# Reserved language identifiers for v1. These are not an enum because
-# the language field accepts any value matching the language pattern —
-# new languages don't require a code change. The reserved set exists
-# so that documentation and tests can reference canonical spellings
-# without hardcoding strings.
-RESERVED_LANGUAGES: frozenset[str] = frozenset(
-    {
-        "python",
-        "csharp",
-        "javascript",
-        "typescript",
-        "sql",
-    }
-)
-
-
 def resolve_symbol_kind(value: str) -> SymbolKind | str:
     """Resolve a symbol_kind string to its core enum or return it as an extension.
 

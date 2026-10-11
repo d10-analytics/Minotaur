@@ -926,3 +926,158 @@ class TestStampTrustBoundaryAdversarial:
 
         assert seam_called, "embedded NUL byte must cause fallback to full validation"
         assert loaded.validated is True
+
+
+# ---------------------------------------------------------------------------
+# Bounded, path-prefixed schema load errors
+# ---------------------------------------------------------------------------
+
+
+def _replicated_document(node_count: int = 2000) -> dict[str, object]:
+    """Return a schema-valid graph with *node_count* nodes.
+
+    The example graph's nodes are repeated to reach the size a real document
+    has, so the message-length assertions exercise the size at which a full
+    ``str(error)`` dump would be unacceptable. The schema never checks node-ID
+    uniqueness, so the repetition does not introduce a second error.
+    """
+    document = json.loads(_EXAMPLE_GRAPH.read_text(encoding="utf-8"))
+    base_nodes = document["nodes"]
+    assert isinstance(base_nodes, list) and base_nodes
+    document["nodes"] = [base_nodes[index % len(base_nodes)] for index in range(node_count)]
+    return document
+
+
+def test_required_violation_message_is_only_path_and_message() -> None:
+    """A missing top-level field reports ``$:`` and the property name."""
+    document = _replicated_document()
+    assert len(document["nodes"]) == 2000
+    document.pop("coordinate_encoding")
+
+    with pytest.raises(GraphLoadError) as error:
+        load_graph_bytes(json.dumps(document).encode())
+
+    # Exact equality: retaining ``str(ValidationError)`` (which appends the
+    # schema and the whole 2,000-node instance) fails this assertion.
+    assert str(error.value) == "$: 'coordinate_encoding' is a required property"
+
+
+def test_type_violation_message_is_capped_at_one_thousand_characters() -> None:
+    """A type error's ``repr(instance)`` message is truncated."""
+    document = _replicated_document()
+    oversized_key = "k" * 5000
+    document["nodes"] = {oversized_key: 1}
+
+    with pytest.raises(GraphLoadError) as error:
+        load_graph_bytes(json.dumps(document).encode())
+
+    message = str(error.value)
+    assert message.startswith("$.nodes: ")
+    assert len(message) <= 1000
+    # The raw instance repr exceeds 5,000 characters; it must not survive.
+    assert oversized_key not in message
+
+
+# ---------------------------------------------------------------------------
+# A non-object array item is rejected by the model on every load path
+# ---------------------------------------------------------------------------
+
+
+def _case_nodes_int(document: dict[str, object]) -> None:
+    document["nodes"] = [1]
+
+
+def _case_nodes_null(document: dict[str, object]) -> None:
+    document["nodes"] = [None]
+
+
+def _case_relationships_int(document: dict[str, object]) -> None:
+    document["relationships"] = [1]
+
+
+def _case_evidence_int(document: dict[str, object]) -> None:
+    relationships = document["relationships"]
+    assert isinstance(relationships, list)
+    relationships[0]["evidence"] = [1]  # type: ignore[index]
+
+
+def _case_locations_int(document: dict[str, object]) -> None:
+    relationships = document["relationships"]
+    assert isinstance(relationships, list)
+    relationships[0]["evidence"][0]["locations"] = [1]  # type: ignore[index]
+
+
+_ARRAY_ITEM_CASES: list[tuple[str, object, str, str]] = [
+    ("nodes-int", _case_nodes_int, "'nodes' item 0 must be an object, got int", "$.nodes[0]"),
+    (
+        "nodes-null",
+        _case_nodes_null,
+        "'nodes' item 0 must be an object, got NoneType",
+        "$.nodes[0]",
+    ),
+    (
+        "relationships-int",
+        _case_relationships_int,
+        "'relationships' item 0 must be an object, got int",
+        "$.relationships[0]",
+    ),
+    (
+        "evidence-int",
+        _case_evidence_int,
+        "'evidence' item 0 must be an object, got int",
+        "$.relationships[0].evidence[0]",
+    ),
+    (
+        "locations-int",
+        _case_locations_int,
+        "'locations' item 0 must be an object, got int",
+        "$.relationships[0].evidence[0].locations[0]",
+    ),
+]
+
+
+class TestNonObjectArrayItems:
+    """The trusted path and the validated path both refuse."""
+
+    @pytest.mark.parametrize(
+        ("case_id", "mutate", "trusted_message", "json_path"),
+        _ARRAY_ITEM_CASES,
+        ids=[case[0] for case in _ARRAY_ITEM_CASES],
+    )
+    def test_every_load_path_raises_graph_load_error(
+        self,
+        tmp_path: Path,
+        case_id: str,
+        mutate: object,
+        trusted_message: str,
+        json_path: str,
+    ) -> None:
+        document = json.loads(_EXAMPLE_GRAPH.read_text(encoding="utf-8"))
+        mutate(document)  # type: ignore[operator]
+        data = json.dumps(document).encode()
+        digest = graph_digest(data)
+
+        graph_path = tmp_path / "graph.json"
+        graph_path.write_bytes(data)
+        # A real matching sidecar is the natural trusted trigger; no
+        # ``_skip_schema`` is passed anywhere.
+        stamp_path(graph_path).write_text(f"{digest}\n", encoding="utf-8")
+
+        # (a) stamped file: the model owns the rejection on the schema-skipping
+        # trusted path, and names the array and index.
+        with pytest.raises(GraphLoadError) as trusted:
+            load_graph_file(graph_path)
+        assert str(trusted.value) == trusted_message
+
+        # (b) matching-sidecar blob: the same trusted path without the filesystem.
+        with pytest.raises(GraphLoadError) as blob:
+            load_graph_blob(data, sidecar=digest.encode())
+        assert str(blob.value) == trusted_message
+
+        # (c) validate=True forces the schema pass; the JSON pointer proves the
+        # schema owner rejected the input instead of the model.
+        with pytest.raises(GraphLoadError) as validated:
+            load_graph_file(graph_path, validate=True)
+        validated_message = str(validated.value)
+        assert validated_message.startswith(f"{json_path}: ")
+        assert "item 0 must be an object" not in validated_message
