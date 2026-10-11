@@ -1297,7 +1297,7 @@ def test_replace_cannot_smuggle_a_float_past_the_serializer() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC-02 / R-02: ``from_dict`` names the array and index of a non-object item
+# ``from_dict`` names the array and index of a non-object item
 # ---------------------------------------------------------------------------
 
 
@@ -1344,7 +1344,7 @@ def _set_locations_int(document: dict[str, object]) -> None:
 def test_from_dict_names_the_array_and_index_of_a_non_object_item(
     mutate: object, message: str
 ) -> None:
-    """``D-02``: the item check lives at the array site, so it knows the index.
+    """The item check lives at the array site, so it knows the index.
 
     ``GraphDocument.from_dict`` is the model boundary: it raises a
     ``ValueError`` (never a raw ``AttributeError``) whose text names the array

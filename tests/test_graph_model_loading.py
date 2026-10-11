@@ -929,7 +929,7 @@ class TestStampTrustBoundaryAdversarial:
 
 
 # ---------------------------------------------------------------------------
-# AC-01: bounded, path-prefixed schema load errors
+# Bounded, path-prefixed schema load errors
 # ---------------------------------------------------------------------------
 
 
@@ -937,8 +937,8 @@ def _replicated_document(node_count: int = 2000) -> dict[str, object]:
     """Return a schema-valid graph with *node_count* nodes.
 
     The example graph's nodes are repeated to reach the size a real document
-    has, so the message-length assertions exercise the case that made the old
-    ``str(error)`` dump unacceptable. The schema never checks node-ID
+    has, so the message-length assertions exercise the size at which a full
+    ``str(error)`` dump would be unacceptable. The schema never checks node-ID
     uniqueness, so the repetition does not introduce a second error.
     """
     document = json.loads(_EXAMPLE_GRAPH.read_text(encoding="utf-8"))
@@ -949,7 +949,7 @@ def _replicated_document(node_count: int = 2000) -> dict[str, object]:
 
 
 def test_required_violation_message_is_only_path_and_message() -> None:
-    """A missing top-level field reports ``$:`` and the property name (AC-01)."""
+    """A missing top-level field reports ``$:`` and the property name."""
     document = _replicated_document()
     assert len(document["nodes"]) == 2000
     document.pop("coordinate_encoding")
@@ -963,7 +963,7 @@ def test_required_violation_message_is_only_path_and_message() -> None:
 
 
 def test_type_violation_message_is_capped_at_one_thousand_characters() -> None:
-    """A type error's ``repr(instance)`` message is truncated (AC-01)."""
+    """A type error's ``repr(instance)`` message is truncated."""
     document = _replicated_document()
     oversized_key = "k" * 5000
     document["nodes"] = {oversized_key: 1}
@@ -979,7 +979,7 @@ def test_type_violation_message_is_capped_at_one_thousand_characters() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC-02: a non-object array item is rejected by the model on every load path
+# A non-object array item is rejected by the model on every load path
 # ---------------------------------------------------------------------------
 
 
@@ -1037,7 +1037,7 @@ _ARRAY_ITEM_CASES: list[tuple[str, object, str, str]] = [
 
 
 class TestNonObjectArrayItems:
-    """``R-02``/``D-02``: the trusted path and the validated path both refuse."""
+    """The trusted path and the validated path both refuse."""
 
     @pytest.mark.parametrize(
         ("case_id", "mutate", "trusted_message", "json_path"),

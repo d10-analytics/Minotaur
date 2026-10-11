@@ -505,7 +505,7 @@ def _wire_with_extensions(extensions: dict[str, dict[str, object]]) -> dict[str,
 def test_schema_rejects_non_integer_or_non_bmp_extension_wire_values(
     extensions: dict[str, dict[str, object]], json_path: str
 ) -> None:
-    """``D-01``: the load error names the JSON path, not the instance dump."""
+    """The load error names the JSON path, not the instance dump."""
     with pytest.raises(GraphLoadError) as error:
         load_graph_bytes(json.dumps(_wire_with_extensions(extensions)).encode())
     message = str(error.value)
@@ -653,7 +653,7 @@ def test_extension_key_verdicts_agree_on_trusted_and_full_validation_paths(
 
 
 # ---------------------------------------------------------------------------
-# R-06 / AC-05: an explicit JSON null is rejected on the trusted path too
+# An explicit JSON null is rejected on the trusted path too
 # ---------------------------------------------------------------------------
 #
 # The published schema forbids ``null`` in every model field, but the trusted
@@ -756,11 +756,11 @@ def _object_at(document: object, path: tuple[str | int, ...]) -> dict[str, objec
 
 
 def test_null_enumeration_covers_the_trusted_only_fields() -> None:
-    """The probe must include the fields the baseline trusted path accepted.
+    """The probe must include the fields only the model layer can refuse.
 
-    ``F-14`` found these four accepted only on the trusted path when set to
-    ``null``; covering them is what makes the enumeration fail without the
-    model-layer check.
+    These four fields reach the trusted path's model checks as ``null`` without
+    any schema pass to reject them; covering them is what makes the
+    enumeration fail without the model-layer check.
     """
     cells = {(label, object_path, name) for label, _, object_path, name in _NULL_CELLS}
     assert ("provenance-demo.json", ("nodes", 0), "language") in cells
