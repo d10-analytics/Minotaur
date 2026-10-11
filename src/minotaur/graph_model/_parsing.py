@@ -41,7 +41,7 @@ def hashable_json(value: object) -> object:
     """Return a hashable key that preserves JSON value identity.
 
     The key distinguishes JSON values that Python's own equality conflates:
-    a mapping becomes ``("m", sorted (key, key) pairs)`` and a sequence
+    a mapping becomes ``("m", sorted (key, value-key) pairs)`` and a sequence
     becomes ``("s", (key, ...))``, so an object and an array never collide;
     a boolean becomes ``("b", value)``, so JSON ``true`` and ``1`` (equal
     under Python equality) keep distinct keys. Other leaves pass through
@@ -65,8 +65,9 @@ def reject_unknown_fields(data: dict[str, object], allowed: frozenset[str], cont
     trusted, sidecar-authorized load skips the schema pass.  This helper is
     the first check every wire object passes through, so it owns the null rule
     on both paths.  The check runs before the conforming early return so a
-    conforming object is checked too; ``None in data.values()`` allocates
-    nothing on the accepted path, and only a rejection builds a message.
+    conforming object is checked too; ``None in data.values()`` builds no
+    list or message on the accepted path, and only a rejection builds a
+    message.
     """
     if None in data.values():
         field = next(name for name, value in data.items() if value is None)
