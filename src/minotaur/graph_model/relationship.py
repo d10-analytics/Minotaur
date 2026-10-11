@@ -147,7 +147,7 @@ class Relationship:
             raise ValueError("relationship requires an 'evidence' array")
         if not evidence_data:
             raise ValueError("relationship 'evidence' array must be non-empty")
-        # D-02/R-02: this is the only site that knows the array index, so the
+        # This is the only site that knows the array index, so the
         # item type check lives here rather than inside ``Evidence.from_dict``.
         evidence_items: list[Evidence] = []
         for index, item in enumerate(evidence_data):

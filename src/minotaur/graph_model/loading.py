@@ -123,15 +123,18 @@ def load_graph_bytes(
             _validate_wire_shape(raw)
         document = GraphDocument.from_dict(raw)
     except jsonschema.ValidationError as error:
-        # D-01/R-01: one bounded, path-prefixed line.  ``str(error)`` appends
-        # the whole schema and the whole instance (tens of MB on a real graph),
-        # and ``error.message`` is ``repr(instance)`` for type errors, so the
+        # One bounded, path-prefixed line.  ``str(error)`` appends the whole
+        # schema and the whole instance (tens of MB on a real graph), and
+        # ``error.message`` is ``repr(instance)`` for type errors, so the
         # composed text is capped.  The JSON path names the offending field and
-        # keeps the verdict useful without the dump.
+        # keeps the verdict useful without the dump.  Only this schema-violation
+        # message is capped.
         raise GraphLoadError(f"{error.json_path}: {error.message}"[:1000]) from None
     except ValueError as error:
-        # Model and semantic failures keep their own message verbatim; the
-        # semantic report is already bounded and names each issue's pointer.
+        # Model construction failures pass through unchanged and are not
+        # capped, as does the semantic report raised below: either message may
+        # echo the offending value at full length (for example an oversized
+        # ``format`` or ``generated_at`` string, or many duplicate node IDs).
         raise GraphLoadError(str(error)) from None
     except RecursionError:
         # Both the schema validator and the extension freeze recurse once per

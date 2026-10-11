@@ -322,7 +322,7 @@ class GraphDocument:
         nodes_data = data.get("nodes")
         if not isinstance(nodes_data, list):
             raise ValueError("document requires a 'nodes' array")
-        # D-02/R-02: this is the only site that knows the array index, so the
+        # This is the only site that knows the array index, so the
         # item type check lives here rather than inside ``Node.from_dict``.
         node_items: list[Node] = []
         for index, item in enumerate(nodes_data):

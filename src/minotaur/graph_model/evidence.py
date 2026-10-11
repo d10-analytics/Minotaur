@@ -278,7 +278,7 @@ class Evidence:
                 raise ValueError("'locations' must be an array when present")
             if not locations_data:
                 raise ValueError("'locations' array must be non-empty when present")
-            # D-02/R-02: this is the only site that knows the array index, so
+            # This is the only site that knows the array index, so
             # the item type check lives here rather than inside
             # ``Location.from_dict``.
             location_items: list[Location] = []
