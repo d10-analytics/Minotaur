@@ -29,8 +29,8 @@ through composition rather than a direct static edge.
   interpreter.
 - `analysis-platform` points to `graph-contract` for graph emission and shared
   contracts.
-- `analysis-platform` points to `project-acquisition` for source-selection and
-  production contracts.
+- `analysis-platform` points to `project-acquisition` for the SQL interpreter
+  settings contract (`SqlSettings`) that the registry passes to SQL analysis.
 
 These directions describe the selected proof universe, not required runtime
 dependencies or architectural policy.
