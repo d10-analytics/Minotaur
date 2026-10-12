@@ -14,17 +14,23 @@ assets.
 
 ## Expected interactions
 
-The following directions are expected/observed, non-enforced, and
-selection-bounded structural interactions:
+The bullets below follow a fixed claim convention: a bullet of the form
+`X` points to `Y` states an observed static edge between two declared
+systems, one of which is this system, while a bullet of the form consumes
+something through `<system>` composition describes a dependency carried
+through composition rather than a direct static edge.
 
-- `command-interface` points to the analysis platform for workflow
-  composition; the platform receives that composition request.
-- `project-acquisition` points to the analysis platform for source preparation;
-  the platform receives those inputs.
-- The platform points to `analysis-sql` for the bounded T-SQL interpreter.
-- The platform points to `analysis-python` for Python interpretation.
-- It points to `analysis-javascript` for the Python JavaScript interpreter.
-- It points to `graph-contract` for graph emission and shared contracts.
+- `command-interface` points to `analysis-platform` for workflow composition.
+- `project-acquisition` points to `analysis-platform` for source preparation.
+- `analysis-platform` points to `analysis-javascript` for JavaScript
+  interpretation.
+- `analysis-platform` points to `analysis-python` for Python interpretation.
+- `analysis-platform` points to `analysis-sql` for the bounded T-SQL
+  interpreter.
+- `analysis-platform` points to `graph-contract` for graph emission and shared
+  contracts.
+- `analysis-platform` points to `project-acquisition` for the SQL interpreter
+  settings contract (`SqlSettings`) that the registry passes to SQL analysis.
 
 These directions describe the selected proof universe, not required runtime
 dependencies or architectural policy.

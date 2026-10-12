@@ -22,6 +22,7 @@ PURPOSE = ROOT / "docs/concepts/purpose.md"
 QUERY_REFERENCE = ROOT / "docs/guides/query-reference.md"
 README = ROOT / "README.md"
 SYSTEM_WALKTHROUGH = ROOT / "examples/system-walkthrough/README.md"
+GRAPH_FORMAT_REFERENCE = ROOT / "docs/formats/minotaur-graph-v1.md"
 
 
 def _collapsed(path: Path) -> str:
@@ -124,6 +125,53 @@ def test_query_guide_documents_strict_loading_and_absent_file_warnings() -> None
     assert "listed by system" in text
     assert "the repository overview reports them across all declared systems" in text
     assert "never changes the answer or its exit status" in text
+
+
+# ---------------------------------------------------------------------------
+# The re-export boundary statement
+# ---------------------------------------------------------------------------
+
+
+REEXPORT_BOUNDARY = (
+    "Re-exports are not resolved: `from pkg import f` records an unresolved "
+    "`pkg.f` reference with no module-layer `imports` consumer, so "
+    "`pkg/__init__.py` never links a name that another module actually defines."
+)
+
+
+def test_system_guide_documents_the_reexport_boundary_statement() -> None:
+    text = _collapsed(QUERY_GUIDE)
+    assert REEXPORT_BOUNDARY in text
+
+
+def test_query_reference_documents_the_reexport_boundary_statement() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert REEXPORT_BOUNDARY in text
+
+
+def test_reexport_boundary_statement_does_not_use_the_readme_connection_phrase() -> None:
+    # The system README parser reads "points to" as an interaction claim, so the
+    # pinned sentence must never contain it.
+    assert "points to" not in REEXPORT_BOUNDARY
+
+
+def test_analysis_python_readme_documents_the_reexport_boundary_statement() -> None:
+    # Checks only that the pinned sentence is present in the README, not its
+    # position, and must never require the phrase "points to".
+    readme = ROOT / "docs/systems/analysis-python/README.md"
+    text = _collapsed(readme)
+    assert REEXPORT_BOUNDARY in text
+
+
+def test_system_guide_names_text_fallback_exactly_once() -> None:
+    text = _collapsed(QUERY_GUIDE)
+    raw = QUERY_GUIDE.read_text(encoding="utf-8")
+    assert raw.count("--text-fallback") == 1, (
+        "`query unreferenced --text-fallback` must be named exactly once in "
+        "the system-definitions guide as the text-level cross-check"
+    )
+    assert "query unreferenced --text-fallback" in text
+    assert "retains a suspect whenever its bare name appears elsewhere" in text
 
 
 # ---------------------------------------------------------------------------
@@ -615,3 +663,134 @@ def test_readme_documents_historical_comparison_and_offline_report() -> None:
     assert "retains the revision identities it was generated from" in text
     assert "examples/system-walkthrough/minotaur-comparison.html" in text
     assert "resolved commit IDs" in text
+
+
+# ---------------------------------------------------------------------------
+# Markdown link checker, walkthrough kind lists, freshness first-read list,
+# query-reference systems example and empty-tree behavior, format-reference
+# expected_symbol_kind, and invalid fixture enumeration.
+# ---------------------------------------------------------------------------
+
+LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+_HEADING_PATTERN = re.compile(r"^(#+)\s+(.*)$")
+_SKIP_DIRECTORIES = {".git", ".venv", "node_modules", "__pycache__", "dist", "build"}
+
+
+def _github_slug(heading: str) -> str:
+    """The common GitHub-style anchor slugger for the checker's anchor compare."""
+    text = heading.strip().lower()
+    text = re.sub(r"[^\w\- ]", "", text)
+    return text.replace(" ", "-")
+
+
+def _markdown_files() -> list[Path]:
+    return sorted(path for path in ROOT.rglob("*.md") if not (set(path.parts) & _SKIP_DIRECTORIES))
+
+
+def _same_repository_md_link_problems() -> list[str]:
+    """Every broken same-repository ``.md`` link, with target or anchor slug.
+
+    Same-repository relative ``.md`` links only: each target is resolved from
+    the linking file's directory and must exist, and each ``#anchor`` slug is
+    compared against the target file's ``#`` headings with the GitHub-style
+    slugger. No network access; external links and pure-fragment links are out
+    of scope.
+    """
+    problems: list[str] = []
+    for source in _markdown_files():
+        for match in LINK_PATTERN.finditer(source.read_text(encoding="utf-8")):
+            target = match.group(1)
+            if "://" in target or target.startswith("#"):
+                continue
+            path_part, _, anchor = target.partition("#")
+            if not path_part.endswith(".md"):
+                continue
+            resolved = (source.parent / path_part).resolve()
+            if not resolved.is_file():
+                problems.append(f"{source}: broken target {target}")
+                continue
+            if not anchor:
+                continue
+            headings = {
+                _github_slug(m.group(2))
+                for line in resolved.read_text(encoding="utf-8").splitlines()
+                if (m := _HEADING_PATTERN.match(line))
+            }
+            if anchor not in headings:
+                problems.append(f"{source}: broken anchor {target}")
+    return problems
+
+
+def test_same_repository_markdown_link_targets_and_anchors_resolve() -> None:
+    problems = _same_repository_md_link_problems()
+    assert problems == [], "broken same-repository .md links: " + "; ".join(problems)
+
+
+def test_system_walkthrough_kind_lists_include_sql_calls_in_canonical_order() -> None:
+    text = _collapsed(SYSTEM_WALKTHROUGH)
+    # Canonical SQL dependency-kind order (CURRENT_SQL_DEPENDENCY_KINDS,
+    # src/minotaur/query/sql.py): sql:reads-from, sql:foreign-key-to, sql:calls.
+    assert "`sql:reads-from`, `sql:foreign-key-to`, or `sql:calls`?" in text, (
+        "the surface kind sentence must list sql:calls in canonical order"
+    )
+    assert (
+        "`sql:reads-from`, `sql:foreign-key-to`, and `sql:calls`) and the concrete "
+        "in-scope targets" in text
+    ), "the consumers kind sentence must list sql:calls in canonical order"
+    assert (
+        "outgoing `calls`, `references`, `imports`, `sql:reads-from`, "
+        "`sql:foreign-key-to`, and `sql:calls`" in text
+    ), "the system-deps kind sentence must list sql:calls in canonical order"
+
+
+def test_freshness_concept_names_functions_and_the_system_queries_as_first_reads() -> None:
+    text = _collapsed(ROOT / "docs/concepts/freshness.md")
+    # Function-name citations, not line numbers that go stale.
+    assert (
+        "`stale_graph = query.no_refresh and not observed.is_clean` gates "
+        "`text_fallback=query.text_fallback and not stale_graph` in `_run_unreferenced`"
+    ) in text
+    assert "in `_run_unreferenced` (`minotaur/cli.py`)" in text
+    assert "cli.py:360" not in text and "cli.py:380" not in text
+    # The system queries share the first-read validation cost.
+    for command in (
+        "`query systems`",
+        "`query surface`",
+        "`query consumers`",
+        "`query system-deps`",
+    ):
+        assert command in text
+    assert "shared loader `_load_and_refresh_graph` in `minotaur/cli.py`" in text
+
+
+def test_query_reference_states_the_real_source_of_the_systems_example() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert "the overview tests' synthetic three-file tree with two declared systems" in text, (
+        "the systems example must state its real synthetic source"
+    )
+    assert "the synthetic fixture used by the public walkthrough" not in text
+
+
+def test_query_reference_documents_the_zero_system_overview_behavior() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert "With zero declared systems, text output prints `no declared systems`" in text
+    assert "`--details` appends the empty `declared_files {}` and `connections []`" in text
+    assert "exits `0`" in text
+
+
+def test_format_reference_documents_expected_symbol_kind_and_no_current_producer() -> None:
+    text = _collapsed(GRAPH_FORMAT_REFERENCE)
+    assert "optional `expected_symbol_kind` field" in text
+    assert "same symbol-kind vocabulary as `symbol_kind`" in text
+    assert "validated at construction" in text
+    assert "no identity role" in text
+    assert (
+        "no bundled interpreter currently emits it, and no query or rendering path reads it"
+    ) in text
+
+
+def test_format_reference_lists_the_invalid_generated_at_fixture() -> None:
+    text = _collapsed(GRAPH_FORMAT_REFERENCE)
+    assert "- `invalid-generated-at.json` fails JSON Schema validation;" in text
+    fixture = ROOT / "tests/fixtures/minotaur-graph-v1/invalid/invalid-generated-at.json"
+    assert fixture.is_file()

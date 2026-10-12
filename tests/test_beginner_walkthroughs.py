@@ -45,11 +45,66 @@ def test_walkthrough_prints_documented_transcript(scenario: str, document: str) 
     assert result.stderr == ""
 
     # Parser messages differ between supported Python versions. Keep the path,
-    # diagnostic code and status exact, normalizing only parser wording/location.
+    # diagnostic code, severity suffix and status exact, normalizing only
+    # parser wording/location. Preserving the `[severity=…]` tail lets the
+    # documented transcript pin the rendered severity.
     def normalize(text: str) -> str:
-        return re.sub(r"broken.py:\d+:\d+: parse-error: [^\n]+", "broken.py: parse-error", text)
+        return re.sub(
+            r"broken\.py:\d+:\d+: parse-error: .*?( \[severity=[^\]]*\])?(?=\n|$)",
+            lambda m: "broken.py: parse-error" + (m.group(1) or ""),
+            text,
+        )
 
     assert normalize(result.stdout) == normalize(expected[0])
+
+
+def test_malformed_walkthrough_transcript_pins_error_severity() -> None:
+    """The recovery transcript shows the real `[severity=error]` diagnostic tail.
+
+    ``_format_diagnostic`` (``minotaur/cli.py``) renders the severity suffix on
+    every diagnostic, so the documented parse-error line must keep it; a
+    transcript without the suffix fails this named assertion.
+    """
+    expected = re.findall(
+        r"```text\n(.*?)```",
+        (ROOT / "docs/guides/source-error-recovery.md").read_text(),
+        re.DOTALL,
+    )[0]
+    assert "broken.py:0:13: parse-error: invalid syntax [severity=error]" in expected
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), "malformed", "--no-pause"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "broken.py:0:13: parse-error: invalid syntax [severity=error]" in result.stdout
+
+
+def test_python_walkthrough_reports_eof_without_an_interactive_terminal() -> None:
+    """A closed stdin turns the pause into one notice line and a clean exit.
+
+    Running the ``python`` scenario without ``--no-pause`` feeds the pause
+    prompt EOF exactly as a non-interactive invocation would. Without the
+    ``try/except EOFError`` guard around the ``input()`` call, the closed
+    stdin raises ``EOFError``, the process exits nonzero with a traceback on
+    stderr, and all three assertions here fail.
+    """
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), "python"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (
+        "No interactive terminal is available; the temporary workspace is being removed."
+        in result.stdout
+    )
+    assert result.stderr == ""
 
 
 def test_javascript_member_call_remains_unresolved(tmp_path: Path) -> None:

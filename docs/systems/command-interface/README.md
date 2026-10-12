@@ -13,16 +13,22 @@ and source or browser presentation.
 
 ## Expected interactions
 
-The following directions are expected/observed, non-enforced, and
-selection-bounded structural interactions:
+The bullets below follow a fixed claim convention: a bullet of the form
+`X` points to `Y` states an observed static edge between two declared
+systems, one of which is this system, while a bullet of the form consumes
+something through `<system>` composition describes a dependency carried
+through composition rather than a direct static edge.
 
-- The command interface points to `project-acquisition` for configuration and
+- `command-interface` points to `project-acquisition` for configuration and
   current-versus-committed preparation.
-- It points to `graph-contract` for graph loading and validation.
-- It points to `analysis-platform` for source-analysis composition.
-- It points to `query-and-system-reporting` for public query dispatch and
-  reporting.
-- It points to `source-presentation` for presentation dispatch.
+- `command-interface` points to `graph-contract` for graph loading and
+  validation.
+- `command-interface` points to `analysis-platform` for source-analysis
+  composition.
+- `command-interface` points to `query-and-system-reporting` for public query
+  dispatch and reporting.
+- `command-interface` points to `source-presentation` for presentation
+  dispatch.
 
 These directions describe the selected proof universe, not required runtime
 dependencies or architectural policy.

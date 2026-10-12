@@ -294,7 +294,8 @@ canonical `coverage ` JSON line, followed by lines of the exact form
 `NAME  declared TOTAL  represented REPRESENTED  absent ABSENT`. Default JSON
 has exactly `query`, `refreshed`, `stale`, `stale_analyzer`, `results`, and `coverage`;
 each result's `declared_files` has `scope`, `total`, `represented`, and `absent`.
-For example, the synthetic fixture used by the public walkthrough produces:
+For example, the overview tests' synthetic three-file tree with two declared
+systems produces:
 
 ```text
 coverage {"declared_files":{"absent":1,"represented":2,"scope":"all_declared_system_files","total":3},"graph_files":{"count":3,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":1,"scope":"all_declared_system_files"},"selection":{"status":"recorded","targets":["."]},"source_diagnostics":{"status":"unavailable"},"unassigned_files":{"count":1,"scope":"final_graph_file_node_derived_paths"}}
@@ -314,6 +315,11 @@ counts only unresolved-reference nodes classified to named systems, excluding
 the shared canonical lexical order, not a guarantee that analysis succeeded
 for every target. Diagnostics are tagged unavailable until a refresh observes
 them, including an observed count of zero.
+
+With zero declared systems, text output prints `no declared systems`
+(after the canonical `coverage ` line), `--details` appends the empty
+`declared_files {}` and `connections []` inventory lines, and the command
+exits `0`. A partial or empty tree is a valid limited answer, not an error.
 
 `--details` adds `results[].declared_files.paths` and
 `coverage.unassigned_files.paths`, both sorted, plus top-level `connections`.
@@ -369,8 +375,11 @@ current SQL dependency kinds `sql:reads-from`, `sql:foreign-key-to`, and
 * `consumers` lists the outside files participating in boundary relationships,
   one record per file, with the distinct kinds that file contributes and the
   in-scope targets it reaches. An outside file that only imports a system
-  module is a consumer through `imports` even when no call resolves. An empty
-  result prints `no consumers`.
+  module is a consumer through `imports` even when no call resolves.
+  Re-exports are not resolved: `from pkg import f` records an unresolved
+  `pkg.f` reference with no module-layer `imports` consumer, so
+  `pkg/__init__.py` never links a name that another module actually defines.
+  An empty result prints `no consumers`.
 * `system-deps` lists the target categories of the system's own outgoing
   boundary relationships, including `sql:reads-from`, `sql:foreign-key-to`,
   and `sql:calls`: each named target system plus explicit `no_system` and

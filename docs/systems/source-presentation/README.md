@@ -14,19 +14,23 @@ policy, and graph production.
 
 ## Expected interactions
 
-The following directions are expected/observed ownership or data-flow
-interactions. They are non-enforced and selection-bounded; a direction carried
-through composition need not appear as a direct static connection in the
-selected graph.
+The bullets below follow a fixed claim convention: a bullet of the form
+`X` points to `Y` states an observed static edge between two declared
+systems, one of which is this system, while a bullet of the form consumes
+something through `<system>` composition describes a dependency carried
+through composition rather than a direct static edge.
 
-- `command-interface` points to source presentation for presentation dispatch;
-  source presentation receives that request.
-- Source presentation consumes `graph-contract`'s canonical graph payload and
-  source-location contract through command-interface composition.
-- The selected graph also observes a direct static `source-presentation` to
-  `graph-contract` connection (`calls`, `imports`, and `references`), including
-  the shared `is_safe_path` path guard. Like every observed edge in this
-  section, it is not asserted as required.
+- `command-interface` points to `source-presentation` for presentation
+  dispatch.
+- `query-and-system-reporting` points to `source-presentation` for source
+  excerpts and presentation payloads.
+- `source-presentation` points to `graph-contract` for the canonical graph
+  payload, source locations, and the shared path guard.
+- `source-presentation` points to `query-and-system-reporting` for the
+  system-membership and endpoint-classification types (`System`,
+  `SystemMembership`, `EndpointKind`).
+- `source-presentation` consumes the canonical graph payload and
+  source-location contract through `command-interface` composition.
 
 These directions describe the selected proof universe, not required runtime
 dependencies or architectural policy; an observed edge is not asserted as

@@ -175,11 +175,25 @@ source root, analysis targets, graph, and system-definition directory. Its
 `systems_dir = "docs/systems"` uses the recommended layout; another project
 can keep the same per-system directories under a different configured parent.
 
-Every query command below runs from the repository root and reads the
-committed graph with `--no-refresh`, so a walkthrough never rewrites a
-checked-in file. `--root examples/system-walkthrough` is the source root the
-graph was analyzed against; the definitions are found at that root's default
-`docs/systems` location.
+Every console command in this walkthrough runs from `examples/system-walkthrough`
+itself: the example's own `.minotaur.toml` supplies the source root (`.`), the
+committed `minotaur-graph.json`, and the `docs/systems` definitions directory,
+and each query reads the committed graph with `--no-refresh`, so a walkthrough
+never rewrites a checked-in file. The same query also works from the
+repository root: there you name the config instead, and its values anchor to
+the config's directory while command-line path arguments stay relative to the
+working directory:
+
+```bash
+minotaur query surface orders --config examples/system-walkthrough/.minotaur.toml --no-refresh
+```
+
+Three documented commands are the exception and run from the repository root:
+the runner scenario (`python examples/run_walkthrough.py systems`, shown
+above), the regenerate script
+(`python3 examples/system-walkthrough/regenerate_system_walkthrough.py`), and
+the screenshot-capture script
+(`python3 scripts/capture_system_walkthrough_demo.py`).
 
 ### The declared systems
 
@@ -214,11 +228,8 @@ reproducible across commits. Re-run the same command against a scratch path and
 `diff` the result against the checked-in graph to confirm they agree:
 
 ```console
-$ minotaur analyze --root examples/system-walkthrough \
-    --output /tmp/system-walkthrough-graph.json \
-    --force examples/system-walkthrough/shop
-$ minotaur query diff examples/system-walkthrough/minotaur-graph.json \
-    /tmp/system-walkthrough-graph.json
+$ minotaur analyze --root . --output /tmp/system-walkthrough-graph.json --force shop
+$ minotaur query diff minotaur-graph.json /tmp/system-walkthrough-graph.json
 no changes
 ```
 
@@ -262,14 +273,14 @@ required before using the visual map or the comparison scenario.
 ### `surface`: what outside files reach into the system
 
 `surface` answers: which in-scope symbols do files outside the system reach
-through `calls`, `references`, `sql:reads-from`, or `sql:foreign-key-to`?
+through `calls`, `references`, `sql:reads-from`, `sql:foreign-key-to`, or `sql:calls`?
 Importing the system's module is a consumer fact, never an exposed boundary,
 so an outside file that only imports `shop.orders` would expose nothing.
 
 ```console
 $ minotaur query surface orders \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh
+    --graph minotaur-graph.json \
+    --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 shop/orders.py  shop.orders.create_order  calls
 ```
@@ -280,8 +291,8 @@ internal. The same records as JSON:
 
 ```console
 $ minotaur query surface orders \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh --json
+    --graph minotaur-graph.json \
+    --root . --no-refresh --json
 {"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"surface","refreshed":false,"results":[{"category":"system: orders","kinds":["calls"],"path":"shop/orders.py","symbol":"shop.orders.create_order"}],"stale":[],"stale_analyzer":null}
 ```
 
@@ -290,8 +301,8 @@ are needed:
 
 ```console
 $ minotaur query surface orders \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh --details
+    --graph minotaur-graph.json \
+    --root . --no-refresh --details
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 shop/orders.py  shop.orders.create_order  calls
 relationships [{"evidence":[{"evidence_extensions":{"status":"unavailable"},"producer":{"name":"minotaur-python","status":"recorded","version":{"status":"unavailable"}},"provenance":"static-analysis","rule":{"status":"unavailable"},"sites":[{"coordinate_encoding":"utf-8","path":"shop/checkout.py","range":{"end":{"column":25,"line":8},"end_exclusive":true,"start":{"column":13,"line":8}}}]}],"kind":"calls","relationship_extensions":{"status":"unavailable"},"source":{"id":"node:sha256:99b2170760c1979d5601f6da9483153ac2da5ebfc7b071c4ecc53016c2e714b7","label":"shop.checkout.checkout","location":{"coordinate_encoding":"utf-8","path":"shop/checkout.py","range":{"end":{"column":25,"line":9},"end_exclusive":true,"start":{"column":1,"line":7}},"status":"recorded"},"node_class":"symbol","path":{"status":"recorded","value":"shop/checkout.py"},"semantic_identity":{"basis":"source-location","namespace":"minotaur-python","reference_text":{"status":"unavailable"},"resource_key":{"status":"unavailable"},"upstream_identifier":{"status":"unavailable"}}},"target":{"id":"node:sha256:5822107e1c8348278f492acfc50cb897197cd9ea9c52d307cf347ff0b2b0cc69","label":"shop.orders.create_order","location":{"coordinate_encoding":"utf-8","path":"shop/orders.py","range":{"end":{"column":17,"line":10},"end_exclusive":true,"start":{"column":1,"line":7}},"status":"recorded"},"node_class":"symbol","path":{"status":"recorded","value":"shop/orders.py"},"semantic_identity":{"basis":"source-location","namespace":"minotaur-python","reference_text":{"status":"unavailable"},"resource_key":{"status":"unavailable"},"upstream_identifier":{"status":"unavailable"}}}}]
@@ -301,13 +312,13 @@ relationships [{"evidence":[{"evidence_extensions":{"status":"unavailable"},"pro
 
 `consumers` answers: one record per outside file participating in a
 boundary-crossing relationship, carrying the distinct relationship kinds that
-file contributes (`calls`, `references`, `imports`, `sql:reads-from`, and
-`sql:foreign-key-to`) and the concrete in-scope targets it reaches:
+file contributes (`calls`, `references`, `imports`, `sql:reads-from`,
+`sql:foreign-key-to`, and `sql:calls`) and the concrete in-scope targets it reaches:
 
 ```console
 $ minotaur query consumers orders \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh
+    --graph minotaur-graph.json \
+    --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 shop/checkout.py (no_system)  calls: shop.orders.create_order (shop/orders.py); imports: shop.orders.create_order (shop/orders.py)
 ```
@@ -319,8 +330,8 @@ because linking against the system's module is itself a consumer fact.
 
 ```console
 $ minotaur query consumers orders \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh --json
+    --graph minotaur-graph.json \
+    --root . --no-refresh --json
 {"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"consumers","refreshed":false,"results":[{"category":"no_system","file":"shop/checkout.py","kinds":["calls","imports"],"targets":[{"kind":"calls","label":"shop.orders.create_order","path":"shop/orders.py"},{"kind":"imports","label":"shop.orders.create_order","path":"shop/orders.py"}]}],"stale":[],"stale_analyzer":null}
 ```
 
@@ -330,8 +341,8 @@ system*:
 
 ```console
 $ minotaur query consumers billing \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh
+    --graph minotaur-graph.json \
+    --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 shop/checkout.py (no_system)  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
 shop/orders.py (system: orders)  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
@@ -340,16 +351,16 @@ shop/orders.py (system: orders)  calls: shop.billing.charge (shop/billing.py); i
 ### `system-deps`: what the system itself reaches
 
 `system-deps` answers: which target categories the system's own files reach
-through outgoing `calls`, `references`, `imports`, `sql:reads-from`, and
-`sql:foreign-key-to` — other named systems, plus the explicit `no_system`
+through outgoing `calls`, `references`, `imports`, `sql:reads-from`,
+`sql:foreign-key-to`, and `sql:calls` — other named systems, plus the explicit `no_system`
 category for path-carrying targets in no declared system and `external` for
 path-less upstream targets. The orders subsystem charges orders through billing
 and appends to the shared ledger:
 
 ```console
 $ minotaur query system-deps orders \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh
+    --graph minotaur-graph.json \
+    --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 no_system  calls: shop.ledger.record (shop/ledger.py); imports: shop.ledger.record (shop/ledger.py)
 system: billing  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
@@ -357,8 +368,8 @@ system: billing  calls: shop.billing.charge (shop/billing.py); imports: shop.bil
 
 ```console
 $ minotaur query system-deps orders \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh --json
+    --graph minotaur-graph.json \
+    --root . --no-refresh --json
 {"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"system-deps","refreshed":false,"results":[{"category":"no_system","targets":[{"kind":"calls","label":"shop.ledger.record","path":"shop/ledger.py"},{"kind":"imports","label":"shop.ledger.record","path":"shop/ledger.py"}]},{"category":"system: billing","targets":[{"kind":"calls","label":"shop.billing.charge","path":"shop/billing.py"},{"kind":"imports","label":"shop.billing.charge","path":"shop/billing.py"}]}],"stale":[],"stale_analyzer":null}
 ```
 
@@ -369,16 +380,16 @@ has a single `no_system` row:
 
 ```console
 $ minotaur query system-deps billing \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh
+    --graph minotaur-graph.json \
+    --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 no_system  calls: shop.ledger.record (shop/ledger.py); imports: shop.ledger.record (shop/ledger.py)
 ```
 
 ```console
 $ minotaur query surface billing \
-    --graph examples/system-walkthrough/minotaur-graph.json \
-    --root examples/system-walkthrough --no-refresh
+    --graph minotaur-graph.json \
+    --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
 shop/billing.py  shop.billing.charge  calls
 ```

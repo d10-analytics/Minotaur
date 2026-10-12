@@ -3,6 +3,8 @@
 Run from the checkout with its installed Python environment. Each CLI call is
 printed beside its output and exit status. Temporary files are removed when
 the scenario finishes; the first-run HTML stays openable until you press Enter.
+Without an interactive terminal (stdin at EOF), the pause prints one notice
+line and the temporary workspace is removed immediately.
 """
 
 from __future__ import annotations
@@ -116,6 +118,13 @@ def query(root: Path, kind: str, *arguments: str) -> None:
 
 
 def first_run(root: Path, *, pause: bool) -> None:
+    """Copy the getting-started app, query it, and render the first-run HTML.
+
+    With ``pause``, wait for Enter so the HTML stays openable. At EOF (no
+    interactive terminal) the pause prints one notice line and returns, so
+    the enclosing temporary directory removes the workspace and the run
+    still exits 0.
+    """
     shutil.copy2(ROOT / "examples/getting-started/app.py", root / "app.py")
     analyze(root, "app.py")
     query(root, "definitions", "greeting")
@@ -125,7 +134,10 @@ def first_run(root: Path, *, pause: bool) -> None:
     )
     if pause:
         print(f"Open this local file in your browser: {(root / 'graph.html').as_uri()}")
-        input("Press Enter after viewing it to remove the temporary workspace: ")
+        try:
+            input("Press Enter after viewing it to remove the temporary workspace: ")
+        except EOFError:
+            print("No interactive terminal is available; the temporary workspace is being removed.")
 
 
 def javascript(root: Path) -> None:

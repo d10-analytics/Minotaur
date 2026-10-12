@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -130,6 +131,16 @@ _CONNECTIONS = [
         "system: analysis-javascript",
         "system: graph-contract",
         ("calls", "imports", "references"),
+    ),
+    (
+        "system: analysis-platform",
+        "system: analysis-javascript",
+        ("imports", "references"),
+    ),
+    (
+        "system: analysis-platform",
+        "system: analysis-python",
+        ("imports", "references"),
     ),
     (
         "system: analysis-platform",
@@ -318,7 +329,7 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
         "count": 0,
         "paths": [],
     }
-    assert len(payload["connections"]) == 24
+    assert len(payload["connections"]) == 26
     assert [
         (item["source_category"], item["target_category"], tuple(item["kinds"]))
         for item in payload["connections"]
@@ -503,3 +514,97 @@ def test_target_omission_reports_one_declared_file_absent(
         "status": "recorded",
         "targets": sorted(target for target in _TARGETS if target != "minotaur/cli.py"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Two-way claim test between README narrative and the observed manifest
+# ---------------------------------------------------------------------------
+
+
+def _expected_interactions_bullets(readme: Path) -> list[str]:
+    """Return each ``- `` bullet (with continuations) in the section, verbatim."""
+    section = readme.read_text(encoding="utf-8").split("## Expected interactions", 1)[1]
+    bullets: list[str] = []
+    for line in section.splitlines():
+        if line.startswith("- "):
+            bullets.append(line[2:].strip())
+        elif line.startswith("  ") and bullets:
+            bullets[-1] = f"{bullets[-1]} {line.strip()}"
+        elif bullets and not line.startswith((" ", "-")):
+            break
+    return bullets
+
+
+def _form_a_endpoint(bullet: str, before: bool) -> str | None:
+    """Return the first backticked token before/after the single 'points to'."""
+    head, _, tail = bullet.partition("points to")
+    text = head if before else tail
+    tokens = re.findall(r"`([^`]+)`", text)
+    return tokens[0] if tokens else None
+
+
+def test_readme_interaction_claims_match_the_observed_connection_manifest() -> None:
+    """Every form-(a) README claim is observed, and every observed edge is claimed."""
+    observed = {
+        (source.removeprefix("system: "), target.removeprefix("system: "))
+        for source, target, _ in _CONNECTIONS
+    }
+    declared = {path.name for path in SYSTEMS_ROOT.iterdir() if path.is_dir()}
+    stated: set[tuple[str, str]] = set()
+
+    for readme in sorted(SYSTEMS_ROOT.glob("*/README.md")):
+        own = readme.parent.name
+        claims: set[tuple[str, str]] = set()
+        for bullet in _expected_interactions_bullets(readme):
+            count = bullet.count("points to")
+            composed = re.search(r"consumes .* through `([^`]+)` composition", bullet)
+            if count == 1 and composed:
+                pytest.fail(f"{readme}: bullet mixes both forms: {bullet!r}")
+            if count == 1:
+                source, target = (_form_a_endpoint(bullet, before) for before in (True, False))
+                if source is None or target is None:
+                    pytest.fail(
+                        f"{readme}: bullet lacks a backticked declared-system endpoint: {bullet!r}"
+                    )
+                if source not in declared or target not in declared:
+                    pytest.fail(f"{readme}: bullet endpoint is not a declared system: {bullet!r}")
+                if own not in (source, target):
+                    pytest.fail(
+                        f"{readme}: neither bullet endpoint is this README's own "
+                        f"system {own!r} (no fallback): {bullet!r}"
+                    )
+                claims.add((source, target))
+            elif count > 1:
+                pytest.fail(f"{readme}: bullet has several 'points to': {bullet!r}")
+            elif composed is None:
+                pytest.fail(
+                    f"{readme}: bullet is neither form (a) 'points to' nor form (b) "
+                    f"'consumes ... through `<system>` composition': {bullet!r}"
+                )
+            elif composed.group(1) not in declared:
+                pytest.fail(f"{readme}: composition system is not declared: {bullet!r}")
+        assert claims, f"{readme}: parsed no form-(a) interaction claims"
+        if own == "analysis-python":
+            assert ("analysis-platform", "analysis-python") in claims, (
+                f"{readme}: incoming analysis-platform -> analysis-python claim missing"
+            )
+        unknown = claims - observed
+        assert not unknown, (
+            f"{readme}: claimed but unobserved edges {sorted(unknown)}; observed "
+            f"targets for the source systems: "
+            f"{ {s: sorted(t for u, t in observed if u == s) for s, _ in sorted(unknown)} }"
+        )
+        stated |= claims
+
+    unstated = observed - stated
+    assert not unstated, f"observed edges no README states: {sorted(unstated)}"
+
+    sql_readme = (SYSTEMS_ROOT / "analysis-sql" / "README.md").read_text(encoding="utf-8")
+    sentence = next(line for line in sql_readme.splitlines() if "SQL interpreter files" in line)
+    assert "exactly the SQL interpreter files listed in" in sentence, (
+        f"analysis-sql/README.md: membership sentence lacks the expected wording: {sentence!r}"
+    )
+    numbers = re.findall(r"\b\d+\b|\bone\b|\btwo\b|\bthree\b|\bfour\b|\bfive\b", sentence)
+    assert not numbers, (
+        f"analysis-sql/README.md: membership sentence states a file count {numbers}: {sentence!r}"
+    )

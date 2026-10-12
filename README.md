@@ -46,7 +46,7 @@ its supporting source visible in the details panel.
 - **Explore visually.** Search, filter, zoom, and select nodes or connections to
   inspect their details and source evidence. The self-contained HTML explorer
   opens locally without a server or network requests. The bundled
-  [shop system walkthrough](examples/system-walkthrough/README.md#explore-system-boundaries-visually)
+  [shop system walkthrough](examples/system-walkthrough/README.md#2-find-a-system-boundary)
   demonstrates system focus and cross-system connections.
 
 ## Map systems and their boundaries

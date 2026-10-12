@@ -6,8 +6,9 @@ storefront package with two declared systems. Pasted output rots the moment a
 renderer changes, so this test re-runs every documented console command
 exactly as a reader would and compares standard output byte-for-byte.
 
-Commands run through ``python -m minotaur`` from the repository root, exactly
-as the documentation shows them. Scratch outputs are redirected into pytest's
+Commands run through ``python -m minotaur`` from ``examples/system-walkthrough``
+itself, exactly as the documentation shows them, so the example's own
+``.minotaur.toml`` governs. Scratch outputs are redirected into pytest's
 ``tmp_path`` so a walkthrough never rewrites a checked-in file, and every
 committed example artifact is byte-compared before and after each command.
 """
@@ -30,11 +31,19 @@ from minotaur.graph_model.loading import graph_digest, load_graph_bytes, stamp_p
 ROOT = Path(__file__).parents[2]
 EXAMPLE = ROOT / "examples" / "system-walkthrough"
 WALKTHROUGH = EXAMPLE / "README.md"
+GUIDE = ROOT / "docs" / "guides" / "system-definitions.md"
 RUNNER = ROOT / "examples" / "run_walkthrough.py"
 COMPARISON_REPORT = EXAMPLE / "minotaur-comparison.html"
 CONSOLE_BLOCK = re.compile(r"^```console\n(.*?)^```$", re.DOTALL | re.MULTILINE)
+BASH_BLOCK = re.compile(r"^```bash\n(.*?)^```$", re.DOTALL | re.MULTILINE)
 
 SCRATCH_GRAPH = "/tmp/system-walkthrough-graph.json"
+
+#: The repo-root alternative the run-location passage shows exactly once,
+#: outside any executed console block.
+CONFIG_ALTERNATIVE = (
+    "minotaur query surface orders --config examples/system-walkthrough/.minotaur.toml --no-refresh"
+)
 
 #: Every committed artifact under the example directory, keyed by relative path.
 COMMITTED_FILES = {
@@ -45,6 +54,36 @@ COMMITTED_FILES = {
 def _committed_bytes() -> dict[Path, bytes]:
     """Snapshot every committed example artifact's bytes."""
     return {relative: path.read_bytes() for relative, path in COMMITTED_FILES.items()}
+
+
+def _example_file_set() -> set[Path]:
+    """Snapshot the recursive file set under the example directory.
+
+    ``COMMITTED_FILES`` is built at import, so a command that *creates* a file
+    inside the committed tree is invisible to ``_committed_bytes``; the file
+    set closes that gap.
+    """
+    return {path.relative_to(EXAMPLE) for path in EXAMPLE.rglob("*") if path.is_file()}
+
+
+def _collapsed(text: str) -> str:
+    """Collapse whitespace so a prose pin survives a reflow."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _run_location_passage() -> str:
+    """Return the walkthrough README's run-location passage."""
+    text = WALKTHROUGH.read_text(encoding="utf-8")
+    start = text.index("Every console command in this walkthrough")
+    return text[start : text.index("### The declared systems")]
+
+
+def _first_surface_orders_transcript() -> tuple[str, str]:
+    """Return ``(normalized command, pasted stdout)`` of the first surface block."""
+    for command, expected in TRANSCRIPTS:
+        if command.startswith("minotaur query surface orders "):
+            return " ".join(command.split()), expected
+    raise AssertionError("no surface orders transcript was extracted")
 
 
 def _transcripts() -> list[tuple[str, str, str]]:
@@ -247,10 +286,8 @@ def test_documented_command_still_prints_its_pasted_output(
     command: str, expected: str, tmp_path: Path
 ) -> None:
     """Re-run one documented transcript and compare stdout byte-for-byte."""
-    before = _committed_bytes()
-    sandbox = tmp_path / "config-free-sandbox"
-    sandbox.mkdir()
-    (sandbox / "examples").symlink_to(ROOT / "examples", target_is_directory=True)
+    before_bytes = _committed_bytes()
+    before_files = _example_file_set()
     arguments = shlex.split(command)
     assert arguments[0] == "minotaur"
     scratch = str(tmp_path / "system-walkthrough-graph.json")
@@ -265,30 +302,98 @@ def test_documented_command_still_prints_its_pasted_output(
             "minotaur",
             "analyze",
             "--root",
-            "examples/system-walkthrough",
+            ".",
             "--output",
             scratch,
             "--force",
-            "examples/system-walkthrough/shop",
+            "shop",
         ]
         completed = subprocess.run(
             prerequisite,
-            cwd=sandbox,
+            cwd=EXAMPLE,
             text=True,
             capture_output=True,
             check=False,
         )
         assert completed.returncode == 0, f"{command}\n{completed.stderr}"
+        assert _example_file_set() == before_files, (
+            "the diff prerequisite changed the example file set"
+        )
     completed = subprocess.run(
         [sys.executable, "-m", "minotaur", *arguments],
-        cwd=sandbox,
+        cwd=EXAMPLE,
         text=True,
         capture_output=True,
         check=False,
     )
     assert completed.returncode == 0, f"{command}\n{completed.stderr}"
     assert completed.stdout == expected, command
-    assert _committed_bytes() == before, f"{command} rewrote a checked-in example artifact"
+    assert _committed_bytes() == before_bytes, f"{command} rewrote a checked-in example artifact"
+    assert _example_file_set() == before_files, (
+        f"{command} created or removed a file under {EXAMPLE}"
+    )
+
+
+def test_run_location_passage_pins_example_directory_and_repo_root_exceptions() -> None:
+    """The run-location passage pins the run location, alternative, and exceptions."""
+    passage = _collapsed(_run_location_passage())
+    # The primary instruction is the example directory itself, where the
+    # example's own .minotaur.toml governs.
+    assert (
+        "Every console command in this walkthrough runs from `examples/system-walkthrough`"
+        in passage
+    )
+    # The repo-root alternative is shown once, with the exact spelling, in the
+    # passage and outside every executed console block (so the block counts hold).
+    readme = WALKTHROUGH.read_text(encoding="utf-8")
+    found = re.findall(r"minotaur query surface orders --config \S+ --no-refresh", readme)
+    assert found == [CONFIG_ALTERNATIVE]
+    assert CONFIG_ALTERNATIVE in _run_location_passage()
+    assert all(command != CONFIG_ALTERNATIVE for command, _ in TRANSCRIPTS)
+    # The three repo-root commands are named as the explicit exceptions.
+    assert "run from the repository root" in passage
+    assert "runner scenario" in passage
+    assert "run_walkthrough.py systems" in passage
+    assert "regenerate script" in passage
+    assert "regenerate_system_walkthrough.py" in passage
+    assert "screenshot-capture script" in passage
+    assert "capture_system_walkthrough_demo.py" in passage
+
+
+def test_config_alternative_runs_from_repository_root() -> None:
+    """The passage's --config form executes from the repository root as documented."""
+    first_command, first_expected = _first_surface_orders_transcript()
+    assert first_command == (
+        "minotaur query surface orders --graph minotaur-graph.json --root . --no-refresh"
+    )
+    before_bytes = _committed_bytes()
+    before_files = _example_file_set()
+    completed = subprocess.run(
+        [sys.executable, "-m", "minotaur", *shlex.split(CONFIG_ALTERNATIVE)[1:]],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == first_expected, CONFIG_ALTERNATIVE
+    assert _committed_bytes() == before_bytes, "the --config run rewrote a committed artifact"
+    assert _example_file_set() == before_files, "the --config run changed the example file set"
+
+
+def test_query_guide_example_matches_the_walkthrough_location_and_command() -> None:
+    """The guide's query example states the example directory and the executed command."""
+    text = GUIDE.read_text(encoding="utf-8")
+    anchor = text.index("Query a declared system")
+    segment = text[anchor : text.index("```bash", anchor)]
+    assert "examples/system-walkthrough" in segment
+    matching = [
+        block for block in BASH_BLOCK.findall(text) if "minotaur query surface orders" in block
+    ]
+    assert len(matching) == 1
+    joined = " ".join(matching[0].replace("\\\n", " ").split())
+    first_command, _ = _first_surface_orders_transcript()
+    assert joined == first_command
 
 
 def test_public_systems_membership_change_keeps_graph_bytes_identical(

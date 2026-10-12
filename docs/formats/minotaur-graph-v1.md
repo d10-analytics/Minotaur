@@ -92,6 +92,13 @@ namespaced extension. `language`, when present, is a lowercase identifier;
 the reserved v1 spellings are `python`, `csharp`, `javascript`, `typescript`,
 and `sql`.
 
+Nodes may also carry the optional `expected_symbol_kind` field: a string from
+the same symbol-kind vocabulary as `symbol_kind` (`#/$defs/symbolKind` in the
+schema), validated at construction like `symbol_kind` itself. It carries no
+identity role — it does not feed the canonical identity input — and it is
+observation-neutral: no bundled interpreter currently emits it, and no query
+or rendering path reads it.
+
 The ID is `node:sha256:` followed by the SHA-256 digest of the RFC 8785 JSON
 Canonicalization Scheme (JCS) encoding of a canonical identity input. For
 `source-location`, that input contains the basis and namespace plus node
@@ -391,7 +398,8 @@ fixtures are in
 
 - `wrong-position-type.json` fails JSON Schema validation;
 - `missing-curated-rule.json` fails JSON Schema validation;
-- `unsafe-path.json` fails JSON Schema validation; and
+- `unsafe-path.json` fails JSON Schema validation;
+- `invalid-generated-at.json` fails JSON Schema validation; and
 - `dangling-relationship.json` passes structural shape checks but fails
   semantic endpoint validation.
 

@@ -33,12 +33,13 @@ A system query needs three things to exist:
    paths are relative to, passed as `--root` (or supplied by a
    [project configuration](project-configuration.md)).
 
-Query a declared system by its name:
+Query a declared system by its name, from `examples/system-walkthrough` (the
+directory of the bundled [system walkthrough](../../examples/system-walkthrough/)):
 
 ```bash
 minotaur query surface orders \
-  --graph examples/system-walkthrough/minotaur-graph.json \
-  --root examples/system-walkthrough --no-refresh
+  --graph minotaur-graph.json \
+  --root . --no-refresh
 ```
 
 The repository overview and the three named-boundary queries share the
@@ -154,6 +155,13 @@ Importing a system's module is a *consumer fact* and never an exposed
 boundary: `imports` edges are reported by `consumers` and `system-deps` but
 are never `surface`. The module is not an implicit callable
 boundary.
+
+Re-exports are not resolved: `from pkg import f` records an unresolved
+`pkg.f` reference with no module-layer `imports` consumer, so
+`pkg/__init__.py` never links a name that another module actually defines.
+As a text-level cross-check on such a name, `query unreferenced
+--text-fallback` retains a suspect whenever its bare name appears elsewhere
+in scanned source text.
 
 ## surface
 

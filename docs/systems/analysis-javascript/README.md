@@ -13,14 +13,18 @@ policy.
 
 ## Expected interactions
 
-The following directions are expected/observed, non-enforced, and
-selection-bounded structural interactions:
+The bullets below follow a fixed claim convention: a bullet of the form
+`X` points to `Y` states an observed static edge between two declared
+systems, one of which is this system, while a bullet of the form consumes
+something through `<system>` composition describes a dependency carried
+through composition rather than a direct static edge.
 
-- `analysis-platform` points to JavaScript analysis for JavaScript
-  interpretation; JavaScript analysis receives that request.
-- JavaScript analysis points to shared `analysis-platform` helpers and
-  contracts.
-- It points to `graph-contract` for graph entities and serialization contracts.
+- `analysis-platform` points to `analysis-javascript` for JavaScript
+  interpretation.
+- `analysis-javascript` points to `analysis-platform` for shared reading,
+  emission, accumulation, and workspace contracts.
+- `analysis-javascript` points to `graph-contract` for graph entities and
+  serialization contracts.
 
 These directions describe the selected proof universe, not required runtime
 dependencies or architectural policy.

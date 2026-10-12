@@ -14,7 +14,7 @@ graph from the valid file and reports the malformed sibling on standard error:
 ```text
 $ minotaur analyze --root . --output graph.json .
 stderr:
-broken.py:0:13: parse-error: invalid syntax
+broken.py:0:13: parse-error: invalid syntax [severity=error]
 exit: 1
 $ minotaur query definitions healthy --graph graph.json --root . --no-refresh
 good.py:1  good.healthy  function
