@@ -127,6 +127,50 @@ def test_query_guide_documents_strict_loading_and_absent_file_warnings() -> None
 
 
 # ---------------------------------------------------------------------------
+# AC-02: the re-export boundary statement
+# ---------------------------------------------------------------------------
+
+
+REEXPORT_BOUNDARY = (
+    "Re-exports are not resolved: `from pkg import f` records an unresolved "
+    "`pkg.f` reference with no module-layer `imports` consumer, so "
+    "`pkg/__init__.py` never links a name that another module actually defines."
+)
+
+
+def test_system_guide_documents_the_reexport_boundary_statement() -> None:
+    text = _collapsed(QUERY_GUIDE)
+    assert REEXPORT_BOUNDARY in text
+    assert "points to" not in text
+
+
+def test_query_reference_documents_the_reexport_boundary_statement() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert REEXPORT_BOUNDARY in text
+    assert "points to" not in text
+
+
+def test_analysis_python_readme_documents_the_reexport_boundary_statement() -> None:
+    # Approved transient: T04 writes this sentence in the pinned wording; the
+    # pin fails on the branch until then. It checks presence only, not
+    # position, and must never demand "points to".
+    readme = ROOT / "docs/systems/analysis-python/README.md"
+    text = _collapsed(readme)
+    assert REEXPORT_BOUNDARY in text
+
+
+def test_system_guide_names_text_fallback_exactly_once() -> None:
+    text = _collapsed(QUERY_GUIDE)
+    raw = QUERY_GUIDE.read_text(encoding="utf-8")
+    assert raw.count("--text-fallback") == 1, (
+        "`query unreferenced --text-fallback` must be named exactly once in "
+        "the system-definitions guide as the text-level cross-check"
+    )
+    assert "query unreferenced --text-fallback" in text
+    assert "retains a suspect whenever its bare name appears elsewhere" in text
+
+
+# ---------------------------------------------------------------------------
 # AC-15: docs/formats/system-definition-v1.md
 # ---------------------------------------------------------------------------
 
