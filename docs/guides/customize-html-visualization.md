@@ -61,7 +61,7 @@ unassigned files appear because they connect directly to it. The red lines mark
 connections that cross the selected boundary. Open the linked HTML file to try
 the controls yourself.
 
-The [shop system walkthrough](../../examples/system-walkthrough/README.md#explore-system-boundaries-visually)
+The [shop system walkthrough](../../examples/system-walkthrough/README.md#2-find-a-system-boundary)
 includes a small offline explorer with two declared systems and unassigned
 boundary nodes. Its checked-in configuration and regeneration script show the
 same project layout used for production repositories. `docs/systems` is the

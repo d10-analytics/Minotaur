@@ -294,7 +294,8 @@ canonical `coverage ` JSON line, followed by lines of the exact form
 `NAME  declared TOTAL  represented REPRESENTED  absent ABSENT`. Default JSON
 has exactly `query`, `refreshed`, `stale`, `stale_analyzer`, `results`, and `coverage`;
 each result's `declared_files` has `scope`, `total`, `represented`, and `absent`.
-For example, the synthetic fixture used by the public walkthrough produces:
+For example, the overview tests' synthetic three-file tree with two declared
+systems produces:
 
 ```text
 coverage {"declared_files":{"absent":1,"represented":2,"scope":"all_declared_system_files","total":3},"graph_files":{"count":3,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":1,"scope":"all_declared_system_files"},"selection":{"status":"recorded","targets":["."]},"source_diagnostics":{"status":"unavailable"},"unassigned_files":{"count":1,"scope":"final_graph_file_node_derived_paths"}}
@@ -314,6 +315,11 @@ counts only unresolved-reference nodes classified to named systems, excluding
 the shared canonical lexical order, not a guarantee that analysis succeeded
 for every target. Diagnostics are tagged unavailable until a refresh observes
 them, including an observed count of zero.
+
+With zero declared systems, text output prints `no declared systems`
+(after the canonical `coverage ` line), `--details` appends the empty
+`declared_files {}` and `connections []` inventory lines, and the command
+exits `0`. A partial or empty tree is a valid limited answer, not an error.
 
 `--details` adds `results[].declared_files.paths` and
 `coverage.unassigned_files.paths`, both sorted, plus top-level `connections`.

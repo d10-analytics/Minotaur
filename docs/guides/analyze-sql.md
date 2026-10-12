@@ -139,11 +139,14 @@ that add `PRIMARY KEY`, `UNIQUE`, or `CHECK` constraints, drop constraints,
 alter columns, or mix foreign-key and other actions. An unsupported ALTER
 statement contributes no partial foreign-key facts. A malformed batch yields
 no facts from that batch, even when an earlier statement in it was valid;
-later `GO` batches remain eligible. The graph records table-level dependencies
-only: it does not retain constraint names, column mappings or ordering,
-referential-action values, replication modifiers, or separate edges for
-multiple constraints between the same table pair. Accepted modifiers add no
-edge payload.
+later `GO` batches remain eligible. The relationship remains a table-level
+dependency: it does not retain constraint names, referential-action values,
+replication modifiers, or separate edges for multiple constraints between the
+same table pair. Each `sql:foreign-key-to` evidence record may optionally carry
+ordered `foreign_key_columns` mappings with `local` and `referenced`
+position-paired, and a record without a mapping remains valid; the
+[graph format reference](../formats/minotaur-graph-v1.md) owns the exact field
+rules. Accepted modifiers add no edge payload.
 
 ## Graph and query meaning
 
