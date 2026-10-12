@@ -13,26 +13,25 @@ the JSON schema asset.
 
 ## Expected interactions
 
-The following directions are expected/observed ownership or data-flow
-interactions. They are non-enforced and selection-bounded; a direction carried
-through composition need not appear as a direct static connection in the
-selected graph.
+The bullets below follow a fixed claim convention: a bullet of the form
+`X` points to `Y` states an observed static edge between two declared
+systems, one of which is this system, while a bullet of the form consumes
+something through `<system>` composition describes a dependency carried
+through composition rather than a direct static edge.
 
-- `command-interface` points to graph contract for graph operations.
-- `project-acquisition` points to graph contract for acquired graph inputs.
-- `analysis-platform` points to graph contract for emission and graph
-  contracts.
-- `analysis-python` points to graph contract for Python graph facts.
-- `analysis-javascript` points to graph contract for JavaScript graph facts.
-- `query-and-system-reporting` points to graph contract for graph indexing and
-  queries.
-- `analysis-sql` points to graph contract for SQL graph facts.
+- `command-interface` points to `graph-contract` for graph operations.
+- `project-acquisition` points to `graph-contract` for acquired graph inputs.
+- `analysis-platform` points to `graph-contract` for emission and shared
+  graph contracts.
+- `analysis-python` points to `graph-contract` for Python graph facts.
+- `analysis-javascript` points to `graph-contract` for JavaScript graph facts.
+- `analysis-sql` points to `graph-contract` for SQL graph facts.
+- `query-and-system-reporting` points to `graph-contract` for graph indexing
+  and queries.
+- `source-presentation` points to `graph-contract` for the canonical graph
+  payload, source locations, and the shared path guard.
 - `source-presentation` consumes the canonical graph payload and source
-  locations through command-interface composition. The selected graph also
-  observes a direct static `source-presentation` to `graph-contract` connection
-  (`calls`, `imports`, and `references`), including the shared `is_safe_path`
-  path guard. Like every observed edge in this section, it is not asserted as
-  required.
+  locations through `command-interface` composition.
 
 Graph contract therefore has a documented ownership or data-flow relationship
 with the other eight systems. These directions describe the selected proof

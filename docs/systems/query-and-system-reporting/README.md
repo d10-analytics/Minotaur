@@ -12,15 +12,24 @@ semantics, policy or architectural enforcement, and browser rendering.
 
 ## Expected interactions
 
-The following directions are expected/observed, non-enforced, and
-selection-bounded structural interactions:
+The bullets below follow a fixed claim convention: a bullet of the form
+`X` points to `Y` states an observed static edge between two declared
+systems, one of which is this system, while a bullet of the form consumes
+something through `<system>` composition describes a dependency carried
+through composition rather than a direct static edge.
 
-- `command-interface` points to query and system reporting for public query
-  dispatch; query and system reporting receives that request.
-- `project-acquisition` points to it for comparison and reporting inputs; it
-  receives those inputs.
-- Query and system reporting points to `graph-contract` for graph indexing,
+- `command-interface` points to `query-and-system-reporting` for public query
+  dispatch.
+- `project-acquisition` points to `query-and-system-reporting` for comparison
+  and reporting inputs.
+- `query-and-system-reporting` points to `graph-contract` for graph indexing,
   validation, and graph-backed views.
+- `query-and-system-reporting` points to `analysis-platform` for shared
+  analysis contracts.
+- `query-and-system-reporting` points to `project-acquisition` for
+  configuration and project inputs.
+- `query-and-system-reporting` points to `source-presentation` for source
+  excerpts and presentation payloads.
 
 System membership remains an exact TOML scope, not a desired dependency,
 allow/deny rule, architectural grade, or runtime requirement. These
