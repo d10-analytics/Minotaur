@@ -8,10 +8,10 @@ from pathlib import Path
 
 from minotaur.config import SqlSettings
 from minotaur.language_interpreter.contract import AnalysisResult
-from minotaur.language_interpreter.javascript import NAMESPACE as JAVASCRIPT_NAMESPACE
-from minotaur.language_interpreter.javascript import analyze_javascript_files
-from minotaur.language_interpreter.python import NAMESPACE as PYTHON_NAMESPACE
-from minotaur.language_interpreter.python import analyze_python_files
+from minotaur.language_interpreter.javascript.interpreter import NAMESPACE as JAVASCRIPT_NAMESPACE
+from minotaur.language_interpreter.javascript.interpreter import analyze_javascript_files
+from minotaur.language_interpreter.python.interpreter import NAMESPACE as PYTHON_NAMESPACE
+from minotaur.language_interpreter.python.interpreter import analyze_python_files
 from minotaur.language_interpreter.sql.interpreter import NAMESPACE as SQL_NAMESPACE
 from minotaur.language_interpreter.sql.interpreter import analyze_sql_files
 from minotaur.language_interpreter.workspace import Workspace
