@@ -33,12 +33,13 @@ A system query needs three things to exist:
    paths are relative to, passed as `--root` (or supplied by a
    [project configuration](project-configuration.md)).
 
-Query a declared system by its name:
+Query a declared system by its name, from `examples/system-walkthrough` (the
+directory of the bundled [system walkthrough](../../examples/system-walkthrough/)):
 
 ```bash
 minotaur query surface orders \
-  --graph examples/system-walkthrough/minotaur-graph.json \
-  --root examples/system-walkthrough --no-refresh
+  --graph minotaur-graph.json \
+  --root . --no-refresh
 ```
 
 The repository overview and the three named-boundary queries share the
