@@ -152,9 +152,8 @@ def test_query_reference_documents_the_reexport_boundary_statement() -> None:
 
 
 def test_analysis_python_readme_documents_the_reexport_boundary_statement() -> None:
-    # Approved transient: T04 writes this sentence in the pinned wording; the
-    # pin fails on the branch until then. It checks presence only, not
-    # position, and must never demand "points to".
+    # Checks only that the pinned sentence is present in the README, not its
+    # position, and must never require the phrase "points to".
     readme = ROOT / "docs/systems/analysis-python/README.md"
     text = _collapsed(readme)
     assert REEXPORT_BOUNDARY in text
