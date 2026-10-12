@@ -128,7 +128,7 @@ def test_query_guide_documents_strict_loading_and_absent_file_warnings() -> None
 
 
 # ---------------------------------------------------------------------------
-# AC-02: the re-export boundary statement
+# The re-export boundary statement
 # ---------------------------------------------------------------------------
 
 
@@ -142,13 +142,17 @@ REEXPORT_BOUNDARY = (
 def test_system_guide_documents_the_reexport_boundary_statement() -> None:
     text = _collapsed(QUERY_GUIDE)
     assert REEXPORT_BOUNDARY in text
-    assert "points to" not in text
 
 
 def test_query_reference_documents_the_reexport_boundary_statement() -> None:
     text = _collapsed(QUERY_REFERENCE)
     assert REEXPORT_BOUNDARY in text
-    assert "points to" not in text
+
+
+def test_reexport_boundary_statement_does_not_use_the_readme_connection_phrase() -> None:
+    # The system README parser reads "points to" as an interaction claim, so the
+    # pinned sentence must never contain it.
+    assert "points to" not in REEXPORT_BOUNDARY
 
 
 def test_analysis_python_readme_documents_the_reexport_boundary_statement() -> None:
@@ -690,7 +694,7 @@ def _same_repository_md_link_problems() -> list[str]:
     the linking file's directory and must exist, and each ``#anchor`` slug is
     compared against the target file's ``#`` headings with the GitHub-style
     slugger. No network access; external links and pure-fragment links are out
-    of scope (D-15).
+    of scope.
     """
     problems: list[str] = []
     for source in _markdown_files():
@@ -741,14 +745,14 @@ def test_system_walkthrough_kind_lists_include_sql_calls_in_canonical_order() ->
 
 def test_freshness_concept_names_functions_and_the_system_queries_as_first_reads() -> None:
     text = _collapsed(ROOT / "docs/concepts/freshness.md")
-    # Function-name citations, not line numbers that go stale (D-16).
+    # Function-name citations, not line numbers that go stale.
     assert (
         "`stale_graph = query.no_refresh and not observed.is_clean` gates "
         "`text_fallback=query.text_fallback and not stale_graph` in `_run_unreferenced`"
     ) in text
     assert "in `_run_unreferenced` (`minotaur/cli.py`)" in text
     assert "cli.py:360" not in text and "cli.py:380" not in text
-    # The system queries share the first-read validation cost (D-16).
+    # The system queries share the first-read validation cost.
     for command in (
         "`query systems`",
         "`query surface`",
@@ -762,7 +766,7 @@ def test_freshness_concept_names_functions_and_the_system_queries_as_first_reads
 def test_query_reference_states_the_real_source_of_the_systems_example() -> None:
     text = _collapsed(QUERY_REFERENCE)
     assert "the overview tests' synthetic three-file tree with two declared systems" in text, (
-        "the systems example must state its real synthetic source (D-19)"
+        "the systems example must state its real synthetic source"
     )
     assert "the synthetic fixture used by the public walkthrough" not in text
 

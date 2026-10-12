@@ -47,7 +47,7 @@ def test_walkthrough_prints_documented_transcript(scenario: str, document: str) 
     # Parser messages differ between supported Python versions. Keep the path,
     # diagnostic code, severity suffix and status exact, normalizing only
     # parser wording/location. Preserving the `[severity=…]` tail lets the
-    # documented transcript pin the rendered severity (D-17).
+    # documented transcript pin the rendered severity.
     def normalize(text: str) -> str:
         return re.sub(
             r"broken\.py:\d+:\d+: parse-error: .*?( \[severity=[^\]]*\])?(?=\n|$)",

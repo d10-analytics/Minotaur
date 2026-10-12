@@ -517,7 +517,7 @@ def test_target_omission_reports_one_declared_file_absent(
 
 
 # ---------------------------------------------------------------------------
-# AC-05: two-way claim test between README narrative and the observed manifest
+# Two-way claim test between README narrative and the observed manifest
 # ---------------------------------------------------------------------------
 
 
@@ -602,7 +602,7 @@ def test_readme_interaction_claims_match_the_observed_connection_manifest() -> N
     sql_readme = (SYSTEMS_ROOT / "analysis-sql" / "README.md").read_text(encoding="utf-8")
     sentence = next(line for line in sql_readme.splitlines() if "SQL interpreter files" in line)
     assert "exactly the SQL interpreter files listed in" in sentence, (
-        f"analysis-sql/README.md: membership sentence lacks the D-23 wording: {sentence!r}"
+        f"analysis-sql/README.md: membership sentence lacks the expected wording: {sentence!r}"
     )
     numbers = re.findall(r"\b\d+\b|\bone\b|\btwo\b|\bthree\b|\bfour\b|\bfive\b", sentence)
     assert not numbers, (
