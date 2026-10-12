@@ -26,6 +26,8 @@ through composition rather than a direct static edge.
   excerpts and presentation payloads.
 - `source-presentation` points to `graph-contract` for the canonical graph
   payload, source locations, and the shared path guard.
+- `source-presentation` points to `query-and-system-reporting` for comparison
+  and reporting consumers.
 - `source-presentation` consumes the canonical graph payload and
   source-location contract through `command-interface` composition.
 
