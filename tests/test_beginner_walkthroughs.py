@@ -82,6 +82,31 @@ def test_malformed_walkthrough_transcript_pins_error_severity() -> None:
     assert "broken.py:0:13: parse-error: invalid syntax [severity=error]" in result.stdout
 
 
+def test_python_walkthrough_reports_eof_without_an_interactive_terminal() -> None:
+    """A closed stdin turns the pause into one notice line and a clean exit.
+
+    Running the ``python`` scenario without ``--no-pause`` feeds the pause
+    prompt EOF exactly as a non-interactive invocation would. Without the
+    ``try/except EOFError`` guard around the ``input()`` call, the closed
+    stdin raises ``EOFError``, the process exits nonzero with a traceback on
+    stderr, and all three assertions here fail.
+    """
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), "python"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (
+        "No interactive terminal is available; the temporary workspace is being removed."
+        in result.stdout
+    )
+    assert result.stderr == ""
+
+
 def test_javascript_member_call_remains_unresolved(tmp_path: Path) -> None:
     runner = runpy.run_path(str(RUNNER))
     runner["javascript"](tmp_path)
