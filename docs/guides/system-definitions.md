@@ -156,6 +156,13 @@ boundary: `imports` edges are reported by `consumers` and `system-deps` but
 are never `surface`. The module is not an implicit callable
 boundary.
 
+Re-exports are not resolved: `from pkg import f` records an unresolved
+`pkg.f` reference with no module-layer `imports` consumer, so
+`pkg/__init__.py` never links a name that another module actually defines.
+As a text-level cross-check on such a name, `query unreferenced
+--text-fallback` retains a suspect whenever its bare name appears elsewhere
+in scanned source text.
+
 ## surface
 
 `surface SYSTEM_NAME` returns one record per *exposed in-scope symbol*: a

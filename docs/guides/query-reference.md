@@ -369,8 +369,11 @@ current SQL dependency kinds `sql:reads-from`, `sql:foreign-key-to`, and
 * `consumers` lists the outside files participating in boundary relationships,
   one record per file, with the distinct kinds that file contributes and the
   in-scope targets it reaches. An outside file that only imports a system
-  module is a consumer through `imports` even when no call resolves. An empty
-  result prints `no consumers`.
+  module is a consumer through `imports` even when no call resolves.
+  Re-exports are not resolved: `from pkg import f` records an unresolved
+  `pkg.f` reference with no module-layer `imports` consumer, so
+  `pkg/__init__.py` never links a name that another module actually defines.
+  An empty result prints `no consumers`.
 * `system-deps` lists the target categories of the system's own outgoing
   boundary relationships, including `sql:reads-from`, `sql:foreign-key-to`,
   and `sql:calls`: each named target system plus explicit `no_system` and
