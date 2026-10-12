@@ -42,8 +42,7 @@ SCRATCH_GRAPH = "/tmp/system-walkthrough-graph.json"
 #: The repo-root alternative the run-location passage shows exactly once,
 #: outside any executed console block.
 CONFIG_ALTERNATIVE = (
-    "minotaur query surface orders "
-    "--config examples/system-walkthrough/.minotaur.toml --no-refresh"
+    "minotaur query surface orders --config examples/system-walkthrough/.minotaur.toml --no-refresh"
 )
 
 #: Every committed artifact under the example directory, keyed by relative path.
@@ -317,9 +316,9 @@ def test_documented_command_still_prints_its_pasted_output(
             check=False,
         )
         assert completed.returncode == 0, f"{command}\n{completed.stderr}"
-        assert (
-            _example_file_set() == before_files
-        ), "the diff prerequisite changed the example file set"
+        assert _example_file_set() == before_files, (
+            "the diff prerequisite changed the example file set"
+        )
     completed = subprocess.run(
         [sys.executable, "-m", "minotaur", *arguments],
         cwd=EXAMPLE,
@@ -330,9 +329,9 @@ def test_documented_command_still_prints_its_pasted_output(
     assert completed.returncode == 0, f"{command}\n{completed.stderr}"
     assert completed.stdout == expected, command
     assert _committed_bytes() == before_bytes, f"{command} rewrote a checked-in example artifact"
-    assert (
-        _example_file_set() == before_files
-    ), f"{command} created or removed a file under {EXAMPLE}"
+    assert _example_file_set() == before_files, (
+        f"{command} created or removed a file under {EXAMPLE}"
+    )
 
 
 def test_run_location_passage_pins_example_directory_and_repo_root_exceptions() -> None:

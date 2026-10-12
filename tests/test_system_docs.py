@@ -682,11 +682,7 @@ def _github_slug(heading: str) -> str:
 
 
 def _markdown_files() -> list[Path]:
-    return sorted(
-        path
-        for path in ROOT.rglob("*.md")
-        if not (set(path.parts) & _SKIP_DIRECTORIES)
-    )
+    return sorted(path for path in ROOT.rglob("*.md") if not (set(path.parts) & _SKIP_DIRECTORIES))
 
 
 def _same_repository_md_link_problems() -> list[str]:
@@ -732,9 +728,9 @@ def test_system_walkthrough_kind_lists_include_sql_calls_in_canonical_order() ->
     text = _collapsed(SYSTEM_WALKTHROUGH)
     # Canonical SQL dependency-kind order (CURRENT_SQL_DEPENDENCY_KINDS,
     # src/minotaur/query/sql.py): sql:reads-from, sql:foreign-key-to, sql:calls.
-    assert (
-        "`sql:reads-from`, `sql:foreign-key-to`, or `sql:calls`?" in text
-    ), "the surface kind sentence must list sql:calls in canonical order"
+    assert "`sql:reads-from`, `sql:foreign-key-to`, or `sql:calls`?" in text, (
+        "the surface kind sentence must list sql:calls in canonical order"
+    )
     assert (
         "`sql:reads-from`, `sql:foreign-key-to`, and `sql:calls`) and the concrete "
         "in-scope targets" in text
@@ -767,17 +763,15 @@ def test_freshness_concept_names_functions_and_the_system_queries_as_first_reads
 
 def test_query_reference_states_the_real_source_of_the_systems_example() -> None:
     text = _collapsed(QUERY_REFERENCE)
-    assert (
-        "the overview tests' synthetic three-file tree with two declared systems" in text
-    ), "the systems example must state its real synthetic source (D-19)"
+    assert "the overview tests' synthetic three-file tree with two declared systems" in text, (
+        "the systems example must state its real synthetic source (D-19)"
+    )
     assert "the synthetic fixture used by the public walkthrough" not in text
 
 
 def test_query_reference_documents_the_zero_system_overview_behavior() -> None:
     text = _collapsed(QUERY_REFERENCE)
-    assert (
-        "With zero declared systems, text output prints `no declared systems`" in text
-    )
+    assert "With zero declared systems, text output prints `no declared systems`" in text
     assert "`--details` appends the empty `declared_files {}` and `connections []`" in text
     assert "exits `0`" in text
 
