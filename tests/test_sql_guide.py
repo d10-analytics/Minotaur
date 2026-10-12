@@ -114,3 +114,26 @@ def test_sql_guide_documents_orphan_fk_warning_boundaries() -> None:
     assert "does not establish that an extraction gap exists" in text
     assert "does not change the resolved `sql:foreign-key-to` edge" in text
     assert "coalesced to one unresolved target per source table and target text" in text
+
+
+def test_sql_guide_documents_foreign_key_column_evidence_with_format_owner() -> None:
+    text = _text()
+    # The relationship stays table-level while evidence may carry column pairs.
+    assert "The relationship remains a table-level dependency" in text
+    # Retained exclusions.
+    assert "does not retain constraint names" in text
+    assert "referential-action values" in text
+    assert "replication modifiers" in text
+    assert "separate edges for multiple constraints between the same table pair" in text
+    # Optional ordered foreign_key_columns evidence; a mapping-less record is valid.
+    assert (
+        "Each `sql:foreign-key-to` evidence record may optionally carry ordered "
+        "`foreign_key_columns` mappings with `local` and `referenced` position-paired, "
+        "and a record without a mapping remains valid"
+    ) in text
+    # The format reference owns the exact field rules; the guide only links to it.
+    assert (
+        "[graph format reference](../formats/minotaur-graph-v1.md) owns the exact field rules"
+    ) in text
+    # The old wrong claim must never return.
+    assert "column mappings or ordering" not in text

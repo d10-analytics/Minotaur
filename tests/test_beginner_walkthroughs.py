@@ -45,11 +45,41 @@ def test_walkthrough_prints_documented_transcript(scenario: str, document: str) 
     assert result.stderr == ""
 
     # Parser messages differ between supported Python versions. Keep the path,
-    # diagnostic code and status exact, normalizing only parser wording/location.
+    # diagnostic code, severity suffix and status exact, normalizing only
+    # parser wording/location. Preserving the `[severity=…]` tail lets the
+    # documented transcript pin the rendered severity (D-17).
     def normalize(text: str) -> str:
-        return re.sub(r"broken.py:\d+:\d+: parse-error: [^\n]+", "broken.py: parse-error", text)
+        return re.sub(
+            r"broken\.py:\d+:\d+: parse-error: .*?( \[severity=[^\]]*\])?(?=\n|$)",
+            lambda m: "broken.py: parse-error" + (m.group(1) or ""),
+            text,
+        )
 
     assert normalize(result.stdout) == normalize(expected[0])
+
+
+def test_malformed_walkthrough_transcript_pins_error_severity() -> None:
+    """The recovery transcript shows the real `[severity=error]` diagnostic tail.
+
+    ``_format_diagnostic`` (``minotaur/cli.py``) renders the severity suffix on
+    every diagnostic, so the documented parse-error line must keep it; a
+    transcript without the suffix fails this named assertion.
+    """
+    expected = re.findall(
+        r"```text\n(.*?)```",
+        (ROOT / "docs/guides/source-error-recovery.md").read_text(),
+        re.DOTALL,
+    )[0]
+    assert "broken.py:0:13: parse-error: invalid syntax [severity=error]" in expected
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), "malformed", "--no-pause"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "broken.py:0:13: parse-error: invalid syntax [severity=error]" in result.stdout
 
 
 def test_javascript_member_call_remains_unresolved(tmp_path: Path) -> None:
