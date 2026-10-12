@@ -662,10 +662,9 @@ def test_readme_documents_historical_comparison_and_offline_report() -> None:
 
 
 # ---------------------------------------------------------------------------
-# T03: link checker (D-14/D-15), walkthrough kind lists (D-18), freshness
-# first-read list (D-16), query-reference systems example and empty-tree
-# behavior (D-19/D-20), format-reference expected_symbol_kind (D-21) and
-# invalid fixture enumeration (D-22).
+# Markdown link checker, walkthrough kind lists, freshness first-read list,
+# query-reference systems example and empty-tree behavior, format-reference
+# expected_symbol_kind, and invalid fixture enumeration.
 # ---------------------------------------------------------------------------
 
 LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
