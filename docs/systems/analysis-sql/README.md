@@ -21,8 +21,8 @@ through composition rather than a direct static edge.
   accumulation, and workspace contracts.
 - `analysis-sql` points to `graph-contract` for graph entities, identities,
   and relationships.
-- `analysis-sql` points to `project-acquisition` for configuration and
-  project-input contracts.
+- `analysis-sql` points to `project-acquisition` for the SQL interpreter
+  settings contract (`SqlSettings`).
 
 The SQL analyzer is the final `.sql` entry in `default_registry()`, so the
 shared selection and freshness workflows can activate this bounded language.
