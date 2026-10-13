@@ -30,6 +30,11 @@ DEFAULT_ARTIFACT = ROOT / "examples" / "python-workflow" / "minotaur-graph.html"
 DEFAULT_OUTPUT = ROOT / "docs" / "assets" / "python-workflow-demo.png"
 VIEWPORT = {"width": 1440, "height": 900}
 DETAIL_WIDTH = VIEWPORT["width"] // 3
+# The selected call, named exactly as the details panel renders its endpoints.
+SELECTED_VIEW = (
+    "minotaur.language_interpreter.selection.select_sources"
+    " → minotaur.language_interpreter.selection._resolve_target"
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -106,6 +111,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         page.wait_for_timeout(100)
         page.mouse.move(VIEWPORT["width"] - 10, VIEWPORT["height"] - 10)
+        selected_view = page.locator("#detail-content h3").inner_text()
+        assert selected_view == SELECTED_VIEW, (
+            f"the selected call view is {selected_view!r}, expected {SELECTED_VIEW!r}"
+        )
         page.screenshot(path=str(output))
         browser.close()
     return 0
