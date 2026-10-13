@@ -41,10 +41,11 @@ workload selects the `instrument_reader` package this way, and the documented
 A workload `expect` is `ok` (exit 0 with an answer), `empty` (exit 0 with the
 command's exact literal, such as `no changes`), `error` (the argument-
 validation path), or `difference` (exit 1 with output, the valid exit status
-of `query diff`). The committed `diff-selection` entries for this root and for
-`src` declare `difference`, because a whole-root selection against a narrower
-one removes symbols. The SQL root's `diff` is the unchanged-graph control: its
-single file makes `diff` print exactly `no changes`, so it keeps `empty`.
+of `query diff`). The committed `diff-selection` entries for this root, for
+`src`, and for the JavaScript root declare `difference`, because a whole-root
+selection against a narrower one removes symbols. The SQL root's `diff` is the
+unchanged-graph control: its single file makes `diff` print exactly `no
+changes`, so it keeps `empty`.
 
 After the distinct-HEAD and provenance guards pass, each compared root also
 runs the seed-determinism cell: the branch side's own query arguments are
