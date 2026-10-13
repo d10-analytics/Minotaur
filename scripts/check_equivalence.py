@@ -618,6 +618,11 @@ def _compare_root(
     baseline_graph = baseline_dir / "graph.json"
     branch_graph = branch_dir / "graph.json"
     language_files = _language_files(root, workload.selection)
+    if not language_files:
+        # A root with no file of the selection's language is a workload/root
+        # mismatch; name the selection itself so ``analyze`` fails loudly
+        # instead of silently analyzing a different language.
+        language_files = (Path(workload.selection),)
     baseline_analyze = _analyze(baseline, root, baseline_graph, *language_files)
     branch_analyze = _analyze(branch, root, branch_graph, *language_files)
     tally.comparisons += 1
@@ -1232,6 +1237,7 @@ def _compare(
     ok = True
     total = Tally()
     compared: list[tuple[Path, RootQueries]] = []
+    attempted: list[tuple[Path, RootQueries]] = []
     present = 0
     for index, (root, optional, key) in enumerate(roots):
         if not root.exists():
@@ -1254,13 +1260,16 @@ def _compare(
             continue
         root_ok, tally = _compare_root(sides, root, workload, scratch / f"root-{index}")
         total.absorb(tally)
+        attempted.append((root, workload))
         print(
             f"root={root} summary: comparisons={tally.comparisons}"
             f" queries_answered={tally.queries_answered}/{tally.queries_expected}"
         )
         # The totals line counts a root only when its comparison actually
         # succeeded, so a failed root makes ``roots_compared`` less than
-        # ``roots_present`` instead of hiding behind the attempt.
+        # ``roots_present`` instead of hiding behind the attempt.  Scenario
+        # mode still sees every attempted root, so its own refusals stay
+        # reachable when a root fails for an unrelated reason.
         if root_ok:
             compared.append((root, workload))
         else:
@@ -1276,7 +1285,7 @@ def _compare(
         f" roots_requested={len(roots)} comparisons={total.comparisons}"
     )
     if scenarios:
-        ok = _run_scenarios(sides, compared[:2], scratch / "scenarios") and ok
+        ok = _run_scenarios(sides, attempted[:2], scratch / "scenarios") and ok
     return ok
 
 
