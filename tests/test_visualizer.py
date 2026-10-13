@@ -581,21 +581,36 @@ def test_regenerating_checked_in_examples_is_reproducible(tmp_path: Path) -> Non
         assert first.joinpath(name).read_bytes() == second.joinpath(name).read_bytes(), name
 
 
-def test_regenerating_checked_in_examples_only_reproduces_reviewed_bytes() -> None:
-    """Under ``R-07``/``D-03`` generation is read-only apart from its outputs.
+def test_regenerating_checked_in_examples_only_reproduces_reviewed_bytes(tmp_path: Path) -> None:
+    """Under ``R-07``/``D-15`` generation is read-only apart from its outputs.
 
-    ``git status`` is the natural repository-mutation probe: introducing any
-    tracked change other than the intended artifacts fails the assertion, and
-    the intended artifacts themselves must regenerate byte-identically.
+    Regeneration goes to a temporary directory, so the committed examples stay
+    untouched and the regeneration scripts remain their only writers.
+    ``git status`` is the natural repository-mutation probe for that: it must be
+    unchanged across the run, including for ``examples/python-workflow`` and
+    ``examples/system-walkthrough``. The same temporary output must also
+    reproduce the committed artifacts byte for byte, which is what makes a stale
+    committed artifact fail here on every run.
     """
+    python_workflow = tmp_path / "python-workflow"
+    system_walkthrough = tmp_path / "system-walkthrough"
     before = _tracked_changes()
-    _generate_python_workflow(EXAMPLE)
-    _generate_system_walkthrough(SYSTEM_EXAMPLE)
+    _generate_python_workflow(python_workflow)
+    _generate_system_walkthrough(system_walkthrough)
     introduced = _tracked_changes() - before
     assert introduced == set(), (
         "regeneration must reproduce the reviewed artifacts without touching any "
-        f"other tracked file: {sorted(introduced)}"
+        f"tracked file, including the committed examples: {sorted(introduced)}"
     )
+    for generated, committed in (
+        (python_workflow, EXAMPLE),
+        (system_walkthrough, SYSTEM_EXAMPLE),
+    ):
+        assert sorted(path.name for path in generated.iterdir()) == sorted(ARTIFACT_NAMES)
+        for name in ARTIFACT_NAMES:
+            assert generated.joinpath(name).read_bytes() == committed.joinpath(name).read_bytes(), (
+                f"{committed.name}/{name} is stale: regenerate the committed example"
+            )
 
 
 def test_presentation_prepares_membership_once_without_file_scans() -> None:
