@@ -44,20 +44,24 @@ jobs:
         run: mypy
 
   quick-tests:
-    name: Quick tests
+    name: Quick tests (${{ matrix.python-version }})
     if: >-
       github.event_name == 'pull_request' ||
       (github.event_name == 'push' && github.ref != 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Set up Python 3.11
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install test dependencies
@@ -91,21 +95,25 @@ jobs:
           assert schema()['\$id'] == 'urn:minotaur:schemas:minotaur-graph:0.1.0'"
 
   full-tests:
-    name: Full tests
+    name: Full tests (${{ matrix.python-version }})
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'merge_group' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Set up Python 3.11
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install test dependencies
