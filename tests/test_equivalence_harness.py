@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import shutil
 import subprocess
@@ -20,6 +21,11 @@ from minotaur.language_interpreter.workspace import Workspace
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "check_equivalence.py"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "equivalence_root"
+JAVASCRIPT_ROOT = ROOT / "tests" / "fixtures" / "analyzer_semantics" / "javascript"
+SQL_ROOT = ROOT / "tests" / "fixtures" / "analyzer_semantics" / "sql"
+# Workload keys whose roots are Python; language-specific workload rules are
+# asserted on these only.
+PYTHON_ROOT_KEYS = ("equivalence_root", "src", "Onyx")
 # Compare against the final source behavior, including analyzer version stamps
 # and the declaration roles recorded on accessor and overload symbol nodes.
 BASELINE_COMMIT = "c22e201ee5bf08d193eb0b897e6a55478a69aa29"
@@ -31,12 +37,44 @@ FIXTURE_PARENT_COMMIT = "d32d4c9ecf1f25839c5055d37bb5fc970d28e77b"
 
 
 @pytest.fixture(scope="session")
-def baseline_src(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+def session_clone(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """A throwaway clone whose ``.git`` owns every harness worktree (``D-11``).
+
+    ``git worktree add`` registers a worktree in whichever repository owns the
+    checkout.  Doing it from the developer checkout leaves dangling
+    registrations in the user's ``.git`` when a session is interrupted, so the
+    tests clone once and register their worktrees in the clone instead.
+    """
+
+    clone = tmp_path_factory.mktemp("equivalence-clone") / "checkout"
+    created = subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(clone)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if created.returncode:
+        raise RuntimeError(f"could not clone the repository: {created.stderr}")
+    yield clone
+    shutil.rmtree(clone, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def baseline_src(session_clone: Path, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
     """Materialise a throwaway git worktree of the Baseline commit."""
 
     checkout = tmp_path_factory.mktemp("equivalence-baseline") / "checkout"
     added = subprocess.run(
-        ["git", "-C", str(ROOT), "worktree", "add", "--detach", str(checkout), BASELINE_COMMIT],
+        [
+            "git",
+            "-C",
+            str(session_clone),
+            "worktree",
+            "add",
+            "--detach",
+            str(checkout),
+            BASELINE_COMMIT,
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -47,16 +85,16 @@ def baseline_src(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
         yield checkout / "src"
     finally:
         subprocess.run(
-            ["git", "-C", str(ROOT), "worktree", "remove", "--force", str(checkout)],
+            ["git", "-C", str(session_clone), "worktree", "remove", "--force", str(checkout)],
             capture_output=True,
             text=True,
             check=False,
         )
         # An interrupted session can leave the registration behind after the
-        # temporary directory is reaped; prune so the user's ``.git`` never
+        # temporary directory is reaped; prune so the clone's ``.git`` never
         # carries a dangling worktree entry from a test run.
         subprocess.run(
-            ["git", "-C", str(ROOT), "worktree", "prune"],
+            ["git", "-C", str(session_clone), "worktree", "prune"],
             capture_output=True,
             text=True,
             check=False,
@@ -146,55 +184,39 @@ def test_import_provenance_guard_rejects_a_tree_that_shadows_nothing(
     assert "not a repository checkout" not in result.stderr
 
 
-def test_self_test_rejects_byte_injection_and_accepts_clean_copy(
-    baseline_src: Path, tmp_path: Path
+def test_self_test_detects_every_injection_class_on_the_javascript_root(
+    baseline_src: Path,
 ) -> None:
-    root = _source_root(tmp_path)
-    result = _run(
-        "--baseline-src",
-        str(baseline_src),
-        "--branch-src",
-        str(ROOT / "src"),
-        "--queries",
-        str(_workload_file(tmp_path, root.name)),
-        "--root",
-        str(root),
-        "--self-test",
-    )
-    assert result.returncode == 0, result.stderr
-    assert "analyze graph SHA-256: DIFFERENT" in result.stdout
-    assert "self-test: PASS" in result.stdout
-    assert "self-test mode: provenance guard skipped" in result.stderr
+    """One fixture-scoped run serves every self-test assertion (``R-08``).
 
-
-def test_self_test_requires_each_injection_to_produce_its_own_differing_row(
-    baseline_src: Path, tmp_path: Path
-) -> None:
-    """Graph bytes, HTML bytes and query stdout are each proven separately.
-
-    A single injection would let a harness that had stopped comparing HTML or
-    query output still print PASS.
+    Each injection must produce its own differing row, so a harness that had
+    stopped comparing HTML, query output, Drift, hash-ordered output or the
+    JavaScript interpretation could not still print PASS.  The JavaScript
+    fixture root keeps the run small while making the JavaScript semantics
+    injection live rather than skipped.
     """
 
-    root = _source_root(tmp_path)
     result = _run(
         "--baseline-src",
         str(baseline_src),
         "--branch-src",
         str(ROOT / "src"),
-        "--queries",
-        str(_workload_file(tmp_path, root.name)),
         "--root",
-        str(root),
+        str(JAVASCRIPT_ROOT),
         "--self-test",
     )
-    assert result.returncode == 0, result.stderr
-    for name in ("serialize", "visualize", "query"):
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("serialize", "visualize", "query", "javascript", "drift", "hash-order"):
         assert f"self-test: injection {name} detected" in result.stdout
     differing = [line for line in result.stdout.splitlines() if line.endswith(": DIFFERENT")]
-    assert any("artifact=analyze graph SHA-256" in line for line in differing)
-    assert any("artifact=visualize HTML SHA-256" in line for line in differing)
+    root = JAVASCRIPT_ROOT.resolve()
+    assert any(f"root={root} artifact=analyze graph SHA-256" in line for line in differing)
+    assert any(f"root={root} artifact=visualize HTML SHA-256" in line for line in differing)
     assert any("query=" in line for line in differing)
+    assert any(f"root={root} artifact=Drift" in line for line in differing)
+    assert any("seed-determinism" in line for line in differing)
+    assert "self-test: PASS" in result.stdout
+    assert "self-test mode: provenance guard skipped" in result.stderr
 
 
 def test_self_test_fails_when_an_injection_no_longer_perturbs_output(
@@ -238,19 +260,19 @@ def test_self_test_fails_when_an_injection_no_longer_perturbs_output(
 
 
 def test_clean_equal_heads_in_distinct_worktrees_are_refused(
-    baseline_src: Path, tmp_path: Path
+    session_clone: Path, baseline_src: Path, tmp_path: Path
 ) -> None:
     worktree = tmp_path / "same-head"
     added = subprocess.run(
         [
             "git",
             "-C",
-            str(baseline_src.parent),
+            str(session_clone),
             "worktree",
             "add",
             "--detach",
             str(worktree),
-            "HEAD",
+            BASELINE_COMMIT,
         ],
         capture_output=True,
         text=True,
@@ -271,7 +293,15 @@ def test_clean_equal_heads_in_distinct_worktrees_are_refused(
         assert str(worktree / "src") in result.stderr
     finally:
         subprocess.run(
-            ["git", "-C", str(baseline_src.parent), "worktree", "remove", "--force", str(worktree)],
+            [
+                "git",
+                "-C",
+                str(session_clone),
+                "worktree",
+                "remove",
+                "--force",
+                str(worktree),
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -414,7 +444,12 @@ def test_fixture_pin_is_a_full_sha_and_fixture_commit_is_its_immediate_child() -
 def _non_diff_workload(
     tmp_path: Path, *, exclude_names: frozenset[str] = frozenset()
 ) -> tuple[Path, dict[str, object]]:
-    """Keep the deliberate diff exit-status change outside byte comparisons."""
+    """Strip ``diff`` for the historical baseline-advance comparisons.
+
+    Those tests compare two pre-pin commits whose ``diff`` exit status and
+    envelope predate the committed ``difference`` expectation, so keeping
+    ``diff`` in would make them compare an unrelated contract change.
+    """
 
     source_workload = json.loads(
         (ROOT / "scripts" / "equivalence_queries.json").read_text(encoding="utf-8")
@@ -431,24 +466,24 @@ def _non_diff_workload(
 
 
 def test_every_non_control_query_answers_on_the_committed_fixture_root(
-    baseline_src: Path, tmp_path: Path
+    baseline_src: Path,
 ) -> None:
-    """The unchanged query workload remains equivalent across source trees.
+    """The committed workload runs whole, including its expected difference.
 
-    ``query diff`` deliberately changed its valid-difference status from 0 to
-    1 in this feature. Keep that breaking contract out of the historical
-    cross-version equivalence workload and prove it directly below.
+    ``query diff`` answers with exit 1 and output for a whole-root selection
+    against a narrower one, so the committed ``diff-selection`` entry declares
+    ``difference`` and counts as an answer rather than a vacuous run (``D-09``).
     """
 
-    workload_path, fixture_workload = _non_diff_workload(tmp_path)
+    fixture_workload = json.loads(
+        (ROOT / "scripts" / "equivalence_queries.json").read_text(encoding="utf-8")
+    )[FIXTURE_ROOT.name]
 
     result = _run(
         "--baseline-src",
         str(baseline_src),
         "--branch-src",
         str(ROOT / "src"),
-        "--queries",
-        str(workload_path),
         "--root",
         str(FIXTURE_ROOT),
     )
@@ -457,11 +492,102 @@ def test_every_non_control_query_answers_on_the_committed_fixture_root(
     summary = next(line for line in result.stdout.splitlines() if " summary: " in line)
     answered, expected = summary.split("queries_answered=")[1].split("/")
     workload = fixture_workload
+    diff_entries = [item for item in workload["queries"] if item.get("expect") == "difference"]
+    assert len(diff_entries) == 1 and diff_entries[0]["command"] == "diff"
     non_answers = sum(1 for item in workload["queries"] if item.get("expect") in {"empty", "error"})
     assert non_answers >= 4
     assert int(answered) == int(expected) - non_answers, summary
     assert int(expected) == len(workload["queries"]), summary
     assert "DIFFERENT" not in result.stdout
+
+
+def test_default_run_compares_every_language_root(baseline_src: Path) -> None:
+    """No ``--root`` compares the fixture and baseline ``src`` per language plus
+    the JavaScript and SQL sample roots, and exits 0 at the pin (``R-01``)."""
+
+    workloads = json.loads((ROOT / "scripts" / "equivalence_queries.json").read_text())
+    result = _run(
+        "--baseline-src",
+        str(baseline_src),
+        "--branch-src",
+        str(ROOT / "src"),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "VACUOUS" not in result.stderr
+    assert "FAILED" not in result.stdout
+    assert "DIFFERENT" not in result.stdout
+    assert "roots_compared=4 roots_present=4 roots_requested=4" in result.stdout
+
+    roots = (
+        (FIXTURE_ROOT, "equivalence_root"),
+        (baseline_src, "src"),
+        (JAVASCRIPT_ROOT, "javascript"),
+        (SQL_ROOT, "sql"),
+    )
+    for root, key in roots:
+        assert f"root={root.resolve()} artifact=analyze graph SHA-256: IDENTICAL" in result.stdout
+        summary = next(
+            line for line in result.stdout.splitlines() if f"root={root} summary:" in line
+        )
+        answered, expected = summary.split("queries_answered=")[1].split("/")
+        queries = workloads[key]["queries"]
+        non_answers = sum(1 for item in queries if item.get("expect") in {"empty", "error"})
+        assert int(expected) == len(queries), summary
+        assert int(answered) == len(queries) - non_answers, summary
+
+
+def test_a_root_that_fails_is_not_counted_as_compared(baseline_src: Path, tmp_path: Path) -> None:
+    """``totals:`` counts a root only when its comparison succeeded (``R-01``)."""
+
+    good = _source_root(tmp_path, name="good-root")
+    bad = _source_root(tmp_path, name="bad-root")
+    workload = tmp_path / "mixed-roots.json"
+    workload.write_text(
+        json.dumps(
+            {
+                good.name: {
+                    "selection": "app.py",
+                    "queries": [
+                        {
+                            "name": "definitions-main",
+                            "command": "definitions",
+                            "args": ["main"],
+                            "variants": {"json": True, "no_refresh": True},
+                        }
+                    ],
+                },
+                bad.name: {
+                    "selection": "app.py",
+                    "queries": [
+                        {
+                            "name": "definitions-missing",
+                            "command": "definitions",
+                            "args": ["not a valid symbol"],
+                            "variants": {"no_refresh": True},
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = _run(
+        "--baseline-src",
+        str(baseline_src),
+        "--branch-src",
+        str(ROOT / "src"),
+        "--queries",
+        str(workload),
+        "--root",
+        str(good),
+        "--root",
+        str(bad),
+    )
+    assert result.returncode == 1
+    assert "query=definitions-missing" in result.stderr
+    assert "VACUOUS expected=ok" in result.stderr
+    assert "only 1 of 2 present roots were compared" in result.stderr
+    assert "roots_compared=1 roots_present=2 roots_requested=2" in result.stdout
 
 
 def test_equivalence_side_diff_selection_uses_exit_one_for_valid_difference(
@@ -485,6 +611,78 @@ def test_equivalence_side_diff_selection_uses_exit_one_for_valid_difference(
     )
     assert result.returncode == 1
     assert b"added" in result.stdout
+
+
+def test_difference_expectation_is_validated_and_only_for_diff(
+    harness: types.ModuleType, tmp_path: Path
+) -> None:
+    """``difference`` is the diff command's own exit-1 answer (``D-09``)."""
+
+    def workload(expect: str, command: str) -> Path:
+        path = tmp_path / f"queries-{expect}-{command}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "root": {
+                        "selection": "app.py",
+                        "queries": [
+                            {"name": "entry", "command": command, "args": [], "expect": expect}
+                        ],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    loaded = harness._load_queries(workload("difference", "diff"))
+    assert loaded["root"].queries[0]["expect"] == "difference"
+    with pytest.raises(ValueError, match="difference from a non-diff command"):
+        harness._load_queries(workload("difference", "definitions"))
+
+    differing = harness.Completed(1, b"removed x\n", b"")
+    assert harness._differing(differing)
+    assert not harness._differing(harness.Completed(0, b"no changes\n", b""))
+    assert not harness._differing(harness.Completed(1, b"", b""))
+    assert not harness._differing(harness.Completed(1, b"x\n", b"", timed_out=True))
+
+
+def test_child_environment_threads_the_hash_seed(harness: types.ModuleType) -> None:
+    """The self-determinism cell needs a second seed in the child (``D-07``)."""
+
+    assert harness._env(Path("/src"))["PYTHONHASHSEED"] == "0"
+    assert harness._env(Path("/src"), hash_seed=0)["PYTHONHASHSEED"] == "0"
+    assert harness._env(Path("/src"), hash_seed=7)["PYTHONHASHSEED"] == "7"
+
+
+def test_seed_determinism_cell_reruns_the_branch_side_under_another_seed(
+    harness: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cell is self-determinism: one side, two seeds, equal bytes."""
+
+    side = harness.Side("branch", ROOT / "src")
+    probes = [
+        harness.SeedProbe(
+            label=f"root={FIXTURE_ROOT} query=definitions variant=human",
+            args=["-m", "minotaur", "query", "definitions", "main"],
+            seed_zero=harness.Completed(0, b"answer\n", b""),
+        )
+    ]
+    seen: list[tuple[str, int]] = []
+
+    def matching(side, args, *, cwd=None, timeout=300, hash_seed=0):
+        seen.append((side.name, hash_seed))
+        return harness.Completed(0, b"answer\n", b"")
+
+    monkeypatch.setattr(harness, "_run", matching)
+    assert harness._compare_seed_determinism(side, FIXTURE_ROOT, probes)
+    assert seen == [("branch", harness.SELF_DETERMINISM_SEED)]
+
+    def diverging(side, args, *, cwd=None, timeout=300, hash_seed=0):
+        return harness.Completed(0, b"other\n", b"")
+
+    monkeypatch.setattr(harness, "_run", diverging)
+    assert not harness._compare_seed_determinism(side, FIXTURE_ROOT, probes)
 
 
 def test_a_query_that_produces_no_output_fails_the_run(baseline_src: Path, tmp_path: Path) -> None:
@@ -844,7 +1042,7 @@ def test_visualize_failure_on_both_sides_is_not_comparable(
             harness.Side("branch", tmp_path / "branch"),
         ),
         root,
-        harness.RootQueries(selection=".", queries=[]),
+        harness.RootQueries(selection="app.py", queries=[]),
         tmp_path / "scratch",
     )
     output = capsys.readouterr().out
@@ -899,27 +1097,38 @@ def test_child_environment_is_scrubbed_and_pinned(
     assert env["PYTHONPATH"] == "/src"
 
 
-def test_committed_workloads_cover_every_d06_root_with_real_error_controls() -> None:
-    """Root (3) needs a committed workload or it can never be compared; every
-    root's controls must include a genuine argument-validation error path."""
+def test_committed_workloads_cover_every_default_root_with_real_error_controls() -> None:
+    """Every default root needs a committed workload or it can never be
+    compared; the Python roots' controls must include a genuine
+    argument-validation error path, and the JavaScript and SQL roots must carry
+    their own answering query classes (``R-02``)."""
 
     data = json.loads((SCRIPT.with_name("equivalence_queries.json")).read_text(encoding="utf-8"))
-    assert set(data) == {"equivalence_root", "src", "Onyx"}
+    assert set(data) == {"equivalence_root", "src", "Onyx", "javascript", "sql"}
     assert data["src"]["selection"] == "minotaur/cli.py"
-    src_callers_zero = next(
-        item for item in data["src"]["queries"] if item["name"] == "callers-zero"
-    )
-    assert src_callers_zero["expect"] == "ok"
-    for key, workload in data.items():
+    for key in PYTHON_ROOT_KEYS:
+        workload = data[key]
         names = {item["name"] for item in workload["queries"]}
         assert "definitions-invalid" not in names, key
         errors = {item["name"] for item in workload["queries"] if item.get("expect") == "error"}
         assert {"context-malformed-site", "impact-negative-depth"} <= errors, key
         empties = {item["name"] for item in workload["queries"] if item.get("expect") == "empty"}
-        required_empty = {"definitions-no-match"}
-        if key != "src":
-            required_empty.add("callers-zero")
-        assert required_empty <= empties, key
+        assert {"definitions-no-match", "callers-zero"} <= empties, key
+        assert (FIXTURE_ROOT if key == "equivalence_root" else ROOT / "src").is_dir(), key
+
+    # The JavaScript and SQL roots reuse committed analyzer-semantics samples
+    # read-only and each carry the four query classes (``R-02``).
+    for key, root in (("javascript", JAVASCRIPT_ROOT), ("sql", SQL_ROOT)):
+        workload = data[key]
+        commands = {item["command"] for item in workload["queries"]}
+        assert {"definitions", "callers", "unreferenced", "diff"} <= commands, key
+        assert (root / workload["selection"]).is_file(), key
+    javascript_diff = next(
+        item for item in data["javascript"]["queries"] if item["command"] == "diff"
+    )
+    assert javascript_diff["expect"] == "difference"
+    sql_diff = next(item for item in data["sql"]["queries"] if item["command"] == "diff")
+    assert sql_diff["expect"] == "empty"
 
     onyx = data["Onyx"]["queries"]
     callers_zero = next(item for item in onyx if item["name"] == "callers-zero")
@@ -961,7 +1170,7 @@ def test_scenarios_refuse_a_root_with_no_python_to_mutate(
         "--branch-src",
         str(ROOT / "src"),
         "--queries",
-        str(_workload_file(tmp_path, root.name, selection=".")),
+        str(_workload_file(tmp_path, root.name, selection="ghost.py")),
         "--root",
         str(root),
         "--scenarios",
@@ -1067,6 +1276,79 @@ def test_sidecar_scenarios_reject_a_step_that_did_not_set_up_its_stamp(
     assert "step=i sidecar setup" in capsys.readouterr().err
 
 
+def test_sidecar_truth_check_reports_a_false_stamp(
+    harness: types.ModuleType,
+    baseline_src: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A stamp that no longer matches its graph must be reported FAILED.
+
+    Setting up the stamp is not enough: the query must leave it truthful, or a
+    corrupted sidecar would silently pass the trust comparison.
+    """
+
+    workload = harness._load_queries(SCRIPT.with_name("equivalence_queries.json"))[
+        FIXTURE_ROOT.name
+    ]
+    query = harness._scenario_query
+
+    def corrupt(side, root, graph, no_refresh, **kwargs):
+        result = query(side, root, graph, no_refresh, **kwargs)
+        if graph.stem.split("-")[0] == "k":
+            stamp = graph.with_name(graph.name + ".sha256")
+            stamp.write_text(f"{'0' * 64}  {graph.name}\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(harness, "_scenario_query", corrupt)
+    ok = harness._run_scenarios(
+        (harness.Side("baseline", baseline_src), harness.Side("branch", ROOT / "src")),
+        [(FIXTURE_ROOT, workload)],
+        tmp_path / "scenarios",
+    )
+    assert not ok
+    errors = capsys.readouterr().err
+    assert "step=k sidecar" in errors
+    assert "FAILED" in errors
+
+
+def test_scenario_step_that_produces_no_answer_fails(
+    harness: types.ModuleType,
+    baseline_src: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two identical ``no definitions`` outputs are not an answer.
+
+    The guard is what stops a freshness walk from passing while every step
+    compared the same empty result.
+    """
+
+    root = _source_root(tmp_path)
+    workload = harness._load_queries(
+        _workload_file(
+            tmp_path,
+            root.name,
+            queries=[
+                {
+                    "name": "definitions-missing",
+                    "command": "definitions",
+                    "args": ["not a valid symbol"],
+                    "variants": {"no_refresh": True},
+                }
+            ],
+        )
+    )[root.name]
+    ok = harness._run_scenarios(
+        (harness.Side("baseline", baseline_src), harness.Side("branch", ROOT / "src")),
+        [(root, workload)],
+        tmp_path / "scenarios",
+    )
+    assert not ok
+    assert "query produced no answer" in capsys.readouterr().err
+
+
 def test_sidecar_steps_actually_change_the_stamp(harness: types.ModuleType, tmp_path: Path) -> None:
     graph = tmp_path / "graph.json"
     graph.write_text("{}", encoding="utf-8")
@@ -1091,72 +1373,35 @@ def test_both_scratch_roots_normalise_to_one_placeholder(harness: types.ModuleTy
     assert harness._compare_processes("row", left, right, baseline_scratch, branch_scratch)
 
 
-def test_expected_refresh_scenario_admits_only_the_attempt_prefix_delta(
-    harness: types.ModuleType,
-) -> None:
-    stale_lines = b"minotaur: stale: app.py (content changed)\n"
-    baseline = harness.Completed(
-        0,
-        b'{"refreshed": true}\n',
-        b"minotaur: refreshed graph (1 drifted paths)\n" + stale_lines,
-    )
-    branch = harness.Completed(
-        0,
-        b'{"refreshed": true}\n',
-        b"minotaur: refreshing graph (1 drifted paths)\n" + stale_lines,
-    )
+def test_ordinary_stderr_is_still_compared_byte_for_byte(harness: types.ModuleType) -> None:
+    """Removing the refresh-delta rule leaves ordinary stderr exact (``R-05``)."""
 
-    assert harness._compare_processes(
-        "expected refresh", baseline, branch, allow_refresh_attempt_delta=True
-    )
-    assert not harness._compare_processes("ordinary comparison", baseline, branch)
-
-
-@pytest.mark.parametrize(
-    "branch_stderr",
-    [
-        b"minotaur: refreshing graph (2 drifted paths)\n"
-        b"minotaur: stale: app.py (content changed)\n",
-        b"minotaur: refreshing graph (1 drifted paths)\n"
-        b"minotaur: stale: other.py (content changed)\n",
-        b"prefix minotaur: refreshing graph (1 drifted paths)\n"
-        b"minotaur: stale: app.py (content changed)\n",
-        b"minotaur: refreshed graph (1 drifted paths)\n"
-        b"minotaur: stale: app.py (content changed)\nextra\n",
-    ],
-)
-def test_expected_refresh_scenario_rejects_every_other_stderr_difference(
-    harness: types.ModuleType, branch_stderr: bytes
-) -> None:
     baseline = harness.Completed(
         0,
         b"answer\n",
         b"minotaur: refreshed graph (1 drifted paths)\nminotaur: stale: app.py (content changed)\n",
     )
-    branch = harness.Completed(0, b"answer\n", branch_stderr)
-
-    assert not harness._compare_processes(
-        "expected refresh", baseline, branch, allow_refresh_attempt_delta=True
-    )
-
-
-@pytest.mark.parametrize(
-    ("branch_returncode", "branch_stdout"),
-    [(1, b"answer\n"), (0, b"different\n")],
-)
-def test_refresh_attempt_delta_does_not_relax_exit_or_stdout(
-    harness: types.ModuleType, branch_returncode: int, branch_stdout: bytes
-) -> None:
-    baseline = harness.Completed(0, b"answer\n", b"minotaur: refreshed graph (1 drifted paths)\n")
     branch = harness.Completed(
-        branch_returncode,
-        branch_stdout,
-        b"minotaur: refreshing graph (1 drifted paths)\n",
+        0,
+        b"answer\n",
+        b"minotaur: refreshing graph (1 drifted paths)\n"
+        b"minotaur: stale: app.py (content changed)\n",
     )
+    assert not harness._compare_processes("ordinary comparison", baseline, branch)
+    assert harness._compare_processes("identical comparison", baseline, baseline)
 
-    assert not harness._compare_processes(
-        "expected refresh", baseline, branch, allow_refresh_attempt_delta=True
-    )
+
+def test_dead_refresh_delta_rule_and_constants_are_removed(harness: types.ModuleType) -> None:
+    """The dead rule, parameter and constants are gone, not merely unused."""
+
+    for name in (
+        "_normalise_refresh_attempt_delta",
+        "BASELINE_REFRESH_PREFIX",
+        "BRANCH_REFRESH_PREFIX",
+    ):
+        assert not hasattr(harness, name), name
+    parameters = inspect.signature(harness._compare_processes).parameters
+    assert "allow_refresh_attempt_delta" not in parameters
 
 
 def test_output_is_compared_as_bytes_not_decoded_text(harness: types.ModuleType) -> None:
@@ -1194,19 +1439,25 @@ def test_a_failed_drift_subprocess_is_reported_not_crashed(
 
 
 def test_definitions_many_query_is_the_bare_main_name() -> None:
+    """Only the Python roots define ``main``; JavaScript and SQL roots do not."""
+
     workloads = json.loads((ROOT / "scripts/equivalence_queries.json").read_text())
-    for key, workload in workloads.items():
+    for key in PYTHON_ROOT_KEYS:
         definitions = next(
-            entry for entry in workload["queries"] if entry["name"] == "definitions-many"
+            entry for entry in workloads[key]["queries"] if entry["name"] == "definitions-many"
         )
         assert definitions["args"] == ["main"], key
+    for key in ("javascript", "sql"):
+        names = {entry["name"] for entry in workloads[key]["queries"]}
+        assert "definitions-many" not in names, key
 
 
-def test_root_two_import_isolated_from_top_level_package_and_self_test_detects_divergence(
+def test_root_two_import_is_isolated_from_a_shadowing_top_level_package(
     harness: types.ModuleType,
     baseline_src: Path,
-    tmp_path: Path,
 ) -> None:
+    """Root (2)'s working directory cannot shadow the branch's own package."""
+
     probe = harness._run(
         harness.Side("branch", ROOT / "src"),
         ["-c", "import minotaur; print(minotaur.__file__)"],
@@ -1214,22 +1465,6 @@ def test_root_two_import_isolated_from_top_level_package_and_self_test_detects_d
     )
     assert probe.returncode == 0
     assert str((ROOT / "src" / "minotaur" / "__init__.py").resolve()) in probe.stdout_text
-
-    root = _source_root(tmp_path, name="root-two-probe")
-    result = _run(
-        "--baseline-src",
-        str(baseline_src),
-        "--branch-src",
-        str(ROOT / "src"),
-        "--queries",
-        str(_workload_file(tmp_path, root.name)),
-        "--root",
-        str(root),
-        "--self-test",
-    )
-    assert result.returncode == 0, result.stderr
-    assert "artifact=analyze graph SHA-256: DIFFERENT" in result.stdout
-    assert "self-test: PASS" in result.stdout
 
 
 # The frozen pin that predates the reviewed viewer-asset change. It is the
@@ -1249,10 +1484,10 @@ def _is_ancestor(older: str, newer: str) -> bool:
     )
 
 
-def _worktree_side(tmp_path: Path, label: str, commit: str) -> Path:
+def _worktree_side(tmp_path: Path, label: str, commit: str, clone: Path) -> Path:
     checkout = tmp_path / f"checkout-{label}"
     added = subprocess.run(
-        ["git", "-C", str(ROOT), "worktree", "add", "--detach", str(checkout), commit],
+        ["git", "-C", str(clone), "worktree", "add", "--detach", str(checkout), commit],
         capture_output=True,
         text=True,
         check=False,
@@ -1262,22 +1497,69 @@ def _worktree_side(tmp_path: Path, label: str, commit: str) -> Path:
     return checkout / "src"
 
 
-def _remove_worktree(src: Path) -> None:
+def _remove_worktree(src: Path, clone: Path) -> None:
     subprocess.run(
-        ["git", "-C", str(ROOT), "worktree", "remove", "--force", str(src.parent)],
+        ["git", "-C", str(clone), "worktree", "remove", "--force", str(src.parent)],
         capture_output=True,
         text=True,
         check=False,
     )
     subprocess.run(
-        ["git", "-C", str(ROOT), "worktree", "prune"],
+        ["git", "-C", str(clone), "worktree", "prune"],
         capture_output=True,
         text=True,
         check=False,
     )
 
 
-def test_equivalence_baseline_advance_is_necessary_and_sufficient(tmp_path: Path) -> None:
+def _registered_worktrees(repository: Path) -> list[str]:
+    listed = subprocess.run(
+        ["git", "-C", str(repository), "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return [
+        line[len("worktree ") :]
+        for line in listed.stdout.splitlines()
+        if line.startswith("worktree ")
+    ]
+
+
+def test_harness_worktrees_register_in_the_session_clone_not_the_developer_repo(
+    session_clone: Path, baseline_src: Path, tmp_path: Path
+) -> None:
+    """Worktrees never touch the user's ``.git`` (``D-11``, ``F-09``).
+
+    The developer checkout's registrations must be unchanged before, during
+    and after a harness worktree is created, while the clone's own list grows.
+    A GitHub-hosted checkout is its repository's only worktree, so the same
+    observation reduces to the developer list showing just its primary.
+    """
+
+    developer_before = _registered_worktrees(ROOT)
+    clone_before = _registered_worktrees(session_clone)
+    assert str(ROOT) in developer_before
+    assert str(session_clone) in clone_before
+    # The baseline worktree is materialised by the fixture, from the clone.
+    assert str(baseline_src.parent) in clone_before
+    assert str(baseline_src.parent) not in developer_before
+
+    side = _worktree_side(tmp_path, "clone-proof", BASELINE_COMMIT, session_clone)
+    try:
+        clone_during = _registered_worktrees(session_clone)
+        assert _registered_worktrees(ROOT) == developer_before
+        assert len(clone_during) == len(clone_before) + 1
+        assert str(side.parent) in clone_during
+    finally:
+        _remove_worktree(side, session_clone)
+    assert _registered_worktrees(ROOT) == developer_before
+    assert str(side.parent) not in _registered_worktrees(session_clone)
+
+
+def test_equivalence_baseline_advance_is_necessary_and_sufficient(
+    session_clone: Path, tmp_path: Path
+) -> None:
     """``C-10``: the reviewed viewer change is the only reason the pin moved.
 
     Reverting only ``VIEWER_ADVANCE_COMMIT`` must reproduce the intentional
@@ -1290,9 +1572,9 @@ def test_equivalence_baseline_advance_is_necessary_and_sufficient(tmp_path: Path
 
     workload_path, _ = _non_diff_workload(tmp_path, exclude_names=frozenset({"callers-qualified"}))
 
-    reverted_side = _worktree_side(tmp_path, "reverted", PRE_ADVANCE_BASELINE)
-    advanced_side = _worktree_side(tmp_path, "advanced", VIEWER_ADVANCE_COMMIT)
-    frozen_side = _worktree_side(tmp_path, "pre-stamp", PRE_STAMP_COMMIT)
+    reverted_side = _worktree_side(tmp_path, "reverted", PRE_ADVANCE_BASELINE, session_clone)
+    advanced_side = _worktree_side(tmp_path, "advanced", VIEWER_ADVANCE_COMMIT, session_clone)
+    frozen_side = _worktree_side(tmp_path, "pre-stamp", PRE_STAMP_COMMIT, session_clone)
     try:
         reverted = _run(
             "--baseline-src",
@@ -1327,19 +1609,21 @@ def test_equivalence_baseline_advance_is_necessary_and_sufficient(tmp_path: Path
         assert advanced.returncode == 0, advanced.stdout + advanced.stderr
         assert "DIFFERENT" not in advanced.stdout
     finally:
-        _remove_worktree(reverted_side)
-        _remove_worktree(advanced_side)
-        _remove_worktree(frozen_side)
+        _remove_worktree(reverted_side, session_clone)
+        _remove_worktree(advanced_side, session_clone)
+        _remove_worktree(frozen_side, session_clone)
 
 
-def test_navigation_baseline_advance_preserves_exact_query_comparison(tmp_path: Path) -> None:
+def test_navigation_baseline_advance_preserves_exact_query_comparison(
+    session_clone: Path, tmp_path: Path
+) -> None:
     """The pin accounts for caller kinds while other query bytes stay equal."""
 
     assert _is_ancestor(VIEWER_ADVANCE_COMMIT, BASELINE_COMMIT)
     workload_path, _ = _non_diff_workload(tmp_path)
-    old_side = _worktree_side(tmp_path, "old-navigation", VIEWER_ADVANCE_COMMIT)
-    new_side = _worktree_side(tmp_path, "new-navigation", BASELINE_COMMIT)
-    frozen_side = _worktree_side(tmp_path, "pre-stamp", PRE_STAMP_COMMIT)
+    old_side = _worktree_side(tmp_path, "old-navigation", VIEWER_ADVANCE_COMMIT, session_clone)
+    new_side = _worktree_side(tmp_path, "new-navigation", BASELINE_COMMIT, session_clone)
+    frozen_side = _worktree_side(tmp_path, "pre-stamp", PRE_STAMP_COMMIT, session_clone)
     try:
         old = _run(
             "--baseline-src",
@@ -1369,6 +1653,6 @@ def test_navigation_baseline_advance_preserves_exact_query_comparison(tmp_path: 
         assert current.returncode == 0, current.stdout + current.stderr
         assert "DIFFERENT" not in current.stdout
     finally:
-        _remove_worktree(old_side)
-        _remove_worktree(new_side)
-        _remove_worktree(frozen_side)
+        _remove_worktree(old_side, session_clone)
+        _remove_worktree(new_side, session_clone)
+        _remove_worktree(frozen_side, session_clone)
