@@ -153,6 +153,7 @@
           "{graph}",
           "{selection}"
         ],
+        "expect": "difference",
         "variants": {
           "json": true
         }
@@ -190,7 +191,7 @@
         "args": [
           "minotaur.graph_model.validation.ValidationReport.is_valid"
         ],
-        "expect": "ok",
+        "expect": "empty",
         "variants": {
           "no_refresh": true
         }
@@ -313,6 +314,7 @@
           "{graph}",
           "{selection}"
         ],
+        "expect": "difference",
         "variants": {
           "json": true
         }
@@ -473,9 +475,108 @@
           "{graph}",
           "{selection}"
         ],
+        "expect": "difference",
         "variants": {
           "json": true
         }
+      }
+    ]
+  },
+  "javascript": {
+    "selection": "app.js",
+    "queries": [
+      {
+        "name": "definitions-function",
+        "command": "definitions",
+        "args": [
+          "target"
+        ],
+        "variants": {
+          "json": true,
+          "no_refresh": true
+        }
+      },
+      {
+        "name": "callers-qualified",
+        "command": "callers",
+        "args": [
+          "lib.target"
+        ],
+        "variants": {
+          "json": true,
+          "no_refresh": true
+        }
+      },
+      {
+        "name": "unreferenced-root",
+        "command": "unreferenced",
+        "args": [
+          "."
+        ],
+        "variants": {
+          "json": true,
+          "no_refresh": true
+        }
+      },
+      {
+        "name": "diff-selection",
+        "command": "diff",
+        "args": [
+          "{graph}",
+          "{selection}"
+        ],
+        "expect": "difference",
+        "variants": {
+          "json": true
+        }
+      }
+    ]
+  },
+  "sql": {
+    "selection": "schema.sql",
+    "queries": [
+      {
+        "name": "definitions-table",
+        "command": "definitions",
+        "args": [
+          "Parent"
+        ],
+        "variants": {
+          "json": true,
+          "no_refresh": true
+        }
+      },
+      {
+        "name": "callers-qualified",
+        "command": "callers",
+        "args": [
+          "dbo.Child"
+        ],
+        "variants": {
+          "json": true,
+          "no_refresh": true
+        }
+      },
+      {
+        "name": "unreferenced-root",
+        "command": "unreferenced",
+        "args": [
+          "."
+        ],
+        "variants": {
+          "json": true,
+          "no_refresh": true
+        }
+      },
+      {
+        "name": "diff-selection",
+        "command": "diff",
+        "args": [
+          "{graph}",
+          "{selection}"
+        ],
+        "expect": "empty",
+        "variants": {}
       }
     ]
   }
