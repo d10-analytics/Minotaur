@@ -30,6 +30,12 @@ single `analyze` call. The `src` root also carries JavaScript assets, so it is
 analyzed by its Python files alone and a mixed tree is never passed to one
 interpreter.
 
+A selection that names a directory or module instead of a file has no
+extension and no single language to expand, so it stays a whole-root workload
+analyzed with the default `.` target. The committed `Onyx` optional-root
+workload selects the `instrument_reader` package this way, and the documented
+`--optional-root` comparison is unchanged by the per-language split.
+
 ## Expectations and the seed cell
 
 A workload `expect` is `ok` (exit 0 with an answer), `empty` (exit 0 with the
