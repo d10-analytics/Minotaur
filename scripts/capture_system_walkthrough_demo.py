@@ -22,6 +22,9 @@ DEFAULT_OUTPUT = ROOT / "docs" / "assets" / "system-walkthrough-demo.png"
 COMPARISON_ARTIFACT = ROOT / "examples" / "system-walkthrough" / "minotaur-comparison.html"
 COMPARISON_OUTPUT = ROOT / "docs" / "assets" / "system-comparison-demo.png"
 VIEWPORT = {"width": 1440, "height": 900}
+# The system the explorer focuses and the boundary call the comparison selects.
+FOCUSED_SYSTEM = "orders"
+COMPARISON_VIEW = "shop.orders.cancel_order → shop.billing.refund"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -63,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _focus_explorer(page: object) -> None:
     """Focus ``orders``, reveal its boundary, and settle the layout."""
-    page.locator("#system-filter").select_option("orders")
+    page.locator("#system-filter").select_option(FOCUSED_SYSTEM)
     page.locator("#btn-direction").click()
     page.locator("#cross-system-connections").check()
     page.wait_for_function(
@@ -74,6 +77,10 @@ def _focus_explorer(page: object) -> None:
                 && cy.elements(':animated').empty();
         }"""
     )
+    focused = page.locator("#system-filter option:checked").inner_text()
+    assert focused == FOCUSED_SYSTEM, (
+        f"the focused system is {focused!r}, expected {FOCUSED_SYSTEM!r}"
+    )
 
 
 def _focus_comparison(page: object) -> None:
@@ -83,7 +90,7 @@ def _focus_comparison(page: object) -> None:
     it changes which captured revision's excerpt is shown without moving the
     graph. Selecting a changed call edge demonstrates it on the saved report.
     """
-    page.locator("#system-filter").select_option("orders")
+    page.locator("#system-filter").select_option(FOCUSED_SYSTEM)
     page.locator("#cross-system-connections").check()
     page.wait_for_function(
         """() => {
@@ -116,6 +123,10 @@ def _focus_comparison(page: object) -> None:
         }"""
     )
     page.wait_for_timeout(400)
+    selected_view = page.locator("#detail-content h3").inner_text()
+    assert selected_view == COMPARISON_VIEW, (
+        f"the selected comparison view is {selected_view!r}, expected {COMPARISON_VIEW!r}"
+    )
 
 
 if __name__ == "__main__":

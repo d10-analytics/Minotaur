@@ -10,12 +10,23 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
+from comparator_builders import (
+    _comparison_edge,
+    _comparison_location,
+    _comparison_node,
+    _comparison_source_node,
+)
 
 from minotaur import cli
+from minotaur.graph_model.document import GraphDocument
+from minotaur.graph_model.evidence import Evidence
 from minotaur.graph_model.loading import GraphLoadError, load_graph_bytes, stamp_path
+from minotaur.graph_model.provenance import CoordinateEncoding
+from minotaur.graph_model.relationship import Relationship
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import build_presentation
 from minotaur.graph_visualizer.source import prepare_excerpts
+from minotaur.query.graph_comparison import compare_graphs
 from minotaur.system import System
 
 ROOT = Path(__file__).parents[1]
@@ -581,21 +592,36 @@ def test_regenerating_checked_in_examples_is_reproducible(tmp_path: Path) -> Non
         assert first.joinpath(name).read_bytes() == second.joinpath(name).read_bytes(), name
 
 
-def test_regenerating_checked_in_examples_only_reproduces_reviewed_bytes() -> None:
-    """Under ``R-07``/``D-03`` generation is read-only apart from its outputs.
+def test_regenerating_checked_in_examples_only_reproduces_reviewed_bytes(tmp_path: Path) -> None:
+    """Under ``R-07``/``D-15`` generation is read-only apart from its outputs.
 
-    ``git status`` is the natural repository-mutation probe: introducing any
-    tracked change other than the intended artifacts fails the assertion, and
-    the intended artifacts themselves must regenerate byte-identically.
+    Regeneration goes to a temporary directory, so the committed examples stay
+    untouched and the regeneration scripts remain their only writers.
+    ``git status`` is the natural repository-mutation probe for that: it must be
+    unchanged across the run, including for ``examples/python-workflow`` and
+    ``examples/system-walkthrough``. The same temporary output must also
+    reproduce the committed artifacts byte for byte, which is what makes a stale
+    committed artifact fail here on every run.
     """
+    python_workflow = tmp_path / "python-workflow"
+    system_walkthrough = tmp_path / "system-walkthrough"
     before = _tracked_changes()
-    _generate_python_workflow(EXAMPLE)
-    _generate_system_walkthrough(SYSTEM_EXAMPLE)
+    _generate_python_workflow(python_workflow)
+    _generate_system_walkthrough(system_walkthrough)
     introduced = _tracked_changes() - before
     assert introduced == set(), (
         "regeneration must reproduce the reviewed artifacts without touching any "
-        f"other tracked file: {sorted(introduced)}"
+        f"tracked file, including the committed examples: {sorted(introduced)}"
     )
+    for generated, committed in (
+        (python_workflow, EXAMPLE),
+        (system_walkthrough, SYSTEM_EXAMPLE),
+    ):
+        assert sorted(path.name for path in generated.iterdir()) == sorted(ARTIFACT_NAMES)
+        for name in ARTIFACT_NAMES:
+            assert generated.joinpath(name).read_bytes() == committed.joinpath(name).read_bytes(), (
+                f"{committed.name}/{name} is stale: regenerate the committed example"
+            )
 
 
 def test_presentation_prepares_membership_once_without_file_scans() -> None:
@@ -627,3 +653,99 @@ def test_presentation_prepares_membership_once_without_file_scans() -> None:
     }
     assert [checkout.iterations, overlap.iterations] == [1, 1]
     assert [checkout.contains, overlap.contains] == [0, 0]
+
+
+def test_graph_format_documents_sql_fk_evidence_contract() -> None:
+    documentation = (ROOT / "docs/formats/minotaur-graph-v1.md").read_text()
+    for phrase in (
+        '`extensions["minotaur-sql"] = {"foreign_key_columns": [...]}`',
+        "`foreign_key_columns` array is nonempty",
+        "fields `local` and `referenced`",
+        "Its order is semantic",
+        "table-edge tuple `(source, target, kind)`",
+        "Constraint names",
+        "`ON DELETE`",
+        "`ON UPDATE`",
+        "`NOT FOR REPLICATION`",
+    ):
+        assert phrase in documentation
+
+
+@pytest.mark.parametrize("override", [False, True], ids=["default-evidence", "custom-evidence"])
+def test_comparison_helpers_match_real_comparator_payloads(override: bool) -> None:
+    nodes = tuple(_comparison_source_node(name) for name in ("source", "target"))
+    default = {
+        "provenance": "static-analysis",
+        "locations": [_comparison_location("source.py", 0)],
+    }
+    before_evidence = [default, {"provenance": "imported-graph"}] if override else [default]
+    after_evidence = list(reversed(before_evidence))
+    before_relationship = Relationship(
+        nodes[0].id,
+        nodes[1].id,
+        "calls",
+        tuple(Evidence.from_dict(record) for record in before_evidence),
+    )
+    after_relationship = Relationship(
+        nodes[0].id,
+        nodes[1].id,
+        "calls",
+        tuple(Evidence.from_dict(record) for record in after_evidence),
+    )
+    result = compare_graphs(
+        GraphDocument(CoordinateEncoding.UTF_8, nodes=nodes, relationships=(before_relationship,)),
+        GraphDocument(CoordinateEncoding.UTF_8, nodes=nodes, relationships=(after_relationship,)),
+    )
+    actual_nodes = {change.before["node"]["id"]: change for change in result.nodes}
+    assert set(actual_nodes) == {node.id for node in nodes}
+    for name, node in zip(("source", "target"), nodes, strict=True):
+        helper = _comparison_node(name, before_system=None, after_system=None)
+        actual = actual_nodes[node.id]
+        assert helper.before == actual.before
+        assert helper.after == actual.after
+        assert helper.to_dict().keys() == actual.to_dict().keys()
+    helper_edge = _comparison_edge(
+        "edge",
+        "source",
+        "target",
+        before_systems=(None, None),
+        after_systems=(None, None),
+        before_evidence=[before_evidence] if override else None,
+        after_evidence=[after_evidence] if override else None,
+    )
+    assert len(result.relationships) == 1
+    actual_edge = result.relationships[0]
+    assert helper_edge.before == actual_edge.before
+    assert helper_edge.after == actual_edge.after
+    assert helper_edge.eligibility == actual_edge.eligibility
+    assert helper_edge.to_dict().keys() == actual_edge.to_dict().keys()
+
+
+def test_comparison_fixture_overrides_preserve_identity_and_grouped_evidence() -> None:
+    default_node = _comparison_source_node("source")
+    changed = _comparison_node("source", label="display", path="other.py", line=7)
+    assert changed.before["node"]["id"] == default_node.id
+    assert changed.before["node"]["identity"] == default_node.to_dict()["identity"]
+    assert changed.before["node"]["label"] == "display"
+    assert changed.before["node"]["location"]["path"] == "other.py"
+    assert changed.before["node"]["location"]["range"]["start"]["line"] == 7
+    occurrences = [
+        [{"provenance": "static-analysis"}, {"provenance": "imported-graph"}],
+        [{"provenance": "curated-rule", "rule": {"id": "fixture-rule"}}],
+    ]
+    edge = _comparison_edge(
+        "edge",
+        "source",
+        "target",
+        before_evidence=occurrences,
+        after_evidence=list(reversed(occurrences)),
+    )
+    assert isinstance(edge.before, tuple)
+    assert edge.before == edge.after
+    payloads = edge.to_dict()["before"]
+    assert [item["source"] for item in payloads] == [default_node.id, default_node.id]
+    assert [item["target"] for item in payloads] == [_comparison_source_node("target").id] * 2
+    assert [[record["provenance"] for record in item["evidence"]] for item in payloads] == [
+        ["curated-rule"],
+        ["imported-graph", "static-analysis"],
+    ]

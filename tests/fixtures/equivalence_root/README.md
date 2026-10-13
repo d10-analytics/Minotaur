@@ -17,3 +17,38 @@ callers at all (`workflow.util.unused_helper`, which is also the
 
 Nothing outside the harness imports this package; it is source material to be
 analyzed, not code to be executed.
+
+## Per-language default roots
+
+A run with no `--root` compares this root beside the baseline `src` and the
+committed JavaScript and SQL samples,
+`tests/fixtures/analyzer_semantics/javascript` and
+`tests/fixtures/analyzer_semantics/sql`, read-only. Each root is analyzed one
+language at a time: the workload `selection` names a file whose extension is
+the language boundary, so only the root's files of that language reach a
+single `analyze` call. The `src` root also carries JavaScript assets, so it is
+analyzed by its Python files alone and a mixed tree is never passed to one
+interpreter.
+
+A selection that names a directory or module instead of a file has no
+extension and no single language to expand, so it stays a whole-root workload
+analyzed with the default `.` target. The committed `Onyx` optional-root
+workload selects the `instrument_reader` package this way, and the documented
+`--optional-root` comparison is unchanged by the per-language split.
+
+## Expectations and the seed cell
+
+A workload `expect` is `ok` (exit 0 with an answer), `empty` (exit 0 with the
+command's exact literal, such as `no changes`), `error` (the argument-
+validation path), or `difference` (exit 1 with output, the valid exit status
+of `query diff`). The committed `diff-selection` entries for this root, for
+`src`, and for the JavaScript root declare `difference`, because a whole-root
+selection against a narrower one removes symbols. The SQL root's `diff` is the
+unchanged-graph control: its single file makes `diff` print exactly `no
+changes`, so it keeps `empty`.
+
+After the distinct-HEAD and provenance guards pass, each compared root also
+runs the seed-determinism cell: the branch side's own query arguments are
+rerun under a second `PYTHONHASHSEED` and compared byte for byte, so output
+whose order leaks out of `hash()` fails the run rather than hiding behind the
+pinned seed of ordinary comparisons.

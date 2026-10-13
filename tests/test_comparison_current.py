@@ -593,10 +593,10 @@ def test_prepare_comparison_does_not_inspect_or_read_unused_current_graph(
 
     real_lstat = comparison.os.lstat
 
-    def forbidden_lstat(path: object) -> object:
+    def forbidden_lstat(path: object, *args: object, **kwargs: object) -> object:
         if Path(path) == graph_link:
             raise AssertionError("unused current graph must not be inspected")
-        return real_lstat(path)
+        return real_lstat(path, *args, **kwargs)
 
     monkeypatch.setattr(comparison.os, "lstat", forbidden_lstat)
     original_read_bytes = Path.read_bytes

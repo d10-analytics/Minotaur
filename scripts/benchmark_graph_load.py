@@ -47,12 +47,6 @@ from pathlib import Path
 
 import orjson
 
-# ``components sum`` must mirror the end-to-end trusted query row, which runs
-# ``validate_document(document, verify_node_ids=False)``. The untrusted row is
-# measured for visibility (R-06/D-17 label the gate row "trusted") but is not
-# part of that sum.
-_SUM_EXCLUDED_COMPONENTS = frozenset({"validate_document (untrusted)"})
-
 
 class _SubprocessError(Exception):
     """Raised when a benchmarked subprocess exits non-zero."""
@@ -225,6 +219,21 @@ def _median(values: list[float]) -> float:
     return (s[n // 2 - 1] + s[n // 2]) / 2
 
 
+def _components_sum(components: dict[str, list[float]]) -> float:
+    """Total of the component medians the end-to-end trusted query path pays.
+
+    ``components sum`` mirrors the end-to-end trusted query row, which runs
+    ``validate_document(document, verify_node_ids=False)``. The untrusted
+    ``validate_document`` row is measured and printed for visibility but is not
+    part of that sum.
+    """
+    return sum(
+        _median(times)
+        for name, times in components.items()
+        if name != "validate_document (untrusted)"
+    )
+
+
 def _format_table(
     rows: list[tuple[str, float, float, float]], serialize_sha: str, verbose: bool
 ) -> str:
@@ -350,11 +359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             components = _benchmark_components(temp_graph_path, root, repeats)
             for name, times in components.items():
                 rows.append((name, _median(times), min(times), max(times)))
-            components_sum = sum(
-                _median(times)
-                for name, times in components.items()
-                if name not in _SUM_EXCLUDED_COMPONENTS
-            )
+            components_sum = _components_sum(components)
             rows.append(("components sum", components_sum, components_sum, components_sum))
 
             # 4. serialize (AC-10)

@@ -9,8 +9,20 @@ checkout.
 Roots (specification ``D-06``): (1) ``tests/fixtures/equivalence_root`` beside
 this script -- a committed Python substrate small enough to read and rich
 enough that every query class has a real hit; (2) the baseline worktree's own
-``src``; (3) an optional large checkout supplied with ``--optional-root``,
-the only root that may be missing without failing the run.
+``src``; (3) the committed JavaScript and SQL analyzer-semantics samples
+beside this script, so a language regression that never reaches ``src`` is
+still measured; (4) an optional large checkout supplied with
+``--optional-root``, the only root that may be missing without failing the
+run.
+
+A root is analyzed one language at a time.  The committed ``src`` root also
+contains JavaScript assets, and one ``analyze`` call over both languages is
+refused by design, so the workload's ``selection`` names a file whose
+registered extension is the language boundary: only the root's files sharing
+that extension are passed to the child.  The JavaScript sample root reuses
+``tests/fixtures/analyzer_semantics/javascript`` read-only, and the SQL root
+reuses ``tests/fixtures/analyzer_semantics/sql`` with an unchanged-graph
+``diff`` control.
 
 Queries come from a per-root JSON file keyed by the root directory's name, so
 a root is never compared with a query list written for a different tree.
@@ -54,9 +66,15 @@ from pathlib import Path
 from typing import Any
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "equivalence_root"
+JAVASCRIPT_ROOT = (
+    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "analyzer_semantics" / "javascript"
+)
+SQL_ROOT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "analyzer_semantics" / "sql"
 SCRATCH_PLACEHOLDER = "<scratch>"
-BASELINE_REFRESH_PREFIX = b"minotaur: refreshed graph ("
-BRANCH_REFRESH_PREFIX = b"minotaur: refreshing graph ("
+# The self-determinism cell reruns the branch side under a second, deliberately
+# different hash seed so ordering that leaks out of ``hash()`` fails the run
+# instead of hiding behind the pinned ``PYTHONHASHSEED=0`` of ordinary runs.
+SELF_DETERMINISM_SEED = 1
 
 
 @dataclass(frozen=True)
@@ -87,6 +105,15 @@ class RootQueries:
 
     selection: str
     queries: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class SeedProbe:
+    """One branch-side query run whose bytes must not depend on hash order."""
+
+    label: str
+    args: list[str]
+    seed_zero: Completed
 
 
 @dataclass
@@ -144,7 +171,7 @@ def _resolve(path: Path) -> Path:
     return path.expanduser().resolve()
 
 
-def _env(src: Path) -> dict[str, str]:
+def _env(src: Path, *, hash_seed: int = 0) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
@@ -155,7 +182,7 @@ def _env(src: Path) -> dict[str, str]:
     }
     env["PYTHONPATH"] = str(src)
     env["PYTHONSAFEPATH"] = "1"
-    env["PYTHONHASHSEED"] = "0"
+    env["PYTHONHASHSEED"] = str(hash_seed)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
@@ -166,19 +193,23 @@ def _run(
     *,
     cwd: Path | None = None,
     timeout: float = 300,
+    hash_seed: int = 0,
 ) -> Completed:
     """Run one side's subprocess and capture raw bytes.
 
     Output is compared as bytes: ``text=True`` would decode with the ambient
     locale and translate newlines, so a real byte difference could be
     normalised away by the instrument that exists to detect it.
+
+    ``hash_seed`` reaches the child through ``PYTHONHASHSEED`` so the
+    self-determinism cell can rerun the branch side under a second seed.
     """
 
     try:
         result = subprocess.run(
             [sys.executable, *args],
             cwd=cwd,
-            env=_env(side.src),
+            env=_env(side.src, hash_seed=hash_seed),
             capture_output=True,
             check=False,
             timeout=timeout,
@@ -328,31 +359,6 @@ def _normalise_stderr(value: bytes, *scratches: Path) -> bytes:
     return value
 
 
-def _normalise_refresh_attempt_delta(baseline: bytes, branch: bytes) -> tuple[bytes, bytes]:
-    """Admit only the authorized old-to-new refresh-attempt prefix change.
-
-    The branch spelling is rewritten only at the start of a stderr line and
-    only when the baseline has the corresponding historical spelling.  The
-    subsequent drift count, stale-path lines, and every other stderr byte still
-    have to compare exactly.
-    """
-
-    baseline_lines = baseline.splitlines(keepends=True)
-    branch_lines = branch.splitlines(keepends=True)
-    if len(baseline_lines) != len(branch_lines):
-        return baseline, branch
-    normalised_branch: list[bytes] = []
-    changed = False
-    for baseline_line, branch_line in zip(baseline_lines, branch_lines, strict=True):
-        if baseline_line.startswith(BASELINE_REFRESH_PREFIX) and branch_line.startswith(
-            BRANCH_REFRESH_PREFIX
-        ):
-            branch_line = BASELINE_REFRESH_PREFIX + branch_line[len(BRANCH_REFRESH_PREFIX) :]
-            changed = True
-        normalised_branch.append(branch_line)
-    return baseline, b"".join(normalised_branch) if changed else branch
-
-
 def _row(
     label: str,
     baseline: Any,
@@ -372,7 +378,6 @@ def _compare_processes(
     baseline: Completed,
     branch: Completed,
     *scratches: Path,
-    allow_refresh_attempt_delta: bool = False,
 ) -> bool:
     if baseline.timed_out or branch.timed_out:
         print(
@@ -383,10 +388,6 @@ def _compare_processes(
         return False
     baseline_stderr = _normalise_stderr(baseline.stderr, *scratches)
     branch_stderr = _normalise_stderr(branch.stderr, *scratches)
-    if allow_refresh_attempt_delta:
-        baseline_stderr, branch_stderr = _normalise_refresh_attempt_delta(
-            baseline_stderr, branch_stderr
-        )
     left = (baseline.returncode, baseline.stdout, baseline_stderr)
     right = (branch.returncode, branch.stdout, branch_stderr)
     return _row(label, left, right)
@@ -420,23 +421,48 @@ def _load_queries(path: Path) -> dict[str, RootQueries]:
             raise ValueError(f"workload for root {key!r} needs a non-empty list of query objects")
         for item in queries:
             expect = item.get("expect", "ok")
-            if expect not in ("ok", "empty", "error"):
+            if expect not in ("ok", "empty", "error", "difference"):
                 raise ValueError(f"query {item.get('name')!r} has unknown expect {expect!r}")
             if expect == "empty" and item.get("command") not in EMPTY_QUERY_OUTPUTS:
                 raise ValueError(
                     f"query {item.get('name')!r} expects empty output from an unsupported command"
                 )
+            if expect == "difference" and item.get("command") != "diff":
+                raise ValueError(
+                    f"query {item.get('name')!r} expects a difference from a non-diff command"
+                )
         workloads[key] = RootQueries(selection=selection, queries=queries)
     return workloads
 
 
+def _language_files(root: Path, selection: str) -> tuple[Path, ...] | None:
+    """Every root file the workload's selection extension registers.
+
+    The workload's ``selection`` names one file of the language under test, so
+    its extension is the language boundary.  Passing each matching file keeps a
+    mixed tree out of a single ``analyze`` call, which the CLI refuses by
+    design (``D-04``).
+
+    A selection that names a directory or module has no extension and therefore
+    no single language to expand; it is a whole-root workload, so ``None`` keeps
+    the historical ``.`` analyze target.  The committed ``Onyx`` optional-root
+    workload selects the ``instrument_reader`` package this way, and the
+    documented ``--optional-root`` path must keep comparing it unchanged.
+    """
+
+    extension = Path(selection).suffix
+    if not extension:
+        return None
+    return tuple(sorted(path for path in root.rglob(f"*{extension}") if path.is_file()))
+
+
 def _analyze(
-    side: Side, root: Path, graph: Path, target: str = ".", *, force: bool = True
+    side: Side, root: Path, graph: Path, *targets: object, force: bool = True
 ) -> Completed:
     args = ["-m", "minotaur", "analyze", "--root", str(root), "--output", str(graph)]
     if force:
         args.append("--force")
-    args.append(target)
+    args.extend(str(target) for target in (targets or (".",)))
     return _run(side, args, cwd=root)
 
 
@@ -475,6 +501,12 @@ def _answered(result: Completed) -> bool:
     )
 
 
+def _differing(result: Completed) -> bool:
+    """An expected difference is exit 1 with real output, not an empty run."""
+
+    return not result.timed_out and result.returncode == 1 and bool(result.stdout.strip())
+
+
 def _empty(result: Completed, command: str) -> bool:
     return (
         not result.timed_out
@@ -495,14 +527,20 @@ def _compare_queries(
     selections: tuple[Path, Path],
     scratches: tuple[Path, Path],
     tally: Tally,
+    seed_probes: list[SeedProbe] | None = None,
 ) -> bool:
     """Compare every query, and require each one to have really answered.
 
     Byte identity between two runs that both printed ``unknown symbol`` or
     ``no definitions`` is not evidence of anything.  The harness insists that
     every answering entry exits 0 with meaningful stdout on both sides, every
-    empty-result entry prints its command's exact human literal, and every
-    control entry really is the error path it claims to be.
+    empty-result entry prints its command's exact human literal, every
+    expected difference exits 1 with output, and every control entry really is
+    the error path it claims to be.
+
+    When *seed_probes* is supplied, each branch-side run is recorded so the
+    seed-determinism cell can rerun it under a second ``PYTHONHASHSEED`` and
+    compare the bytes.
     """
 
     baseline, branch = sides
@@ -519,15 +557,18 @@ def _compare_queries(
             left = _run(baseline, args, cwd=root)
             right = _run(branch, branch_args, cwd=root)
             tally.comparisons += 1
-            if not _compare_processes(
-                f"root={root} query={name} variant={variant_name}", left, right, *scratches
-            ):
+            label = f"root={root} query={name} variant={variant_name}"
+            if not _compare_processes(label, left, right, *scratches):
                 ok = False
+            if seed_probes is not None:
+                seed_probes.append(SeedProbe(label=label, args=branch_args, seed_zero=right))
             probe = (
                 _answered
                 if expect == "ok"
                 else (lambda result, command=command: _empty(result, command))
                 if expect == "empty"
+                else _differing
+                if expect == "difference"
                 else _errored
             )
             for label, result in (("baseline", left), ("branch", right)):
@@ -539,9 +580,30 @@ def _compare_queries(
                         f" stdout_bytes={len(result.stdout)}",
                         file=sys.stderr,
                     )
-        if satisfied and expect == "ok":
+        if satisfied and expect in ("ok", "difference"):
             tally.queries_answered += 1
         if not satisfied:
+            ok = False
+    return ok
+
+
+def _compare_seed_determinism(
+    branch: Side,
+    root: Path,
+    probes: Sequence[SeedProbe],
+) -> bool:
+    """Rerun the branch side under a second hash seed and compare bytes.
+
+    The pinned ``PYTHONHASHSEED=0`` of ordinary runs would hide output whose
+    order leaks out of ``hash()``.  Each recorded branch-side query runs again
+    under ``SELF_DETERMINISM_SEED``; any byte difference is a named failure.
+    """
+
+    ok = True
+    for probe in probes:
+        seeded = _run(branch, probe.args, cwd=root, hash_seed=SELF_DETERMINISM_SEED)
+        label = probe.label.replace("query=", "seed-determinism query=", 1)
+        if not _compare_processes(label, probe.seed_zero, seeded):
             ok = False
     return ok
 
@@ -561,8 +623,21 @@ def _compare_root(
     scratches = (baseline_dir, branch_dir)
     baseline_graph = baseline_dir / "graph.json"
     branch_graph = branch_dir / "graph.json"
-    baseline_analyze = _analyze(baseline, root, baseline_graph)
-    branch_analyze = _analyze(branch, root, branch_graph)
+    language_files = _language_files(root, workload.selection)
+    if language_files is None:
+        # Suffix-less selections name a directory or module: analyze the whole
+        # root, exactly as this harness did before per-language selection
+        # (``AUD-01``).
+        analyze_targets: tuple[Path, ...] = ()
+    elif language_files:
+        analyze_targets = language_files
+    else:
+        # A file selection whose language has no file in this root is a
+        # workload/root mismatch; name the selection itself so ``analyze``
+        # fails loudly instead of silently analyzing a different language.
+        analyze_targets = (Path(workload.selection),)
+    baseline_analyze = _analyze(baseline, root, baseline_graph, *analyze_targets)
+    branch_analyze = _analyze(branch, root, branch_graph, *analyze_targets)
     tally.comparisons += 1
     ok = _compare_processes(f"root={root} analyze", baseline_analyze, branch_analyze, *scratches)
     if baseline_analyze.returncode or branch_analyze.returncode:
@@ -635,6 +710,7 @@ def _compare_root(
                 file=sys.stderr,
             )
             ok = False
+    seed_probes: list[SeedProbe] = []
     if not _compare_queries(
         sides,
         root,
@@ -643,7 +719,15 @@ def _compare_root(
         (baseline_selection, branch_selection),
         scratches,
         tally,
+        seed_probes,
     ):
+        ok = False
+
+    # The seed cell runs here, inside the guarded comparison flow, after the
+    # distinct-HEAD and provenance guards have passed.  It never invokes the
+    # guarded normal-run path with equal sources: it reruns the branch side's
+    # own recorded query arguments under a second hash seed.
+    if not _compare_seed_determinism(branch, root, seed_probes):
         ok = False
 
     if not _compare_drift(sides, root, baseline_graph, tally):
@@ -732,6 +816,78 @@ def _inject_query(src: Path) -> None:
             "_equivalence_original_dump_json = dump_json\n"
             "def dump_json(payload):\n"
             "    return _equivalence_original_dump_json(payload) + '\\n'\n"
+        )
+
+
+def _inject_javascript(src: Path) -> None:
+    """Perturb JavaScript semantics so the JavaScript root's graph differs.
+
+    The JavaScript root must be compared live: a root that was silently
+    skipped would let a JavaScript regression pass the harness.  Relabelling
+    one emitted node changes the analyze graph bytes without touching any
+    other language's interpretation.
+    """
+
+    interpreter = src / "minotaur" / "language_interpreter" / "javascript" / "interpreter.py"
+    with interpreter.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n\n# Self-test-only output perturbation.\n"
+            "from dataclasses import replace as _equivalence_replace\n"
+            "_equivalence_original_analyze_javascript = analyze_javascript_files\n"
+            "def analyze_javascript_files(workspace, files):\n"
+            "    result = _equivalence_original_analyze_javascript(workspace, files)\n"
+            "    first, *rest = result.document.nodes\n"
+            "    return _equivalence_replace(\n"
+            "        result,\n"
+            "        document=_equivalence_replace(\n"
+            "            result.document,\n"
+            "            nodes=(_equivalence_replace(first, label=first.label + '!'), *rest),\n"
+            "        ),\n"
+            "    )\n"
+        )
+
+
+def _inject_drift(src: Path) -> None:
+    """Perturb the ``Drift`` value one side computes from the same graph.
+
+    ``_compare_drift`` runs the drift snippet in each side against the same
+    graph and root, so a filesystem-only change cannot make the two values
+    differ.  Only a code perturbation proves the row is a real comparison and
+    not a self-comparison that always reports IDENTICAL.
+    """
+
+    freshness = src / "minotaur" / "query" / "freshness.py"
+    with freshness.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n\n# Self-test-only output perturbation.\n"
+            "_equivalence_original_drift = drift\n"
+            "def drift(document, root):\n"
+            "    result = _equivalence_original_drift(document, root)\n"
+            "    return Drift(\n"
+            "        tuple(result.changed) + ('<equivalence>',),\n"
+            "        result.missing,\n"
+            "        result.added,\n"
+            "        result.analyzer,\n"
+            "    )\n"
+        )
+
+
+def _inject_hash_order(src: Path) -> None:
+    """Make one query's record order depend on ``hash()`` (``D-16``).
+
+    The pinned ``PYTHONHASHSEED=0`` of ordinary comparisons would hide this
+    ordering entirely; the self-determinism cell reruns the branch side under a
+    second seed and must therefore fail.
+    """
+
+    render = src / "minotaur" / "query" / "render.py"
+    with render.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n\n# Self-test-only output perturbation.\n"
+            "_equivalence_original_render_json = render_json\n"
+            "def render_json(query_name, records, **kwargs):\n"
+            "    records = sorted(records, key=lambda record: hash(repr(record.to_dict())))\n"
+            "    return _equivalence_original_render_json(query_name, records, **kwargs)\n"
         )
 
 
@@ -950,7 +1106,6 @@ def _run_scenarios(
                 right,
                 copies[0],
                 copies[1],
-                allow_refresh_attempt_delta=letter in "acde",
             ):
                 ok = False
             for result, refusal in zip((left, right), expect_refusal, strict=True):
@@ -1095,6 +1250,7 @@ def _compare(
     ok = True
     total = Tally()
     compared: list[tuple[Path, RootQueries]] = []
+    attempted: list[tuple[Path, RootQueries]] = []
     present = 0
     for index, (root, optional, key) in enumerate(roots):
         if not root.exists():
@@ -1117,12 +1273,19 @@ def _compare(
             continue
         root_ok, tally = _compare_root(sides, root, workload, scratch / f"root-{index}")
         total.absorb(tally)
-        compared.append((root, workload))
+        attempted.append((root, workload))
         print(
             f"root={root} summary: comparisons={tally.comparisons}"
             f" queries_answered={tally.queries_answered}/{tally.queries_expected}"
         )
-        if not root_ok:
+        # The totals line counts a root only when its comparison actually
+        # succeeded, so a failed root makes ``roots_compared`` less than
+        # ``roots_present`` instead of hiding behind the attempt.  Scenario
+        # mode still sees every attempted root, so its own refusals stay
+        # reachable when a root fails for an unrelated reason.
+        if root_ok:
+            compared.append((root, workload))
+        else:
             ok = False
     if not total.comparisons:
         _fail("no artifact comparisons were performed")
@@ -1135,7 +1298,7 @@ def _compare(
         f" roots_requested={len(roots)} comparisons={total.comparisons}"
     )
     if scenarios:
-        ok = _run_scenarios(sides, compared[:2], scratch / "scenarios") and ok
+        ok = _run_scenarios(sides, attempted[:2], scratch / "scenarios") and ok
     return ok
 
 
@@ -1145,7 +1308,7 @@ def _root_list(
     required = (
         [_resolve(path) for path in arguments.root]
         if arguments.root
-        else [FIXTURE_ROOT, baseline.src]
+        else [FIXTURE_ROOT, baseline.src, JAVASCRIPT_ROOT, SQL_ROOT]
     )
     optional = [_resolve(path) for path in arguments.optional_root or []]
     keys: list[str | None] = list(arguments.workload or [])
@@ -1203,6 +1366,9 @@ INJECTIONS: tuple[tuple[str, Any, str], ...] = (
     ("serialize", _inject_serialize, "artifact=analyze graph SHA-256: DIFFERENT"),
     ("visualize", _inject_visualize, "artifact=visualize HTML SHA-256: DIFFERENT"),
     ("query", _inject_query, "query="),
+    ("javascript", _inject_javascript, "artifact=analyze graph SHA-256: DIFFERENT"),
+    ("drift", _inject_drift, "artifact=Drift: DIFFERENT"),
+    ("hash-order", _inject_hash_order, "seed-determinism"),
 )
 
 

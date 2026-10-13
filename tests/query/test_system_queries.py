@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -124,6 +126,42 @@ def _query(
     )
     captured = capsys.readouterr()
     return status, captured.out, captured.err
+
+
+def _query_subprocess(
+    graph: Path,
+    root: Path,
+    name: str,
+    system_name: str,
+    *extra: str,
+    hash_seed: str,
+) -> tuple[int, bytes, bytes]:
+    """Run one query through the CLI in a fresh interpreter pinned to ``hash_seed``.
+
+    A real child process lets ``PYTHONHASHSEED`` vary the str hashing that
+    orders any set- or dict-derived output, unlike the single already-started
+    interpreter the in-process helper runs in.
+    """
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "minotaur",
+            "query",
+            name,
+            system_name,
+            "--graph",
+            str(graph),
+            "--root",
+            str(root),
+            *extra,
+        ],
+        cwd=root,
+        env={**os.environ, "PYTHONHASHSEED": hash_seed},
+        capture_output=True,
+        check=False,
+    )
+    return completed.returncode, completed.stdout, completed.stderr
 
 
 def _assert_system_text(out: str, summary: str) -> dict[str, object]:
@@ -483,28 +521,50 @@ def test_external_category_from_a_pathless_upstream_endpoint(
 
 
 def test_system_queries_json_is_deterministic_and_hides_graph_internals(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
 ) -> None:
     root = _repo(tmp_path)
     _write(root, "orders/__init__.py", "")
-    _write(root, "orders/mod.py", "def order():\n    pass\n")
+    _write(root, "orders/mod.py", "def order():\n    pass\n\ndef cancel():\n    pass\n")
+    # orders/client.py gives the system outgoing boundary edges (a declared
+    # target and an unassigned one, each through call and import kinds).
+    _write(
+        root,
+        "orders/client.py",
+        "from catalog import ship\nfrom other import ping\n\ndef send():\n    ship()\n    ping()\n",
+    )
+    _write(root, "catalog.py", "def ship():\n    pass\n")
+    _write(root, "other.py", "def ping():\n    pass\n")
+    # Two outside consumers, one reaching two symbols through two kinds.
     _write(
         root,
         "mix.py",
-        "from orders.mod import order\n\ndef caller():\n    order()\n",
+        "from orders.mod import order, cancel\n\ndef caller():\n    order()\n    grab = cancel\n",
     )
-    _declare(root, "orders", ["orders/mod.py"])
+    _write(
+        root,
+        "second.py",
+        "from orders.mod import order\n\ndef other_caller():\n    order()\n",
+    )
+    _declare(root, "orders", ["orders/mod.py", "orders/client.py"])
+    _declare(root, "catalog", ["catalog.py"])
     graph = _analyze(root)
-    monkeypatch.chdir(root)
 
     pairs = (("surface", "orders"), ("consumers", "orders"), ("system-deps", "orders"))
     for name, system_name in pairs:
-        first = _query(capsys, graph, root, name, system_name, "--json")
-        second = _query(capsys, graph, root, name, system_name, "--json")
-        assert first[0] == second[0] == 0
-        assert first[1] == second[1]
-        assert "node:sha256:" not in first[1]
-        payload = json.loads(first[1])
+        seeded = {
+            seed: _query_subprocess(graph, root, name, system_name, "--json", hash_seed=seed)
+            for seed in ("0", "1")
+        }
+        statuses = {seed: result[0] for seed, result in seeded.items()}
+        assert statuses == {"0": 0, "1": 0}, seeded["0"][2]
+        first = seeded["0"]
+        # Byte-identical across two different PYTHONHASHSEED values (AC-11):
+        # any hash()-ordered row, kind, or target would diverge here.
+        assert first[1] == seeded["1"][1]
+        out = first[1].decode("utf-8")
+        assert "node:sha256:" not in out
+        payload = json.loads(out)
         assert set(payload) == {
             "query",
             "refreshed",
