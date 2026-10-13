@@ -435,18 +435,24 @@ def _load_queries(path: Path) -> dict[str, RootQueries]:
     return workloads
 
 
-def _language_files(root: Path, selection: str) -> tuple[Path, ...]:
+def _language_files(root: Path, selection: str) -> tuple[Path, ...] | None:
     """Every root file the workload's selection extension registers.
 
     The workload's ``selection`` names one file of the language under test, so
     its extension is the language boundary.  Passing each matching file keeps a
     mixed tree out of a single ``analyze`` call, which the CLI refuses by
     design (``D-04``).
+
+    A selection that names a directory or module has no extension and therefore
+    no single language to expand; it is a whole-root workload, so ``None`` keeps
+    the historical ``.`` analyze target.  The committed ``Onyx`` optional-root
+    workload selects the ``instrument_reader`` package this way, and the
+    documented ``--optional-root`` path must keep comparing it unchanged.
     """
 
     extension = Path(selection).suffix
     if not extension:
-        raise ValueError(f"workload selection {selection!r} has no file extension")
+        return None
     return tuple(sorted(path for path in root.rglob(f"*{extension}") if path.is_file()))
 
 
@@ -618,13 +624,20 @@ def _compare_root(
     baseline_graph = baseline_dir / "graph.json"
     branch_graph = branch_dir / "graph.json"
     language_files = _language_files(root, workload.selection)
-    if not language_files:
-        # A root with no file of the selection's language is a workload/root
-        # mismatch; name the selection itself so ``analyze`` fails loudly
-        # instead of silently analyzing a different language.
-        language_files = (Path(workload.selection),)
-    baseline_analyze = _analyze(baseline, root, baseline_graph, *language_files)
-    branch_analyze = _analyze(branch, root, branch_graph, *language_files)
+    if language_files is None:
+        # Suffix-less selections name a directory or module: analyze the whole
+        # root, exactly as this harness did before per-language selection
+        # (``AUD-01``).
+        analyze_targets: tuple[Path, ...] = ()
+    elif language_files:
+        analyze_targets = language_files
+    else:
+        # A file selection whose language has no file in this root is a
+        # workload/root mismatch; name the selection itself so ``analyze``
+        # fails loudly instead of silently analyzing a different language.
+        analyze_targets = (Path(workload.selection),)
+    baseline_analyze = _analyze(baseline, root, baseline_graph, *analyze_targets)
+    branch_analyze = _analyze(branch, root, branch_graph, *analyze_targets)
     tally.comparisons += 1
     ok = _compare_processes(f"root={root} analyze", baseline_analyze, branch_analyze, *scratches)
     if baseline_analyze.returncode or branch_analyze.returncode:
