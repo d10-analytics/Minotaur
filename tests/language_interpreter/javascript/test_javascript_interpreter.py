@@ -1454,6 +1454,54 @@ def test_relative_parent_imports_resolve_and_root_escape_is_unresolved(tmp_path)
     )
 
 
+def test_import_alias_binds_the_local_name_and_calls_the_imported_symbol(tmp_path):
+    # An alias is usable only when the local name owns the imported target: a
+    # use of the alias resolves to the exported symbol rather than to the
+    # imported spelling, so it emits a call instead of an unresolved use.
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": "import { helper as localHelper } from './lib.js';\nlocalHelper();\n",
+            "lib.js": "export function helper() {}\n",
+        },
+    )
+    assert result.diagnostics == ()
+    app = _node(result, "app")
+    helper = _node(result, "lib.helper")
+    assert [
+        (edge.source, edge.target) for edge in _edges(result, RelationshipKind.CALLS.value)
+    ] == [(app.id, helper.id)]
+    assert not {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+
+
+def test_unresolved_import_specifier_still_records_the_module_imports_edge(tmp_path):
+    # The module-level edge belongs to the import statement, not to a single
+    # specifier, so it survives a specifier the target module does not export;
+    # the unresolved specifier is reported separately from that edge.
+    result = _analyze(
+        tmp_path,
+        {
+            "other.js": "import { missing } from './lib.js';\n",
+            "lib.js": "export function helper() {}\n",
+        },
+    )
+    assert result.diagnostics == ()
+    other = _node(result, "other")
+    lib = _node(result, "lib")
+    assert [
+        (edge.source, edge.target) for edge in _edges(result, RelationshipKind.IMPORTS.value)
+    ] == [(other.id, lib.id)]
+    assert {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"./lib.js#missing"}
+
+
 @pytest.mark.parametrize("source", ["export function ok() {}\r", "export function ok() {}\r\n"])
 def test_cr_and_crlf_documents_are_valid_under_source_text_validation(tmp_path, source):
     result = _analyze(tmp_path, {"app.js": source})
