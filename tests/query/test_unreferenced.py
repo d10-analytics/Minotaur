@@ -813,3 +813,41 @@ def test_javascript_naming_identifiers_leave_every_function_unreferenced(
         "a.js:7  a.outer  function",
         "a.js:8  a.target  function",
     ]
+
+
+def test_javascript_class_expression_name_and_label_stay_unreferenced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(
+        tmp_path,
+        "named.js",
+        "function main() { const View = class Inner { m() {} }; }\nfunction Inner() {}\n",
+    )
+    _write(
+        tmp_path,
+        "continued.js",
+        "function main() { outer: for (const item of items) { continue outer; } }\n"
+        "function outer() {}\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out.splitlines() == [
+        "continued.js:1  continued.main  function",
+        "continued.js:2  continued.outer  function",
+        "named.js:1  named.main  function",
+        "named.js:2  named.Inner  function",
+    ]
