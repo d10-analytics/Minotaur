@@ -295,6 +295,12 @@ def _collect_declarations(
                 if getattr(member, "type", None) != "MethodDefinition":
                     continue
                 key = getattr(member, "key", None)
+                # EDGE-EXPR-005: supports computed method keys without a key-text method label.
+                if getattr(member, "computed", False):
+                    # A computed key is an executable expression, not a method
+                    # name; the key and body are walked under the emitted class
+                    # instead of inventing a key-text method symbol.
+                    continue
                 method_name = _property_name(key)
                 if method_name is None:
                     continue
@@ -507,6 +513,20 @@ def _expressions(
                         shadows=program_shadows,
                         skip_declaration=True,
                     )
+                elif getattr(member, "type", None) == "MethodDefinition":
+                    # A computed-key method has no emitted symbol, so its key
+                    # and body are walked under the emitted class.
+                    _walk(
+                        member,
+                        owner,
+                        module,
+                        top_bindings,
+                        relationships,
+                        nodes,
+                        emitter,
+                        shadows=program_shadows,
+                        skip_declaration=True,
+                    )
         elif getattr(declaration, "type", None) == "VariableDeclaration":
             # Each callable declarator is an emitted owner of its initializer
             # and body.  Other declarators in the same statement remain
@@ -555,6 +575,71 @@ def _expressions(
                 emitter,
                 shadows=program_shadows,
             )
+
+
+_EXPRESSION = "expression"
+_BINDING = "binding"
+_NAME = "name"
+
+# Child-field dispatch for node types without a dedicated ``_walk`` branch.
+# Each entry classifies that type's node-valued child fields:
+#
+# ``expression``
+#     An executable expression; identifiers reached here are uses.
+# ``binding``
+#     A binding pattern; it names targets and is never a use.
+# ``name``
+#     An identifier naming a target (a label, class name, or meta property);
+#     it is never a use.
+#
+# A type absent from this table is walked field by field, and an Identifier
+# reached from an unclassified field is not a use, because the field is not
+# known to be an expression position.
+_CHILD_FIELDS: dict[str, dict[str, str]] = {
+    "ArrayExpression": {"elements": _EXPRESSION},
+    "ArrayPattern": {"elements": _BINDING},
+    "AssignmentExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
+    "AssignmentPattern": {"left": _BINDING, "right": _EXPRESSION},
+    "AwaitExpression": {"argument": _EXPRESSION},
+    "BinaryExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
+    "BreakStatement": {"label": _NAME},
+    "ClassBody": {"body": _EXPRESSION},
+    "ClassExpression": {"id": _NAME, "superClass": _EXPRESSION, "body": _EXPRESSION},
+    "ConditionalExpression": {
+        "test": _EXPRESSION,
+        "consequent": _EXPRESSION,
+        "alternate": _EXPRESSION,
+    },
+    "ContinueStatement": {"label": _NAME},
+    "ExpressionStatement": {"expression": _EXPRESSION},
+    # Class fields are excluded for both class forms: field initialization and
+    # dispatch need runtime semantics, so no child field is walked.
+    "FieldDefinition": {},
+    "IfStatement": {"test": _EXPRESSION, "consequent": _EXPRESSION, "alternate": _EXPRESSION},
+    "LabeledStatement": {"label": _NAME, "body": _EXPRESSION},
+    "LogicalExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
+    "MetaProperty": {"meta": _NAME, "property": _NAME},
+    # Constructor/member dispatch is runtime-sensitive and is not a CALLS fact
+    # in this slice; constructor arguments still contain uses.
+    "NewExpression": {"arguments": _EXPRESSION},
+    "ObjectExpression": {"properties": _EXPRESSION},
+    "ObjectPattern": {"properties": _BINDING},
+    "PropertyDefinition": {},
+    "RestElement": {"argument": _BINDING},
+    "ReturnStatement": {"argument": _EXPRESSION},
+    "SequenceExpression": {"expressions": _EXPRESSION},
+    "SpreadElement": {"argument": _EXPRESSION},
+    "StaticBlock": {"body": _EXPRESSION},
+    "SwitchCase": {"test": _EXPRESSION, "consequent": _EXPRESSION},
+    "TaggedTemplateExpression": {"tag": _EXPRESSION, "quasi": _EXPRESSION},
+    "TemplateLiteral": {"expressions": _EXPRESSION},
+    "ThrowStatement": {"argument": _EXPRESSION},
+    "TryStatement": {"block": _EXPRESSION, "handler": _EXPRESSION, "finalizer": _EXPRESSION},
+    "UnaryExpression": {"argument": _EXPRESSION},
+    "UpdateExpression": {"argument": _EXPRESSION},
+    "VariableDeclarator": {"id": _BINDING, "init": _EXPRESSION},
+    "YieldExpression": {"argument": _EXPRESSION},
+}
 
 
 def _walk(
@@ -825,12 +910,6 @@ def _walk(
         for argument in getattr(node, "arguments", ()):
             _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
         return
-    if typ == "NewExpression":
-        # Constructor/member dispatch is runtime-sensitive and is not a CALLS
-        # fact in this slice.  Constructor arguments still contain uses.
-        for argument in getattr(node, "arguments", ()):
-            _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
-        return
     if typ == "MemberExpression":
         _walk(
             getattr(node, "object", None),
@@ -893,7 +972,60 @@ def _walk(
             shadows,
         )
         return
-    for value in vars(node).values():
+    if typ == "MethodDefinition":
+        # A class member key names the member; only a computed key executes.
+        # EDGE-EXPR-006: supports class field and static-field exclusion for both class forms.
+        # Field and static-field definitions are absent from the dispatch table
+        # below, so a class expression excludes them exactly as an emitted class
+        # declaration does.
+        if getattr(node, "computed", False):
+            key = getattr(node, "key", None)
+            if not _is_deferred_callable(key):
+                _walk(key, owner, module, bindings, relationships, nodes, seen, shadows)
+        _walk(
+            getattr(node, "value", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+        )
+        return
+    # Types without a dedicated branch walk their classified child fields.
+    # EDGE-EXPR-001: supports non-use identifiers emitting no reference edges.
+    _walk_classified_fields(node, owner, module, bindings, relationships, nodes, seen, shadows)
+
+
+def _walk_classified_fields(
+    node: Any,
+    owner: str,
+    module: _Module,
+    bindings: dict[str, _Binding],
+    relationships: RelationshipAccumulator,
+    nodes: list[Node],
+    seen: NodeEmitter,
+    shadows: set[str],
+) -> None:
+    """Walk the child fields classified for a node type without a branch."""
+    specification = _CHILD_FIELDS.get(node.type)
+    if specification is None:
+        # An unclassified type is walked field by field, but a field holding an
+        # Identifier names a target rather than using one: without a
+        # classification the field is not known to be an expression position.
+        for value in vars(node).values():
+            if isinstance(value, list):
+                for item in value:
+                    if getattr(item, "type", None) != "Identifier":
+                        _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
+            elif getattr(value, "type", None) != "Identifier":
+                _walk(value, owner, module, bindings, relationships, nodes, seen, shadows)
+        return
+    for field_name, category in specification.items():
+        if category != _EXPRESSION:
+            continue
+        value = getattr(node, field_name, None)
         if isinstance(value, list):
             for item in value:
                 _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
