@@ -546,3 +546,44 @@ def test_lost_import_route_callers_keep_unresolved_text_without_stale_call(
 
     assert status == 0
     assert captured.out == "caller.py:4:12  sub.go [references] [unresolved]\n"
+
+
+def test_javascript_class_expression_name_is_not_a_caller(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(
+        tmp_path,
+        "a.js",
+        "function main() {\n"
+        "  const View = class { render() {} };\n"
+        "  outer: for (const item of items) { break outer; }\n"
+        "  const marker = new.target;\n"
+        "}\n"
+        "function render() {}\n"
+        "function outer() {}\n"
+        "function target() {}\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    # The class-expression method key and the label are naming identifiers, so
+    # neither reaches the top-level functions they spell.
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    assert _edge_kinds(document, "a.main", "a.render") == []
+    assert _edge_kinds(document, "a.main", "a.outer") == []
+
+    status = cli.main(
+        [
+            "query",
+            "callers",
+            "a.render",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "no callers\n"

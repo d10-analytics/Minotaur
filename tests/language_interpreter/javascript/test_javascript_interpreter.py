@@ -1495,3 +1495,173 @@ def test_class_accessors_record_declaration_roles_for_correspondence(tmp_path):
         with pytest.raises(CorrespondenceAmbiguityError) as raised:
             prepare_whole_graph(refused.document)
         assert set(raised.value.candidate_ids) == {node.id for node in duplicates}
+
+
+def test_non_use_identifier_forms_emit_no_reference_edges(tmp_path):
+    # import.meta is a documented non-use: the module analyzes beside a good
+    # sibling and emits no fact for the meta property's identifiers.
+    meta = _analyze(
+        tmp_path / "meta",
+        {"app.js": "const u = import.meta.url;\n", "good.js": "export function good() {}\n"},
+    )
+    assert meta.diagnostics == ()
+    assert {node.label for node in meta.document.nodes if node.node_class is NodeClass.FILE} == {
+        "app.js",
+        "good.js",
+    }
+    assert not any(node.reference_text is not None for node in meta.document.nodes)
+    assert not _edges(meta, RelationshipKind.CALLS.value)
+
+    # A label, a class-expression name, and a new.target property are all
+    # naming identifiers, so none of the four top-level functions is referenced.
+    h9 = _analyze(
+        tmp_path / "h9",
+        {
+            "a.js": (
+                "function main() {\n"
+                "  const View = class { render() {} };\n"
+                "  outer: for (const item of items) { break outer; }\n"
+                "  const marker = new.target;\n"
+                "}\n"
+                "function render() {}\n"
+                "function outer() {}\n"
+                "function target() {}\n"
+            )
+        },
+    )
+    main = _node(h9, "a.main")
+    references = _edges(h9, RelationshipKind.REFERENCES.value)
+    for hidden in ("a.render", "a.outer", "a.target"):
+        hidden_id = _node(h9, hidden).id
+        assert not any(edge.source == main.id and edge.target == hidden_id for edge in references)
+
+    new_target = _analyze(
+        tmp_path / "new-target",
+        {"app.js": "function probe() { const value = new.target; }\n"},
+    )
+    assert not any(node.reference_text in {"new", "target"} for node in new_target.document.nodes)
+
+    named = _analyze(
+        tmp_path / "named",
+        {
+            "a.js": (
+                "function main() { const View = class Inner { m() {} }; }\nfunction Inner() {}\n"
+            )
+        },
+    )
+    named_main = _node(named, "a.main")
+    named_inner = _node(named, "a.Inner")
+    assert not any(
+        edge.source == named_main.id and edge.target == named_inner.id
+        for edge in _edges(named, RelationshipKind.REFERENCES.value)
+    )
+    assert not any(node.reference_text in {"Inner", "m"} for node in named.document.nodes)
+
+    continued = _analyze(
+        tmp_path / "continue",
+        {
+            "a.js": (
+                "function main() { outer: for (const item of items) { continue outer; } }\n"
+                "function outer() {}\n"
+            )
+        },
+    )
+    continued_main = _node(continued, "a.main")
+    continued_outer = _node(continued, "a.outer")
+    assert not any(
+        edge.source == continued_main.id and edge.target == continued_outer.id
+        for edge in _edges(continued, RelationshipKind.REFERENCES.value)
+    )
+
+
+def test_computed_method_keys_walk_without_method_label(tmp_path):
+    declaration = _analyze(
+        tmp_path / "declaration",
+        {"a.js": "function pick() {}\nclass Box { [key]() {} [pick()]() {} }\n"},
+    )
+    box = _node(declaration, "a.Box")
+    pick = _node(declaration, "a.pick")
+    assert any(
+        edge.source == box.id
+        and edge.target == pick.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in declaration.document.relationships
+    )
+    assert not any(node.symbol_kind == "method" for node in declaration.document.nodes)
+
+    body = _analyze(
+        tmp_path / "body",
+        {
+            "a.js": (
+                "function pick() {}\nfunction helper() {}\nclass Box { [pick()]() { helper(); } }\n"
+            )
+        },
+    )
+    body_box = _node(body, "a.Box")
+    body_helper = _node(body, "a.helper")
+    assert any(
+        edge.source == body_box.id
+        and edge.target == body_helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in body.document.relationships
+    )
+    assert not any(node.symbol_kind == "method" for node in body.document.nodes)
+
+    expression = _analyze(
+        tmp_path / "expression",
+        {
+            "a.js": (
+                "function pick() {}\n"
+                "function helper() {}\n"
+                "function main() { const Box = class { [pick()]() { helper(); } }; }\n"
+            )
+        },
+    )
+    expression_main = _node(expression, "a.main")
+    expression_pick = _node(expression, "a.pick")
+    expression_helper = _node(expression, "a.helper")
+    calls = {
+        (edge.source, edge.target) for edge in _edges(expression, RelationshipKind.CALLS.value)
+    }
+    assert (expression_main.id, expression_pick.id) in calls
+    assert (expression_main.id, expression_helper.id) in calls
+    assert not any(node.symbol_kind in {"class", "method"} for node in expression.document.nodes)
+
+
+def test_class_expression_fields_and_static_fields_emit_no_facts(tmp_path):
+    fields = _analyze(
+        tmp_path / "fields",
+        {
+            "a.js": (
+                "function helper() {}\n"
+                "const instance = class { field = helper(); };\n"
+                "const staticView = class { static s = helper(); };\n"
+                "const computedView = class { [key] = helper(); };\n"
+            )
+        },
+    )
+    assert not _edges(fields, RelationshipKind.CALLS.value)
+    assert not any(node.reference_text is not None for node in fields.document.nodes)
+
+    # The class-declaration exclusion is the regression pin for both forms.
+    pinned = _analyze(
+        tmp_path / "pinned",
+        {"a.js": "function helper() {}\nclass View { field = helper(); }\n"},
+    )
+    assert not _edges(pinned, RelationshipKind.CALLS.value)
+    assert not any(node.reference_text is not None for node in pinned.document.nodes)
+
+    # A non-computed method still runs under the enclosing emitted owner.
+    method = _analyze(
+        tmp_path / "method",
+        {"a.js": "function helper() {}\nconst View = class { m() { helper(); } };\n"},
+    )
+    method_module = _node(method, "a")
+    method_helper = _node(method, "a.helper")
+    assert any(
+        edge.source == method_module.id
+        and edge.target == method_helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in method.document.relationships
+    )
+    assert not any(node.reference_text is not None for node in method.document.nodes)

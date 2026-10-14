@@ -774,3 +774,42 @@ def test_ambiguous_conditional_continuation_stays_unreferenced(
 
     assert status == 0
     assert "pkg.sub.go" in {result["symbol"] for result in payload["results"]}
+
+
+def test_javascript_naming_identifiers_leave_every_function_unreferenced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(
+        tmp_path,
+        "a.js",
+        "function main() {\n"
+        "  const View = class { render() {} };\n"
+        "  outer: for (const item of items) { break outer; }\n"
+        "  const marker = new.target;\n"
+        "}\n"
+        "function render() {}\n"
+        "function outer() {}\n"
+        "function target() {}\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out.splitlines() == [
+        "a.js:1  a.main  function",
+        "a.js:6  a.render  function",
+        "a.js:7  a.outer  function",
+        "a.js:8  a.target  function",
+    ]
