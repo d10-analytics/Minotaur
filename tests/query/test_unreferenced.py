@@ -851,3 +851,28 @@ def test_javascript_class_expression_name_and_label_stay_unreferenced(
         "named.js:1  named.main  function",
         "named.js:2  named.Inner  function",
     ]
+
+
+def test_javascript_module_owned_default_export_call_clears_unreferenced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "lib.js", "export function helper() {}\nexport function orphan() {}\n")
+    _write(
+        tmp_path,
+        "app.js",
+        "import { helper } from './lib.js';\n"
+        "export default function () { helper(); }\n"
+        "export default () => missingInDefault();\n"
+        "export default helper;\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(["query", "unreferenced", "--graph", str(graph), "--root", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert status == 0
+    # The uncalled sibling stays listed, so the module-owned default-export call
+    # is what clears lib.helper rather than the query reporting nothing.
+    assert captured.out.splitlines() == ["lib.js:2  lib.orphan  function"]
+    assert "lib.helper" not in captured.out

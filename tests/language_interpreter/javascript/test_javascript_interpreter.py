@@ -1742,3 +1742,47 @@ def test_binding_pattern_defaults_keep_their_executable_uses(tmp_path):
         {"a.js": "let v;\n({ v } = obj);\n({ unbound } = obj);\n"},
     )
     assert not any(node.reference_text in {"v", "unbound"} for node in binding_only.document.nodes)
+
+
+def test_anonymous_default_exports_walk_bodies_with_module_owner(tmp_path):
+    # The three anonymous default-export forms share one module: the function
+    # body, the arrow body, and the bare expression.  None of them emits a
+    # declaration symbol, so every walked use belongs to the module symbol.
+    result = _analyze(
+        tmp_path,
+        {
+            "lib.js": "export function helper() {}\n",
+            "app.js": (
+                "import { helper } from './lib.js';\n"
+                "export default function () { helper(); }\n"
+                "export default () => missingInDefault();\n"
+                "export default helper;\n"
+            ),
+        },
+    )
+    assert result.diagnostics == ()
+    app = _node(result, "app")
+    helper = _node(result, "lib.helper")
+    calls = {(edge.source, edge.target) for edge in _edges(result, RelationshipKind.CALLS.value)}
+    references = {
+        (edge.source, edge.target) for edge in _edges(result, RelationshipKind.REFERENCES.value)
+    }
+
+    # The anonymous function body's resolved callee is a module-owned call, the
+    # fact `callers lib.helper` renders with `app` as the caller.
+    assert (app.id, helper.id) in calls
+    # The arrow body's unresolved callee is a module-owned reference, never a
+    # call.
+    missing = next(
+        node for node in result.document.nodes if node.reference_text == "missingInDefault"
+    )
+    assert (app.id, missing.id) in references
+    assert (app.id, missing.id) not in calls
+    # `export default helper;` is the bare expression form.  It is a use only
+    # because the unwrapped declaration is walked as an expression position: a
+    # field-by-field walk of the export statement leaves the bare Identifier
+    # unclassified, so this assertion fails without that walk.
+    assert (app.id, helper.id) in references
+    # The module symbol owns every fact in this fixture, so no other node can
+    # misattribute the uses the two query consumers read.
+    assert all(source == app.id for source, _ in calls | references)

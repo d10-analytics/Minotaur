@@ -587,3 +587,37 @@ def test_javascript_class_expression_name_is_not_a_caller(
 
     assert status == 0
     assert captured.out == "no callers\n"
+
+
+def test_javascript_anonymous_default_export_callers_use_module_owner(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "lib.js", "export function helper() {}\nexport function orphan() {}\n")
+    _write(
+        tmp_path,
+        "app.js",
+        "import { helper } from './lib.js';\n"
+        "export default function () { helper(); }\n"
+        "export default () => missingInDefault();\n"
+        "export default helper;\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        ["query", "callers", "lib.helper", "--graph", str(graph), "--root", str(tmp_path)]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "app.js:2:30  app [calls]\n"
+
+    # A genuinely uncalled sibling still reports no callers, so the line above
+    # is the module-owned default-export call rather than a blanket match.
+    control = cli.main(
+        ["query", "callers", "lib.orphan", "--graph", str(graph), "--root", str(tmp_path)]
+    )
+    control_captured = capsys.readouterr()
+
+    assert control == 0
+    assert control_captured.out == "no callers\n"
