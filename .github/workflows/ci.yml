@@ -175,7 +175,11 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'merge_group' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    # Pinned through the renderer-flake stabilization window so results stay
+    # attributable while the Ubuntu 24 → 26 migration rolls out. Removal trigger:
+    # return to ubuntu-latest after ~2 weeks of green browser runs plus one
+    # observation run on the new image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       MINOTAUR_VISUALIZER_BROWSER_REQUIRED: "1"
@@ -190,7 +194,13 @@ jobs:
       - name: Install visualizer test dependencies
         run: |
           python3 -m pip install -e ".[dev,visualizer]"
+          # Pin the browser build under test during the stabilization window.
+          python3 -m pip install "playwright==1.63.*"
           python3 -m playwright install --with-deps chromium
+      - name: Record browser stack
+        run: |
+          python3 -m playwright --version
+          ls ~/.cache/ms-playwright | grep -i chromium || true
       - name: Exercise generated file artifact
         run: python3 -m pytest tests/test_visualizer_browser.py -v
 
