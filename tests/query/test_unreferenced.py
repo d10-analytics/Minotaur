@@ -876,3 +876,20 @@ def test_javascript_module_owned_default_export_call_clears_unreferenced(
     # is what clears lib.helper rather than the query reporting nothing.
     assert captured.out.splitlines() == ["lib.js:2  lib.orphan  function"]
     assert "lib.helper" not in captured.out
+
+
+def test_javascript_new_callee_reference_clears_unreferenced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "app.js", "function Widget() {}\nfunction orphan() {}\nnew Widget();\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(["query", "unreferenced", "--graph", str(graph), "--root", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert status == 0
+    # The uncalled sibling stays listed, so the new-callee reference is what
+    # clears app.Widget rather than the query reporting nothing.
+    assert captured.out.splitlines() == ["app.js:2  app.orphan  function"]
+    assert "app.Widget" not in captured.out

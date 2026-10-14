@@ -616,6 +616,48 @@ def test_nested_array_rest_assignment_and_late_computed_bindings_shadow_defaults
         )
 
 
+def test_declaration_and_catch_pattern_defaults_emit_calls(tmp_path):
+    # Declaration and catch parameter patterns reuse the parameter walker, so
+    # their nested defaults execute under the enclosing emitted owner.
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function topHelper() {}\n"
+                "function nestedHelper() {}\n"
+                "function loopHelper() {}\n"
+                "function catchTarget() {}\n"
+                "const { a = topHelper() } = obj;\n"
+                "function nested() { const { b = nestedHelper() } = obj; }\n"
+                "for (const { c = loopHelper() } of items) {}\n"
+                "try {} catch ({ message = catchTarget() }) {}\n"
+            )
+        },
+    )
+    module = _node(result, "app")
+    nested = _node(result, "app.nested")
+    calls = {(edge.source, edge.target) for edge in _edges(result, RelationshipKind.CALLS.value)}
+    assert (module.id, _node(result, "app.topHelper").id) in calls
+    assert (nested.id, _node(result, "app.nestedHelper").id) in calls
+    assert (module.id, _node(result, "app.loopHelper").id) in calls
+    assert (module.id, _node(result, "app.catchTarget").id) in calls
+
+    # A declaration pattern's computed key executes exactly as a parameter
+    # pattern's does: the shared walker's ObjectPattern branch records the
+    # reference at the enclosing module owner, and the binding name is not a use.
+    computed = _analyze(
+        tmp_path / "computed",
+        {"app.js": "function key() {}\nconst { [key]: v } = obj;\n"},
+    )
+    computed_module = _node(computed, "app")
+    computed_key = _node(computed, "app.key")
+    references = {
+        (edge.source, edge.target) for edge in _edges(computed, RelationshipKind.REFERENCES.value)
+    }
+    assert (computed_module.id, computed_key.id) in references
+    assert not any(node.reference_text == "v" for node in computed.document.nodes)
+
+
 def test_local_export_lists_emit_module_owned_unresolved_facts_including_aliases(tmp_path):
     source = "function helper() {}\nexport { helper, helper as publicName };\n"
     result = _analyze(tmp_path, {"app.js": source})
@@ -1025,6 +1067,78 @@ def test_unsupported_imports_are_explicit_unresolved_facts(tmp_path):
     assert not _edges(result, RelationshipKind.CALLS.value)
 
 
+def test_unsupported_import_locals_and_new_callees_emit_references(tmp_path):
+    # An unsupported import local is neither a binding nor a shadow, so a use
+    # falls through to the ordinary lookup and records an unresolved reference.
+    namespace = _analyze(
+        tmp_path / "namespace",
+        {
+            "app.js": "import * as utils from './lib.js';\nutils.fmt();\n",
+            "lib.js": "export function fmt() {}\n",
+        },
+    )
+    assert {
+        node.reference_text
+        for node in namespace.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"./lib.js#*", "utils", "utils.fmt"}
+    assert not _edges(namespace, RelationshipKind.CALLS.value)
+
+    default_import = _analyze(
+        tmp_path / "default",
+        {
+            "app.js": "import Widget from './lib.js';\nnew Widget(); Widget();\n",
+            "lib.js": "export default function Widget() {}\n",
+        },
+    )
+    assert {
+        node.reference_text
+        for node in default_import.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"./lib.js#default", "Widget"}
+    widget_uses = [
+        node
+        for node in default_import.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "Widget"
+    ]
+    assert len(widget_uses) == 2
+    default_app = _node(default_import, "app")
+    default_references = {
+        (edge.source, edge.target)
+        for edge in _edges(default_import, RelationshipKind.REFERENCES.value)
+    }
+    assert all((default_app.id, node.id) in default_references for node in widget_uses)
+
+    # ``new`` classifies its callee as an ordinary expression: a locally
+    # declared constructor yields a reference at the enclosing owner, never a
+    # call, while an unresolved callee yields an unresolved reference.
+    local = _analyze(tmp_path / "local", {"app.js": "function Widget() {}\nnew Widget();\n"})
+    local_app = _node(local, "app")
+    local_widget = _node(local, "app.Widget")
+    assert any(
+        edge.source == local_app.id
+        and edge.target == local_widget.id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in local.document.relationships
+    )
+    assert not _edges(local, RelationshipKind.CALLS.value)
+
+    unresolved = _analyze(tmp_path / "unresolved", {"app.js": "new unres();\n"})
+    assert {
+        node.reference_text
+        for node in unresolved.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"unres"}
+    unresolved_app = _node(unresolved, "app")
+    unresolved_callee = _node(unresolved, "unres")
+    assert any(
+        edge.source == unresolved_app.id
+        and edge.target == unresolved_callee.id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in unresolved.document.relationships
+    )
+
+
 def test_module_and_lexical_shadowing_cover_parameters_patterns_and_catches(tmp_path):
     result = _analyze(
         tmp_path,
@@ -1159,7 +1273,10 @@ def test_lexical_module_bindings_and_unsupported_import_locals_are_suppressed(tm
         for node in result.document.nodes
         if node.node_class is NodeClass.UNRESOLVED_REFERENCE
     }
-    assert texts == {"report", "./lib.js#default"}
+    # ``total`` stays suppressed because it is a real lexical binding, while an
+    # unsupported default-import local is not a binding at all: both of its uses
+    # fall through to the ordinary lookup and record ``value``.
+    assert texts == {"report", "./lib.js#default", "value"}
     caller = _node(result, "app.caller")
     target = _node(result, "app.target")
     assert any(
@@ -1298,7 +1415,9 @@ def test_member_fact_exclusions_keep_this_new_and_iife_dispatch_silent(tmp_path)
         for node in result.document.nodes
         if node.node_class is NodeClass.UNRESOLVED_REFERENCE
     }
-    assert unresolved == {"hidden"}
+    # ``Foo`` is the new-callee reference; the member dispatch on
+    # ``new Foo().bar`` and the IIFE member dispatch stay silent.
+    assert unresolved == {"hidden", "Foo"}
 
 
 def test_relative_parent_imports_resolve_and_root_escape_is_unresolved(tmp_path):
