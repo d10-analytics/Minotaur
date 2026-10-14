@@ -59,7 +59,6 @@ class _Module:
     exports: dict[str, _Binding]
     declaration_nodes: tuple[Node, ...]
     method_containments: tuple[tuple[str, str], ...]
-    unsupported_import_locals: set[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +250,6 @@ def _make_module(path: str, source: str, tree: Any, line_index: LineIndex) -> _M
         exports,
         tuple(declaration_nodes),
         tuple(method_containments),
-        set(),
     )
 
 
@@ -417,8 +415,6 @@ def _imports(
                         if previous is None or imported_binding.position >= previous.position:
                             module.bindings[local] = imported_binding
                 else:
-                    if local:
-                        module.unsupported_import_locals.add(local)
                     _unsupported(
                         module,
                         f"{source}#{imported}",
@@ -472,9 +468,7 @@ def _expressions(
         for name, binding in module.bindings.items()
         if not name.startswith("\x00method:")
     }
-    program_shadows = (
-        _scope_shadows(module.tree) | module.unsupported_import_locals
-    ) - module.bindings.keys()
+    program_shadows = _scope_shadows(module.tree) - module.bindings.keys()
     for statement in getattr(module.tree, "body", ()):
         owner = module.module_id
         declaration = (
@@ -535,6 +529,19 @@ def _expressions(
                 declarator_node = getattr(dec, "_minotaur_node", None)
                 declarator_owner = (
                     declarator_node.id if declarator_node is not None else module.module_id
+                )
+                # A top-level binding pattern's defaults and computed keys
+                # execute under the declarator's owner.  The walker accumulates
+                # bound names in place, so it receives its own shadow copy.
+                _walk_parameter_defaults(
+                    getattr(dec, "id", None),
+                    declarator_owner,
+                    module,
+                    top_bindings,
+                    relationships,
+                    nodes,
+                    emitter,
+                    set(program_shadows),
                 )
                 _walk(
                     getattr(dec, "init", None),
@@ -624,8 +631,9 @@ _CHILD_FIELDS: dict[str, dict[str, str]] = {
     "LogicalExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
     "MetaProperty": {"meta": _NAME, "property": _NAME},
     # Constructor/member dispatch is runtime-sensitive and is not a CALLS fact
-    # in this slice; constructor arguments still contain uses.
-    "NewExpression": {"arguments": _EXPRESSION},
+    # in this slice; the callee is an ordinary expression position, so it emits
+    # a reference, and constructor arguments still contain uses.
+    "NewExpression": {"callee": _EXPRESSION, "arguments": _EXPRESSION},
     "ObjectExpression": {"properties": _EXPRESSION},
     "PropertyDefinition": {},
     "ReturnStatement": {"argument": _EXPRESSION},
@@ -658,6 +666,7 @@ def _walk(
 ) -> None:
     if node is None or not hasattr(node, "type"):
         return
+    # EDGE-EXPR-004: supports unsupported import locals and new callees as references.
     typ = node.type
     shadows = shadows or set()
     if typ == "Identifier":
@@ -772,6 +781,20 @@ def _walk(
         return
     if typ == "VariableDeclaration":
         for declarator in getattr(node, "declarations", ()):
+            # Nested and loop-header declarations reach their pattern defaults
+            # through the same shared walker as top-level and parameter
+            # patterns.  Each declarator gets its own shadow copy so the
+            # walker's in-place bound-name accumulation cannot leak.
+            _walk_parameter_defaults(
+                getattr(declarator, "id", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                set(shadows),
+            )
             _walk(
                 getattr(declarator, "init", None),
                 owner,
@@ -789,6 +812,19 @@ def _walk(
             _walk(child, owner, module, bindings, relationships, nodes, seen, block_shadows)
         return
     if typ == "CatchClause":
+        # A catch parameter pattern's defaults execute under the enclosing
+        # owner, exactly as a function parameter's do.  The parameter's own
+        # bindings stay out of the incoming set so the copy does not leak.
+        _walk_parameter_defaults(
+            getattr(node, "param", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            set(shadows),
+        )
         catch_shadows = set(shadows) | _bound_names(getattr(node, "param", None))
         _walk(
             getattr(node, "body", None),
@@ -1076,7 +1112,13 @@ def _walk_parameter_defaults(
     seen: NodeEmitter,
     shadows: set[str],
 ) -> None:
-    """Walk executable defaults nested in a function binding pattern."""
+    """Walk executable defaults nested in a binding pattern.
+
+    Function parameters, declaration patterns, and catch parameters all reuse
+    this walker, so a computed key and a nested default execute identically in
+    every pattern position.
+    """
+    # EDGE-EXPR-003: supports declaration and catch pattern defaults through the shared walker.
     if pattern is None or not hasattr(pattern, "type"):
         return
     typ = pattern.type
