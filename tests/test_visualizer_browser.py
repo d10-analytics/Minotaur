@@ -469,6 +469,8 @@ def test_checked_in_python_workflow_artifact_opens_without_external_requests() -
         page.on("request", lambda request: requested.append(request.url))
         page.goto(artifact.as_uri())
         assert page.evaluate("window.minotaurVisualizer.cy.nodes().length") > 0
+        _snapshot_original_elements(page)
+        _assert_visible_layout(page, "TB")
         edge = _click_visible_edge_and_show_details(page)
         assert edge["kind"] in page.locator("#detail-content").inner_text()
         browser.close()
@@ -1020,53 +1022,86 @@ def _assert_visible_layout(page: object, direction: str) -> None:
     assert result["cameraError"] < 0.1, result
 
 
-@pytest.mark.parametrize("bundled", [False, True], ids=["generated", "bundled"])
-def test_layout_uses_only_filter_eligible_elements(tmp_path: Path, bundled: bool) -> None:
-    artifact = ROOT / "examples/python-workflow/minotaur-graph.html"
-    if not bundled:
-        artifact = tmp_path / "viewer.html"
-        assert (
-            cli.main(
-                [
-                    "visualize",
-                    "--input",
-                    str(ROOT / "examples/python-workflow/minotaur-graph.json"),
-                    "--output",
-                    str(artifact),
-                    "--source-root",
-                    str(ROOT / "src"),
-                ]
-            )
-            == 0
+def _snapshot_original_elements(page: object) -> None:
+    """Freeze the pre-interaction element set for later layout comparisons."""
+    page.evaluate("""() => {
+        const cy = window.minotaurVisualizer.cy;
+        window.originalElements = cy.elements().map(
+            e => ({group:e.group(), data:e.data()}));
+        window.originalElements = JSON.parse(JSON.stringify(window.originalElements));
+        window.originalIdentities = cy.elements().toArray();
+    }""")
+
+
+@pytest.mark.flaky(reruns=1, only_rerun="Target crashed")
+def test_layout_uses_only_filter_eligible_elements(tmp_path: Path) -> None:
+    """Prove the filter/direction/reset matrix on one render of the workflow graph.
+
+    The artifact is generated fresh and asserted byte-identical to the checked-in
+    distributable before the browser proof runs, so the checked-in file's behavior
+    is proven transitively without executing the same bytes twice. The second pass
+    previously run here added no coverage and was the site of a recurring
+    intermittent Chromium renderer crash (``Target crashed``); see the smoke test
+    below for the direct open of the distributable file.
+    """
+    artifact = tmp_path / "viewer.html"
+    assert (
+        cli.main(
+            [
+                "visualize",
+                "--input",
+                str(ROOT / "examples/python-workflow/minotaur-graph.json"),
+                "--output",
+                str(artifact),
+                "--source-root",
+                str(ROOT / "src"),
+            ]
         )
+        == 0
+    )
+    # The browser proof runs once. Byte equality pins the checked-in distributable
+    # artifact to this exact render, so its behavior is proven transitively.
+    assert (
+        artifact.read_bytes()
+        == (ROOT / "examples/python-workflow/minotaur-graph.html").read_bytes()
+    )
     errors: list[str] = []
     requests: list[str] = []
+    console: list[str] = []
+    step = {"name": "startup"}
+
+    def _on_console(message: object) -> None:
+        entry = f"{message.type}: {message.text}"  # type: ignore[union-attr]
+        console.append(entry)
+        del console[:-50]
+
     with sync_playwright() as runner:
         browser = runner.chromium.launch()
         page = browser.new_page(viewport={"width": 1440, "height": 900})
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.on("request", lambda request: requests.append(request.url))
+        page.on("console", _on_console)
+        page.on("crash", lambda _: errors.append(f"renderer crashed during step: {step['name']}"))
         page.goto(artifact.as_uri())
-        page.evaluate("""() => {
-            const cy = window.minotaurVisualizer.cy;
-            window.originalElements = cy.elements().map(e => ({group:e.group(), data:e.data()}));
-            window.originalElements = JSON.parse(JSON.stringify(window.originalElements));
-            window.originalIdentities = cy.elements().toArray();
-        }""")
-        _assert_visible_layout(page, "TB")
-        classes = ["file", "symbol", "unresolved-reference"]
-        for mask in [6, 5, 4, 3, 2, 1, 0, 7]:
-            for index, kind in enumerate(classes):
-                page.locator(f'input[data-kind="{kind}"]').set_checked(bool(mask & (1 << index)))
-            empty_camera = (
-                page.evaluate(
-                    "({zoom:window.minotaurVisualizer.cy.zoom(), "
-                    "pan:window.minotaurVisualizer.cy.pan()})"
-                )
-                if mask == 0
-                else None
-            )
+        try:
+            _snapshot_original_elements(page)
+            step["name"] = "initial-TB-layout"
             _assert_visible_layout(page, "TB")
+            classes = ["file", "symbol", "unresolved-reference"]
+            for mask in [6, 5, 4, 3, 2, 1, 0, 7]:
+                step["name"] = f"kind-filter-mask-{mask}"
+                for index, kind in enumerate(classes):
+                    kind_filter = page.locator(f'input[data-kind="{kind}"]')
+                    kind_filter.set_checked(bool(mask & (1 << index)))
+                empty_camera = (
+                    page.evaluate(
+                        "({zoom:window.minotaurVisualizer.cy.zoom(), "
+                        "pan:window.minotaurVisualizer.cy.pan()})"
+                    )
+                    if mask == 0
+                    else None
+                )
+                _assert_visible_layout(page, "TB")
             if mask == 0:
                 camera = page.evaluate(
                     "({zoom:window.minotaurVisualizer.cy.zoom(), "
@@ -1083,47 +1118,59 @@ def test_layout_uses_only_filter_eligible_elements(tmp_path: Path, bundled: bool
                     )
                     == camera
                 )
-        for direction in ["LR", "BT", "RL"]:
+            for direction in ["LR", "BT", "RL"]:
+                step["name"] = f"direction-{direction}"
+                page.locator("#btn-direction").click()
+                _assert_visible_layout(page, direction)
+            for checkbox in page.locator("#edge-filters input").all():
+                step["name"] = "edge-filter-toggle"
+                checkbox.uncheck()
+                _assert_visible_layout(page, "RL")
+                page.locator('input[data-kind="symbol"]').uncheck()
+                page.locator('input[data-kind="symbol"]').check()
+                _assert_visible_layout(page, "RL")
+                checkbox.check()
+            step["name"] = "unresolved-reference-unchecked"
+            page.locator('input[data-kind="unresolved-reference"]').uncheck()
+            _assert_visible_layout(page, "RL")
+            for reset in ["button", "shortcut"]:
+                step["name"] = f"camera-reset-{reset}"
+                page.evaluate("window.minotaurVisualizer.cy.pan({x:0,y:0})")
+                if reset == "button":
+                    page.locator("#btn-fit").click()
+                else:
+                    page.keyboard.press("f")
+                _assert_visible_layout(page, "RL")
+            step["name"] = "search-dim-then-node-details"
+            page.locator("#search").fill("no matching label anywhere")
+            page.wait_for_timeout(200)
+            assert page.evaluate("window.minotaurVisualizer.cy.nodes('.dimmed').length") > 0
             page.locator("#btn-direction").click()
-            _assert_visible_layout(page, direction)
-        for checkbox in page.locator("#edge-filters input").all():
-            checkbox.uncheck()
-            _assert_visible_layout(page, "RL")
+            _assert_visible_layout(page, "TB")
+            page.locator("#search").fill("")
+            page.wait_for_timeout(200)
+            _click_connected_node_and_show_details(page)
+            page.locator('input[data-kind="file"]').uncheck()
             page.locator('input[data-kind="symbol"]').uncheck()
+            detail_text = page.locator("#detail-content").inner_text()
+            assert "Select a node or edge to inspect it." in detail_text
+            page.locator('input[data-kind="file"]').check()
             page.locator('input[data-kind="symbol"]').check()
-            _assert_visible_layout(page, "RL")
-            checkbox.check()
-        page.locator('input[data-kind="unresolved-reference"]').uncheck()
-        _assert_visible_layout(page, "RL")
-        for reset in ["button", "shortcut"]:
-            page.evaluate("window.minotaurVisualizer.cy.pan({x:0,y:0})")
-            if reset == "button":
-                page.locator("#btn-fit").click()
-            else:
-                page.keyboard.press("f")
-            _assert_visible_layout(page, "RL")
-        page.locator("#search").fill("no matching label anywhere")
-        page.wait_for_timeout(200)
-        assert page.evaluate("window.minotaurVisualizer.cy.nodes('.dimmed').length") > 0
-        page.locator("#btn-direction").click()
-        _assert_visible_layout(page, "TB")
-        page.locator("#search").fill("")
-        page.wait_for_timeout(200)
-        _click_connected_node_and_show_details(page)
-        page.locator('input[data-kind="file"]').uncheck()
-        page.locator('input[data-kind="symbol"]').uncheck()
-        assert (
-            "Select a node or edge to inspect it." in page.locator("#detail-content").inner_text()
-        )
-        page.locator('input[data-kind="file"]').check()
-        page.locator('input[data-kind="symbol"]').check()
-        page.locator("#btn-direction").click()
-        assert page.evaluate("window.minotaurVisualizer.cy.nodes().some(n => n.animated())")
-        page.locator('input[data-kind="unresolved-reference"]').check()
-        page.locator('input[data-kind="unresolved-reference"]').uncheck()
-        page.locator("#btn-direction").click()
-        _assert_visible_layout(page, "BT")
-        browser.close()
+            page.locator("#btn-direction").click()
+            assert page.evaluate("window.minotaurVisualizer.cy.nodes().some(n => n.animated())")
+            page.locator('input[data-kind="unresolved-reference"]').check()
+            page.locator('input[data-kind="unresolved-reference"]').uncheck()
+            page.locator("#btn-direction").click()
+            _assert_visible_layout(page, "BT")
+            browser.close()
+        except Exception as exc:
+            if "Target crashed" in str(exc):
+                tail = "\n".join(console[-20:])
+                raise type(exc)(
+                    f"{exc}\n[minotaur-diagnostics] step={step['name']}\n"
+                    f"[minotaur-diagnostics] console-tail:\n{tail}"
+                ) from exc
+            raise
     assert not errors
     assert all(url.startswith("file:") for url in requests)
 
