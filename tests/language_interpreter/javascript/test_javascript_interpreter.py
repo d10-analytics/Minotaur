@@ -1607,6 +1607,26 @@ def test_computed_method_keys_walk_without_method_label(tmp_path):
     )
     assert not any(node.symbol_kind == "method" for node in body.document.nodes)
 
+    # A nested, non-emitted class declaration has no class symbol, so its
+    # computed key and body belong to the enclosing emitted owner.
+    nested = _analyze(
+        tmp_path / "nested",
+        {
+            "a.js": (
+                "function pick() {}\n"
+                "function helper() {}\n"
+                "function main() { class Box { [pick()]() { helper(); } } }\n"
+            )
+        },
+    )
+    nested_main = _node(nested, "a.main")
+    nested_calls = {
+        (edge.source, edge.target) for edge in _edges(nested, RelationshipKind.CALLS.value)
+    }
+    assert (nested_main.id, _node(nested, "a.pick").id) in nested_calls
+    assert (nested_main.id, _node(nested, "a.helper").id) in nested_calls
+    assert not any(node.symbol_kind in {"class", "method"} for node in nested.document.nodes)
+
     expression = _analyze(
         tmp_path / "expression",
         {
@@ -1665,3 +1685,60 @@ def test_class_expression_fields_and_static_fields_emit_no_facts(tmp_path):
         for edge in method.document.relationships
     )
     assert not any(node.reference_text is not None for node in method.document.nodes)
+
+
+def test_binding_pattern_defaults_keep_their_executable_uses(tmp_path):
+    # An assignment target's binding names are not uses, but its defaults and
+    # computed keys still execute.
+    object_default = _analyze(
+        tmp_path / "object-default",
+        {"a.js": "function helper() {}\nlet v;\n({ v = helper() } = obj);\n"},
+    )
+    object_module = _node(object_default, "a")
+    object_helper = _node(object_default, "a.helper")
+    assert any(
+        edge.source == object_module.id
+        and edge.target == object_helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in object_default.document.relationships
+    )
+    assert not any(node.reference_text == "v" for node in object_default.document.nodes)
+
+    array_default = _analyze(
+        tmp_path / "array-default",
+        {"a.js": "function helper() {}\nlet v;\n[v = helper()] = arr;\n"},
+    )
+    array_module = _node(array_default, "a")
+    array_helper = _node(array_default, "a.helper")
+    assert any(
+        edge.source == array_module.id
+        and edge.target == array_helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in array_default.document.relationships
+    )
+    assert not any(node.reference_text == "v" for node in array_default.document.nodes)
+
+    computed = _analyze(
+        tmp_path / "computed",
+        {
+            "a.js": (
+                "function key() {}\n"
+                "function helper() {}\n"
+                "let v;\n"
+                "({ [key()]: v = helper() } = obj);\n"
+            )
+        },
+    )
+    computed_module = _node(computed, "a")
+    computed_calls = {
+        (edge.source, edge.target) for edge in _edges(computed, RelationshipKind.CALLS.value)
+    }
+    assert (computed_module.id, _node(computed, "a.key").id) in computed_calls
+    assert (computed_module.id, _node(computed, "a.helper").id) in computed_calls
+    assert not any(node.reference_text == "v" for node in computed.document.nodes)
+
+    binding_only = _analyze(
+        tmp_path / "binding-only",
+        {"a.js": "let v;\n({ v } = obj);\n({ unbound } = obj);\n"},
+    )
+    assert not any(node.reference_text in {"v", "unbound"} for node in binding_only.document.nodes)
