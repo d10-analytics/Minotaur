@@ -597,9 +597,7 @@ _NAME = "name"
 # known to be an expression position.
 _CHILD_FIELDS: dict[str, dict[str, str]] = {
     "ArrayExpression": {"elements": _EXPRESSION},
-    "ArrayPattern": {"elements": _BINDING},
     "AssignmentExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
-    "AssignmentPattern": {"left": _BINDING, "right": _EXPRESSION},
     "AwaitExpression": {"argument": _EXPRESSION},
     "BinaryExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
     "BreakStatement": {"label": _NAME},
@@ -623,9 +621,7 @@ _CHILD_FIELDS: dict[str, dict[str, str]] = {
     # in this slice; constructor arguments still contain uses.
     "NewExpression": {"arguments": _EXPRESSION},
     "ObjectExpression": {"properties": _EXPRESSION},
-    "ObjectPattern": {"properties": _BINDING},
     "PropertyDefinition": {},
-    "RestElement": {"argument": _BINDING},
     "ReturnStatement": {"argument": _EXPRESSION},
     "SequenceExpression": {"expressions": _EXPRESSION},
     "SpreadElement": {"argument": _EXPRESSION},
@@ -695,6 +691,23 @@ def _walk(
                     if getattr(node, "_minotaur_node", None) is not None:
                         continue
                     value = getattr(child, "value", None)
+                    if getattr(child, "computed", False):
+                        # A nested class declaration has no emitted class
+                        # symbol, so its computed key executes under the
+                        # nearest emitted owner, exactly as the
+                        # MethodDefinition branch does for class expressions.
+                        key = getattr(child, "key", None)
+                        if not _is_deferred_callable(key):
+                            _walk(
+                                key,
+                                owner,
+                                module,
+                                bindings,
+                                relationships,
+                                nodes,
+                                seen,
+                                shadows,
+                            )
                     _walk(
                         value,
                         owner,
@@ -970,6 +983,15 @@ def _walk(
             nodes,
             seen,
             shadows,
+        )
+        return
+    if typ in {"ObjectPattern", "ArrayPattern", "AssignmentPattern", "RestElement"}:
+        # A binding pattern reached through the walker is an assignment target:
+        # its binding names are not uses, but its defaults and computed keys
+        # still execute.  The shared pattern walker accumulates bound names, so
+        # it receives its own copy of the shadow set.
+        _walk_parameter_defaults(
+            node, owner, module, bindings, relationships, nodes, seen, set(shadows)
         )
         return
     if typ == "MethodDefinition":
