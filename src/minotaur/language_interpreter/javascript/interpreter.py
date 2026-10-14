@@ -563,10 +563,16 @@ def _expressions(
             "ImportDeclaration",
             "ExportAllDeclaration",
             "ExportNamedDeclaration",
-            "ExportDefaultDeclaration",
         }:
+            # EDGE-EXPR-002: supports anonymous default-export bodies owned by the module symbol.
+            # A default export's declaration is an expression position, so it is
+            # walked directly instead of through the statement: a bare
+            # identifier reached as an unknown statement field would not count
+            # as a use.  Anonymous function and arrow bodies and the expression
+            # form therefore stay owned by the module symbol, while a named
+            # default declaration keeps the emitted declaration node as owner.
             _walk(
-                statement,
+                declaration,
                 owner,
                 module,
                 top_bindings,
