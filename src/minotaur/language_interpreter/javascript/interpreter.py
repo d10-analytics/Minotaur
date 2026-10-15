@@ -1032,9 +1032,9 @@ def _walk(
         return
     if typ in {"ObjectPattern", "ArrayPattern", "AssignmentPattern", "RestElement"}:
         # A binding pattern reached through the walker is an assignment target:
-        # its binding names are not uses, but its defaults and computed keys
-        # still execute.  The shared pattern walker accumulates bound names, so
-        # it receives its own copy of the shadow set.
+        # its binding names are not uses, but its defaults, computed keys, and
+        # member-expression targets still execute.  The shared pattern walker
+        # accumulates bound names, so it receives its own copy of the shadow set.
         _walk_parameter_defaults(
             node, owner, module, bindings, relationships, nodes, seen, set(shadows)
         )
@@ -1117,14 +1117,21 @@ def _walk_parameter_defaults(
 ) -> None:
     """Walk executable defaults nested in a binding pattern.
 
-    Function parameters, declaration patterns, and catch parameters all reuse
-    this walker, so a computed key and a nested default execute identically in
-    every pattern position.
+    Function parameters, declaration patterns, catch parameters, and assignment
+    targets all reuse this walker, so a computed key and a nested default
+    execute identically in every pattern position.  Only an assignment target
+    can hold a member expression; it is evaluated as an expression exactly as a
+    simple assignment target is.
     """
     # EDGE-EXPR-003: supports declaration and catch pattern defaults through the shared walker.
     if pattern is None or not hasattr(pattern, "type"):
         return
     typ = pattern.type
+    if typ == "MemberExpression":
+        # A member-expression target reads its object and evaluates its
+        # computed key, and its member text is recorded beside the base fact.
+        _walk(pattern, owner, module, bindings, relationships, nodes, seen, shadows)
+        return
     if typ == "AssignmentPattern":
         # The binding being initialized is already shadowing outer names, but
         # its nested pattern is not a use and must be traversed separately.
@@ -1180,6 +1187,20 @@ def _walk_parameter_defaults(
         return
     if typ == "ObjectPattern":
         for property_node in getattr(pattern, "properties", ()) or ():
+            if getattr(property_node, "type", None) == "RestElement":
+                # An object rest target carries no default or computed key; only
+                # a member-expression assignment target executes.
+                _walk_parameter_defaults(
+                    getattr(property_node, "argument", None),
+                    owner,
+                    module,
+                    bindings,
+                    relationships,
+                    nodes,
+                    seen,
+                    shadows,
+                )
+                continue
             if getattr(property_node, "computed", False):
                 _walk(
                     getattr(property_node, "key", None),
