@@ -34,6 +34,12 @@ CASE_IDS = (
     "EDGE-DECL-001",
     "EDGE-DECL-002",
     "EDGE-DECL-003",
+    "EDGE-EXPR-001",
+    "EDGE-EXPR-002",
+    "EDGE-EXPR-003",
+    "EDGE-EXPR-004",
+    "EDGE-EXPR-005",
+    "EDGE-EXPR-006",
 )
 STATUS_MATRIX = {
     "EDGE-BIND-001": {
@@ -69,6 +75,36 @@ STATUS_MATRIX = {
     "EDGE-DECL-003": {
         "minotaur-python": "PARTIAL",
         "minotaur-javascript": "PARTIAL",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-EXPR-001": {
+        "minotaur-python": "NOT_APPLICABLE",
+        "minotaur-javascript": "SUPPORTED",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-EXPR-002": {
+        "minotaur-python": "NOT_APPLICABLE",
+        "minotaur-javascript": "SUPPORTED",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-EXPR-003": {
+        "minotaur-python": "NOT_APPLICABLE",
+        "minotaur-javascript": "SUPPORTED",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-EXPR-004": {
+        "minotaur-python": "NOT_APPLICABLE",
+        "minotaur-javascript": "SUPPORTED",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-EXPR-005": {
+        "minotaur-python": "NOT_APPLICABLE",
+        "minotaur-javascript": "SUPPORTED",
+        "minotaur-sql": "NOT_APPLICABLE",
+    },
+    "EDGE-EXPR-006": {
+        "minotaur-python": "NOT_APPLICABLE",
+        "minotaur-javascript": "SUPPORTED",
         "minotaur-sql": "NOT_APPLICABLE",
     },
 }

@@ -75,6 +75,18 @@ same name and kind in one class still share one identity, and
 `diff --systems` refuses them as ambiguous (exit `2`). The role does not
 change node IDs, labels, or symbol kinds.
 
+A class method whose key is computed, such as `[pick()]() {}`, emits no method
+symbol, and never a method labelled with the key's identifier text. Its key and
+body are walked as expressions under the nearest emitted owner: the class
+symbol for a class declaration, and the enclosing owner for a class expression.
+Field and static-field definitions (`field = ...` and `static field = ...`,
+computed or not) are the class-member exception: they emit no key fact and no
+initializer fact for either class form, matching the exclusion below. The
+committed sample
+[`tests/fixtures/analyzer_semantics/javascript/expressions.js`](../../tests/fixtures/analyzer_semantics/javascript/expressions.js)
+pins the class-expression fields and the class-declaration regression pin,
+beside `accessors.js` for the accessor roles.
+
 ## Supported module imports
 
 The supported ESM binding form is a named import from an exactly relative
@@ -103,8 +115,13 @@ unresolved-reference fact labelled with the full member text, beside the base
 identifier fact. This applies in call and non-call positions, including
 computed chains such as `table[key].run`; member dispatch remains runtime-
 sensitive and never produces a `calls` relationship. Declaration names,
-object-property keys, `this`, `new`, labels, and IIFE callee forms do not
-produce these expression facts. Parameters and lexical bindings shadow module
+object-property keys, `this`, labels, class-expression names, class method
+keys, `MetaProperty`, and IIFE callee forms do not produce these expression
+facts; a computed key such as `[pick()]` is an expression position and is
+walked as one. The callee of `new X()` is an ordinary expression position:
+`new helper()` produces a `references` edge to the resolved declaration, and
+`new unres()` produces an unresolved-reference node, never a `calls`
+relationship. Parameters and lexical bindings shadow module
 bindings; the later supported top-level binding wins in source order.
 
 ## Unsupported module syntax
@@ -112,11 +129,17 @@ bindings; the later supported top-level binding wins in source order.
 Default, namespace, side-effect, bare, extensionless, re-export, dynamic, and
 missing-target imports are not resolved. Each unsupported import/export
 operation is represented by an explicit unresolved reference owned by the
-importing module. A local export list emits one fact per specifier; its stable
-text is `export#<exported-name>`, so `export { helper as publicName }` emits
-`export#publicName`. Other stable forms include `./lib.js#default`,
-`package#*`, `./lib.js#side-effect`, and `./lib.js#dynamic`. Unsupported syntax
-never creates a `calls` edge or an unresolved-node `imports` edge.
+importing module. The local name that binds an unsupported import is neither a
+binding nor a shadow, so a later use is an ordinary unbound name that produces
+its own unresolved reference instead of being suppressed. A local export list
+emits one fact per specifier; its stable text is `export#<exported-name>`, so
+`export { helper as publicName }` emits `export#publicName`. Other stable forms
+include `./lib.js#default`, `package#*`, `./lib.js#side-effect`, and
+`./lib.js#dynamic`. Unsupported syntax never creates a `calls` edge or an
+unresolved-node `imports` edge. CommonJS is not resolved: `require` and
+`module` have no special handling, so `require('./lib.js')` and
+`module.exports` produce unresolved references and never an `imports`
+relationship.
 
 ## Malformed files and diagnostics
 
@@ -131,8 +154,10 @@ facts, and the command reports the diagnostic alongside the partial graph.
 The first slice deliberately excludes object-literal methods because they have
 no stable owning symbol without property-chain resolution. It excludes `this`
 because dispatch requires runtime flow analysis, and class fields and static
-fields because their initialization semantics are ES2022 runtime behavior.
-The analyzer does not execute or import the analyzed source, infer dynamic
+fields because their initialization semantics are ES2022 runtime behavior;
+that exclusion covers both class declarations and class expressions, whose
+field and static-field definitions emit no key or initializer facts. The
+analyzer does not execute or import the analyzed source, infer dynamic
 dispatch, or compose JavaScript and Python graph documents.
 
 ## Freshness metadata
