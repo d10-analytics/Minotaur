@@ -1930,6 +1930,72 @@ def test_binding_pattern_defaults_keep_their_executable_uses(tmp_path):
     assert not any(node.reference_text in {"v", "unbound"} for node in binding_only.document.nodes)
 
 
+def test_destructuring_assignment_member_targets_are_walked_as_expressions(tmp_path):
+    # A member-expression target inside a destructuring assignment reads its
+    # object and evaluates its computed key, exactly as a simple assignment
+    # target does: array, object-value, rest, loop, defaulted, and object-rest
+    # targets each record the computed call, the base reference, and the
+    # member fact under the enclosing function.
+    lines = [
+        "function k() {}",
+        "function main(src) {",
+        "    [cache[k()]] = src;",
+        "    ({ a: store[k()] } = src);",
+        "    [...rest[k()]] = src;",
+        "    for ([slot[k()]] of src) {}",
+        "    [dflt[k()] = fallback] = src;",
+        "    ({ ...spread[k()] } = src);",
+        "}",
+    ]
+    result = _analyze(tmp_path, {"a.js": "\n".join(lines) + "\n"})
+    assert result.diagnostics == ()
+    main = _node(result, "a.main")
+    k = _node(result, "a.k")
+
+    calls = [
+        edge
+        for edge in _edges(result, RelationshipKind.CALLS.value)
+        if edge.source == main.id and edge.target == k.id
+    ]
+    assert len(calls) == 1
+    observed = {
+        (location.range.start.line, location.range.start.character)
+        for location in calls[0].evidence[0].locations
+    }
+    expected = {
+        (index, line.index("[k()]") + 1) for index, line in enumerate(lines) if "[k()]" in line
+    }
+    assert len(expected) == 6
+    assert observed == expected
+
+    member_texts = {
+        "cache",
+        "cache[k()]",
+        "store",
+        "store[k()]",
+        "rest",
+        "rest[k()]",
+        "slot",
+        "slot[k()]",
+        "dflt",
+        "dflt[k()]",
+        "spread",
+        "spread[k()]",
+    }
+    references = _reference_pairs(result)
+    owned_by_main = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.reference_text is not None and (main.id, node.id) in references
+    }
+    # The defaulted target's default is an ordinary expression; the parameter
+    # `src` is shadowed and emits nothing.
+    assert owned_by_main == member_texts | {"fallback"}
+    # Every reference is owned by the enclosing function, never the module.
+    module = _node(result, "a")
+    assert not any(source == module.id for source, _ in references)
+
+
 def test_anonymous_default_exports_walk_bodies_with_module_owner(tmp_path):
     # The three anonymous default-export forms share one module: the function
     # body, the arrow body, and the bare expression.  None of them emits a
