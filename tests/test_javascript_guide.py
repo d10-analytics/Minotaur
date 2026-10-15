@@ -44,7 +44,9 @@ def test_javascript_guide_documents_computed_method_key_walking() -> None:
         "class symbol for a class declaration, and the enclosing owner for a class "
         "expression" in text
     )
-    assert "a computed key such as `[pick()]` is an expression position and is walked as one" in text
+    assert (
+        "a computed key such as `[pick()]` is an expression position and is walked as one" in text
+    )
 
 
 def test_javascript_guide_documents_class_member_field_exclusion() -> None:
