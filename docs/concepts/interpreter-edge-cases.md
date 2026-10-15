@@ -301,7 +301,7 @@ Reason: Python class bodies declare methods with fixed `def` names and have no c
 
 Status: SUPPORTED
 Example: `function pick() {} function helper() {} class Box { [pick()]() { helper(); } }` beside the class-expression form `function main() { const Box = class { [pick()]() { helper(); } }; }`.
-Expected graph facts: The computed key emits `calls a.Box -> a.pick` (or `calls a.main -> a.pick` for the class expression) and the method body emits `calls` to `a.helper` under the nearest emitted owner; no `class` or `method` symbol is emitted for the computed-key form, and no method is labelled with the key's identifier text.
+Expected graph facts: The computed key emits `calls a.Box -> a.pick` (or `calls a.main -> a.pick` for the class expression) and the method body emits `calls` to `a.helper` under the nearest emitted owner; no `method` symbol is emitted for the computed-key member in either form, the class expression emits no `class` symbol while the declaration keeps its `a.Box` class symbol, and no method is labelled with the key's identifier text.
 Owner: [`_collect_declarations`](../../src/minotaur/language_interpreter/javascript/interpreter.py); a computed class member is skipped as a named method so its key and body are walked under the enclosing owner.
 Marker: # EDGE-EXPR-005: supports computed method keys without a key-text method label.
 Proof: [`test_computed_method_keys_walk_without_method_label`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts the class-owned and enclosing-owner calls, the nested and class-expression forms, and the absence of method symbols.
