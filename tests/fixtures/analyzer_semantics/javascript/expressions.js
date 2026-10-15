@@ -27,3 +27,9 @@ function scatter(values) {
     [cache[slot()]] = values;
     ({ first: table[slot()], ...rest[slot()] } = values);
 }
+
+function pick() {}
+
+function regather(values) {
+    [pick, ledger[pick()], spare = pick()] = values;
+}
