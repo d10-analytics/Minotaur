@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from minotaur.graph_model.provenance import NodeClass, RelationshipKind
+from minotaur.language_interpreter.javascript import analyze_javascript_files
+from minotaur.language_interpreter.workspace import Workspace
+
 GUIDE = Path(__file__).parents[1] / "docs/guides/analyze-javascript.md"
 FIXTURE_ROOT = Path(__file__).parents[1] / "tests/fixtures/analyzer_semantics/javascript"
 
@@ -86,3 +90,75 @@ def test_javascript_guide_references_the_semantics_sample_fixtures() -> None:
     assert "accessors.js" in text
     assert (FIXTURE_ROOT / "expressions.js").is_file()
     assert (FIXTURE_ROOT / "accessors.js").is_file()
+
+
+def _analyze(root: Path, files: dict[str, str]):
+    paths = []
+    for name, source in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        paths.append(path)
+    return analyze_javascript_files(Workspace(root), tuple(paths))
+
+
+def _labelled_edges(result, kind: str) -> set[tuple[str, str]]:
+    labels = {node.id: node.label for node in result.document.nodes}
+    return {
+        (labels[edge.source], labels[edge.target])
+        for edge in result.document.relationships
+        if edge.kind == kind
+    }
+
+
+def test_javascript_guide_commonjs_claim_holds_for_require_and_module_exports(
+    tmp_path: Path,
+) -> None:
+    # The documented boundary is observable behavior: a selected sibling module
+    # exists, yet require() and module.exports stay ordinary unbound names.
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": "require('./lib.js');\nmodule.exports = {};\n",
+            "lib.js": "export function target() {}\n",
+        },
+    )
+    assert result.diagnostics == ()
+    assert {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"require", "module", "module.exports"}
+    assert _labelled_edges(result, RelationshipKind.REFERENCES.value) == {
+        ("app", "require"),
+        ("app", "module"),
+        ("app", "module.exports"),
+    }
+    assert not _labelled_edges(result, RelationshipKind.IMPORTS.value)
+    assert not _labelled_edges(result, RelationshipKind.CALLS.value)
+
+
+def test_javascript_guide_field_exclusion_holds_for_computed_class_declaration_fields(
+    tmp_path: Path,
+) -> None:
+    # A computed field of an emitted and of a nested class declaration emits no
+    # key or initializer fact, while a method body in the same class still
+    # executes, so the absence cannot come from the class body going unwalked.
+    result = _analyze(
+        tmp_path,
+        {
+            "a.js": (
+                "function helper() {}\n"
+                "function used() {}\n"
+                "class View { [key] = helper(); m() { used(); } }\n"
+                "function main() { class Inner { [key] = helper(); m() { used(); } } }\n"
+            )
+        },
+    )
+    assert result.diagnostics == ()
+    assert _labelled_edges(result, RelationshipKind.CALLS.value) == {
+        ("a.View.m", "a.used"),
+        ("a.main", "a.used"),
+    }
+    assert not _labelled_edges(result, RelationshipKind.REFERENCES.value)
+    assert not any(node.reference_text is not None for node in result.document.nodes)
