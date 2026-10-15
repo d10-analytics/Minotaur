@@ -1032,11 +1032,20 @@ def _walk(
         return
     if typ in {"ObjectPattern", "ArrayPattern", "AssignmentPattern", "RestElement"}:
         # A binding pattern reached through the walker is an assignment target:
-        # its binding names are not uses, but its defaults, computed keys, and
-        # member-expression targets still execute.  The shared pattern walker
-        # accumulates bound names, so it receives its own copy of the shadow set.
+        # its target names are not uses, but its defaults, computed keys, and
+        # member-expression targets still execute.  An assignment target
+        # introduces no binding, so an earlier target name never shadows a
+        # later default or computed key that uses the same existing variable.
         _walk_parameter_defaults(
-            node, owner, module, bindings, relationships, nodes, seen, set(shadows)
+            node,
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+            introduces_bindings=False,
         )
         return
     if typ == "MethodDefinition":
@@ -1114,6 +1123,8 @@ def _walk_parameter_defaults(
     nodes: list[Node],
     seen: NodeEmitter,
     shadows: set[str],
+    *,
+    introduces_bindings: bool = True,
 ) -> None:
     """Walk executable defaults nested in a binding pattern.
 
@@ -1122,6 +1133,13 @@ def _walk_parameter_defaults(
     execute identically in every pattern position.  Only an assignment target
     can hold a member expression; it is evaluated as an expression exactly as a
     simple assignment target is.
+
+    A parameter, declaration, or catch pattern introduces its names as it is
+    initialized, so each bound name is added to ``shadows`` in place and hides
+    the outer binding from later defaults and computed keys.  An assignment
+    target (``introduces_bindings=False``) assigns existing variables instead:
+    its names stay non-uses, but ``shadows`` is left unchanged so a later
+    default or computed key still resolves the same name to its outer binding.
     """
     # EDGE-EXPR-003: supports declaration and catch pattern defaults through the shared walker.
     if pattern is None or not hasattr(pattern, "type"):
@@ -1132,10 +1150,32 @@ def _walk_parameter_defaults(
         # computed key, and its member text is recorded beside the base fact.
         _walk(pattern, owner, module, bindings, relationships, nodes, seen, shadows)
         return
+
+    def bind(target: Any) -> None:
+        if introduces_bindings:
+            shadows.update(_bound_names(target))
+
+    def walk_target(target: Any) -> None:
+        _walk_parameter_defaults(
+            target,
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+            introduces_bindings=introduces_bindings,
+        )
+
     if typ == "AssignmentPattern":
-        # The binding being initialized is already shadowing outer names, but
-        # its nested pattern is not a use and must be traversed separately.
-        default_shadows = set(shadows) | _bound_names(getattr(pattern, "left", None))
+        left = getattr(pattern, "left", None)
+        # A binding being initialized already shadows outer names in its own
+        # default; an assigned existing variable does not.  The nested pattern
+        # is not a use and is traversed separately.
+        default_shadows = set(shadows)
+        if introduces_bindings:
+            default_shadows |= _bound_names(left)
         _walk(
             getattr(pattern, "right", None),
             owner,
@@ -1146,60 +1186,25 @@ def _walk_parameter_defaults(
             seen,
             default_shadows,
         )
-        _walk_parameter_defaults(
-            getattr(pattern, "left", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-        )
-        shadows.update(_bound_names(getattr(pattern, "left", None)))
+        walk_target(left)
+        bind(left)
         return
     if typ == "RestElement":
-        _walk_parameter_defaults(
-            getattr(pattern, "argument", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-        )
-        shadows.update(_bound_names(getattr(pattern, "argument", None)))
+        argument = getattr(pattern, "argument", None)
+        walk_target(argument)
+        bind(argument)
         return
     if typ == "ArrayPattern":
         for element in getattr(pattern, "elements", ()) or ():
-            _walk_parameter_defaults(
-                element,
-                owner,
-                module,
-                bindings,
-                relationships,
-                nodes,
-                seen,
-                shadows,
-            )
-            shadows.update(_bound_names(element))
+            walk_target(element)
+            bind(element)
         return
     if typ == "ObjectPattern":
         for property_node in getattr(pattern, "properties", ()) or ():
             if getattr(property_node, "type", None) == "RestElement":
                 # An object rest target carries no default or computed key; only
                 # a member-expression assignment target executes.
-                _walk_parameter_defaults(
-                    getattr(property_node, "argument", None),
-                    owner,
-                    module,
-                    bindings,
-                    relationships,
-                    nodes,
-                    seen,
-                    shadows,
-                )
+                walk_target(getattr(property_node, "argument", None))
                 continue
             if getattr(property_node, "computed", False):
                 _walk(
@@ -1213,17 +1218,8 @@ def _walk_parameter_defaults(
                     shadows,
                 )
             value = getattr(property_node, "value", None)
-            _walk_parameter_defaults(
-                value,
-                owner,
-                module,
-                bindings,
-                relationships,
-                nodes,
-                seen,
-                shadows,
-            )
-            shadows.update(_bound_names(value))
+            walk_target(value)
+            bind(value)
 
 
 def _scope_shadows(node: Any) -> set[str]:
