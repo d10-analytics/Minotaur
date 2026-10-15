@@ -614,6 +614,7 @@ _CHILD_FIELDS: dict[str, dict[str, str]] = {
     "AwaitExpression": {"argument": _EXPRESSION},
     "BinaryExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
     "BreakStatement": {"label": _NAME},
+    "ChainExpression": {"expression": _EXPRESSION},
     "ClassBody": {"body": _EXPRESSION},
     "ClassExpression": {"id": _NAME, "superClass": _EXPRESSION, "body": _EXPRESSION},
     "ConditionalExpression": {
@@ -622,6 +623,7 @@ _CHILD_FIELDS: dict[str, dict[str, str]] = {
         "alternate": _EXPRESSION,
     },
     "ContinueStatement": {"label": _NAME},
+    "DoWhileStatement": {"body": _EXPRESSION, "test": _EXPRESSION},
     "ExpressionStatement": {"expression": _EXPRESSION},
     # Class fields are excluded for both class forms: field initialization and
     # dispatch need runtime semantics, so no child field is walked.
@@ -648,6 +650,7 @@ _CHILD_FIELDS: dict[str, dict[str, str]] = {
     "UnaryExpression": {"argument": _EXPRESSION},
     "UpdateExpression": {"argument": _EXPRESSION},
     "VariableDeclarator": {"id": _BINDING, "init": _EXPRESSION},
+    "WhileStatement": {"test": _EXPRESSION, "body": _EXPRESSION},
     "YieldExpression": {"argument": _EXPRESSION},
 }
 
@@ -878,7 +881,7 @@ def _walk(
             loop_shadows,
         )
         return
-    if typ in {"ForInStatement", "ForOfStatement"}:
+    if typ in {"ForInStatement", "ForOfStatement", "ForAwaitStatement"}:
         loop_shadows = set(shadows)
         left = getattr(node, "left", None)
         if getattr(left, "type", None) == "VariableDeclaration" and getattr(left, "kind", None) in {
@@ -1039,9 +1042,9 @@ def _walk(
     if typ == "MethodDefinition":
         # A class member key names the member; only a computed key executes.
         # EDGE-EXPR-006: supports class field and static-field exclusion for both class forms.
-        # Field and static-field definitions are absent from the dispatch table
-        # below, so a class expression excludes them exactly as an emitted class
-        # declaration does.
+        # Field and static-field definitions have empty dispatch-table entries,
+        # so neither their keys nor their initializers are walked, and a class
+        # expression excludes them exactly as an emitted class declaration does.
         if getattr(node, "computed", False):
             key = getattr(node, "key", None)
             if not _is_deferred_callable(key):
