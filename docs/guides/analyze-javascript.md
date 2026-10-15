@@ -136,6 +136,17 @@ as function parameters. A declaration pattern's computed key, such as `[key]`
 in `const { [key]: value } = obj;`, is walked as an expression, while the
 names a pattern binds are not uses.
 
+A destructuring assignment, such as `[cache[key()], y = x()] = values;` or
+`({ v } = obj);`, goes through the same pattern walker but introduces no
+bindings. The names it assigns (`y` and `v`) are not uses. Its defaults,
+computed keys, and member-expression targets are walked as expressions:
+`cache[key()]` produces the `cache` and `cache[key()]` facts and the call to
+`key`, just as the plain assignment `cache[key()] = value` does. An assigned
+name never shadows a later default or key in the same pattern, so `y = x()`
+still records a `calls` relationship to `x`. The same rules apply to a
+`for ... of` or `for ... in` target pattern. A plain assignment target such as
+`x = value` remains an expression position and records a use of `x`.
+
 ## Unsupported module syntax
 
 Default, namespace, side-effect, bare, extensionless, re-export, dynamic, and
