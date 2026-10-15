@@ -1996,6 +1996,93 @@ def test_destructuring_assignment_member_targets_are_walked_as_expressions(tmp_p
     assert not any(source == module.id for source, _ in references)
 
 
+def test_destructuring_assignment_target_names_do_not_shadow_later_uses(tmp_path):
+    # A destructuring assignment assigns existing variables, so an earlier
+    # target name does not hide a later default or computed key that uses the
+    # same name: array, member, defaulted-member, nested, object-value,
+    # object-computed, rest, loop, and self-defaulted targets each still record
+    # the inner call.  Parameter, declaration, and catch patterns do bind their
+    # names, so the same shape stays shadowed there.
+    lines = [
+        "function x() {}",
+        "function k() {}",
+        "function a() {}",
+        "function main(s, v) {",
+        "    [x, y = x()] = s;",
+        "    [k, cache[k()]] = s;",
+        "    [k, o[k()] = d] = v;",
+        "    [a, [b = a()]] = s;",
+        "    ({ p: x, q = x() } = s);",
+        "    ({ p: k, [k()]: z } = s);",
+        "    [k, ...r[k()]] = s;",
+        "    for ([k, slot[k()]] of s) {}",
+        "    [x = x()] = s;",
+        "}",
+        "function param([x, y = x()]) {}",
+        "function declaration(s) { const [k, w = k()] = s; }",
+        "function caught() { try {} catch ([a, e = a()]) {} }",
+    ]
+    result = _analyze(tmp_path, {"a.js": "\n".join(lines) + "\n"})
+    assert result.diagnostics == ()
+    main = _node(result, "a.main")
+    targets = {name: _node(result, f"a.{name}") for name in ("x", "k", "a")}
+    expected_call_sites = {"x": 3, "k": 5, "a": 1}
+
+    for name, target in targets.items():
+        calls = [
+            edge
+            for edge in _edges(result, RelationshipKind.CALLS.value)
+            if edge.source == main.id and edge.target == target.id
+        ]
+        assert len(calls) == 1, name
+        observed = {
+            (location.range.start.line, location.range.start.character)
+            for location in calls[0].evidence[0].locations
+        }
+        expected = {
+            (index, line.index(f"{name}()"))
+            for index, line in enumerate(lines[4:13], start=4)
+            if f"{name}()" in line
+        }
+        assert len(expected) == expected_call_sites[name]
+        assert observed == expected, name
+
+    # Target names stay non-uses: no reference edge reaches an assigned
+    # function, and no unresolved reference names an assigned identifier.
+    references = _reference_pairs(result)
+    assert not any(
+        target.id == referenced for _, referenced in references for target in targets.values()
+    )
+    owned_by_main = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.reference_text is not None and (main.id, node.id) in references
+    }
+    assert owned_by_main == {
+        "cache",
+        "cache[k()]",
+        "o",
+        "o[k()]",
+        "d",
+        "r",
+        "r[k()]",
+        "slot",
+        "slot[k()]",
+    }
+    assert not any(
+        node.reference_text in {"y", "b", "q", "z", "w", "e"} for node in result.document.nodes
+    )
+
+    # Binding patterns keep shadowing their own names.
+    for owner_label in ("a.param", "a.declaration", "a.caught"):
+        owner = _node(result, owner_label)
+        assert not any(
+            edge.source == owner.id
+            and edge.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+            for edge in result.document.relationships
+        ), owner_label
+
+
 def test_anonymous_default_exports_walk_bodies_with_module_owner(tmp_path):
     # The three anonymous default-export forms share one module: the function
     # body, the arrow body, and the bare expression.  None of them emits a
