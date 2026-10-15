@@ -20,3 +20,10 @@ async function drain() {
     do {} while (ready);
     for await (const item of batches) {}
 }
+
+function slot() {}
+
+function scatter(values) {
+    [cache[slot()]] = values;
+    ({ first: table[slot()], ...rest[slot()] } = values);
+}
