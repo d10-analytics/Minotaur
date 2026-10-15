@@ -325,7 +325,7 @@ Reason: Python class fields are annotated assignments or `__init__` attributes a
 Status: SUPPORTED
 Example: `function helper() {} const View = class { field = helper(); static s = helper(); };`
 Expected graph facts: Neither the instance field nor the static field emits a key or initializer fact: no `calls` from `helper()` and no `field` or `s` reference; the class-declaration regression pin `class View { field = helper(); }` emits neither, while a non-computed method body `m() { helper(); }` still emits `calls` under the enclosing owner.
-Owner: [`_walk`](../../src/minotaur/language_interpreter/javascript/interpreter.py); field and static-field definitions are absent from the member dispatch, so both class forms exclude them.
+Owner: [`_walk`](../../src/minotaur/language_interpreter/javascript/interpreter.py); the class-declaration member loop skips field and static-field definitions, and a class expression's members reach their empty `FieldDefinition` and `PropertyDefinition` dispatch-table entries, so neither class form walks a field's key or initializer.
 Marker: # EDGE-EXPR-006: supports class field and static-field exclusion for both class forms.
 Proof: [`test_class_expression_fields_and_static_fields_emit_no_facts`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts the initializer and key absence for the class expression, the class-declaration pin, and the still-executing method body.
 

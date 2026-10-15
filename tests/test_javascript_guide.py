@@ -84,6 +84,33 @@ def test_javascript_guide_documents_commonjs_boundary_as_unsupported() -> None:
     )
 
 
+def test_javascript_guide_documents_anonymous_default_export_module_ownership() -> None:
+    text = _text()
+    assert (
+        "anonymous default declarations and default expressions do not invent a symbol. "
+        "Their bodies are walked as expression positions, and their uses are owned by the "
+        "module symbol: the call in `export default function () { helper(); }`, an arrow "
+        "body such as `export default () => missing();`, and the bare "
+        "`export default helper;` are all facts of the module" in text
+    )
+
+
+def test_javascript_guide_documents_binding_pattern_defaults_in_every_position() -> None:
+    text = _text()
+    assert (
+        "Defaults inside binding patterns execute. A default such as "
+        "`const { a = helper() } = obj;` produces its facts under the nearest enclosing "
+        "emitted owner in every position it occurs: top-level, nested, and loop-header "
+        "declarations and catch parameters all reach it through the same pattern walker "
+        "as function parameters" in text
+    )
+    assert (
+        "A declaration pattern's computed key, such as `[key]` in "
+        "`const { [key]: value } = obj;`, is walked as an expression, while the names a "
+        "pattern binds are not uses" in text
+    )
+
+
 def test_javascript_guide_references_the_semantics_sample_fixtures() -> None:
     text = _text()
     assert "tests/fixtures/analyzer_semantics/javascript/expressions.js" in text

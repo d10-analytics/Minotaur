@@ -60,7 +60,11 @@ Direct named exports retain the declaration node and carry scalar metadata
 `extensions["minotaur-javascript"]["export_kind"] == "named"`. A named
 declaration under `export default` remains a local declaration with
 `export_kind == "default"`; anonymous default declarations and default
-expressions do not invent a symbol. Nested function and class declarations do
+expressions do not invent a symbol. Their bodies are walked as expression
+positions, and their uses are owned by the module symbol: the call in
+`export default function () { helper(); }`, an arrow body such as
+`export default () => missing();`, and the bare `export default helper;` are
+all facts of the module. Nested function and class declarations do
 not become symbols or `contains` relationships: uses in their bodies, including
 methods of nested classes, retain the nearest enclosing emitted symbol as owner.
 
@@ -123,6 +127,14 @@ walked as one. The callee of `new X()` is an ordinary expression position:
 `new unres()` produces an unresolved-reference node, never a `calls`
 relationship. Parameters and lexical bindings shadow module
 bindings; the later supported top-level binding wins in source order.
+
+Defaults inside binding patterns execute. A default such as
+`const { a = helper() } = obj;` produces its facts under the nearest enclosing
+emitted owner in every position it occurs: top-level, nested, and loop-header
+declarations and catch parameters all reach it through the same pattern walker
+as function parameters. A declaration pattern's computed key, such as `[key]`
+in `const { [key]: value } = obj;`, is walked as an expression, while the
+names a pattern binds are not uses.
 
 ## Unsupported module syntax
 
