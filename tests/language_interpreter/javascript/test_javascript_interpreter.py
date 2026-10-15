@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.metadata
+import inspect
+import textwrap
 
 import esprima
 import pytest
+from esprima.syntax import Syntax
 
 from minotaur.graph_model.location import encoded_length, split_lines
 from minotaur.graph_model.provenance import (
@@ -1814,6 +1818,21 @@ def test_computed_method_keys_walk_without_method_label(tmp_path):
     assert (expression_main.id, expression_helper.id) in calls
     assert not any(node.symbol_kind in {"class", "method"} for node in expression.document.nodes)
 
+    # A class expression's superclass executes when the expression is
+    # evaluated, so the enclosing emitted owner references it.
+    extends = _analyze(
+        tmp_path / "extends",
+        {
+            "a.js": (
+                "function Base() {}\nfunction main() { const C = class extends Base { m() {} }; }\n"
+            )
+        },
+    )
+    extends_references = {
+        (edge.source, edge.target) for edge in _edges(extends, RelationshipKind.REFERENCES.value)
+    }
+    assert (_node(extends, "a.main").id, _node(extends, "a.Base").id) in extends_references
+
 
 def test_class_expression_fields_and_static_fields_emit_no_facts(tmp_path):
     fields = _analyze(
@@ -1953,3 +1972,192 @@ def test_anonymous_default_exports_walk_bodies_with_module_owner(tmp_path):
     # The module symbol owns every fact in this fixture, so no other node can
     # misattribute the uses the two query consumers read.
     assert all(source == app.id for source, _ in calls | references)
+
+
+def _reference_pairs(result):
+    return {
+        (edge.source, edge.target) for edge in _edges(result, RelationshipKind.REFERENCES.value)
+    }
+
+
+def _unresolved_node(result, text):
+    return next(node for node in result.document.nodes if node.reference_text == text)
+
+
+def test_loop_tests_and_for_await_iterables_are_uses(tmp_path):
+    # A while or do-while test is evaluated on every iteration, so a bare name
+    # there is a use, exactly as in a for-statement test.
+    while_test = _analyze(
+        tmp_path / "while",
+        {"a.js": "function flag() {}\nfunction main() { while (flag) {} }\n"},
+    )
+    assert (_node(while_test, "a.main").id, _node(while_test, "a.flag").id) in _reference_pairs(
+        while_test
+    )
+
+    do_while_test = _analyze(
+        tmp_path / "do-while",
+        {"a.js": "function flag() {}\nfunction main() { do {} while (flag); }\n"},
+    )
+    assert (
+        _node(do_while_test, "a.main").id,
+        _node(do_while_test, "a.flag").id,
+    ) in _reference_pairs(do_while_test)
+
+    while_unbound = _analyze(
+        tmp_path / "while-unbound",
+        {"a.js": "function main() { while (unboundWhile) {} }\n"},
+    )
+    assert (
+        _node(while_unbound, "a.main").id,
+        _unresolved_node(while_unbound, "unboundWhile").id,
+    ) in _reference_pairs(while_unbound)
+
+    do_while_unbound = _analyze(
+        tmp_path / "do-while-unbound",
+        {"a.js": "function main() { do {} while (unboundDo); }\n"},
+    )
+    assert (
+        _node(do_while_unbound, "a.main").id,
+        _unresolved_node(do_while_unbound, "unboundDo").id,
+    ) in _reference_pairs(do_while_unbound)
+
+    # A for-await iterable is evaluated like a for-of iterable, in both the
+    # declaration and the assignment-target forms.
+    for_await = _analyze(
+        tmp_path / "for-await",
+        {
+            "a.js": (
+                "function items() {}\n"
+                "async function main() { for await (const x of items) { x; } }\n"
+            )
+        },
+    )
+    assert (_node(for_await, "a.main").id, _node(for_await, "a.items").id) in _reference_pairs(
+        for_await
+    )
+    assert not any(node.reference_text == "x" for node in for_await.document.nodes)
+
+    for_await_target = _analyze(
+        tmp_path / "for-await-target",
+        {
+            "a.js": (
+                "function items() {}\nasync function main() { let y; for await (y of items) {} }\n"
+            )
+        },
+    )
+    assert (
+        _node(for_await_target, "a.main").id,
+        _node(for_await_target, "a.items").id,
+    ) in _reference_pairs(for_await_target)
+    assert not any(node.reference_text == "y" for node in for_await_target.document.nodes)
+
+    for_await_unbound = _analyze(
+        tmp_path / "for-await-unbound",
+        {"a.js": "async function main() { for await (const x of unboundItems) {} }\n"},
+    )
+    assert (
+        _node(for_await_unbound, "a.main").id,
+        _unresolved_node(for_await_unbound, "unboundItems").id,
+    ) in _reference_pairs(for_await_unbound)
+
+    # A for-await `const` header shadows the loop body exactly as a for-of
+    # header does, so the body's `x()` calls the loop value, not the module's
+    # `x`.
+    for source in (
+        "for await (const x of items) { x(); }\n",
+        "for (const x of items) { x(); }\n",
+    ):
+        shadowed = _analyze(
+            tmp_path / ("shadow-await" if "await" in source else "shadow-of"),
+            {"a.js": "function x() {}\nfunction items() {}\n" + source},
+        )
+        assert not _edges(shadowed, RelationshipKind.CALLS.value)
+        assert (_node(shadowed, "a").id, _node(shadowed, "a.items").id) in _reference_pairs(
+            shadowed
+        )
+
+
+def _walk_branch_types():
+    """Node types that ``_walk`` handles with a dedicated ``typ`` comparison."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(javascript_interpreter._walk)))
+    types = set()
+    for comparison in ast.walk(tree):
+        if not (
+            isinstance(comparison, ast.Compare)
+            and isinstance(comparison.left, ast.Name)
+            and comparison.left.id == "typ"
+        ):
+            continue
+        for operator, comparator in zip(comparison.ops, comparison.comparators, strict=True):
+            if isinstance(operator, ast.Eq) and isinstance(comparator, ast.Constant):
+                types.add(comparator.value)
+            elif isinstance(operator, ast.In) and isinstance(comparator, ast.Set):
+                types.update(
+                    element.value
+                    for element in comparator.elts
+                    if isinstance(element, ast.Constant)
+                )
+    return types
+
+
+# Esprima node types that need no dispatch, each with the reason it is safe.
+_NODE_TYPES_OUTSIDE_THE_WALK = {
+    # Comments are separate parser records, never children of a tree node.
+    "BlockComment",
+    "LineComment",
+    # The parser rewrites this placeholder into arrow parameters before it
+    # returns the tree.
+    "ArrowParameterPlaceHolder",
+    # The module root: ``_expressions`` walks its statements one by one.
+    "Program",
+    # Module-level import and export forms are recorded by ``_imports``;
+    # ``_expressions`` skips them or walks only an exported declaration.
+    "ImportDeclaration",
+    "ImportSpecifier",
+    "ImportDefaultSpecifier",
+    "ImportNamespaceSpecifier",
+    "ExportAllDeclaration",
+    "ExportNamedDeclaration",
+    "ExportDefaultDeclaration",
+    "ExportSpecifier",
+    "ExportDefaultSpecifier",
+}
+_FACT_FREE_LEAF_NODE_TYPES = {
+    # These hold no child node that could contain a use: values, the `this`
+    # and `super` keywords, private names, empty and debugger statements, and
+    # the dynamic-import callee that the CallExpression branch handles.
+    "Literal",
+    "TemplateElement",
+    "ThisExpression",
+    "Super",
+    "PrivateIdentifier",
+    "EmptyStatement",
+    "DebuggerStatement",
+    "Import",
+}
+# Module code is strict, and strict mode forbids `with`; the guard test proves
+# the parser rejects it.
+_NODE_TYPES_REJECTED_BY_MODULE_PARSING = {"WithStatement"}
+
+
+def test_every_esprima_node_type_is_dispatched_or_explicitly_excused(tmp_path):
+    # A type with neither a ``_walk`` branch nor a child-field entry falls to
+    # the unknown-type path, which skips direct Identifier children; a new or
+    # forgotten statement type would then drop its uses silently.
+    syntax_types = {value for name, value in vars(Syntax).items() if not name.startswith("_")}
+    excused = (
+        _NODE_TYPES_OUTSIDE_THE_WALK
+        | _FACT_FREE_LEAF_NODE_TYPES
+        | _NODE_TYPES_REJECTED_BY_MODULE_PARSING
+    )
+    dispatched = _walk_branch_types() | set(javascript_interpreter._CHILD_FIELDS)
+
+    assert syntax_types - dispatched - excused == set()
+    # Every excuse names a real esprima type that has no dispatch of its own.
+    assert excused <= syntax_types
+    assert not excused & dispatched
+
+    rejected = _analyze(tmp_path, {"a.js": "function f() {}\nwith (target) { f(); }\n"})
+    assert [diagnostic.code for diagnostic in rejected.diagnostics] == [DiagnosticCode.PARSE_ERROR]
+    assert not rejected.document.relationships
