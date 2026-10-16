@@ -46,28 +46,22 @@ validation.
 
 ## Optional whole-workspace convenience API
 
-An interpreter may also expose a convenience wrapper:
+The language interpreter template omits the whole-workspace helper, so a new
+language package exposes only its selected-file function. Library callers that
+want a whole-root analysis use the shared `select_sources()` selection
+function, which owns folder walking, and a new language package must not walk
+folders.
 
-```python
-def analyze_example_language_workspace(root: Path) -> AnalysisResult:
-    workspace = Workspace(root)
-    return analyze_example_language_files(workspace, discover_example_language_files(workspace))
-```
-
-Use this only for the simple library use case: analyze every normally
-discoverable file for one language beneath a root. Keep it a thin wrapper over
-the selected-file function. It must not have a second parsing or graph-building
-implementation.
-
-The Python interpreter follows this pattern. Its
+The Python interpreter keeps an older whole-workspace helper. Its
 `analyze_python_workspace()` API remains compatible for existing callers,
-while `analyze_python_files()` is the API used by the CLI. Future languages
-should follow the same arrangement when a whole-workspace helper is useful.
+while `analyze_python_files()` is the API used by the CLI.
 
-Language-specific discovery belongs only in this optional wrapper. For
-example, `discover_python_files()` decides what a full Python workspace scan
-means; it is not used by the CLI, which instead selects registered extensions
-across all requested targets.
+`discover_python_files()` is the discovery function behind that older helper.
+It decides what a full Python workspace scan means and is not used by the CLI,
+which instead selects registered extensions across all requested targets.
+This Python arrangement is not a pattern for new languages: a new language
+package defines no discovery function, and whole-root callers select its files
+through `select_sources()`.
 
 ## Register the extension
 
@@ -177,8 +171,9 @@ An interpreter change should include behavioral tests that prove:
   supplied in a different order;
 - language-specific parse or read failures preserve valid facts from the other
   selected files; and
-- the whole-workspace convenience wrapper, if supplied, delegates to the same
-  selected-file analysis behavior.
+- for the Python interpreter, its retained `analyze_python_workspace()` helper
+  still delegates to the same selected-file analysis behavior; a new language
+  package supplies no such helper.
 
 Use synthetic, public-safe source fixtures. The graph must describe only facts
 the interpreter can establish statically; unresolved language constructs should
