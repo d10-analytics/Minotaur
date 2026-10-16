@@ -94,6 +94,20 @@ GUIDE_ABSENT = (
     "discover_example_language_files",
     "Future languages should follow the same arrangement",
 )
+GUIDE_RETIRED_RULES = (
+    "Language-specific discovery belongs only in this optional wrapper",
+    "the whole-workspace convenience wrapper, if supplied",
+)
+GUIDE_PYTHON_DISCOVERY_SCOPE = (
+    "This Python arrangement is not a pattern for new languages: a new language package "
+    "defines no discovery function, and whole-root callers select its files through "
+    "`select_sources()`."
+)
+GUIDE_PYTHON_HELPER_CHECK = (
+    "for the Python interpreter, its retained `analyze_python_workspace()` helper still "
+    "delegates to the same selected-file analysis behavior; a new language package "
+    "supplies no such helper."
+)
 STARTER_MESSAGE = "replace the template stub with tested analysis"
 BARE_EXTENSION_PLACEHOLDER = re.compile(r"\.example\b(?!-lang)")
 WALKER_TOKENS = ("rglob", "os.walk", "walk(", "scandir", "iterdir", "listdir(", "glob(")
@@ -228,6 +242,10 @@ def test_guide_names_the_shared_selection_owner_instead_of_a_language_walker() -
     for absent in GUIDE_ABSENT:
         assert absent not in guide
     collapsed = _collapsed(guide)
+    for retired in GUIDE_RETIRED_RULES:
+        assert retired not in collapsed
+    assert GUIDE_PYTHON_DISCOVERY_SCOPE in collapsed
+    assert GUIDE_PYTHON_HELPER_CHECK in collapsed
     assert GUIDE_HELPER_OMISSION in collapsed
     assert GUIDE_SELECTION_OWNER in collapsed
     assert QUALIFIED_DESTINATION in guide
