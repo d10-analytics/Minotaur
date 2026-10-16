@@ -59,7 +59,6 @@ class _Module:
     exports: dict[str, _Binding]
     declaration_nodes: tuple[Node, ...]
     method_containments: tuple[tuple[str, str], ...]
-    unsupported_import_locals: set[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +250,6 @@ def _make_module(path: str, source: str, tree: Any, line_index: LineIndex) -> _M
         exports,
         tuple(declaration_nodes),
         tuple(method_containments),
-        set(),
     )
 
 
@@ -295,6 +293,12 @@ def _collect_declarations(
                 if getattr(member, "type", None) != "MethodDefinition":
                     continue
                 key = getattr(member, "key", None)
+                # EDGE-EXPR-005: supports computed method keys without a key-text method label.
+                if getattr(member, "computed", False):
+                    # A computed key is an executable expression, not a method
+                    # name; the key and body are walked under the emitted class
+                    # instead of inventing a key-text method symbol.
+                    continue
                 method_name = _property_name(key)
                 if method_name is None:
                     continue
@@ -411,8 +415,6 @@ def _imports(
                         if previous is None or imported_binding.position >= previous.position:
                             module.bindings[local] = imported_binding
                 else:
-                    if local:
-                        module.unsupported_import_locals.add(local)
                     _unsupported(
                         module,
                         f"{source}#{imported}",
@@ -466,9 +468,7 @@ def _expressions(
         for name, binding in module.bindings.items()
         if not name.startswith("\x00method:")
     }
-    program_shadows = (
-        _scope_shadows(module.tree) | module.unsupported_import_locals
-    ) - module.bindings.keys()
+    program_shadows = _scope_shadows(module.tree) - module.bindings.keys()
     for statement in getattr(module.tree, "body", ()):
         owner = module.module_id
         declaration = (
@@ -507,6 +507,20 @@ def _expressions(
                         shadows=program_shadows,
                         skip_declaration=True,
                     )
+                elif getattr(member, "type", None) == "MethodDefinition":
+                    # A computed-key method has no emitted symbol, so its key
+                    # and body are walked under the emitted class.
+                    _walk(
+                        member,
+                        owner,
+                        module,
+                        top_bindings,
+                        relationships,
+                        nodes,
+                        emitter,
+                        shadows=program_shadows,
+                        skip_declaration=True,
+                    )
         elif getattr(declaration, "type", None) == "VariableDeclaration":
             # Each callable declarator is an emitted owner of its initializer
             # and body.  Other declarators in the same statement remain
@@ -515,6 +529,19 @@ def _expressions(
                 declarator_node = getattr(dec, "_minotaur_node", None)
                 declarator_owner = (
                     declarator_node.id if declarator_node is not None else module.module_id
+                )
+                # A top-level binding pattern's defaults and computed keys
+                # execute under the declarator's owner.  The walker accumulates
+                # bound names in place, so it receives its own shadow copy.
+                _walk_parameter_defaults(
+                    getattr(dec, "id", None),
+                    declarator_owner,
+                    module,
+                    top_bindings,
+                    relationships,
+                    nodes,
+                    emitter,
+                    set(program_shadows),
                 )
                 _walk(
                     getattr(dec, "init", None),
@@ -543,10 +570,16 @@ def _expressions(
             "ImportDeclaration",
             "ExportAllDeclaration",
             "ExportNamedDeclaration",
-            "ExportDefaultDeclaration",
         }:
+            # EDGE-EXPR-002: supports anonymous default-export bodies owned by the module symbol.
+            # A default export's declaration is an expression position, so it is
+            # walked directly instead of through the statement: a bare
+            # identifier reached as an unknown statement field would not count
+            # as a use.  Anonymous function and arrow bodies and the expression
+            # form therefore stay owned by the module symbol, while a named
+            # default declaration keeps the emitted declaration node as owner.
             _walk(
-                statement,
+                declaration,
                 owner,
                 module,
                 top_bindings,
@@ -555,6 +588,71 @@ def _expressions(
                 emitter,
                 shadows=program_shadows,
             )
+
+
+_EXPRESSION = "expression"
+_BINDING = "binding"
+_NAME = "name"
+
+# Child-field dispatch for node types without a dedicated ``_walk`` branch.
+# Each entry classifies that type's node-valued child fields:
+#
+# ``expression``
+#     An executable expression; identifiers reached here are uses.
+# ``binding``
+#     A binding pattern; it names targets and is never a use.
+# ``name``
+#     An identifier naming a target (a label, class name, or meta property);
+#     it is never a use.
+#
+# A type absent from this table is walked field by field, and an Identifier
+# reached from an unclassified field is not a use, because the field is not
+# known to be an expression position.
+_CHILD_FIELDS: dict[str, dict[str, str]] = {
+    "ArrayExpression": {"elements": _EXPRESSION},
+    "AssignmentExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
+    "AwaitExpression": {"argument": _EXPRESSION},
+    "BinaryExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
+    "BreakStatement": {"label": _NAME},
+    "ChainExpression": {"expression": _EXPRESSION},
+    "ClassBody": {"body": _EXPRESSION},
+    "ClassExpression": {"id": _NAME, "superClass": _EXPRESSION, "body": _EXPRESSION},
+    "ConditionalExpression": {
+        "test": _EXPRESSION,
+        "consequent": _EXPRESSION,
+        "alternate": _EXPRESSION,
+    },
+    "ContinueStatement": {"label": _NAME},
+    "DoWhileStatement": {"body": _EXPRESSION, "test": _EXPRESSION},
+    "ExpressionStatement": {"expression": _EXPRESSION},
+    # Class fields are excluded for both class forms: field initialization and
+    # dispatch need runtime semantics, so no child field is walked.
+    "FieldDefinition": {},
+    "IfStatement": {"test": _EXPRESSION, "consequent": _EXPRESSION, "alternate": _EXPRESSION},
+    "LabeledStatement": {"label": _NAME, "body": _EXPRESSION},
+    "LogicalExpression": {"left": _EXPRESSION, "right": _EXPRESSION},
+    "MetaProperty": {"meta": _NAME, "property": _NAME},
+    # Constructor/member dispatch is runtime-sensitive and is not a CALLS fact
+    # in this slice; the callee is an ordinary expression position, so it emits
+    # a reference, and constructor arguments still contain uses.
+    "NewExpression": {"callee": _EXPRESSION, "arguments": _EXPRESSION},
+    "ObjectExpression": {"properties": _EXPRESSION},
+    "PropertyDefinition": {},
+    "ReturnStatement": {"argument": _EXPRESSION},
+    "SequenceExpression": {"expressions": _EXPRESSION},
+    "SpreadElement": {"argument": _EXPRESSION},
+    "StaticBlock": {"body": _EXPRESSION},
+    "SwitchCase": {"test": _EXPRESSION, "consequent": _EXPRESSION},
+    "TaggedTemplateExpression": {"tag": _EXPRESSION, "quasi": _EXPRESSION},
+    "TemplateLiteral": {"expressions": _EXPRESSION},
+    "ThrowStatement": {"argument": _EXPRESSION},
+    "TryStatement": {"block": _EXPRESSION, "handler": _EXPRESSION, "finalizer": _EXPRESSION},
+    "UnaryExpression": {"argument": _EXPRESSION},
+    "UpdateExpression": {"argument": _EXPRESSION},
+    "VariableDeclarator": {"id": _BINDING, "init": _EXPRESSION},
+    "WhileStatement": {"test": _EXPRESSION, "body": _EXPRESSION},
+    "YieldExpression": {"argument": _EXPRESSION},
+}
 
 
 def _walk(
@@ -571,6 +669,7 @@ def _walk(
 ) -> None:
     if node is None or not hasattr(node, "type"):
         return
+    # EDGE-EXPR-004: supports unsupported import locals and new callees as references.
     typ = node.type
     shadows = shadows or set()
     if typ == "Identifier":
@@ -610,6 +709,23 @@ def _walk(
                     if getattr(node, "_minotaur_node", None) is not None:
                         continue
                     value = getattr(child, "value", None)
+                    if getattr(child, "computed", False):
+                        # A nested class declaration has no emitted class
+                        # symbol, so its computed key executes under the
+                        # nearest emitted owner, exactly as the
+                        # MethodDefinition branch does for class expressions.
+                        key = getattr(child, "key", None)
+                        if not _is_deferred_callable(key):
+                            _walk(
+                                key,
+                                owner,
+                                module,
+                                bindings,
+                                relationships,
+                                nodes,
+                                seen,
+                                shadows,
+                            )
                     _walk(
                         value,
                         owner,
@@ -668,6 +784,20 @@ def _walk(
         return
     if typ == "VariableDeclaration":
         for declarator in getattr(node, "declarations", ()):
+            # Nested and loop-header declarations reach their pattern defaults
+            # through the same shared walker as top-level and parameter
+            # patterns.  Each declarator gets its own shadow copy so the
+            # walker's in-place bound-name accumulation cannot leak.
+            _walk_parameter_defaults(
+                getattr(declarator, "id", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                set(shadows),
+            )
             _walk(
                 getattr(declarator, "init", None),
                 owner,
@@ -685,6 +815,19 @@ def _walk(
             _walk(child, owner, module, bindings, relationships, nodes, seen, block_shadows)
         return
     if typ == "CatchClause":
+        # A catch parameter pattern's defaults execute under the enclosing
+        # owner, exactly as a function parameter's do.  The parameter's own
+        # bindings stay out of the incoming set so the copy does not leak.
+        _walk_parameter_defaults(
+            getattr(node, "param", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            set(shadows),
+        )
         catch_shadows = set(shadows) | _bound_names(getattr(node, "param", None))
         _walk(
             getattr(node, "body", None),
@@ -738,7 +881,7 @@ def _walk(
             loop_shadows,
         )
         return
-    if typ in {"ForInStatement", "ForOfStatement"}:
+    if typ in {"ForInStatement", "ForOfStatement", "ForAwaitStatement"}:
         loop_shadows = set(shadows)
         left = getattr(node, "left", None)
         if getattr(left, "type", None) == "VariableDeclaration" and getattr(left, "kind", None) in {
@@ -825,12 +968,6 @@ def _walk(
         for argument in getattr(node, "arguments", ()):
             _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
         return
-    if typ == "NewExpression":
-        # Constructor/member dispatch is runtime-sensitive and is not a CALLS
-        # fact in this slice.  Constructor arguments still contain uses.
-        for argument in getattr(node, "arguments", ()):
-            _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
-        return
     if typ == "MemberExpression":
         _walk(
             getattr(node, "object", None),
@@ -893,7 +1030,78 @@ def _walk(
             shadows,
         )
         return
-    for value in vars(node).values():
+    if typ in {"ObjectPattern", "ArrayPattern", "AssignmentPattern", "RestElement"}:
+        # A binding pattern reached through the walker is an assignment target:
+        # its target names are not uses, but its defaults, computed keys, and
+        # member-expression targets still execute.  An assignment target
+        # introduces no binding, so an earlier target name never shadows a
+        # later default or computed key that uses the same existing variable.
+        _walk_parameter_defaults(
+            node,
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+            introduces_bindings=False,
+        )
+        return
+    if typ == "MethodDefinition":
+        # A class member key names the member; only a computed key executes.
+        # EDGE-EXPR-006: supports class field and static-field exclusion for both class forms.
+        # Field and static-field definitions have empty dispatch-table entries,
+        # so neither their keys nor their initializers are walked, and a class
+        # expression excludes them exactly as an emitted class declaration does.
+        if getattr(node, "computed", False):
+            key = getattr(node, "key", None)
+            if not _is_deferred_callable(key):
+                _walk(key, owner, module, bindings, relationships, nodes, seen, shadows)
+        _walk(
+            getattr(node, "value", None),
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+        )
+        return
+    # Types without a dedicated branch walk their classified child fields.
+    # EDGE-EXPR-001: supports non-use identifiers emitting no reference edges.
+    _walk_classified_fields(node, owner, module, bindings, relationships, nodes, seen, shadows)
+
+
+def _walk_classified_fields(
+    node: Any,
+    owner: str,
+    module: _Module,
+    bindings: dict[str, _Binding],
+    relationships: RelationshipAccumulator,
+    nodes: list[Node],
+    seen: NodeEmitter,
+    shadows: set[str],
+) -> None:
+    """Walk the child fields classified for a node type without a branch."""
+    specification = _CHILD_FIELDS.get(node.type)
+    if specification is None:
+        # An unclassified type is walked field by field, but a field holding an
+        # Identifier names a target rather than using one: without a
+        # classification the field is not known to be an expression position.
+        for value in vars(node).values():
+            if isinstance(value, list):
+                for item in value:
+                    if getattr(item, "type", None) != "Identifier":
+                        _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
+            elif getattr(value, "type", None) != "Identifier":
+                _walk(value, owner, module, bindings, relationships, nodes, seen, shadows)
+        return
+    for field_name, category in specification.items():
+        if category != _EXPRESSION:
+            continue
+        value = getattr(node, field_name, None)
         if isinstance(value, list):
             for item in value:
                 _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
@@ -915,15 +1123,59 @@ def _walk_parameter_defaults(
     nodes: list[Node],
     seen: NodeEmitter,
     shadows: set[str],
+    *,
+    introduces_bindings: bool = True,
 ) -> None:
-    """Walk executable defaults nested in a function binding pattern."""
+    """Walk executable defaults nested in a binding pattern.
+
+    Function parameters, declaration patterns, catch parameters, and assignment
+    targets all reuse this walker, so a computed key and a nested default
+    execute identically in every pattern position.  Only an assignment target
+    can hold a member expression; it is evaluated as an expression exactly as a
+    simple assignment target is.
+
+    A parameter, declaration, or catch pattern introduces its names as it is
+    initialized, so each bound name is added to ``shadows`` in place and hides
+    the outer binding from later defaults and computed keys.  An assignment
+    target (``introduces_bindings=False``) assigns existing variables instead:
+    its names stay non-uses, but ``shadows`` is left unchanged so a later
+    default or computed key still resolves the same name to its outer binding.
+    """
+    # EDGE-EXPR-003: supports declaration and catch pattern defaults through the shared walker.
     if pattern is None or not hasattr(pattern, "type"):
         return
     typ = pattern.type
+    if typ == "MemberExpression":
+        # A member-expression target reads its object and evaluates its
+        # computed key, and its member text is recorded beside the base fact.
+        _walk(pattern, owner, module, bindings, relationships, nodes, seen, shadows)
+        return
+
+    def bind(target: Any) -> None:
+        if introduces_bindings:
+            shadows.update(_bound_names(target))
+
+    def walk_target(target: Any) -> None:
+        _walk_parameter_defaults(
+            target,
+            owner,
+            module,
+            bindings,
+            relationships,
+            nodes,
+            seen,
+            shadows,
+            introduces_bindings=introduces_bindings,
+        )
+
     if typ == "AssignmentPattern":
-        # The binding being initialized is already shadowing outer names, but
-        # its nested pattern is not a use and must be traversed separately.
-        default_shadows = set(shadows) | _bound_names(getattr(pattern, "left", None))
+        left = getattr(pattern, "left", None)
+        # A binding being initialized already shadows outer names in its own
+        # default; an assigned existing variable does not.  The nested pattern
+        # is not a use and is traversed separately.
+        default_shadows = set(shadows)
+        if introduces_bindings:
+            default_shadows |= _bound_names(left)
         _walk(
             getattr(pattern, "right", None),
             owner,
@@ -934,47 +1186,26 @@ def _walk_parameter_defaults(
             seen,
             default_shadows,
         )
-        _walk_parameter_defaults(
-            getattr(pattern, "left", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-        )
-        shadows.update(_bound_names(getattr(pattern, "left", None)))
+        walk_target(left)
+        bind(left)
         return
     if typ == "RestElement":
-        _walk_parameter_defaults(
-            getattr(pattern, "argument", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-        )
-        shadows.update(_bound_names(getattr(pattern, "argument", None)))
+        argument = getattr(pattern, "argument", None)
+        walk_target(argument)
+        bind(argument)
         return
     if typ == "ArrayPattern":
         for element in getattr(pattern, "elements", ()) or ():
-            _walk_parameter_defaults(
-                element,
-                owner,
-                module,
-                bindings,
-                relationships,
-                nodes,
-                seen,
-                shadows,
-            )
-            shadows.update(_bound_names(element))
+            walk_target(element)
+            bind(element)
         return
     if typ == "ObjectPattern":
         for property_node in getattr(pattern, "properties", ()) or ():
+            if getattr(property_node, "type", None) == "RestElement":
+                # An object rest target carries no default or computed key; only
+                # a member-expression assignment target executes.
+                walk_target(getattr(property_node, "argument", None))
+                continue
             if getattr(property_node, "computed", False):
                 _walk(
                     getattr(property_node, "key", None),
@@ -987,17 +1218,8 @@ def _walk_parameter_defaults(
                     shadows,
                 )
             value = getattr(property_node, "value", None)
-            _walk_parameter_defaults(
-                value,
-                owner,
-                module,
-                bindings,
-                relationships,
-                nodes,
-                seen,
-                shadows,
-            )
-            shadows.update(_bound_names(value))
+            walk_target(value)
+            bind(value)
 
 
 def _scope_shadows(node: Any) -> set[str]:

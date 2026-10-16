@@ -195,3 +195,141 @@ Proof: [`test_class_accessors_record_declaration_roles_for_correspondence`](../.
 
 Status: NOT_APPLICABLE
 Reason: The bounded SQL slice has no property accessor or overload declarations that share one qualified name.
+
+### EDGE-EXPR-001 — Naming identifiers that emit no reference facts
+
+Question: When an identifier appears only as a label, a class-expression name, an object-property key, `this`, or a `MetaProperty`, does it stay out of the reference facts?
+
+#### Python — minotaur-python
+
+Status: NOT_APPLICABLE
+Reason: Python has no labeled statement, class-expression, `this`, or `MetaProperty` identifier form; the corresponding names are declarations or attribute keys rather than a distinct naming-only syntax.
+
+#### JavaScript — minotaur-javascript
+
+Status: SUPPORTED
+Example: `function main() { const View = class { render() {} }; outer: for (const item of items) { break outer; } const marker = new.target; }` beside `function render() {}`, `function outer() {}`, and `function target() {}`.
+Expected graph facts: No `references` or `calls` edge from `a.main` targets `a.render`, `a.outer`, or `a.target`, and the `new.target` form emits no `new` or `target` fact; `import.meta` is equally silent, so the module analyzes beside a valid sibling with both file nodes present.
+Owner: [`_walk`](../../src/minotaur/language_interpreter/javascript/interpreter.py); naming identifier positions are never walked as expression uses.
+Marker: # EDGE-EXPR-001: supports non-use identifiers emitting no reference edges.
+Proof: [`test_non_use_identifier_forms_emit_no_reference_edges`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts parser acceptance for `import.meta`, absence of every label, class-expression-name, and `MetaProperty` reference, and the `new.target` negative facts.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no labeled statement, class expression, property key, or `MetaProperty` operation.
+
+### EDGE-EXPR-002 — Anonymous default-export bodies owned by the module
+
+Question: When an anonymous default export carries a function body, an arrow body, or a bare expression, are its uses owned by the module symbol without inventing a declaration?
+
+#### Python — minotaur-python
+
+Status: NOT_APPLICABLE
+Reason: Python has no default-export operation; a module-level name is always an ordinary declaration.
+
+#### JavaScript — minotaur-javascript
+
+Status: SUPPORTED
+Example: `import { helper } from './lib.js';` then `export default function () { helper(); }`, `export default () => missingInDefault();`, and `export default helper;`.
+Expected graph facts: The anonymous function body emits `calls app -> lib.helper`, the arrow body emits `references app -> ?missingInDefault`, and the bare `export default helper;` emits `references app -> lib.helper`; every fact is owned by the `app` module symbol and no declaration symbol is invented for the anonymous forms.
+Owner: [`_expressions`](../../src/minotaur/language_interpreter/javascript/interpreter.py); an anonymous default export's declaration is walked as an expression position under the module symbol.
+Marker: # EDGE-EXPR-002: supports anonymous default-export bodies owned by the module symbol.
+Proof: [`test_anonymous_default_exports_walk_bodies_with_module_owner`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts the resolved call, the unresolved arrow reference, the bare-expression reference, and module ownership of every fact.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no module export operation.
+
+### EDGE-EXPR-003 — Declaration and catch pattern defaults through the shared walker
+
+Question: When a declaration, loop-header, or catch pattern carries a default initializer or a computed key, does the shared pattern walker still execute its expressions?
+
+#### Python — minotaur-python
+
+Status: NOT_APPLICABLE
+Reason: Python assignment targets have no default-value or computed-key pattern syntax; its analogous parameter defaults are a different operation.
+
+#### JavaScript — minotaur-javascript
+
+Status: SUPPORTED
+Example: `const { a = topHelper() } = obj;` beside `for (const { c = loopHelper() } of items) {}` and `try {} catch ({ message = catchTarget() }) {}`, with `const { [key]: v } = obj;` for the computed key.
+Expected graph facts: Each default initializer emits `calls` from the nearest emitted owner to its helper (`app` for the top-level, loop-header, and caught patterns, the containing function for a nested declaration), and a computed pattern key emits `references app -> app.key` while the bound name itself emits no fact.
+Owner: [`_walk_parameter_defaults`](../../src/minotaur/language_interpreter/javascript/interpreter.py); declaration, loop-header, catch, and parameter patterns share one executable-default walker.
+Marker: # EDGE-EXPR-003: supports declaration and catch pattern defaults through the shared walker.
+Proof: [`test_declaration_and_catch_pattern_defaults_emit_calls`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts each default's owner and target call plus the computed-key reference and the bound-name absence.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no declaration, loop-header, or catch binding-pattern operation.
+
+### EDGE-EXPR-004 — Unsupported import locals and `new` callees as references
+
+Question: When an unsupported import local or a `new` callee is used, does the ordinary lookup record a reference instead of suppressing it or emitting a call?
+
+#### Python — minotaur-python
+
+Status: NOT_APPLICABLE
+Reason: Python imports always bind a name, so there is no unsupported-import local, and Python has no `new` callee operation.
+
+#### JavaScript — minotaur-javascript
+
+Status: SUPPORTED
+Example: `import * as utils from './lib.js'; utils.fmt();` beside `function Widget() {} new Widget();` and `new unres();`.
+Expected graph facts: The namespace-import local emits unresolved references `utils` and `utils.fmt` beside the `./lib.js#*` import fact; `new Widget()` emits `references app -> app.Widget` and `new unres()` emits an unresolved `unres` reference, and neither `new` form emits a `calls` relationship.
+Owner: [`_walk`](../../src/minotaur/language_interpreter/javascript/interpreter.py); identifier use falls through the ordinary lookup, and a `new` callee is classified as an expression.
+Marker: # EDGE-EXPR-004: supports unsupported import locals and new callees as references.
+Proof: [`test_unsupported_import_locals_and_new_callees_emit_references`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts the exact unresolved texts, the resolved and unresolved `new` references, and the absence of `calls` edges.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no import local or constructor-call operation.
+
+### EDGE-EXPR-005 — Computed method keys without a key-text method label
+
+Question: When a class method key is computed, does the analyzer walk the key expression without emitting a method symbol named for its identifier text?
+
+#### Python — minotaur-python
+
+Status: NOT_APPLICABLE
+Reason: Python class bodies declare methods with fixed `def` names and have no computed method key syntax.
+
+#### JavaScript — minotaur-javascript
+
+Status: SUPPORTED
+Example: `function pick() {} function helper() {} class Box { [pick()]() { helper(); } }` beside the class-expression form `function main() { const Box = class { [pick()]() { helper(); } }; }`.
+Expected graph facts: The computed key emits `calls a.Box -> a.pick` (or `calls a.main -> a.pick` for the class expression) and the method body emits `calls` to `a.helper` under the nearest emitted owner; no `method` symbol is emitted for the computed-key member in either form, the class expression emits no `class` symbol while the declaration keeps its `a.Box` class symbol, and no method is labelled with the key's identifier text.
+Owner: [`_collect_declarations`](../../src/minotaur/language_interpreter/javascript/interpreter.py); a computed class member is skipped as a named method so its key and body are walked under the enclosing owner.
+Marker: # EDGE-EXPR-005: supports computed method keys without a key-text method label.
+Proof: [`test_computed_method_keys_walk_without_method_label`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts the class-owned and enclosing-owner calls, the nested and class-expression forms, and the absence of method symbols.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no class or method definition operation.
+
+### EDGE-EXPR-006 — Class field and static-field exclusion for both class forms
+
+Question: Do class field and static-field definitions produce key or initializer facts for either class form?
+
+#### Python — minotaur-python
+
+Status: NOT_APPLICABLE
+Reason: Python class fields are annotated assignments or `__init__` attributes and have no class-expression form.
+
+#### JavaScript — minotaur-javascript
+
+Status: SUPPORTED
+Example: `function helper() {} const View = class { field = helper(); static s = helper(); };`
+Expected graph facts: Neither the instance field nor the static field emits a key or initializer fact: no `calls` from `helper()` and no `field` or `s` reference; the class-declaration regression pin `class View { field = helper(); }` emits neither, while a non-computed method body `m() { helper(); }` still emits `calls` under the enclosing owner.
+Owner: [`_walk`](../../src/minotaur/language_interpreter/javascript/interpreter.py); the class-declaration member loop skips field and static-field definitions, and a class expression's members reach their empty `FieldDefinition` and `PropertyDefinition` dispatch-table entries, so neither class form walks a field's key or initializer.
+Marker: # EDGE-EXPR-006: supports class field and static-field exclusion for both class forms.
+Proof: [`test_class_expression_fields_and_static_fields_emit_no_facts`](../../tests/language_interpreter/javascript/test_javascript_interpreter.py); the natural fixture asserts the initializer and key absence for the class expression, the class-declaration pin, and the still-executing method body.
+
+#### SQL — minotaur-sql
+
+Status: NOT_APPLICABLE
+Reason: The bounded SQL slice has no class or field definition operation.

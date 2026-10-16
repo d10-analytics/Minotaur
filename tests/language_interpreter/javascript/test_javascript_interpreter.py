@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.metadata
+import inspect
+import textwrap
 
 import esprima
 import pytest
+from esprima.syntax import Syntax
 
 from minotaur.graph_model.location import encoded_length, split_lines
 from minotaur.graph_model.provenance import (
@@ -616,6 +620,48 @@ def test_nested_array_rest_assignment_and_late_computed_bindings_shadow_defaults
         )
 
 
+def test_declaration_and_catch_pattern_defaults_emit_calls(tmp_path):
+    # Declaration and catch parameter patterns reuse the parameter walker, so
+    # their nested defaults execute under the enclosing emitted owner.
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function topHelper() {}\n"
+                "function nestedHelper() {}\n"
+                "function loopHelper() {}\n"
+                "function catchTarget() {}\n"
+                "const { a = topHelper() } = obj;\n"
+                "function nested() { const { b = nestedHelper() } = obj; }\n"
+                "for (const { c = loopHelper() } of items) {}\n"
+                "try {} catch ({ message = catchTarget() }) {}\n"
+            )
+        },
+    )
+    module = _node(result, "app")
+    nested = _node(result, "app.nested")
+    calls = {(edge.source, edge.target) for edge in _edges(result, RelationshipKind.CALLS.value)}
+    assert (module.id, _node(result, "app.topHelper").id) in calls
+    assert (nested.id, _node(result, "app.nestedHelper").id) in calls
+    assert (module.id, _node(result, "app.loopHelper").id) in calls
+    assert (module.id, _node(result, "app.catchTarget").id) in calls
+
+    # A declaration pattern's computed key executes exactly as a parameter
+    # pattern's does: the shared walker's ObjectPattern branch records the
+    # reference at the enclosing module owner, and the binding name is not a use.
+    computed = _analyze(
+        tmp_path / "computed",
+        {"app.js": "function key() {}\nconst { [key]: v } = obj;\n"},
+    )
+    computed_module = _node(computed, "app")
+    computed_key = _node(computed, "app.key")
+    references = {
+        (edge.source, edge.target) for edge in _edges(computed, RelationshipKind.REFERENCES.value)
+    }
+    assert (computed_module.id, computed_key.id) in references
+    assert not any(node.reference_text == "v" for node in computed.document.nodes)
+
+
 def test_local_export_lists_emit_module_owned_unresolved_facts_including_aliases(tmp_path):
     source = "function helper() {}\nexport { helper, helper as publicName };\n"
     result = _analyze(tmp_path, {"app.js": source})
@@ -1025,6 +1071,78 @@ def test_unsupported_imports_are_explicit_unresolved_facts(tmp_path):
     assert not _edges(result, RelationshipKind.CALLS.value)
 
 
+def test_unsupported_import_locals_and_new_callees_emit_references(tmp_path):
+    # An unsupported import local is neither a binding nor a shadow, so a use
+    # falls through to the ordinary lookup and records an unresolved reference.
+    namespace = _analyze(
+        tmp_path / "namespace",
+        {
+            "app.js": "import * as utils from './lib.js';\nutils.fmt();\n",
+            "lib.js": "export function fmt() {}\n",
+        },
+    )
+    assert {
+        node.reference_text
+        for node in namespace.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"./lib.js#*", "utils", "utils.fmt"}
+    assert not _edges(namespace, RelationshipKind.CALLS.value)
+
+    default_import = _analyze(
+        tmp_path / "default",
+        {
+            "app.js": "import Widget from './lib.js';\nnew Widget(); Widget();\n",
+            "lib.js": "export default function Widget() {}\n",
+        },
+    )
+    assert {
+        node.reference_text
+        for node in default_import.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"./lib.js#default", "Widget"}
+    widget_uses = [
+        node
+        for node in default_import.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "Widget"
+    ]
+    assert len(widget_uses) == 2
+    default_app = _node(default_import, "app")
+    default_references = {
+        (edge.source, edge.target)
+        for edge in _edges(default_import, RelationshipKind.REFERENCES.value)
+    }
+    assert all((default_app.id, node.id) in default_references for node in widget_uses)
+
+    # ``new`` classifies its callee as an ordinary expression: a locally
+    # declared constructor yields a reference at the enclosing owner, never a
+    # call, while an unresolved callee yields an unresolved reference.
+    local = _analyze(tmp_path / "local", {"app.js": "function Widget() {}\nnew Widget();\n"})
+    local_app = _node(local, "app")
+    local_widget = _node(local, "app.Widget")
+    assert any(
+        edge.source == local_app.id
+        and edge.target == local_widget.id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in local.document.relationships
+    )
+    assert not _edges(local, RelationshipKind.CALLS.value)
+
+    unresolved = _analyze(tmp_path / "unresolved", {"app.js": "new unres();\n"})
+    assert {
+        node.reference_text
+        for node in unresolved.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"unres"}
+    unresolved_app = _node(unresolved, "app")
+    unresolved_callee = _node(unresolved, "unres")
+    assert any(
+        edge.source == unresolved_app.id
+        and edge.target == unresolved_callee.id
+        and edge.kind == RelationshipKind.REFERENCES.value
+        for edge in unresolved.document.relationships
+    )
+
+
 def test_module_and_lexical_shadowing_cover_parameters_patterns_and_catches(tmp_path):
     result = _analyze(
         tmp_path,
@@ -1159,7 +1277,10 @@ def test_lexical_module_bindings_and_unsupported_import_locals_are_suppressed(tm
         for node in result.document.nodes
         if node.node_class is NodeClass.UNRESOLVED_REFERENCE
     }
-    assert texts == {"report", "./lib.js#default"}
+    # ``total`` stays suppressed because it is a real lexical binding, while an
+    # unsupported default-import local is not a binding at all: both of its uses
+    # fall through to the ordinary lookup and record ``value``.
+    assert texts == {"report", "./lib.js#default", "value"}
     caller = _node(result, "app.caller")
     target = _node(result, "app.target")
     assert any(
@@ -1298,7 +1419,9 @@ def test_member_fact_exclusions_keep_this_new_and_iife_dispatch_silent(tmp_path)
         for node in result.document.nodes
         if node.node_class is NodeClass.UNRESOLVED_REFERENCE
     }
-    assert unresolved == {"hidden"}
+    # ``Foo`` is the new-callee reference; the member dispatch on
+    # ``new Foo().bar`` and the IIFE member dispatch stay silent.
+    assert unresolved == {"hidden", "Foo"}
 
 
 def test_relative_parent_imports_resolve_and_root_escape_is_unresolved(tmp_path):
@@ -1333,6 +1456,54 @@ def test_relative_parent_imports_resolve_and_root_escape_is_unresolved(tmp_path)
         edge.source == app.id and edge.target == outside.id
         for edge in result.document.relationships
     )
+
+
+def test_import_alias_binds_the_local_name_and_calls_the_imported_symbol(tmp_path):
+    # An alias is usable only when the local name owns the imported target: a
+    # use of the alias resolves to the exported symbol rather than to the
+    # imported spelling, so it emits a call instead of an unresolved use.
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": "import { helper as localHelper } from './lib.js';\nlocalHelper();\n",
+            "lib.js": "export function helper() {}\n",
+        },
+    )
+    assert result.diagnostics == ()
+    app = _node(result, "app")
+    helper = _node(result, "lib.helper")
+    assert [
+        (edge.source, edge.target) for edge in _edges(result, RelationshipKind.CALLS.value)
+    ] == [(app.id, helper.id)]
+    assert not {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    }
+
+
+def test_unresolved_import_specifier_still_records_the_module_imports_edge(tmp_path):
+    # The module-level edge belongs to the import statement, not to a single
+    # specifier, so it survives a specifier the target module does not export;
+    # the unresolved specifier is reported separately from that edge.
+    result = _analyze(
+        tmp_path,
+        {
+            "other.js": "import { missing } from './lib.js';\n",
+            "lib.js": "export function helper() {}\n",
+        },
+    )
+    assert result.diagnostics == ()
+    other = _node(result, "other")
+    lib = _node(result, "lib")
+    assert [
+        (edge.source, edge.target) for edge in _edges(result, RelationshipKind.IMPORTS.value)
+    ] == [(other.id, lib.id)]
+    assert {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    } == {"./lib.js#missing"}
 
 
 @pytest.mark.parametrize("source", ["export function ok() {}\r", "export function ok() {}\r\n"])
@@ -1495,3 +1666,651 @@ def test_class_accessors_record_declaration_roles_for_correspondence(tmp_path):
         with pytest.raises(CorrespondenceAmbiguityError) as raised:
             prepare_whole_graph(refused.document)
         assert set(raised.value.candidate_ids) == {node.id for node in duplicates}
+
+
+def test_non_use_identifier_forms_emit_no_reference_edges(tmp_path):
+    # import.meta is a documented non-use: the module analyzes beside a good
+    # sibling and emits no fact for the meta property's identifiers.
+    meta = _analyze(
+        tmp_path / "meta",
+        {"app.js": "const u = import.meta.url;\n", "good.js": "export function good() {}\n"},
+    )
+    assert meta.diagnostics == ()
+    assert {node.label for node in meta.document.nodes if node.node_class is NodeClass.FILE} == {
+        "app.js",
+        "good.js",
+    }
+    assert not any(node.reference_text is not None for node in meta.document.nodes)
+    assert not _edges(meta, RelationshipKind.CALLS.value)
+
+    # A label, a class-expression name, and a new.target property are all
+    # naming identifiers, so none of the four top-level functions is referenced.
+    h9 = _analyze(
+        tmp_path / "h9",
+        {
+            "a.js": (
+                "function main() {\n"
+                "  const View = class { render() {} };\n"
+                "  outer: for (const item of items) { break outer; }\n"
+                "  const marker = new.target;\n"
+                "}\n"
+                "function render() {}\n"
+                "function outer() {}\n"
+                "function target() {}\n"
+            )
+        },
+    )
+    main = _node(h9, "a.main")
+    references = _edges(h9, RelationshipKind.REFERENCES.value)
+    for hidden in ("a.render", "a.outer", "a.target"):
+        hidden_id = _node(h9, hidden).id
+        assert not any(edge.source == main.id and edge.target == hidden_id for edge in references)
+
+    new_target = _analyze(
+        tmp_path / "new-target",
+        {"app.js": "function probe() { const value = new.target; }\n"},
+    )
+    assert not any(node.reference_text in {"new", "target"} for node in new_target.document.nodes)
+
+    named = _analyze(
+        tmp_path / "named",
+        {
+            "a.js": (
+                "function main() { const View = class Inner { m() {} }; }\nfunction Inner() {}\n"
+            )
+        },
+    )
+    named_main = _node(named, "a.main")
+    named_inner = _node(named, "a.Inner")
+    assert not any(
+        edge.source == named_main.id and edge.target == named_inner.id
+        for edge in _edges(named, RelationshipKind.REFERENCES.value)
+    )
+    assert not any(node.reference_text in {"Inner", "m"} for node in named.document.nodes)
+
+    continued = _analyze(
+        tmp_path / "continue",
+        {
+            "a.js": (
+                "function main() { outer: for (const item of items) { continue outer; } }\n"
+                "function outer() {}\n"
+            )
+        },
+    )
+    continued_main = _node(continued, "a.main")
+    continued_outer = _node(continued, "a.outer")
+    assert not any(
+        edge.source == continued_main.id and edge.target == continued_outer.id
+        for edge in _edges(continued, RelationshipKind.REFERENCES.value)
+    )
+
+
+def test_computed_method_keys_walk_without_method_label(tmp_path):
+    declaration = _analyze(
+        tmp_path / "declaration",
+        {"a.js": "function pick() {}\nclass Box { [key]() {} [pick()]() {} }\n"},
+    )
+    box = _node(declaration, "a.Box")
+    pick = _node(declaration, "a.pick")
+    assert any(
+        edge.source == box.id
+        and edge.target == pick.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in declaration.document.relationships
+    )
+    assert not any(node.symbol_kind == "method" for node in declaration.document.nodes)
+
+    body = _analyze(
+        tmp_path / "body",
+        {
+            "a.js": (
+                "function pick() {}\nfunction helper() {}\nclass Box { [pick()]() { helper(); } }\n"
+            )
+        },
+    )
+    body_box = _node(body, "a.Box")
+    body_helper = _node(body, "a.helper")
+    assert any(
+        edge.source == body_box.id
+        and edge.target == body_helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in body.document.relationships
+    )
+    assert not any(node.symbol_kind == "method" for node in body.document.nodes)
+
+    # A nested, non-emitted class declaration has no class symbol, so its
+    # computed key and body belong to the enclosing emitted owner.
+    nested = _analyze(
+        tmp_path / "nested",
+        {
+            "a.js": (
+                "function pick() {}\n"
+                "function helper() {}\n"
+                "function main() { class Box { [pick()]() { helper(); } } }\n"
+            )
+        },
+    )
+    nested_main = _node(nested, "a.main")
+    nested_calls = {
+        (edge.source, edge.target) for edge in _edges(nested, RelationshipKind.CALLS.value)
+    }
+    assert (nested_main.id, _node(nested, "a.pick").id) in nested_calls
+    assert (nested_main.id, _node(nested, "a.helper").id) in nested_calls
+    assert not any(node.symbol_kind in {"class", "method"} for node in nested.document.nodes)
+
+    expression = _analyze(
+        tmp_path / "expression",
+        {
+            "a.js": (
+                "function pick() {}\n"
+                "function helper() {}\n"
+                "function main() { const Box = class { [pick()]() { helper(); } }; }\n"
+            )
+        },
+    )
+    expression_main = _node(expression, "a.main")
+    expression_pick = _node(expression, "a.pick")
+    expression_helper = _node(expression, "a.helper")
+    calls = {
+        (edge.source, edge.target) for edge in _edges(expression, RelationshipKind.CALLS.value)
+    }
+    assert (expression_main.id, expression_pick.id) in calls
+    assert (expression_main.id, expression_helper.id) in calls
+    assert not any(node.symbol_kind in {"class", "method"} for node in expression.document.nodes)
+
+    # A class expression's superclass executes when the expression is
+    # evaluated, so the enclosing emitted owner references it.
+    extends = _analyze(
+        tmp_path / "extends",
+        {
+            "a.js": (
+                "function Base() {}\nfunction main() { const C = class extends Base { m() {} }; }\n"
+            )
+        },
+    )
+    extends_references = {
+        (edge.source, edge.target) for edge in _edges(extends, RelationshipKind.REFERENCES.value)
+    }
+    assert (_node(extends, "a.main").id, _node(extends, "a.Base").id) in extends_references
+
+
+def test_class_expression_fields_and_static_fields_emit_no_facts(tmp_path):
+    fields = _analyze(
+        tmp_path / "fields",
+        {
+            "a.js": (
+                "function helper() {}\n"
+                "const instance = class { field = helper(); };\n"
+                "const staticView = class { static s = helper(); };\n"
+                "const computedView = class { [key] = helper(); };\n"
+            )
+        },
+    )
+    assert not _edges(fields, RelationshipKind.CALLS.value)
+    assert not any(node.reference_text is not None for node in fields.document.nodes)
+
+    # The class-declaration exclusion is the regression pin for both forms.
+    pinned = _analyze(
+        tmp_path / "pinned",
+        {"a.js": "function helper() {}\nclass View { field = helper(); }\n"},
+    )
+    assert not _edges(pinned, RelationshipKind.CALLS.value)
+    assert not any(node.reference_text is not None for node in pinned.document.nodes)
+
+    # A non-computed method still runs under the enclosing emitted owner.
+    method = _analyze(
+        tmp_path / "method",
+        {"a.js": "function helper() {}\nconst View = class { m() { helper(); } };\n"},
+    )
+    method_module = _node(method, "a")
+    method_helper = _node(method, "a.helper")
+    assert any(
+        edge.source == method_module.id
+        and edge.target == method_helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in method.document.relationships
+    )
+    assert not any(node.reference_text is not None for node in method.document.nodes)
+
+
+def test_binding_pattern_defaults_keep_their_executable_uses(tmp_path):
+    # An assignment target's binding names are not uses, but its defaults and
+    # computed keys still execute.
+    object_default = _analyze(
+        tmp_path / "object-default",
+        {"a.js": "function helper() {}\nlet v;\n({ v = helper() } = obj);\n"},
+    )
+    object_module = _node(object_default, "a")
+    object_helper = _node(object_default, "a.helper")
+    assert any(
+        edge.source == object_module.id
+        and edge.target == object_helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in object_default.document.relationships
+    )
+    assert not any(node.reference_text == "v" for node in object_default.document.nodes)
+
+    array_default = _analyze(
+        tmp_path / "array-default",
+        {"a.js": "function helper() {}\nlet v;\n[v = helper()] = arr;\n"},
+    )
+    array_module = _node(array_default, "a")
+    array_helper = _node(array_default, "a.helper")
+    assert any(
+        edge.source == array_module.id
+        and edge.target == array_helper.id
+        and edge.kind == RelationshipKind.CALLS.value
+        for edge in array_default.document.relationships
+    )
+    assert not any(node.reference_text == "v" for node in array_default.document.nodes)
+
+    computed = _analyze(
+        tmp_path / "computed",
+        {
+            "a.js": (
+                "function key() {}\n"
+                "function helper() {}\n"
+                "let v;\n"
+                "({ [key()]: v = helper() } = obj);\n"
+            )
+        },
+    )
+    computed_module = _node(computed, "a")
+    computed_calls = {
+        (edge.source, edge.target) for edge in _edges(computed, RelationshipKind.CALLS.value)
+    }
+    assert (computed_module.id, _node(computed, "a.key").id) in computed_calls
+    assert (computed_module.id, _node(computed, "a.helper").id) in computed_calls
+    assert not any(node.reference_text == "v" for node in computed.document.nodes)
+
+    binding_only = _analyze(
+        tmp_path / "binding-only",
+        {"a.js": "let v;\n({ v } = obj);\n({ unbound } = obj);\n"},
+    )
+    assert not any(node.reference_text in {"v", "unbound"} for node in binding_only.document.nodes)
+
+
+def test_destructuring_assignment_member_targets_are_walked_as_expressions(tmp_path):
+    # A member-expression target inside a destructuring assignment reads its
+    # object and evaluates its computed key, exactly as a simple assignment
+    # target does: array, object-value, rest, loop, defaulted, and object-rest
+    # targets each record the computed call, the base reference, and the
+    # member fact under the enclosing function.
+    lines = [
+        "function k() {}",
+        "function main(src) {",
+        "    [cache[k()]] = src;",
+        "    ({ a: store[k()] } = src);",
+        "    [...rest[k()]] = src;",
+        "    for ([slot[k()]] of src) {}",
+        "    [dflt[k()] = fallback] = src;",
+        "    ({ ...spread[k()] } = src);",
+        "}",
+    ]
+    result = _analyze(tmp_path, {"a.js": "\n".join(lines) + "\n"})
+    assert result.diagnostics == ()
+    main = _node(result, "a.main")
+    k = _node(result, "a.k")
+
+    calls = [
+        edge
+        for edge in _edges(result, RelationshipKind.CALLS.value)
+        if edge.source == main.id and edge.target == k.id
+    ]
+    assert len(calls) == 1
+    observed = {
+        (location.range.start.line, location.range.start.character)
+        for location in calls[0].evidence[0].locations
+    }
+    expected = {
+        (index, line.index("[k()]") + 1) for index, line in enumerate(lines) if "[k()]" in line
+    }
+    assert len(expected) == 6
+    assert observed == expected
+
+    member_texts = {
+        "cache",
+        "cache[k()]",
+        "store",
+        "store[k()]",
+        "rest",
+        "rest[k()]",
+        "slot",
+        "slot[k()]",
+        "dflt",
+        "dflt[k()]",
+        "spread",
+        "spread[k()]",
+    }
+    references = _reference_pairs(result)
+    owned_by_main = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.reference_text is not None and (main.id, node.id) in references
+    }
+    # The defaulted target's default is an ordinary expression; the parameter
+    # `src` is shadowed and emits nothing.
+    assert owned_by_main == member_texts | {"fallback"}
+    # Every reference is owned by the enclosing function, never the module.
+    module = _node(result, "a")
+    assert not any(source == module.id for source, _ in references)
+
+
+def test_destructuring_assignment_target_names_do_not_shadow_later_uses(tmp_path):
+    # A destructuring assignment assigns existing variables, so an earlier
+    # target name does not hide a later default or computed key that uses the
+    # same name: array, member, defaulted-member, nested, object-value,
+    # object-computed, rest, loop, and self-defaulted targets each still record
+    # the inner call.  Parameter, declaration, and catch patterns do bind their
+    # names, so the same shape stays shadowed there.
+    lines = [
+        "function x() {}",
+        "function k() {}",
+        "function a() {}",
+        "function main(s, v) {",
+        "    [x, y = x()] = s;",
+        "    [k, cache[k()]] = s;",
+        "    [k, o[k()] = d] = v;",
+        "    [a, [b = a()]] = s;",
+        "    ({ p: x, q = x() } = s);",
+        "    ({ p: k, [k()]: z } = s);",
+        "    [k, ...r[k()]] = s;",
+        "    for ([k, slot[k()]] of s) {}",
+        "    [x = x()] = s;",
+        "}",
+        "function param([x, y = x()]) {}",
+        "function declaration(s) { const [k, w = k()] = s; }",
+        "function caught() { try {} catch ([a, e = a()]) {} }",
+    ]
+    result = _analyze(tmp_path, {"a.js": "\n".join(lines) + "\n"})
+    assert result.diagnostics == ()
+    main = _node(result, "a.main")
+    targets = {name: _node(result, f"a.{name}") for name in ("x", "k", "a")}
+    expected_call_sites = {"x": 3, "k": 5, "a": 1}
+
+    for name, target in targets.items():
+        calls = [
+            edge
+            for edge in _edges(result, RelationshipKind.CALLS.value)
+            if edge.source == main.id and edge.target == target.id
+        ]
+        assert len(calls) == 1, name
+        observed = {
+            (location.range.start.line, location.range.start.character)
+            for location in calls[0].evidence[0].locations
+        }
+        expected = {
+            (index, line.index(f"{name}()"))
+            for index, line in enumerate(lines[4:13], start=4)
+            if f"{name}()" in line
+        }
+        assert len(expected) == expected_call_sites[name]
+        assert observed == expected, name
+
+    # Target names stay non-uses: no reference edge reaches an assigned
+    # function, and no unresolved reference names an assigned identifier.
+    references = _reference_pairs(result)
+    assert not any(
+        target.id == referenced for _, referenced in references for target in targets.values()
+    )
+    owned_by_main = {
+        node.reference_text
+        for node in result.document.nodes
+        if node.reference_text is not None and (main.id, node.id) in references
+    }
+    assert owned_by_main == {
+        "cache",
+        "cache[k()]",
+        "o",
+        "o[k()]",
+        "d",
+        "r",
+        "r[k()]",
+        "slot",
+        "slot[k()]",
+    }
+    assert not any(
+        node.reference_text in {"y", "b", "q", "z", "w", "e"} for node in result.document.nodes
+    )
+
+    # Binding patterns keep shadowing their own names.
+    for owner_label in ("a.param", "a.declaration", "a.caught"):
+        owner = _node(result, owner_label)
+        assert not any(
+            edge.source == owner.id
+            and edge.kind in {RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value}
+            for edge in result.document.relationships
+        ), owner_label
+
+
+def test_anonymous_default_exports_walk_bodies_with_module_owner(tmp_path):
+    # The three anonymous default-export forms share one module: the function
+    # body, the arrow body, and the bare expression.  None of them emits a
+    # declaration symbol, so every walked use belongs to the module symbol.
+    result = _analyze(
+        tmp_path,
+        {
+            "lib.js": "export function helper() {}\n",
+            "app.js": (
+                "import { helper } from './lib.js';\n"
+                "export default function () { helper(); }\n"
+                "export default () => missingInDefault();\n"
+                "export default helper;\n"
+            ),
+        },
+    )
+    assert result.diagnostics == ()
+    app = _node(result, "app")
+    helper = _node(result, "lib.helper")
+    calls = {(edge.source, edge.target) for edge in _edges(result, RelationshipKind.CALLS.value)}
+    references = {
+        (edge.source, edge.target) for edge in _edges(result, RelationshipKind.REFERENCES.value)
+    }
+
+    # The anonymous function body's resolved callee is a module-owned call, the
+    # fact `callers lib.helper` renders with `app` as the caller.
+    assert (app.id, helper.id) in calls
+    # The arrow body's unresolved callee is a module-owned reference, never a
+    # call.
+    missing = next(
+        node for node in result.document.nodes if node.reference_text == "missingInDefault"
+    )
+    assert (app.id, missing.id) in references
+    assert (app.id, missing.id) not in calls
+    # `export default helper;` is the bare expression form.  It is a use only
+    # because the unwrapped declaration is walked as an expression position: a
+    # field-by-field walk of the export statement leaves the bare Identifier
+    # unclassified, so this assertion fails without that walk.
+    assert (app.id, helper.id) in references
+    # The module symbol owns every fact in this fixture, so no other node can
+    # misattribute the uses the two query consumers read.
+    assert all(source == app.id for source, _ in calls | references)
+
+
+def _reference_pairs(result):
+    return {
+        (edge.source, edge.target) for edge in _edges(result, RelationshipKind.REFERENCES.value)
+    }
+
+
+def _unresolved_node(result, text):
+    return next(node for node in result.document.nodes if node.reference_text == text)
+
+
+def test_loop_tests_and_for_await_iterables_are_uses(tmp_path):
+    # A while or do-while test is evaluated on every iteration, so a bare name
+    # there is a use, exactly as in a for-statement test.
+    while_test = _analyze(
+        tmp_path / "while",
+        {"a.js": "function flag() {}\nfunction main() { while (flag) {} }\n"},
+    )
+    assert (_node(while_test, "a.main").id, _node(while_test, "a.flag").id) in _reference_pairs(
+        while_test
+    )
+
+    do_while_test = _analyze(
+        tmp_path / "do-while",
+        {"a.js": "function flag() {}\nfunction main() { do {} while (flag); }\n"},
+    )
+    assert (
+        _node(do_while_test, "a.main").id,
+        _node(do_while_test, "a.flag").id,
+    ) in _reference_pairs(do_while_test)
+
+    while_unbound = _analyze(
+        tmp_path / "while-unbound",
+        {"a.js": "function main() { while (unboundWhile) {} }\n"},
+    )
+    assert (
+        _node(while_unbound, "a.main").id,
+        _unresolved_node(while_unbound, "unboundWhile").id,
+    ) in _reference_pairs(while_unbound)
+
+    do_while_unbound = _analyze(
+        tmp_path / "do-while-unbound",
+        {"a.js": "function main() { do {} while (unboundDo); }\n"},
+    )
+    assert (
+        _node(do_while_unbound, "a.main").id,
+        _unresolved_node(do_while_unbound, "unboundDo").id,
+    ) in _reference_pairs(do_while_unbound)
+
+    # A for-await iterable is evaluated like a for-of iterable, in both the
+    # declaration and the assignment-target forms.
+    for_await = _analyze(
+        tmp_path / "for-await",
+        {
+            "a.js": (
+                "function items() {}\n"
+                "async function main() { for await (const x of items) { x; } }\n"
+            )
+        },
+    )
+    assert (_node(for_await, "a.main").id, _node(for_await, "a.items").id) in _reference_pairs(
+        for_await
+    )
+    assert not any(node.reference_text == "x" for node in for_await.document.nodes)
+
+    for_await_target = _analyze(
+        tmp_path / "for-await-target",
+        {
+            "a.js": (
+                "function items() {}\nasync function main() { let y; for await (y of items) {} }\n"
+            )
+        },
+    )
+    assert (
+        _node(for_await_target, "a.main").id,
+        _node(for_await_target, "a.items").id,
+    ) in _reference_pairs(for_await_target)
+    assert not any(node.reference_text == "y" for node in for_await_target.document.nodes)
+
+    for_await_unbound = _analyze(
+        tmp_path / "for-await-unbound",
+        {"a.js": "async function main() { for await (const x of unboundItems) {} }\n"},
+    )
+    assert (
+        _node(for_await_unbound, "a.main").id,
+        _unresolved_node(for_await_unbound, "unboundItems").id,
+    ) in _reference_pairs(for_await_unbound)
+
+    # A for-await `const` header shadows the loop body exactly as a for-of
+    # header does, so the body's `x()` calls the loop value, not the module's
+    # `x`.
+    for source in (
+        "for await (const x of items) { x(); }\n",
+        "for (const x of items) { x(); }\n",
+    ):
+        shadowed = _analyze(
+            tmp_path / ("shadow-await" if "await" in source else "shadow-of"),
+            {"a.js": "function x() {}\nfunction items() {}\n" + source},
+        )
+        assert not _edges(shadowed, RelationshipKind.CALLS.value)
+        assert (_node(shadowed, "a").id, _node(shadowed, "a.items").id) in _reference_pairs(
+            shadowed
+        )
+
+
+def _walk_branch_types():
+    """Node types that ``_walk`` handles with a dedicated ``typ`` comparison."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(javascript_interpreter._walk)))
+    types = set()
+    for comparison in ast.walk(tree):
+        if not (
+            isinstance(comparison, ast.Compare)
+            and isinstance(comparison.left, ast.Name)
+            and comparison.left.id == "typ"
+        ):
+            continue
+        for operator, comparator in zip(comparison.ops, comparison.comparators, strict=True):
+            if isinstance(operator, ast.Eq) and isinstance(comparator, ast.Constant):
+                types.add(comparator.value)
+            elif isinstance(operator, ast.In) and isinstance(comparator, ast.Set):
+                types.update(
+                    element.value
+                    for element in comparator.elts
+                    if isinstance(element, ast.Constant)
+                )
+    return types
+
+
+# Esprima node types that need no dispatch, each with the reason it is safe.
+_NODE_TYPES_OUTSIDE_THE_WALK = {
+    # Comments are separate parser records, never children of a tree node.
+    "BlockComment",
+    "LineComment",
+    # The parser rewrites this placeholder into arrow parameters before it
+    # returns the tree.
+    "ArrowParameterPlaceHolder",
+    # The module root: ``_expressions`` walks its statements one by one.
+    "Program",
+    # Module-level import and export forms are recorded by ``_imports``;
+    # ``_expressions`` skips them or walks only an exported declaration.
+    "ImportDeclaration",
+    "ImportSpecifier",
+    "ImportDefaultSpecifier",
+    "ImportNamespaceSpecifier",
+    "ExportAllDeclaration",
+    "ExportNamedDeclaration",
+    "ExportDefaultDeclaration",
+    "ExportSpecifier",
+    "ExportDefaultSpecifier",
+}
+_FACT_FREE_LEAF_NODE_TYPES = {
+    # These hold no child node that could contain a use: values, the `this`
+    # and `super` keywords, private names, empty and debugger statements, and
+    # the dynamic-import callee that the CallExpression branch handles.
+    "Literal",
+    "TemplateElement",
+    "ThisExpression",
+    "Super",
+    "PrivateIdentifier",
+    "EmptyStatement",
+    "DebuggerStatement",
+    "Import",
+}
+# Module code is strict, and strict mode forbids `with`; the guard test proves
+# the parser rejects it.
+_NODE_TYPES_REJECTED_BY_MODULE_PARSING = {"WithStatement"}
+
+
+def test_every_esprima_node_type_is_dispatched_or_explicitly_excused(tmp_path):
+    # A type with neither a ``_walk`` branch nor a child-field entry falls to
+    # the unknown-type path, which skips direct Identifier children; a new or
+    # forgotten statement type would then drop its uses silently.
+    syntax_types = {value for name, value in vars(Syntax).items() if not name.startswith("_")}
+    excused = (
+        _NODE_TYPES_OUTSIDE_THE_WALK
+        | _FACT_FREE_LEAF_NODE_TYPES
+        | _NODE_TYPES_REJECTED_BY_MODULE_PARSING
+    )
+    dispatched = _walk_branch_types() | set(javascript_interpreter._CHILD_FIELDS)
+
+    assert syntax_types - dispatched - excused == set()
+    # Every excuse names a real esprima type that has no dispatch of its own.
+    assert excused <= syntax_types
+    assert not excused & dispatched
+
+    rejected = _analyze(tmp_path, {"a.js": "function f() {}\nwith (target) { f(); }\n"})
+    assert [diagnostic.code for diagnostic in rejected.diagnostics] == [DiagnosticCode.PARSE_ERROR]
+    assert not rejected.document.relationships
