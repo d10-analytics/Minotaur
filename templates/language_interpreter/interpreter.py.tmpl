@@ -7,11 +7,7 @@ from typing import Any
 
 from minotaur.language_interpreter.accumulation import RelationshipAccumulator
 from minotaur.language_interpreter.contract import AnalysisResult
-from minotaur.language_interpreter.emission import NodeEmitter, symbol_node
-from minotaur.language_interpreter.example_language.discovery import (
-    discover_example_language_files,
-)
-from minotaur.language_interpreter.paths import resolve_relative
+from minotaur.language_interpreter.emission import NodeEmitter
 from minotaur.language_interpreter.reading import (
     ParsedSource,
     ParseFailure,
@@ -20,7 +16,7 @@ from minotaur.language_interpreter.reading import (
 from minotaur.language_interpreter.workspace import Workspace
 
 NAMESPACE = "minotaur-example"
-LANGUAGE = "example_language"
+LANGUAGE = "example-language"
 
 
 def _parse_example_language(source: str, relative: str) -> Any:
@@ -46,12 +42,6 @@ def _emit_example_language_facts(
     del parsed, nodes, relationships, emitter
 
 
-def analyze_example_language_workspace(root: Path) -> AnalysisResult:
-    """Analyze every normally discoverable example_language file below ``root``."""
-    workspace = Workspace(root)
-    return analyze_example_language_files(workspace, discover_example_language_files(workspace))
-
-
 def analyze_example_language_files(
     workspace: Workspace,
     files: tuple[Path, ...],
@@ -60,7 +50,7 @@ def analyze_example_language_files(
 
     Callers must provide existing regular files below the validated workspace
     root. Replace this stub with tested language-specific static analysis
-    before registering `.example` in ``default_registry()``.
+    before registering `.example-lang` in ``default_registry()``.
     """
     # This is the intended shared-mechanism wiring for a copied interpreter.
     # Emit a FILE node for each parsed source with the lowercase SHA-256 of
@@ -76,4 +66,4 @@ def analyze_example_language_files(
     for parsed in sources:
         _emit_example_language_facts(parsed, nodes, relationships, emitter)
     del diagnostics, relationships, emitter
-    raise NotImplementedError("implement tested example_language static analysis before registration")
+    raise NotImplementedError("implement tested static analysis before registration")

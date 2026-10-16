@@ -15,15 +15,31 @@ the copied interpreter.
 
 1. Create `src/minotaur/language_interpreter/example_language/` and
    `tests/language_interpreter/example_language/`.
-2. Copy `__init__.py.tmpl`, `interpreter.py.tmpl`, and `discovery.py.tmpl` to
+2. Copy `__init__.py.tmpl` and `interpreter.py.tmpl` to
    `src/minotaur/language_interpreter/example_language/`, removing `.tmpl`
    from each destination filename.
 3. Copy `test_example_language_interpreter.py.tmpl` to
    `tests/language_interpreter/example_language/test_example_language_interpreter.py`.
-4. Replace every `example_language` with the new language's lowercase package
-   name, `minotaur-example` with its namespace, and `.example` with its
-   normalized file extension.
-5. Replace the `analyze_example_language_files()` stub with tested,
+4. Rename the placeholders in the copied file contents and destination paths,
+   in this order:
+   - Replace every `example_language` with the new language's lowercase
+     Python package name.
+   - Replace every `example-language` with the new language's graph language
+     identifier, which must match `^[a-z][a-z0-9-]*$` and need not equal the
+     package name.
+   - Replace every `minotaur-example` with the new language's registered
+     namespace.
+   - Replace every `.example-lang` with the new language's normalized file
+     extension.
+5. Sort the imports and format the copied files, where `<name>` is the new
+   package name:
+
+   ```bash
+   ruff check --select I --fix src/minotaur/language_interpreter/<name> tests/language_interpreter/<name>
+   ruff format src/minotaur/language_interpreter/<name> tests/language_interpreter/<name>
+   ```
+
+6. Replace the `analyze_example_language_files()` stub with tested,
    language-specific static analysis. Replace the starter assertion with
    behavioral assertions, then add exactly one `InterpreterRegistration` to
    `default_registry()`.
@@ -49,12 +65,17 @@ A completed language change therefore adds its package, its tests, and one
 `default_registry()` registration; it does not add a language-specific
 command or reimplement shared path and output policy.
 
-The selected-file function is required. The whole-workspace wrapper is
-optional and must stay thin: it delegates to the selected-file function using
-language-specific discovery. Do not create language-specific parser, resolver,
-symbol, or fixture layers until tested semantics require them, and do not
-reimplement the shared `accumulation`, `emission`, `reading`, or `paths`
-mechanisms.
+The selected-file function is required. The template omits the optional
+whole-workspace helper, so the copied package exposes only the selected-file
+function. The shared `select_sources()` selection function owns folder
+walking, workspace containment, symlinks, extension matching, and excluded
+folders; library callers that want a whole-root analysis use it. A language
+package must not walk folders, list excluded directory names, or import
+`selection` at module level.
+
+Do not create language-specific parser, resolver, symbol, or fixture layers
+until tested semantics require them, and do not reimplement the shared
+`accumulation`, `emission`, `reading`, or `paths` mechanisms.
 
 ## Freshness checklist
 

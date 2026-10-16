@@ -10,7 +10,7 @@ from minotaur.language_interpreter.workspace import Workspace
 
 def test_selected_example_language_files_produce_only_established_facts(tmp_path: Path) -> None:
     """Replace the stub assertion with facts from tested language semantics."""
-    source = tmp_path / "sample.example"
+    source = tmp_path / "sample.example-lang"
     source.write_text("replace with representative example_language source", encoding="utf-8")
 
     try:
@@ -19,7 +19,7 @@ def test_selected_example_language_files_produce_only_established_facts(tmp_path
         # The copied template is deliberately incomplete. Replace this branch
         # together with the stub once shared readers and emitters are wired to
         # real language-specific parsing and analysis.
-        raise AssertionError("replace the template stub with tested analysis")
+        raise AssertionError("replace the template stub with tested analysis") from None
 
     # Replace these with assertions for graph facts, diagnostics, and evidence
     # that would fail if language-specific analysis were removed.
