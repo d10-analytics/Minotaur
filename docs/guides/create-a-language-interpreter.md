@@ -46,23 +46,15 @@ validation.
 
 ## Optional whole-workspace convenience API
 
-An interpreter may also expose a convenience wrapper:
+The language interpreter template omits the whole-workspace helper, so a new
+language package exposes only its selected-file function. Library callers that
+want a whole-root analysis use the shared `select_sources()` selection
+function, which owns folder walking, and a new language package must not walk
+folders.
 
-```python
-def analyze_example_language_workspace(root: Path) -> AnalysisResult:
-    workspace = Workspace(root)
-    return analyze_example_language_files(workspace, discover_example_language_files(workspace))
-```
-
-Use this only for the simple library use case: analyze every normally
-discoverable file for one language beneath a root. Keep it a thin wrapper over
-the selected-file function. It must not have a second parsing or graph-building
-implementation.
-
-The Python interpreter follows this pattern. Its
+The Python interpreter keeps an older whole-workspace helper. Its
 `analyze_python_workspace()` API remains compatible for existing callers,
-while `analyze_python_files()` is the API used by the CLI. Future languages
-should follow the same arrangement when a whole-workspace helper is useful.
+while `analyze_python_files()` is the API used by the CLI.
 
 Language-specific discovery belongs only in this optional wrapper. For
 example, `discover_python_files()` decides what a full Python workspace scan
