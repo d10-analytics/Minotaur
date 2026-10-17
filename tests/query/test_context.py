@@ -121,6 +121,47 @@ def test_javascript_context_reports_fresh_then_stale(
     assert json.loads(capsys.readouterr().out)["results"][0]["stale"] is True
 
 
+def test_context_shows_a_declared_encoding_file_as_its_decoded_text(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    content = b'# -*- coding: latin-1 -*-\nname = "caf\xe9"\n\ndef show():\n    return name\n'
+    with pytest.raises(UnicodeDecodeError):
+        content.decode("utf-8")
+    (root / "latin.py").write_bytes(content)
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+    capsys.readouterr()
+
+    status = cli.main(
+        [
+            "query",
+            "context",
+            "--graph",
+            str(graph),
+            "--root",
+            str(root),
+            "--site",
+            "latin.py:2",
+            "--before",
+            "1",
+            "--after",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0, captured.err
+    assert captured.out == (
+        "latin.py:1-4\n"
+        "  1: # -*- coding: latin-1 -*-\n"
+        '> 2: name = "caf\u00e9"\n'
+        "  3: \n"
+        "  4: def show():\n"
+    )
+
+
 def test_context_rejects_unknown_or_out_of_range_sites(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

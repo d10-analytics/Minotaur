@@ -8,9 +8,10 @@ fields or relationship declarations. The exact membership authority is the
 TOML declaration in `system.toml`.
 
 This boundary includes the shared language-interpreter platform files listed
-in `system.toml`. It excludes Python and JavaScript language semantics,
-command-line ownership, UI and query policy, graph persistence, and browser
-assets.
+in `system.toml` and the shared Python source-encoding policy that every
+component decoding Python source bytes uses. It excludes Python and
+JavaScript language semantics, command-line ownership, UI and query policy,
+graph persistence, and browser assets.
 
 ## Expected interactions
 

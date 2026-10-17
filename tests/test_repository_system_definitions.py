@@ -35,6 +35,7 @@ _TARGETS = (
     "minotaur/language_interpreter",
     "minotaur/query",
     "minotaur/source.py",
+    "minotaur/source_encoding.py",
     "minotaur/system.py",
 )
 
@@ -56,6 +57,7 @@ _SYSTEM_FILES = {
         "minotaur/language_interpreter/selection.py",
         "minotaur/language_interpreter/source_text.py",
         "minotaur/language_interpreter/workspace.py",
+        "minotaur/source_encoding.py",
     ],
     "analysis-python": [
         "minotaur/language_interpreter/python/__init__.py",
@@ -230,6 +232,7 @@ _CONNECTIONS = [
     ),
     ("system: query-and-system-reporting", "system: project-acquisition", ("calls", "imports")),
     ("system: query-and-system-reporting", "system: source-presentation", ("calls", "imports")),
+    ("system: source-presentation", "system: analysis-platform", ("calls", "imports")),
     ("system: source-presentation", "system: graph-contract", ("calls", "imports", "references")),
     (
         "system: source-presentation",
@@ -317,11 +320,11 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
         "status": "recorded",
         "targets": sorted(_TARGETS),
     }
-    assert coverage["graph_files"] == {"scope": "final_graph_file_nodes", "count": 62}
+    assert coverage["graph_files"] == {"scope": "final_graph_file_nodes", "count": 63}
     assert coverage["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 62,
-        "represented": 62,
+        "total": 63,
+        "represented": 63,
         "absent": 0,
     }
     assert coverage["unassigned_files"] == {
@@ -329,7 +332,7 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
         "count": 0,
         "paths": [],
     }
-    assert len(payload["connections"]) == 26
+    assert len(payload["connections"]) == 27
     assert [
         (item["source_category"], item["target_category"], tuple(item["kinds"]))
         for item in payload["connections"]
@@ -371,7 +374,7 @@ def test_configured_analysis_without_output_writes_only_isolated_root_artifacts(
     assert sidecar.is_file()
     graph_bytes = graph.read_bytes()
     loaded = load_graph_file(graph)
-    assert sum(node.node_class is NodeClass.FILE for node in loaded.document.nodes) == 62
+    assert sum(node.node_class is NodeClass.FILE for node in loaded.document.nodes) == 63
     assert sidecar.read_text(encoding="ascii").strip() == graph_digest(graph_bytes)
     checkout_after = tuple(
         path.read_bytes() if path.exists() else None for path in (checkout_graph, checkout_sidecar)
@@ -443,11 +446,11 @@ def test_declaration_omission_reports_the_graph_file_as_unassigned(
     assert status == 0
     assert error == ""
     payload = json.loads(output)
-    assert payload["coverage"]["graph_files"]["count"] == 62
+    assert payload["coverage"]["graph_files"]["count"] == 63
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 61,
-        "represented": 61,
+        "total": 62,
+        "represented": 62,
         "absent": 0,
     }
     assert payload["coverage"]["unassigned_files"] == {
@@ -491,12 +494,12 @@ def test_target_omission_reports_one_declared_file_absent(
     payload = json.loads(output)
     assert payload["coverage"]["graph_files"] == {
         "scope": "final_graph_file_nodes",
-        "count": 61,
+        "count": 62,
     }
     assert payload["coverage"]["declared_files"] == {
         "scope": "all_declared_system_files",
-        "total": 62,
-        "represented": 61,
+        "total": 63,
+        "represented": 62,
         "absent": 1,
     }
     assert payload["coverage"]["unassigned_files"] == {
@@ -608,3 +611,26 @@ def test_readme_interaction_claims_match_the_observed_connection_manifest() -> N
     assert not numbers, (
         f"analysis-sql/README.md: membership sentence states a file count {numbers}: {sentence!r}"
     )
+
+
+def test_analysis_platform_readme_names_the_python_source_encoding_policy() -> None:
+    """The boundary prose names the policy without claiming a new interaction."""
+    readme = SYSTEMS_ROOT / "analysis-platform" / "README.md"
+    paragraphs = [
+        " ".join(block.split()) for block in readme.read_text(encoding="utf-8").split("\n\n")
+    ]
+    boundary = next(block for block in paragraphs if block.startswith("This boundary includes"))
+    assert "the shared Python source-encoding policy" in boundary
+    claims = [
+        (_form_a_endpoint(bullet, True), _form_a_endpoint(bullet, False))
+        for bullet in _expected_interactions_bullets(readme)
+    ]
+    assert claims == [
+        ("command-interface", "analysis-platform"),
+        ("project-acquisition", "analysis-platform"),
+        ("analysis-platform", "analysis-javascript"),
+        ("analysis-platform", "analysis-python"),
+        ("analysis-platform", "analysis-sql"),
+        ("analysis-platform", "graph-contract"),
+        ("analysis-platform", "project-acquisition"),
+    ]

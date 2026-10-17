@@ -19,5 +19,6 @@ targets = [
   "minotaur/language_interpreter",
   "minotaur/query",
   "minotaur/source.py",
+  "minotaur/source_encoding.py",
   "minotaur/system.py",
 ]

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from minotaur.graph_model.location import is_safe_path
+from minotaur.source_encoding import decode_python_source, is_python_source_path
 
 
 def read_source_path(root: Path, wire_path: str, spans: list[tuple[int, int]]) -> dict[str, object]:
@@ -27,8 +28,6 @@ def read_source_path(root: Path, wire_path: str, spans: list[tuple[int, int]]) -
         return {"status": "unavailable", "reason": "path is missing or escapes the source root"}
     try:
         content = resolved.read_bytes()
-    except UnicodeDecodeError:
-        return {"status": "unavailable", "reason": "source file is not UTF-8"}
     except OSError as error:
         return {
             "status": "unavailable",
@@ -40,18 +39,28 @@ def read_source_path(root: Path, wire_path: str, spans: list[tuple[int, int]]) -
 def read_source_bytes(
     wire_path: str, content: bytes, spans: Sequence[tuple[int, int]]
 ) -> dict[str, object]:
-    """Render bounded line spans from already captured UTF-8 *content*.
+    """Render bounded line spans from already captured source *content*.
 
-    Comparison presentation must use this boundary after its source captures
-    have been released.  Keeping byte decoding here makes it impossible for a
-    later renderer call to silently fall back to a live checkout path.
+    A Python path is decoded with its declared encoding, exactly as analysis
+    decodes it, and every other path is decoded as UTF-8; the excerpt lines
+    are the decoded text's ``str.splitlines()`` lines. Comparison
+    presentation must use this boundary after
+    its source captures have been released.  Keeping byte decoding here makes
+    it impossible for a later renderer call to silently fall back to a live
+    checkout path.
     """
     if not isinstance(content, bytes):
         raise TypeError("captured source content must be bytes")
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        return {"status": "unavailable", "reason": "source file is not UTF-8"}
+    if is_python_source_path(wire_path):
+        try:
+            text = decode_python_source(content)
+        except UnicodeError as error:
+            return {"status": "unavailable", "reason": f"source file cannot be decoded: {error}"}
+    else:
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            return {"status": "unavailable", "reason": "source file is not UTF-8"}
     lines = text.splitlines()
     merged = merge_spans(spans, len(lines))
     return {

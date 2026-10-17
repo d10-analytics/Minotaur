@@ -152,6 +152,11 @@ their call-site associations and, when known, the caller start for the
 viewer’s two context modes. Omit `--source-root` when
 the downloaded file must contain no source text, and ensure no project
 configuration supplies a source root (run from outside that configured tree
-with explicit graph/output paths if necessary). Missing, unreadable,
-non-UTF-8, and escaping-symlink paths are not embedded. The command warns,
+with explicit graph/output paths if necessary). Python files are excerpted
+through their declared encoding, as analysis reads them, and through UTF-8
+when they declare none. Missing, unreadable, and escaping-symlink paths are not
+embedded, nor is any other path that cannot be decoded: a non-Python file that
+is not UTF-8, or a Python file whose declaration cannot be honoured or whose
+bytes its codec cannot decode. The
+command warns,
 while still writing successfully, when the artifact exceeds 10 MiB.

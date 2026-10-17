@@ -126,6 +126,41 @@ def test_unreferenced_text_fallback_tags_string_mentions_and_supports_paths_and_
     ]
 
 
+def test_unreferenced_text_fallback_reads_a_python_file_in_its_declared_encoding(
+    tmp_path: Path, capsys: object
+) -> None:
+    # In cp1252, byte 0x9a is "\u0161", a word character. A latin-1 decode gives
+    # the control character U+009A and a UTF-8 replacement decode gives U+FFFD,
+    # so either wrong decode splits the name and loses the string mention.
+    western = b'# -*- coding: cp1252 -*-\ndef orph\x9a():\n    pass\n\nmessage = "orph\x9a"\n'
+    latin = b'# -*- coding: latin-1 -*-\nname = "caf\xe9"\n'
+    for content in (western, latin):
+        with pytest.raises(UnicodeDecodeError):
+            content.decode("utf-8")
+    (tmp_path / "western.py").write_bytes(western)
+    (tmp_path / "latin.py").write_bytes(latin)
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    capsys.readouterr()  # type: ignore[attr-defined]
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "western.py",
+            "--text-fallback",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+
+    assert status == 0, captured.err
+    assert captured.out == "western.py:2  western.orph\u0161  function [text-mention]\n"
+
+
 def test_unreferenced_no_refresh_uses_deleted_graph_path_without_text_reads(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -365,6 +365,25 @@ If a source file cannot be read or parsed, the analyzer reports a diagnostic
 for that file and continues with the other files in the workspace. The failed
 file contributes no structural facts.
 
+Python files are decoded the way Python decodes them when it compiles or
+imports them, except that only ASCII-compatible text codecs are honoured. A
+PEP 263 encoding declaration on one of the first two lines, such as
+`# -*- coding: latin-1 -*-`, selects the codec, even when those lines also
+hold bytes that are not UTF-8. Otherwise a UTF-8 byte-order mark selects
+UTF-8, and a file with neither is read as UTF-8. An ASCII-compatible text
+codec is one that decodes the 128 ASCII bytes to the same characters, such as
+`latin-1`, `cp1252`, or `shift_jis`; codecs that Python accepts but that do
+not decode ASCII text unchanged, such as `utf-7` or `shift_jis_2004`, are not
+honoured. Recorded positions are always UTF-8 offsets into the decoded text,
+whatever the file's encoding: in a `latin-1` file, the call in `x = "é"; f()`
+starts at character 10, the UTF-8 length of `x = "é"; `, rather than at its
+byte offset 9 in the file. A
+declaration that cannot be honoured (an unknown codec, a byte-order mark that
+contradicts it, or a codec that is not an ASCII-compatible text codec), or
+bytes the selected codec cannot decode, yields one `source-read-error` for
+that file while analysis continues with the others. The
+[source error recovery guide](source-error-recovery.md) describes the repair.
+
 When an import is missing from the workspace, or a call cannot be resolved
 statically, the analyzer records an explicit unresolved-reference node and a
 reference relationship with source-location evidence. It does not guess a

@@ -43,14 +43,25 @@ class ParseFailure(Exception):
         self.location = location
 
 
+def decode_utf8_sig(content: bytes) -> str:
+    """Decode source bytes as UTF-8, dropping a leading byte-order mark."""
+    return content.decode("utf-8-sig")
+
+
 def read_sources(
     workspace: Workspace,
     files: tuple[Path, ...] | list[Path],
+    *,
+    decode: Callable[[bytes], str] = decode_utf8_sig,
 ) -> tuple[list[RawSource], list[Diagnostic]]:
     """Read selected source files in deterministic root-relative order.
 
-    Each file is read once and decoded with ``utf-8-sig``. Read and decoding
-    failures are isolated to their source so eligible siblings remain usable.
+    Each file is read once and its bytes are turned into text by ``decode``,
+    which defaults to :func:`decode_utf8_sig`. A language whose source format
+    defines its own encoding rule supplies its own ``decode``; the hook
+    signals that a file cannot be decoded by raising :class:`UnicodeError`.
+    Read and decoding failures are isolated to their source so eligible
+    siblings remain usable.
     """
     sources: list[RawSource] = []
     diagnostics: list[Diagnostic] = []
@@ -58,7 +69,7 @@ def read_sources(
         relative = path.relative_to(workspace.root).as_posix()
         try:
             content = path.read_bytes()
-            source = content.decode("utf-8-sig")
+            source = decode(content)
         except (OSError, UnicodeError) as error:
             diagnostics.append(Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, relative, str(error)))
             continue
@@ -70,16 +81,19 @@ def read_and_parse(
     workspace: Workspace,
     files: tuple[Path, ...] | list[Path],
     parse: Callable[[str, str], Any],
+    *,
+    decode: Callable[[bytes], str] = decode_utf8_sig,
 ) -> tuple[list[ParsedSource], list[Diagnostic]]:
     """Read and parse files in deterministic root-relative POSIX order.
 
     Files are sorted by their path relative to ``workspace.root`` so callers'
     selection order cannot affect emitted facts or diagnostics. A read,
     decoding, or parsing failure is reported for that file and does not stop
-    processing its valid siblings.
+    processing its valid siblings. ``decode`` is forwarded to
+    :func:`read_sources`.
     """
     sources: list[ParsedSource] = []
-    raw_sources, diagnostics = read_sources(workspace, files)
+    raw_sources, diagnostics = read_sources(workspace, files, decode=decode)
     for raw in raw_sources:
         try:
             tree = parse(raw.source, raw.relative)

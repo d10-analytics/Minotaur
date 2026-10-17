@@ -25,7 +25,11 @@ from minotaur.graph_model.provenance import CoordinateEncoding
 from minotaur.graph_model.relationship import Relationship
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import build_presentation
-from minotaur.graph_visualizer.source import prepare_excerpts
+from minotaur.graph_visualizer.source import (
+    capture_source_bytes,
+    prepare_excerpts,
+    read_source_bytes,
+)
 from minotaur.query.graph_comparison import compare_graphs
 from minotaur.system import System
 
@@ -87,6 +91,82 @@ def test_source_excerpts_are_contained_merged_and_explicit_when_unavailable(tmp_
         "status": "unavailable",
         "reason": "path is missing or escapes the source root",
     }
+
+
+_LATIN_SOURCE = (
+    b"# -*- coding: latin-1 -*-\n"
+    b"def label():\n"
+    b'    return "caf\xe9"\n'
+    b"\n"
+    b"def show():\n"
+    b"    return label()\n"
+)
+_LATIN_LINES = [
+    "# -*- coding: latin-1 -*-",
+    "def label():",
+    '    return "caf\u00e9"',
+    "",
+    "def show():",
+    "    return label()",
+]
+
+
+def _analyzed_declared_encoding_root(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "latin.py").write_bytes(_LATIN_SOURCE)
+    (root / "bom.py").write_bytes(b"\xef\xbb\xbfvalue = 1\n")
+    graph_path = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(graph_path), str(root)]) == 0
+    return root, graph_path
+
+
+def test_excerpts_of_a_declared_encoding_file_show_its_decoded_lines(tmp_path: Path) -> None:
+    with pytest.raises(UnicodeDecodeError):
+        _LATIN_SOURCE.decode("utf-8")
+    root, graph_path = _analyzed_declared_encoding_root(tmp_path)
+    loaded = load_graph_bytes(graph_path.read_bytes())
+
+    excerpts = prepare_excerpts(loaded.canonical, root)
+
+    assert excerpts["paths"]["latin.py"] == {
+        "status": "available",
+        "spans": [{"start": 0, "lines": _LATIN_LINES}],
+    }
+    captured = capture_source_bytes(root, ["latin.py"])
+    assert captured["latin.py"] == _LATIN_SOURCE
+    assert (
+        read_source_bytes("latin.py", captured["latin.py"], [(0, 5)])
+        == (excerpts["paths"]["latin.py"])
+    )
+
+
+def test_captured_excerpts_decode_declarations_only_for_python_paths(tmp_path: Path) -> None:
+    root, _ = _analyzed_declared_encoding_root(tmp_path)
+    captured = capture_source_bytes(root, ["latin.py", "bom.py"])
+
+    assert read_source_bytes("latin.js", captured["latin.py"], [(0, 5)]) == {
+        "status": "unavailable",
+        "reason": "source file is not UTF-8",
+    }
+    python_bom = read_source_bytes("bom.py", captured["bom.py"], [(0, 0)])
+    javascript_bom = read_source_bytes("bom.js", captured["bom.py"], [(0, 0)])
+    assert python_bom == {"status": "available", "spans": [{"start": 0, "lines": ["value = 1"]}]}
+    assert javascript_bom == {
+        "status": "available",
+        "spans": [{"start": 0, "lines": ["\ufeffvalue = 1"]}],
+    }
+
+
+def test_captured_excerpt_of_an_unknown_declaration_is_unavailable() -> None:
+    payload = read_source_bytes("bogus.py", b"# coding: bogus-codec\nvalue = 1\n", [(0, 1)])
+
+    assert payload["status"] == "unavailable"
+    reason = payload["reason"]
+    assert isinstance(reason, str)
+    assert reason.startswith("source file cannot be decoded: ")
+    assert "unknown encoding" in reason
+    assert set(payload) == {"status", "reason"}
 
 
 def test_call_site_associations_keep_all_provenance_at_one_physical_location(

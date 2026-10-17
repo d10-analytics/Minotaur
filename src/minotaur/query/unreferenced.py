@@ -13,6 +13,7 @@ from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.query.index import GraphIndex
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.query.symbols import label_bare_name
+from minotaur.source_encoding import decode_python_source, is_python_source_path
 
 _TOKEN_PATTERN = re.compile(r"\w+")
 _CANDIDATE_KINDS = frozenset({"class", "function", "method"})
@@ -209,7 +210,14 @@ def _text_mentions(
     folded_counts: dict[str, int] = {}
     for relative in selected:
         path = root / relative
-        for token in _TOKEN_PATTERN.findall(path.read_text(encoding="utf-8")):
+        # Python files are read with their declared encoding, as analysis
+        # reads them, so a name spelled in that encoding is found here too.
+        text = (
+            decode_python_source(path.read_bytes())
+            if is_python_source_path(relative)
+            else path.read_text(encoding="utf-8")
+        )
+        for token in _TOKEN_PATTERN.findall(text):
             counts[token] = counts.get(token, 0) + 1
             folded = token.casefold()
             folded_counts[folded] = folded_counts.get(folded, 0) + 1
