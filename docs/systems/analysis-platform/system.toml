@@ -13,4 +13,5 @@ files = [
   "minotaur/language_interpreter/selection.py",
   "minotaur/language_interpreter/source_text.py",
   "minotaur/language_interpreter/workspace.py",
+  "minotaur/source_encoding.py",
 ]

@@ -44,6 +44,7 @@ from minotaur.language_interpreter.python.discovery import discover_python_files
 from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
+from minotaur.source_encoding import decode_python_source
 
 NAMESPACE = "minotaur-python"
 _PRODUCER = Producer(name="minotaur-python")
@@ -2186,7 +2187,9 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
     modules: list[_Module] = []
     nodes: list[Node] = []
 
-    sources, diagnostics = read_and_parse(workspace, files, _parse_python)
+    sources, diagnostics = read_and_parse(
+        workspace, files, _parse_python, decode=decode_python_source
+    )
     for parsed in sources:
         module = _make_module(parsed.relative, parsed.tree, parsed.source, LineIndex(parsed.source))
         modules.append(module)
