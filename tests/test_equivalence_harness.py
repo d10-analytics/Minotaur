@@ -1640,6 +1640,26 @@ def test_harness_worktrees_register_in_the_session_clone_not_the_developer_repo(
     assert str(side.parent) not in _registered_worktrees(session_clone)
 
 
+# Fixture files in a declared non-UTF-8 source encoding, which interpreters
+# older than declaration-aware decoding cannot read.
+DECLARED_ENCODING_FIXTURES = ("workflow/declared_encoding.py",)
+
+
+def _pre_declared_encoding_fixture_root(tmp_path: Path) -> Path:
+    """Copy the fixture root without files the historical pins cannot decode.
+
+    The historical baseline-advance comparisons run interpreters that predate
+    declared source encodings; on the declared-encoding sample both sides stop
+    with a read error, so they analyze the rest of the root instead.
+    """
+
+    root = tmp_path / "pre-declared-encoding" / FIXTURE_ROOT.name
+    shutil.copytree(FIXTURE_ROOT, root, ignore=shutil.ignore_patterns("__pycache__"))
+    for relative in DECLARED_ENCODING_FIXTURES:
+        (root / relative).unlink()
+    return root
+
+
 def test_equivalence_baseline_advance_is_necessary_and_sufficient(
     session_clone: Path, tmp_path: Path
 ) -> None:
@@ -1654,6 +1674,7 @@ def test_equivalence_baseline_advance_is_necessary_and_sufficient(
     assert _is_ancestor(PRE_ADVANCE_BASELINE, VIEWER_ADVANCE_COMMIT)
 
     workload_path, _ = _non_diff_workload(tmp_path, exclude_names=frozenset({"callers-qualified"}))
+    fixture_root = _pre_declared_encoding_fixture_root(tmp_path)
 
     reverted_side = _worktree_side(tmp_path, "reverted", PRE_ADVANCE_BASELINE, session_clone)
     advanced_side = _worktree_side(tmp_path, "advanced", VIEWER_ADVANCE_COMMIT, session_clone)
@@ -1667,7 +1688,7 @@ def test_equivalence_baseline_advance_is_necessary_and_sufficient(
             "--queries",
             str(workload_path),
             "--root",
-            str(FIXTURE_ROOT),
+            str(fixture_root),
         )
         assert reverted.returncode == 1, reverted.stdout + reverted.stderr
         assert "artifact=analyze graph SHA-256: IDENTICAL" in reverted.stdout
@@ -1687,7 +1708,7 @@ def test_equivalence_baseline_advance_is_necessary_and_sufficient(
             "--queries",
             str(workload_path),
             "--root",
-            str(FIXTURE_ROOT),
+            str(fixture_root),
         )
         assert advanced.returncode == 0, advanced.stdout + advanced.stderr
         assert "DIFFERENT" not in advanced.stdout
@@ -1704,6 +1725,7 @@ def test_navigation_baseline_advance_preserves_exact_query_comparison(
 
     assert _is_ancestor(VIEWER_ADVANCE_COMMIT, BASELINE_COMMIT)
     workload_path, _ = _non_diff_workload(tmp_path)
+    fixture_root = _pre_declared_encoding_fixture_root(tmp_path)
     old_side = _worktree_side(tmp_path, "old-navigation", VIEWER_ADVANCE_COMMIT, session_clone)
     new_side = _worktree_side(tmp_path, "new-navigation", BASELINE_COMMIT, session_clone)
     frozen_side = _worktree_side(tmp_path, "pre-stamp", PRE_STAMP_COMMIT, session_clone)
@@ -1716,7 +1738,7 @@ def test_navigation_baseline_advance_preserves_exact_query_comparison(
             "--queries",
             str(workload_path),
             "--root",
-            str(FIXTURE_ROOT),
+            str(fixture_root),
         )
         assert old.returncode == 1, old.stdout + old.stderr
         differing = [line for line in old.stdout.splitlines() if line.endswith(": DIFFERENT")]
