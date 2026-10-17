@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from minotaur.graph_model.location import Location, Position, Range
-from minotaur.language_interpreter.contract import DiagnosticCode
+from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.reading import (
     ParsedSource,
     ParseFailure,
@@ -147,6 +147,55 @@ def test_read_and_parse_keeps_mixed_failure_diagnostics_in_path_order(tmp_path: 
         (DiagnosticCode.PARSE_ERROR, "a-parse.py"),
         (DiagnosticCode.SOURCE_READ_ERROR, "b-missing.py"),
         (DiagnosticCode.PARSE_ERROR, "c-parse.py"),
+    ]
+
+
+def test_read_sources_decodes_with_the_supplied_hook_and_keeps_raw_bytes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "module.py"
+    raw = b"value = 'caf\xe9'\n"
+    source.write_bytes(raw)
+    received: list[bytes] = []
+
+    def decode(content: bytes) -> str:
+        received.append(content)
+        return content.decode("latin-1").upper()
+
+    sources, diagnostics = read_sources(Workspace(tmp_path), [source], decode=decode)
+
+    assert diagnostics == []
+    assert received == [raw]
+    assert sources == [RawSource("module.py", raw, "VALUE = 'CAFÉ'\n")]
+
+
+def test_read_and_parse_forwards_the_hook_and_isolates_its_unicode_error(
+    tmp_path: Path,
+) -> None:
+    broken = tmp_path / "a-broken.py"
+    valid = tmp_path / "b-valid.py"
+    broken.write_bytes(b"reject me\n")
+    valid.write_bytes(b"accept me\n")
+    failure = UnicodeError("declared encoding cannot be honoured")
+    parsed_relatives: list[str] = []
+
+    def decode(content: bytes) -> str:
+        if content.startswith(b"reject"):
+            raise failure
+        return content.decode("ascii").upper()
+
+    def parse(source: str, relative: str) -> str:
+        parsed_relatives.append(relative)
+        return source
+
+    sources, diagnostics = read_and_parse(
+        Workspace(tmp_path), [broken, valid], parse, decode=decode
+    )
+
+    assert parsed_relatives == ["b-valid.py"]
+    assert sources == [ParsedSource("b-valid.py", b"accept me\n", "ACCEPT ME\n", "ACCEPT ME\n")]
+    assert diagnostics == [
+        Diagnostic(DiagnosticCode.SOURCE_READ_ERROR, "a-broken.py", str(failure))
     ]
 
 
