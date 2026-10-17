@@ -4144,6 +4144,40 @@ def test_every_failing_file_is_reported_in_path_order_and_an_empty_survivor_set_
     assert _file_node_paths(alone) == []
 
 
+def test_isolated_failures_follow_the_interpreters_own_diagnostics_in_posix_path_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "a.py", "def f_a():\n    return 1\n")
+    _write(root, "pkg-a.py", "def f_dash():\n    return 2\n")
+    _write(root, "pkg/z.py", "def f_z():\n    return 3\n")
+    _write(root, "y.py", "def broken(:\n")
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+    interpreter_fault.install("python", "pkg/z.py", RuntimeError("fault in z"))
+    interpreter_fault.install("python", "pkg-a.py", RuntimeError("fault in dash"))
+
+    assert _analyze_in_process(root, output, root) == 1
+
+    lines = _diagnostic_lines(capsys.readouterr().err)
+    # The parse error comes from the final joint analysis and keeps its place
+    # ahead of the isolated files, which follow in root-relative POSIX order:
+    # "pkg-a.py" sorts before "pkg/z.py" because "-" sorts before "/".
+    assert len(lines) == 3
+    assert lines[0].startswith("y.py:")
+    assert ": parse-error: " in lines[0]
+    assert lines[1:] == [
+        _interpreter_error_line("pkg-a.py", "RuntimeError: fault in dash"),
+        _interpreter_error_line("pkg/z.py", "RuntimeError: fault in z"),
+    ]
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert graph["extensions"]["minotaur"]["errors"] == 3
+    assert _file_node_paths(output) == ["a.py"]
+
+
 @pytest.mark.parametrize(
     ("language", "extension", "sources"),
     [
