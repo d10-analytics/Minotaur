@@ -24,6 +24,8 @@ through composition rather than a direct static edge.
   dispatch.
 - `query-and-system-reporting` points to `source-presentation` for source
   excerpts and presentation payloads.
+- `source-presentation` points to `analysis-platform` for the shared Python
+  source-encoding policy.
 - `source-presentation` points to `graph-contract` for the canonical graph
   payload, source locations, and the shared path guard.
 - `source-presentation` points to `query-and-system-reporting` for the
