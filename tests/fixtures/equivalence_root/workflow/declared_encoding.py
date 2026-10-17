@@ -1,4 +1,4 @@
-# -*- coding: latin-1 -*-
+# -*- coding: latin-1 -*- (café)
 """Declared-encoding sample whose bytes are latin-1, such as the é in café."""
 
 
