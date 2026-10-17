@@ -47,6 +47,6 @@ has neither; see
 When the declaration cannot be honoured, or the file contains bytes that the
 selected codec cannot decode, analysis reports one `source-read-error` for
 that file instead of a `parse-error`, writes the partial graph from its valid
-siblings, and exits `1`. To repair it, correct the declaration so that it
-names the file's actual ASCII-compatible encoding, or re-encode the file as
+siblings, and exits `1`. To repair it, add or correct the declaration so that
+it names the file's actual ASCII-compatible encoding, or re-encode the file as
 UTF-8 and remove any declaration that names another codec. Then analyze again.
