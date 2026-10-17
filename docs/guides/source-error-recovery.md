@@ -38,3 +38,15 @@ warning for `broken.py` is expected: that selected file is absent from the
 partial graph. The runner then fixes its header to `def repaired():`, forces
 analysis again, and finds the recovered function at line 1. All temporary
 files, including the graph and sidecar, are removed at the end.
+
+A Python file whose bytes cannot be decoded follows the same path under a
+different code. Analysis decodes each Python file with the codec that its PEP
+263 encoding declaration or UTF-8 byte-order mark selects, or as UTF-8 when it
+has neither; see
+[Current Python analysis](analyze-python.md#diagnostics-and-unresolved-references).
+When the declaration cannot be honoured, or the file contains bytes that the
+selected codec cannot decode, analysis reports one `source-read-error` for
+that file instead of a `parse-error`, writes the partial graph from its valid
+siblings, and exits `1`. To repair it, correct the declaration so that it
+names the file's actual ASCII-compatible encoding, or re-encode the file as
+UTF-8 and remove any declaration that names another codec. Then analyze again.
