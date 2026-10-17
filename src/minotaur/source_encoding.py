@@ -1,9 +1,11 @@
 """Decode Python source bytes as the Python compiler would (PEP 263).
 
 A Python file may declare its encoding in a comment on one of its first two
-lines, and a UTF-8 byte-order mark selects UTF-8. Every Minotaur component
-that turns Python source bytes into text uses this module so analysis,
-excerpts, and text searches agree on the decoded lines.
+lines, and a UTF-8 byte-order mark selects UTF-8. As in the compiler, the
+declaration is found in the raw bytes of those lines, so bytes on them that
+are not UTF-8 do not hide it. A file with neither must be UTF-8 throughout.
+Every Minotaur component that turns Python source bytes into text uses this
+module so analysis, excerpts, and text searches agree on the decoded lines.
 
 The module depends on the standard library only, so the analysis layer and
 the presentation layer can both import it without depending on each other.
@@ -11,6 +13,7 @@ the presentation layer can both import it without depending on each other.
 
 from __future__ import annotations
 
+import codecs
 import tokenize
 from pathlib import PurePosixPath
 
@@ -31,11 +34,11 @@ def decode_python_source(content: bytes) -> str:
     # ``splitlines`` breaks on LF, CRLF and CR alike, so a file with CR-only
     # line endings is read as separate lines and later text is never mistaken
     # for a declaration on the first two lines.
-    readline = iter(content.splitlines(keepends=True)).__next__
+    lines = content.splitlines(keepends=True)
     try:
-        encoding, _ = tokenize.detect_encoding(readline)
+        encoding = _detect_encoding(lines)
     except SyntaxError as error:
-        raise UnicodeError(str(error)) from error
+        encoding = _declared_beside_non_utf8_bytes(lines, error)
     _require_ascii_compatible(encoding)
     return content.decode(encoding)
 
@@ -43,6 +46,34 @@ def decode_python_source(content: bytes) -> str:
 def is_python_source_path(path: str) -> bool:
     """Return whether ``path`` names a Python source file by its suffix."""
     return PurePosixPath(path).suffix.lower() == ".py"
+
+
+def _detect_encoding(lines: list[bytes]) -> str:
+    encoding, _ = tokenize.detect_encoding(iter(lines).__next__)
+    return encoding
+
+
+def _declared_beside_non_utf8_bytes(lines: list[bytes], error: SyntaxError) -> str:
+    """Return the declaration that ``error`` hid behind non-UTF-8 bytes.
+
+    :func:`tokenize.detect_encoding` decodes each examined line as UTF-8
+    before matching a declaration, while the compiler matches the ASCII
+    declaration in the raw bytes. Mapping every byte to one character keeps
+    the ASCII text of the first two lines byte-for-byte and makes the other
+    bytes decodable, so the retry applies the same declaration, blank-line and
+    codec rules to the bytes the compiler examines. A retry that finds no
+    declaration, an unusable one, or a UTF-8 one keeps the original failure,
+    because the bytes that caused it cannot be UTF-8. A byte-order mark maps
+    to characters that are neither blank nor a comment, so a file that starts
+    with one is always given UTF-8 by the retry and keeps its failure too.
+    """
+    try:
+        encoding = _detect_encoding([line.decode("latin-1").encode("utf-8") for line in lines[:2]])
+    except SyntaxError:
+        raise UnicodeError(str(error)) from error
+    if codecs.lookup(encoding).name == "utf-8":
+        raise UnicodeError(str(error)) from error
+    return encoding
 
 
 def _require_ascii_compatible(encoding: str) -> None:

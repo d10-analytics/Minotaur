@@ -42,8 +42,9 @@ def read_source_bytes(
     """Render bounded line spans from already captured source *content*.
 
     A Python path is decoded with its declared encoding, exactly as analysis
-    decodes it, so an excerpt shows the analyzed lines; every other path is
-    decoded as UTF-8. Comparison presentation must use this boundary after
+    decodes it, and every other path is decoded as UTF-8; the excerpt lines
+    are the decoded text's ``str.splitlines()`` lines. Comparison
+    presentation must use this boundary after
     its source captures have been released.  Keeping byte decoding here makes
     it impossible for a later renderer call to silently fall back to a live
     checkout path.
