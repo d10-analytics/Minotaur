@@ -8,10 +8,12 @@ roles: a property with explicit getter, setter and deleter accessors, and
 `@overload`/`@typing.overload` stubs beside their implementation. It defines no
 `main` and calls none of the queried symbols.
 `workflow/declared_encoding.py`, the source-encoding sample, declares
-`# -*- coding: latin-1 -*-`, is committed as latin-1 bytes that are not valid
-UTF-8, and calls its one function at module scope after a non-ASCII string
-literal, so it adds no `unreferenced` hit; `pyproject.toml` excludes it from
-Ruff, which rejects any source file that is not valid UTF-8.
+`# -*- coding: latin-1 -*-` on a first line that also holds a latin-1 byte, so
+the analyzer-semantics fingerprint covers a declaration found beside bytes that
+are not UTF-8. It is committed as latin-1 bytes that are not valid UTF-8 and
+calls its one function at module scope after a non-ASCII string literal, so it
+adds no `unreferenced` hit; `pyproject.toml` excludes it from Ruff, which
+rejects any source file that is not valid UTF-8.
 
 The tree is small on purpose: every query class in
 `scripts/equivalence_queries.json` has a real, non-empty hit here — several
