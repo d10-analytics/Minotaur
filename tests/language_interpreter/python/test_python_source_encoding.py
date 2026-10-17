@@ -14,7 +14,7 @@ from minotaur.graph_model.location import Position
 from minotaur.graph_model.node import Node, NodeClass
 from minotaur.graph_model.provenance import CoordinateEncoding
 from minotaur.language_interpreter.registry import default_registry
-from minotaur.source_encoding import is_python_source_path
+from minotaur.source_encoding import decode_python_source, is_python_source_path
 
 _SIBLING = "sibling.py"
 _SIBLING_BYTES = b"def helper():\n    return 'caf\xc3\xa9'\n"
@@ -163,6 +163,56 @@ def test_cr_only_utf8_file_with_later_encoding_text_is_analyzed(
     assert _symbols(document)["helper.read"].symbol_kind == "function"
 
 
+@pytest.mark.parametrize(
+    ("first", "second", "newline"),
+    [
+        pytest.param(b"# M\xf3dulo", b"# -*- coding: latin-1 -*-", b"\n", id="comment-line"),
+        pytest.param(b"#!/usr/bin/env python \xf3", b"# coding=cp1252", b"\n", id="shebang"),
+        pytest.param(b"# M\xf3dulo", b"# -*- coding: latin-1 -*-", b"\r\n", id="crlf"),
+        pytest.param(b"# M\xf3dulo", b"# -*- coding: latin-1 -*-", b"\r", id="cr-only"),
+        pytest.param(b"", b"# coding: latin-1 \xf3", b"\n", id="declaration-line"),
+    ],
+)
+def test_declaration_beside_non_utf8_bytes_is_honoured(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    first: bytes,
+    second: bytes,
+    newline: bytes,
+) -> None:
+    # The first two lines are not UTF-8, but the declaration on one of them
+    # is ASCII, and the compiler finds it in the raw bytes.
+    content = newline.join([first, second, b"def f():", b"    pass", b'x = "\xe9"; f()', b""])
+    with pytest.raises(UnicodeDecodeError):
+        (first + second).decode("utf-8")
+    compile(content, "declared.py", "exec")
+    root = _root(tmp_path, {_SIBLING: _SIBLING_BYTES, "declared.py": content})
+
+    status, document, errors = _analyze(root, tmp_path / "graph.json", capsys)
+
+    assert status == 0
+    assert errors == []
+    files = _file_nodes(document)
+    assert set(files) == {_SIBLING, "declared.py"}
+    extensions = files["declared.py"].extensions
+    assert extensions is not None
+    assert extensions["minotaur-python"]["content_sha256"] == hashlib.sha256(content).hexdigest()
+    symbols = _symbols(document)
+    assert symbols["declared"].symbol_kind == "module"
+    assert symbols["declared.f"].symbol_kind == "function"
+    assert _call_starts(document, "declared.py") == [Position(4, 10)]
+
+
+def test_declaration_beside_non_utf8_bytes_decodes_as_the_compiler_does() -> None:
+    content = b"# M\xf3dulo\n# -*- coding: latin-1 -*-\nx = '\xe9'\n"
+    namespace: dict[str, object] = {}
+
+    exec(compile(content, "declared.py", "exec"), namespace)
+
+    assert decode_python_source(content) == content.decode("latin-1")
+    assert namespace["x"] == "\xe9"
+
+
 # ---------------------------------------------------------------------------
 # Declarations that cannot be honoured are isolated source-read errors
 # ---------------------------------------------------------------------------
@@ -198,6 +248,63 @@ def test_unhonourable_declaration_is_one_source_read_error(
     assert len(errors) == 1
     assert errors[0].startswith("broken.py: source-read-error: ")
     assert errors[0].endswith(" [severity=error]")
+    assert message in errors[0]
+    assert "parse-error" not in errors[0]
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        pytest.param(
+            b"\xef\xbb\xbf# M\xf3dulo\n# coding: latin-1\nx = 1\n",
+            "invalid or missing encoding declaration",
+            id="bom-conflict",
+        ),
+        pytest.param(
+            b"# M\xf3dulo\n# coding: caf\xe9\nx = 1\n",
+            "invalid or missing encoding declaration",
+            id="non-ascii-name",
+        ),
+        pytest.param(
+            b"# M\xf3dulo\n# coding: bogus-codec\nx = 1\n",
+            "invalid or missing encoding declaration",
+            id="unknown-codec",
+        ),
+        pytest.param(b"# M\xf3dulo\n# coding: rot13\nx = 1\n", "not a text encoding", id="rot13"),
+        pytest.param(
+            b"# M\xf3dulo\n# coding: utf-16\nx = 12\n", "not ASCII-compatible", id="utf-16"
+        ),
+        pytest.param(
+            b'# M\xf3dulo\n# coding: cp1252\nx = "\x81"\n', "can't decode", id="undecodable"
+        ),
+        pytest.param(
+            b"# M\xf3dulo\n# coding: utf-8\nx = 1\n",
+            "invalid or missing encoding declaration",
+            id="utf-8-declaration",
+        ),
+        pytest.param(
+            b"# M\xf3dulo\n# plain comment\nx = 1\n",
+            "invalid or missing encoding declaration",
+            id="undeclared",
+        ),
+        pytest.param(
+            b"x = '\xf3'\n# coding: latin-1\n",
+            "invalid or missing encoding declaration",
+            id="declaration-after-code",
+        ),
+    ],
+)
+def test_non_utf8_first_line_leaves_unhonourable_declarations_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], content: bytes, message: str
+) -> None:
+    root = _root(tmp_path, {_SIBLING: _SIBLING_BYTES, "broken.py": content})
+
+    status, document, errors = _analyze(root, tmp_path / "graph.json", capsys)
+
+    assert status == 1
+    assert set(_file_nodes(document)) == {_SIBLING}
+    assert len(errors) == 1
+    assert errors[0].startswith("broken.py: source-read-error: ")
     assert message in errors[0]
     assert "parse-error" not in errors[0]
 
