@@ -63,7 +63,11 @@ python_version = "3.11"
 target-version = "py310"
 line-length = 100
 src = ["src"]
-extend-exclude = ["tests/fixtures/equivalence_root/workflow/util.py"]
+extend-exclude = [
+    "tests/fixtures/equivalence_root/workflow/util.py",
+    "tests/fixtures/equivalence_root/workflow/declared_encoding.py",
+]
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
