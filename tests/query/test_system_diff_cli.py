@@ -7,6 +7,7 @@ import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -16,6 +17,9 @@ from minotaur.graph_model.loading import graph_digest, stamp_path
 from minotaur.graph_model.provenance import NodeClass, Provenance
 from minotaur.language_interpreter.contract import AnalysisResult
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
+
+if TYPE_CHECKING:
+    from conftest import InterpreterFault
 
 
 def _git(root: Path, *args: str) -> None:
@@ -2856,3 +2860,31 @@ def test_systems_javascript_class_accessors_compare_across_systems(
         ("unchanged", "get"),
         ("unchanged", "set"),
     ]
+
+
+def test_isolated_current_source_failure_names_the_file_in_the_capture_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    # consumer.py stays uncommitted so only the current side analyzes it.
+    _git(root, "rm", "-q", "--cached", "consumer.py")
+    _git(root, "commit", "-qm", "baseline")
+    capsys.readouterr()
+    before = _state(root)
+    interpreter_fault.install("python", "consumer.py", RuntimeError("injected fault"))
+
+    assert cli.main(["query", "diff", "--systems", "--system", "App"]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "consumer.py" in captured.err
+    assert "captured source analysis produced diagnostics" in captured.err
+    assert "captured source production failed" not in captured.err
+    assert "Traceback" not in captured.err
+    _assert_state(root, before)
