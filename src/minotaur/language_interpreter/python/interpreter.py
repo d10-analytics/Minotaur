@@ -13,6 +13,7 @@ import builtins
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TypeAlias
 
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.evidence import Producer
@@ -266,28 +267,55 @@ def _child_nodes(node: ast.AST) -> Iterator[ast.AST]:
             yield value
 
 
+_Step: TypeAlias = "ast.AST | Iterator[_Step]"
+"""One unit of traversal work: a node to visit, or a sequence of further steps."""
+
+
 def _visit_children(visitor: ast.NodeVisitor, node: ast.AST) -> None:
-    """Visit ``node``'s descendants in ``ast.NodeVisitor`` order at constant depth.
+    """Visit ``node``'s descendants in ``ast.NodeVisitor`` order at constant depth."""
+    _run_steps(visitor, _child_nodes(node))
+
+
+def _run_steps(visitor: ast.NodeVisitor, steps: Iterator[_Step]) -> None:
+    """Run traversal steps in ``ast.NodeVisitor`` order at constant depth.
 
     The inherited ``generic_visit`` recurses once per syntax level, so a long
     left-deep expression such as ``a + a + ...`` exhausts the interpreter stack.
-    Here a child with a ``visit_<Class>`` method is dispatched to it, exactly as
-    ``NodeVisitor.visit`` would; any other child is expanded in place on a
-    last-in-first-out stack of child iterators. The visitor-call sequence is
-    therefore identical to the recursive traversal, while depth no longer grows
-    with nesting that no dedicated method handles.
+    Here each node is handled in one of three ways, on a last-in-first-out
+    stack of step iterators:
+
+    - a node whose class has a ``_steps_<Class>`` generator on the visitor runs
+      that generator in place. The generator does what ``visit_<Class>`` would
+      and yields the nodes it would visit, or nested step iterators, instead of
+      recursing, so a chain such as ``a.b().b()...`` adds no depth per step;
+    - otherwise a node with a ``visit_<Class>`` method is dispatched to it,
+      exactly as ``NodeVisitor.visit`` would;
+    - any other node is expanded in place into its children.
+
+    A yielded iterator is resumed only after everything it yielded has been
+    handled, so the event sequence is identical to the recursive traversal,
+    while depth no longer grows with nesting that a step generator or the
+    generic expansion handles.
     """
-    pending = [_child_nodes(node)]
+    pending: list[Iterator[_Step]] = [steps]
     while pending:
-        child = next(pending[-1], None)
-        if child is None:
+        step = next(pending[-1], None)
+        if step is None:
             pending.pop()
             continue
-        method = getattr(visitor, "visit_" + child.__class__.__name__, None)
+        if not isinstance(step, ast.AST):
+            pending.append(step)
+            continue
+        class_name = step.__class__.__name__
+        in_place = getattr(visitor, "_steps_" + class_name, None)
+        if in_place is not None:
+            pending.append(in_place(step))
+            continue
+        method = getattr(visitor, "visit_" + class_name, None)
         if method is None:
-            pending.append(_child_nodes(child))
+            pending.append(_child_nodes(step))
         else:
-            method(child)
+            method(step)
 
 
 class _ScopeCallVisitor(ast.NodeVisitor):
@@ -330,18 +358,20 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         _visit_children(self, node)
 
     def visit_Call(self, node: ast.Call) -> None:
+        _run_steps(self, iter((node,)))
+
+    def _steps_Call(self, node: ast.Call) -> Iterator[_Step]:
         self.calls.append(node)
         self._call_snapshots[node] = self._capture_expression()
         # The callable expression is represented by the calls relationship;
         # suppress only its immediate head. Interior expressions (subscript
         # keys, conditionals, and f-string values) remain ordinary loads.
-        self._visit_chain_interiors(node.func)
-        for argument in node.args:
-            self.visit(argument)
+        yield self._chain_interior_steps(node.func)
+        yield from node.args
         for keyword in node.keywords:
-            self.visit(keyword.value)
+            yield keyword.value
 
-    def _visit_chain_interiors(self, node: ast.expr) -> None:
+    def _chain_interior_steps(self, node: ast.expr) -> Iterator[_Step]:
         """Visit a member chain's interiors while omitting its head identifiers.
 
         One expression contributes one fact, labelled with its full text, so
@@ -350,24 +380,27 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         a nested call, a subscript key, a conditional -- remains an ordinary
         expression and must still be traversed, which is why both paths share
         this descent instead of stopping at the first non-attribute base.
+
+        The descent is yielded to ``_run_steps`` rather than recursed into, so
+        a long chain such as ``a.b(c)[d].b(c)[d]...`` adds no stack depth.
         """
         if isinstance(node, ast.Name):
             return
         if isinstance(node, ast.Attribute):
             if isinstance(node.value, (ast.Attribute, ast.Name)):
-                self._visit_chain_interiors(node.value)
+                yield self._chain_interior_steps(node.value)
             else:
                 # A complex member base is an ordinary expression: retain its
                 # base identifier and interior names (obj[key].method()).
-                self.visit(node.value)
+                yield node.value
             return
         if isinstance(node, ast.Subscript):
             # A direct subscript callee suppresses only its table head while
             # retaining keys such as ``handler`` as ordinary references.
-            self._visit_chain_interiors(node.value)
-            self.visit(node.slice)
+            yield self._chain_interior_steps(node.value)
+            yield node.slice
             return
-        self.visit(node)
+        yield node
 
     def visit_Name(self, node: ast.Name) -> None:
         bound_names, _, _, _ = self._scope_names()
@@ -1464,11 +1497,14 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         )
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
+        _run_steps(self, iter((node,)))
+
+    def _steps_Attribute(self, node: ast.Attribute) -> Iterator[_Step]:
         if not isinstance(node.ctx, ast.Load):
             # ``store.registry = {}`` and ``del store.registry`` record no
             # member fact, but they still load the base object, which is an
             # ordinary reference to it.
-            self.visit(node.value)
+            yield node.value
             return
         snapshot = self._capture_expression()
         # Record only the outermost attribute of a chain; whether it is
@@ -1476,7 +1512,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # facts are emitted. Interiors are traversed without being recorded.
         self.references.append(node)
         self._reference_snapshots[node] = snapshot
-        self._visit_chain_interiors(node)
+        yield self._chain_interior_steps(node)
 
 
 def _import_bindings(alias: ast.alias) -> dict[str, str]:
@@ -3313,21 +3349,24 @@ def _attribute_root_name(expression: ast.expr) -> str | None:
     Unlike ``_base_identifier`` this stops at a call or subscript, because
     ``super().run`` is headed by a call result rather than by ``super``.
     """
+    while isinstance(expression, ast.Attribute):
+        expression = expression.value
     if isinstance(expression, ast.Name):
         return expression.id
-    if isinstance(expression, ast.Attribute):
-        return _attribute_root_name(expression.value)
     return None
 
 
 def _base_identifier(expression: ast.expr) -> str | None:
     """Return the root identifier of a member expression's value."""
+    while True:
+        if isinstance(expression, (ast.Attribute, ast.Subscript)):
+            expression = expression.value
+        elif isinstance(expression, ast.Call):
+            expression = expression.func
+        else:
+            break
     if isinstance(expression, ast.Name):
         return expression.id
-    if isinstance(expression, (ast.Attribute, ast.Subscript)):
-        return _base_identifier(expression.value)
-    if isinstance(expression, ast.Call):
-        return _base_identifier(expression.func)
     return None
 
 
@@ -3496,11 +3535,45 @@ def _parse_python(source: str, relative: str) -> ast.Module:
         raise ParseFailure(str(error), None) from error
 
 
+_LABEL_PLACEHOLDER = "_"
+
+
 def _expression_text(expression: ast.expr) -> str:
+    """Return the label of an expression: exactly its ``ast.unparse`` text.
+
+    ``ast.unparse`` recurses once per member, call, or subscript step, so a
+    long chain such as ``a.b().b()...`` would exhaust the interpreter stack.
+    Those steps are never parenthesised inside one another, so the chain is
+    rendered segment by segment instead: the innermost step, whose head is not
+    itself a step, through ``ast.unparse``; each outer attribute as ``.name``;
+    and each outer call or subscript through ``ast.unparse`` of a copy whose
+    head is a placeholder name, with that placeholder removed. Quoting and
+    precedence therefore remain the running interpreter's own.
+    """
     if isinstance(expression, ast.Name):
         return expression.id
-    if isinstance(expression, ast.Attribute):
-        if isinstance(expression.value, (ast.Name, ast.Attribute)):
-            return f"{_expression_text(expression.value)}.{expression.attr}"
-        return ast.unparse(expression)
-    return ast.unparse(expression)
+    outer: list[ast.Attribute | ast.Call | ast.Subscript] = []
+    innermost = expression
+    while isinstance(innermost, (ast.Attribute, ast.Call, ast.Subscript)):
+        inner = innermost.func if isinstance(innermost, ast.Call) else innermost.value
+        if not isinstance(inner, (ast.Attribute, ast.Call, ast.Subscript)):
+            break
+        outer.append(innermost)
+        innermost = inner
+    segments = [ast.unparse(innermost)]
+    for step in reversed(outer):
+        segments.append(_chain_segment_text(step))
+    return "".join(segments)
+
+
+def _chain_segment_text(step: ast.Attribute | ast.Call | ast.Subscript) -> str:
+    """Return the text one chain step appends to the text of its head."""
+    if isinstance(step, ast.Attribute):
+        return "." + step.attr
+    placeholder = ast.Name(id=_LABEL_PLACEHOLDER, ctx=ast.Load())
+    shallow: ast.Call | ast.Subscript
+    if isinstance(step, ast.Call):
+        shallow = ast.Call(func=placeholder, args=step.args, keywords=step.keywords)
+    else:
+        shallow = ast.Subscript(value=placeholder, slice=step.slice, ctx=step.ctx)
+    return ast.unparse(shallow)[len(_LABEL_PLACEHOLDER) :]
