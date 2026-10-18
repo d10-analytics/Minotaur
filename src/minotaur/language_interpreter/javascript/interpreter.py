@@ -664,6 +664,16 @@ _CHILD_FIELDS: dict[str, dict[str, str]] = {
 }
 
 
+class _MemberFactStep:
+    """A member expression whose member text is recorded once its object and
+    computed property have been walked."""
+
+    __slots__ = ("node",)
+
+    def __init__(self, node: Any) -> None:
+        self.node = node
+
+
 def _walk(
     node: Any,
     owner: str,
@@ -676,16 +686,34 @@ def _walk(
     skip_declaration: bool = False,
     member_fact: bool = True,
 ) -> None:
-    # Nodes without a dedicated branch are walked from an explicit stack rather
-    # than by recursion, so a long binary or logical chain costs no stack depth
-    # per operand.  Each pending entry holds a node, the shadow set it inherits,
-    # and whether a member expression there records its member text.  Children
-    # of the classified fallback inherit the owner and shadows and always record
-    # member text, so ``skip_declaration`` and ``member_fact`` apply to the root
-    # node only.
+    # Nodes without a dedicated branch, member expressions, and calls whose
+    # callee is not a bare name are walked from an explicit stack rather than by
+    # recursion, so a long binary, logical, member, or method-call chain costs no
+    # stack depth per element.  Each pending entry holds a node, the shadow set it
+    # inherits, and whether a member expression there records its member text.
+    # Children of the classified fallback inherit the owner and shadows and
+    # always record member text, so ``skip_declaration`` and ``member_fact``
+    # apply to the root node only.  A ``_MemberFactStep`` entry records a member
+    # expression's text after its object and computed property, which are pushed
+    # above it, have been walked.
     pending: list[tuple[Any, set[str] | None, bool]] = [(node, shadows, member_fact)]
     while pending:
         node, shadows, member_fact = pending.pop()
+        if isinstance(node, _MemberFactStep):
+            member = node.node
+            shadows = shadows or set()
+            root = _member_root(member)
+            if root is not None and root not in shadows:
+                member_label = _member_text(member, module.source)
+                if member_label is not None:
+                    seen.unresolved(
+                        owner,
+                        member_label,
+                        _node_location(module.path, member, module.line_index),
+                        nodes,
+                        relationships,
+                    )
+            continue
         if node is None or not hasattr(node, "type"):
             continue
         # EDGE-EXPR-004: supports unsupported import locals and new callees as references.
@@ -977,59 +1005,24 @@ def _walk(
                         )
                     else:
                         seen.unresolved(owner, callee_name, location, nodes, relationships)
-            else:
-                _walk(
-                    callee,
-                    owner,
-                    module,
-                    bindings,
-                    relationships,
-                    nodes,
-                    seen,
-                    shadows,
-                    member_fact=member_fact,
-                )
             # Member dispatch and IIFE callee forms are deliberately outside the
             # direct bare-identifier call contract; their bases and bodies remain
-            # ordinary executable expressions.
-            for argument in getattr(node, "arguments", ()):
-                _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
+            # ordinary executable expressions.  The arguments are pushed in
+            # reverse so they are walked in order, after any callee walked here.
+            pending.extend(
+                (argument, shadows, True) for argument in reversed(getattr(node, "arguments", ()))
+            )
+            if getattr(callee, "type", None) != "Identifier":
+                pending.append((callee, shadows, member_fact))
             continue
         if typ == "MemberExpression":
-            _walk(
-                getattr(node, "object", None),
-                owner,
-                module,
-                bindings,
-                relationships,
-                nodes,
-                seen,
-                shadows,
-                member_fact=False,
-            )
-            if getattr(node, "computed", False):
-                _walk(
-                    getattr(node, "property", None),
-                    owner,
-                    module,
-                    bindings,
-                    relationships,
-                    nodes,
-                    seen,
-                    shadows,
-                )
+            # The object is walked first, then a computed property, and only then
+            # is the member text recorded, so the base fact precedes it.
             if member_fact:
-                root = _member_root(node)
-                if root is not None and root not in shadows:
-                    member_label = _member_text(node, module.source)
-                    if member_label is not None:
-                        seen.unresolved(
-                            owner,
-                            member_label,
-                            _node_location(module.path, node, module.line_index),
-                            nodes,
-                            relationships,
-                        )
+                pending.append((_MemberFactStep(node), shadows, False))
+            if getattr(node, "computed", False):
+                pending.append((getattr(node, "property", None), shadows, True))
+            pending.append((getattr(node, "object", None), shadows, False))
             continue
         if typ == "Property":
             if getattr(node, "computed", False):
@@ -1448,30 +1441,32 @@ def _property_name(node: Any) -> str | None:
 
 def _member_root(node: Any) -> str | None:
     """Return the root identifier of a member-expression chain."""
-    typ = getattr(node, "type", None)
-    if typ == "Identifier":
-        return str(node.name)
-    if typ == "MemberExpression":
-        return _member_root(getattr(node, "object", None))
-    return None
+    while getattr(node, "type", None) == "MemberExpression":
+        node = getattr(node, "object", None)
+    return str(node.name) if getattr(node, "type", None) == "Identifier" else None
 
 
 def _member_text(node: Any, source: str) -> str | None:
     """Render a member chain using canonical dots and source-range keys."""
-    typ = getattr(node, "type", None)
-    if typ == "Identifier":
-        return str(node.name)
-    if typ != "MemberExpression":
+    members: list[Any] = []
+    while getattr(node, "type", None) == "MemberExpression":
+        members.append(node)
+        node = getattr(node, "object", None)
+    if getattr(node, "type", None) != "Identifier":
         return None
-    object_text = _member_text(getattr(node, "object", None), source)
-    if object_text is None:
-        return None
-    property_node = getattr(node, "property", None)
-    if getattr(node, "computed", False):
-        start, end = getattr(property_node, "range", (0, 0))
-        return f"{object_text}[{source[start:end]}]"
-    property_name = _property_name(property_node)
-    return f"{object_text}.{property_name}" if property_name is not None else None
+    parts = [str(node.name)]
+    # Segments are appended from the innermost member outward.
+    for member in reversed(members):
+        property_node = getattr(member, "property", None)
+        if getattr(member, "computed", False):
+            start, end = getattr(property_node, "range", (0, 0))
+            parts.append(f"[{source[start:end]}]")
+            continue
+        property_name = _property_name(property_node)
+        if property_name is None:
+            return None
+        parts.append(f".{property_name}")
+    return "".join(parts)
 
 
 def _start(node: Any) -> int:
