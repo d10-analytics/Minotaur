@@ -83,9 +83,12 @@ which the graph was last actually generated, as provenance rather than a
 freshness gate.
 
 The command writes canonical JSON atomically. It exits `0` on a clean graph,
-`1` after writing a valid partial graph with parse or source-read diagnostics,
-and `2` for argument, selection, dispatch, or output-preflight errors (with
-no output written).
+`1` after writing a valid partial graph with parse, source-read, or
+`interpreter-error` diagnostics, and `2` for argument, selection, dispatch, or
+output-preflight errors (with no output written). An analysis failure that no
+single selected file explains is also a dispatch error: it exits `2`, writes
+no graph or sidecar, and leaves an existing graph and sidecar unchanged (see
+[Diagnostics and unresolved references](#diagnostics-and-unresolved-references)).
 
 ## Structural facts it records
 
@@ -364,6 +367,20 @@ that is removed before the script exits.
 If a source file cannot be read or parsed, the analyzer reports a diagnostic
 for that file and continues with the other files in the workspace. The failed
 file contributes no structural facts.
+
+If the analyzer itself fails unexpectedly, Minotaur analyzes each selected
+Python file on its own to find the files that cause the failure. Each such
+file is reported as one error-severity `interpreter-error` diagnostic with no
+location, whose message names the exception class and its text, for example
+`deep.py: interpreter-error: RecursionError: maximum recursion depth exceeded
+[severity=error]`. The code reports a Minotaur limitation, not a syntax
+problem, so the file may be valid Python. That file contributes no facts; the
+remaining files are analyzed together, `analyze` writes the partial graph and
+exits `1`. A refreshing `query` re-analyzes the same way, answers from the
+rewritten graph, and exits `1` without printing the diagnostic. When no single
+selected file explains the failure, or the remaining files still fail
+together, the command instead prints one `minotaur: error: analysis failed in a
+way no single selected file explains: …` line, exits `2`, and writes no graph.
 
 Python files are decoded the way Python decodes them when it compiles or
 imports them, except that only ASCII-compatible text codecs are honoured. A

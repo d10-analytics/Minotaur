@@ -3435,11 +3435,18 @@ def _syntax_location(path: str, error: SyntaxError) -> Location | None:
 
 
 def _parse_python(source: str, relative: str) -> ast.Module:
-    """Parse Python source and normalize syntax failures for the reader."""
+    """Parse Python source and normalize parser failures for the reader.
+
+    Besides syntax errors, ``ast.parse`` raises ``RecursionError`` when a
+    module nests deeper than the parser can build; that file is reported as a
+    parse failure without a location so its siblings still analyze.
+    """
     try:
         return ast.parse(source, filename=relative)
     except SyntaxError as error:
         raise ParseFailure(error.msg, _syntax_location(relative, error)) from error
+    except RecursionError as error:
+        raise ParseFailure(str(error), None) from error
 
 
 def _expression_text(expression: ast.expr) -> str:

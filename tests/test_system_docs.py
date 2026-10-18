@@ -794,3 +794,50 @@ def test_format_reference_lists_the_invalid_generated_at_fixture() -> None:
     assert "- `invalid-generated-at.json` fails JSON Schema validation;" in text
     fixture = ROOT / "tests/fixtures/minotaur-graph-v1/invalid/invalid-generated-at.json"
     assert fixture.is_file()
+
+
+# ---------------------------------------------------------------------------
+# Isolated interpreter failures: the analyze guides and the recovery guide
+# ---------------------------------------------------------------------------
+
+ANALYZE_PYTHON_GUIDE = ROOT / "docs/guides/analyze-python.md"
+SOURCE_ERROR_RECOVERY_GUIDE = ROOT / "docs/guides/source-error-recovery.md"
+INTERPRETER_ERROR_GUIDES = (
+    ANALYZE_PYTHON_GUIDE,
+    ROOT / "docs/guides/analyze-javascript.md",
+    ROOT / "docs/guides/analyze-sql.md",
+    SOURCE_ERROR_RECOVERY_GUIDE,
+)
+
+
+def test_analyze_guides_name_the_interpreter_error_diagnostic() -> None:
+    for guide in INTERPRETER_ERROR_GUIDES:
+        text = _collapsed(guide)
+        assert "`interpreter-error`" in text, f"{guide.name} must name `interpreter-error`"
+        assert "error-severity `interpreter-error`" in text, (
+            f"{guide.name} must state that `interpreter-error` is an error"
+        )
+        assert "with no location" in text, f"{guide.name} must state it carries no location"
+
+
+def test_analyze_python_exit_statuses_include_the_interpreter_error_and_no_blame_exit() -> None:
+    text = _collapsed(ANALYZE_PYTHON_GUIDE)
+    assert (
+        "`1` after writing a valid partial graph with parse, source-read, or "
+        "`interpreter-error` diagnostics"
+    ) in text
+    assert "no single selected file explains" in text
+    assert (
+        "An analysis failure that no single selected file explains is also a dispatch "
+        "error: it exits `2`, writes no graph or sidecar"
+    ) in text
+
+
+def test_source_error_recovery_states_the_interpreter_error_and_no_blame_outcomes() -> None:
+    text = _collapsed(SOURCE_ERROR_RECOVERY_GUIDE)
+    assert "no single selected file explains" in text
+    assert (
+        "exit `2` means an argument or preflight failure, or an analysis failure that "
+        "no single selected file explains, and writes no graph"
+    ) in text
+    assert "writes the partial graph from the remaining files, and exits `1`" in text

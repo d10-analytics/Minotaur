@@ -14,6 +14,7 @@ import sys
 import time
 from importlib import metadata
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -23,6 +24,9 @@ from minotaur.graph_model.loading import load_graph_file, stamp_path
 from minotaur.language_interpreter import ANALYZER_SEMANTICS_VERSION, registry
 from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode, DiagnosticSeverity
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
+
+if TYPE_CHECKING:
+    from conftest import InterpreterFault
 
 
 def _write(root: Path, path: str, source: str) -> Path:
@@ -4013,3 +4017,300 @@ def test_analyze_refuses_an_existing_output_that_is_an_unloadable_stamped_graph(
 
 def _set_nodes_item_int(document: dict[str, object]) -> None:
     document["nodes"] = [1]
+
+
+_INJECTED_FAULT = "injected fault"
+_UNATTRIBUTED = (
+    "minotaur: error: analysis failed in a way no single selected file explains: "
+    "RuntimeError: cross-file fault"
+)
+
+
+def _interpreter_error_line(path: str, message: str = f"RuntimeError: {_INJECTED_FAULT}") -> str:
+    return f"{path}: interpreter-error: {message} [severity=error]"
+
+
+def _isolation_root(tmp_path: Path) -> Path:
+    """Three modules whose only cross-file facts link ``a.py`` and ``c.py``."""
+    root = tmp_path / "source"
+    _write(root, "a.py", "def f_a():\n    return 1\n")
+    _write(root, "b.py", "def f_b():\n    return 2\n")
+    _write(root, "c.py", "from a import f_a\n\n\ndef f_c():\n    return f_a()\n")
+    return root
+
+
+def _analyze_in_process(root: Path, output: Path, *targets: Path, force: bool = False) -> int:
+    return cli.main(
+        [
+            "analyze",
+            "--root",
+            str(root),
+            "--output",
+            str(output),
+            *(str(target) for target in targets),
+            *(["--force"] if force else []),
+        ]
+    )
+
+
+def _diagnostic_lines(stderr: str) -> list[str]:
+    """Source diagnostic lines, excluding the CLI's own ``minotaur:`` messages."""
+    return [line for line in stderr.splitlines() if not line.startswith("minotaur: ")]
+
+
+def _command_errors(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if line.startswith("minotaur: error:")]
+
+
+def _file_node_paths(output: Path) -> list[str]:
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    return sorted(node["path"] for node in graph["nodes"] if node["node_class"] == "file")
+
+
+def _calls_between(output: Path, caller: str, callee: str) -> int:
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    ids = {node["label"]: node["id"] for node in graph["nodes"]}
+    return sum(
+        1
+        for relationship in graph["relationships"]
+        if relationship["kind"] == "calls"
+        and relationship["source"] == ids.get(caller)
+        and relationship["target"] == ids.get(callee)
+    )
+
+
+def test_interpreter_failure_isolates_the_file_and_keeps_joint_facts_of_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = _isolation_root(tmp_path)
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+    interpreter_fault.install("python", "b.py", RuntimeError(_INJECTED_FAULT))
+
+    assert _analyze_in_process(root, output, root) == 1
+
+    stderr = capsys.readouterr().err
+    assert _diagnostic_lines(stderr) == [_interpreter_error_line("b.py")]
+    assert "Traceback" not in stderr
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert _file_node_paths(output) == ["a.py", "c.py"]
+    assert {node["label"] for node in graph["nodes"]} == {
+        "a.py",
+        "a",
+        "a.f_a",
+        "c.py",
+        "c",
+        "c.f_c",
+    }
+    assert not any(node.get("path") == "b.py" for node in graph["nodes"])
+    # Only a joint analysis of a.py and c.py resolves the import and the call.
+    assert _calls_between(output, "c.f_c", "a.f_a") == 1
+    python_facts = graph["extensions"]["minotaur-python"]
+    assert python_facts["imports_resolved"] == 1
+    assert python_facts["imports_unresolved"] == 0
+
+
+def test_every_failing_file_is_reported_in_path_order_and_an_empty_survivor_set_is_analyzed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = _isolation_root(tmp_path)
+    _write(root, "d.py", "def f_d():\n    return 4\n")
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+    interpreter_fault.install("python", "b.py", RuntimeError(_INJECTED_FAULT))
+    interpreter_fault.install("python", "d.py", RuntimeError())
+
+    assert _analyze_in_process(root, output, root) == 1
+
+    stderr = capsys.readouterr().err
+    assert _diagnostic_lines(stderr) == [
+        _interpreter_error_line("b.py"),
+        _interpreter_error_line("d.py", "RuntimeError"),
+    ]
+    assert _file_node_paths(output) == ["a.py", "c.py"]
+    assert _calls_between(output, "c.f_c", "a.f_a") == 1
+
+    alone = tmp_path / "alone.json"
+    assert _analyze_in_process(root, alone, root / "b.py") == 1
+
+    stderr = capsys.readouterr().err
+    assert _diagnostic_lines(stderr) == [_interpreter_error_line("b.py")]
+    assert _file_node_paths(alone) == []
+
+
+def test_isolated_failures_follow_the_interpreters_own_diagnostics_in_posix_path_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "a.py", "def f_a():\n    return 1\n")
+    _write(root, "pkg-a.py", "def f_dash():\n    return 2\n")
+    _write(root, "pkg/z.py", "def f_z():\n    return 3\n")
+    _write(root, "y.py", "def broken(:\n")
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+    interpreter_fault.install("python", "pkg/z.py", RuntimeError("fault in z"))
+    interpreter_fault.install("python", "pkg-a.py", RuntimeError("fault in dash"))
+
+    assert _analyze_in_process(root, output, root) == 1
+
+    lines = _diagnostic_lines(capsys.readouterr().err)
+    # The parse error comes from the final joint analysis and keeps its place
+    # ahead of the isolated files, which follow in root-relative POSIX order:
+    # "pkg-a.py" sorts before "pkg/z.py" because "-" sorts before "/".
+    assert len(lines) == 3
+    assert lines[0].startswith("y.py:")
+    assert ": parse-error: " in lines[0]
+    assert lines[1:] == [
+        _interpreter_error_line("pkg-a.py", "RuntimeError: fault in dash"),
+        _interpreter_error_line("pkg/z.py", "RuntimeError: fault in z"),
+    ]
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert graph["extensions"]["minotaur"]["errors"] == 3
+    assert _file_node_paths(output) == ["a.py"]
+
+
+@pytest.mark.parametrize(
+    ("language", "extension", "sources"),
+    [
+        (
+            "javascript",
+            "js",
+            (
+                "export function fa() {\n  return 1;\n}\n",
+                "export function fb() {\n  return 2;\n}\n",
+                "export function fc() {\n  return 3;\n}\n",
+            ),
+        ),
+        (
+            "sql",
+            "sql",
+            (
+                "CREATE TABLE A (id int)\n",
+                "CREATE TABLE B (id int)\n",
+                "CREATE TABLE C (id int)\n",
+            ),
+        ),
+    ],
+)
+def test_interpreter_failure_isolation_is_shared_by_every_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+    language: str,
+    extension: str,
+    sources: tuple[str, str, str],
+) -> None:
+    root = tmp_path / "source"
+    for stem, source in zip(("a", "b", "c"), sources, strict=True):
+        _write(root, f"{stem}.{extension}", source)
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+    interpreter_fault.install(language, f"b.{extension}", RuntimeError(_INJECTED_FAULT))
+
+    assert _analyze_in_process(root, output, root) == 1
+
+    stderr = capsys.readouterr().err
+    assert _diagnostic_lines(stderr) == [_interpreter_error_line(f"b.{extension}")]
+    assert "Traceback" not in stderr
+    assert _file_node_paths(output) == [f"a.{extension}", f"c.{extension}"]
+
+
+def test_failure_no_single_file_explains_is_a_command_error_that_keeps_the_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = _isolation_root(tmp_path)
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+    assert _analyze_in_process(root, output, root) == 0
+    capsys.readouterr()
+    graph_before = output.read_bytes()
+    sidecar_before = stamp_path(output).read_bytes()
+    # b.py fails only when a.py shares the attempt, so every file analyzes alone.
+    interpreter_fault.install("python", "b.py", RuntimeError("cross-file fault"), alongside="a.py")
+
+    assert _analyze_in_process(root, output, root, force=True) == 2
+
+    stderr = capsys.readouterr().err
+    assert _command_errors(stderr) == [_UNATTRIBUTED]
+    assert "Traceback" not in stderr
+    assert "interpreter-error" not in stderr
+    assert output.read_bytes() == graph_before
+    assert stamp_path(output).read_bytes() == sidecar_before
+
+
+def test_failing_final_attempt_is_a_command_error_instead_of_more_blame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = _isolation_root(tmp_path)
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+    assert _analyze_in_process(root, output, root) == 0
+    capsys.readouterr()
+    graph_before = output.read_bytes()
+    sidecar_before = stamp_path(output).read_bytes()
+    interpreter_fault.install("python", "c.py", RuntimeError(_INJECTED_FAULT))
+    interpreter_fault.install("python", "b.py", RuntimeError("cross-file fault"), alongside="a.py")
+
+    assert _analyze_in_process(root, output, root, force=True) == 2
+
+    stderr = capsys.readouterr().err
+    assert _command_errors(stderr) == [_UNATTRIBUTED]
+    assert "Traceback" not in stderr
+    assert "interpreter-error" not in stderr
+    assert output.read_bytes() == graph_before
+    assert stamp_path(output).read_bytes() == sidecar_before
+
+
+def test_isolated_failure_is_counted_in_the_graph_and_reanalyzed_on_the_next_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = _isolation_root(tmp_path)
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+    interpreter_fault.install("python", "b.py", RuntimeError(_INJECTED_FAULT))
+
+    assert _analyze_in_process(root, output, root) == 1
+    assert _diagnostic_lines(capsys.readouterr().err) == [_interpreter_error_line("b.py")]
+    facts = json.loads(output.read_text(encoding="utf-8"))["extensions"]["minotaur"]
+    assert facts["errors"] == 1
+
+    assert _analyze_in_process(root, output, root) == 1
+    stderr = capsys.readouterr().err
+    assert "graph is up to date" not in stderr
+    assert _diagnostic_lines(stderr) == [_interpreter_error_line("b.py")]
+
+
+def test_interpreter_interrupt_is_not_isolated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = _isolation_root(tmp_path)
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+    interpreter_fault.install("python", "b.py", KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        _analyze_in_process(root, output, root)
+
+    assert not output.exists()
+    assert not stamp_path(output).exists()
