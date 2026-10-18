@@ -2463,3 +2463,32 @@ def test_member_text_resumes_below_an_operator_that_is_a_member_object(
         result,
         [(NodeClass.UNRESOLVED_REFERENCE, label, None, 0, column) for label, column in references],
     )
+
+
+def test_var_in_a_nested_function_or_class_does_not_shadow_the_enclosing_function(tmp_path):
+    # A ``var`` belongs to its nearest function or static block, so declarations
+    # inside nested functions, arrows and class static blocks leave the
+    # enclosing function's call resolved to the module binding.
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function target() {}\n"
+                "function outer() {\n"
+                "  function inner() { var target = 1; }\n"
+                "  const expression = function () { var target = 2; };\n"
+                "  const arrow = () => { var target = 3; };\n"
+                "  class Holder { static { var target = 4; } }\n"
+                "  target();\n"
+                "}\n"
+            )
+        },
+    )
+    target = _node(result, "app.target")
+    outer = _node(result, "app.outer")
+    assert [
+        location.range.start.line
+        for edge in _edges(result, RelationshipKind.CALLS.value)
+        if edge.source == outer.id and edge.target == target.id
+        for location in edge.evidence[0].locations
+    ] == [6]
