@@ -2492,3 +2492,48 @@ def test_var_in_a_nested_function_or_class_does_not_shadow_the_enclosing_functio
         if edge.source == outer.id and edge.target == target.id
         for location in edge.evidence[0].locations
     ] == [6]
+
+
+def test_long_member_chain_reports_its_base_then_its_member_text(tmp_path):
+    result = _analyze_with_caller_budget(
+        tmp_path, "export const x = a" + ".b" * _CHAIN_TERMS + ";\n"
+    )
+
+    _assert_file_and_module_then(
+        result,
+        [
+            (NodeClass.UNRESOLVED_REFERENCE, "a", None, 0, 17),
+            (NodeClass.UNRESOLVED_REFERENCE, "a" + ".b" * _CHAIN_TERMS, None, 0, 17),
+        ],
+    )
+
+
+def test_long_method_call_chain_reports_only_its_base(tmp_path):
+    # Every member in the chain has a call as its object, so none has an
+    # identifier root and only the base name is a reference.
+    result = _analyze_with_caller_budget(
+        tmp_path, "export const x = a" + ".b()" * _CHAIN_TERMS + ";\n"
+    )
+
+    _assert_file_and_module_then(result, [(NodeClass.UNRESOLVED_REFERENCE, "a", None, 0, 17)])
+
+
+def test_member_callee_text_follows_its_object_and_key_and_precedes_the_arguments(tmp_path):
+    # The member text is recorded after the object and the computed key it
+    # contains, and the call's arguments are walked only after the callee.
+    result = _analyze(tmp_path, {"mod.js": "export const x = a[c].d(e, f.g);\n"})
+
+    _assert_file_and_module_then(
+        result,
+        [
+            (NodeClass.UNRESOLVED_REFERENCE, label, None, 0, column)
+            for label, column in [
+                ("a", 17),
+                ("c", 19),
+                ("a[c].d", 17),
+                ("e", 24),
+                ("f", 27),
+                ("f.g", 27),
+            ]
+        ],
+    )
