@@ -553,6 +553,37 @@ def test_long_mixed_chain_reports_callees_then_interiors_innermost_first(
     _assert_file_and_module_then(result, [*callees, *interiors])
 
 
+def test_chain_walk_keeps_callee_argument_keyword_and_member_order(tmp_path: Path) -> None:
+    """Interior references follow source evaluation order around a chain.
+
+    A subscript callee yields its table chain's keys before its own key, a
+    call yields positional and starred arguments before keyword values, and a
+    member load is recorded before the chain beneath it is walked.
+    """
+    _write(tmp_path, "mod.py", "x = t[i][k](a, *s, key=b, **m)\ny = p.q(c.d).r\n")
+
+    result = analyze_python_files(Workspace(tmp_path), (tmp_path / "mod.py",))
+
+    _assert_file_and_module_then(
+        result,
+        [
+            (NodeClass.UNRESOLVED_REFERENCE, label, None, line, column)
+            for label, line, column in (
+                ("t[i][k]", 0, 4),
+                ("p.q", 1, 4),
+                ("i", 0, 6),
+                ("k", 0, 9),
+                ("a", 0, 12),
+                ("s", 0, 16),
+                ("b", 0, 23),
+                ("m", 0, 28),
+                ("p.q(c.d).r", 1, 4),
+                ("c.d", 1, 8),
+            )
+        ],
+    )
+
+
 _LABEL_PARITY_CORPUS = (
     "a",
     "a.b.c.d",
