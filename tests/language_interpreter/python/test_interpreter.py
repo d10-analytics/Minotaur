@@ -20,11 +20,16 @@ from minotaur import cli
 from minotaur.graph_model.identity import compute_node_id
 from minotaur.graph_model.loading import load_graph_file
 from minotaur.graph_model.location import Location, Position, Range
-from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipKind
+from minotaur.graph_model.provenance import NodeClass, Provenance, RelationshipKind, SymbolKind
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_model.validation import IssueCode, validate_document
 from minotaur.language_interpreter import emission as shared_emission
-from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.contract import (
+    AnalysisResult,
+    Diagnostic,
+    DiagnosticCode,
+    DiagnosticSeverity,
+)
 from minotaur.language_interpreter.python import analyze_python_files, analyze_python_workspace
 from minotaur.language_interpreter.python import interpreter as python_interpreter
 from minotaur.language_interpreter.python.interpreter import _ScopeCallVisitor
@@ -332,6 +337,35 @@ def test_syntax_error_is_reported_without_erasing_other_workspace_facts(tmp_path
     )
     assert {node.label for node in result.document.nodes} >= {"valid", "valid.working"}
     assert "broken" not in {node.label for node in result.document.nodes}
+    assert validate_document(result.document).is_valid
+
+
+def test_module_too_deep_for_the_parser_is_a_parse_error_beside_its_siblings(
+    tmp_path: Path,
+) -> None:
+    # 50,000 terms exceeds the parser's own nesting ceiling on every supported
+    # Python version, so ``ast.parse`` raises ``RecursionError`` for this file.
+    _write(tmp_path, "deep.py", "x = " + " + ".join(["1"] * 50_000) + "\n")
+    _write(tmp_path, "alpha.py", "def first():\n    return 1\n")
+    _write(tmp_path, "beta.py", "def second():\n    return 2\n")
+    files = tuple(tmp_path / name for name in ("deep.py", "alpha.py", "beta.py"))
+
+    result = analyze_python_files(Workspace(tmp_path), files)
+
+    assert len(result.diagnostics) == 1
+    diagnostic = result.diagnostics[0]
+    assert diagnostic.code == DiagnosticCode.PARSE_ERROR
+    assert diagnostic.path == "deep.py"
+    assert diagnostic.severity == DiagnosticSeverity.ERROR
+    assert diagnostic.location is None
+    assert "maximum recursion depth" in diagnostic.message
+    nodes = result.document.nodes
+    file_paths = {node.path for node in nodes if node.node_class == NodeClass.FILE}
+    assert {"alpha.py", "beta.py"} <= file_paths
+    functions = {node.label for node in nodes if node.symbol_kind == SymbolKind.FUNCTION.value}
+    assert {"alpha.first", "beta.second"} <= functions
+    assert all(node.path != "deep.py" for node in nodes)
+    assert all(node.location is None or node.location.path != "deep.py" for node in nodes)
     assert validate_document(result.document).is_valid
 
 
