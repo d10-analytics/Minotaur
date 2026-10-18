@@ -31,7 +31,9 @@ exit: 0
 The parser's diagnostic wording can vary by Python version. Its zero-based
 location differs from the one-based locations in query results. Exit `1` from
 analysis means a partial graph with diagnostics; exit `2` means an argument or
-preflight failure. Do not treat either as a complete successful analysis.
+preflight failure, or an analysis failure that no single selected file
+explains, and writes no graph. Do not treat either as a complete successful
+analysis.
 
 `--no-refresh` lets us inspect `healthy` in the partial snapshot. The stale
 warning for `broken.py` is expected: that selected file is absent from the
@@ -50,3 +52,14 @@ that file instead of a `parse-error`, writes the partial graph from its valid
 siblings, and exits `1`. To repair it, add or correct the declaration so that
 it names the file's actual ASCII-compatible encoding, or re-encode the file as
 UTF-8 and remove any declaration that names another codec. Then analyze again.
+
+A file that makes the analyzer itself fail unexpectedly is isolated the same
+way. Analysis retries each selected file of the failing language on its own,
+reports each file that fails alone as one error-severity `interpreter-error`
+with no location, such as `deep.py: interpreter-error: RecursionError: maximum
+recursion depth exceeded [severity=error]`, writes the partial graph from the
+remaining files, and exits `1`. The diagnostic reports a Minotaur limitation
+rather than a problem in the source, which may be valid. When no single
+selected file explains the failure, analysis prints one `minotaur: error:
+analysis failed in a way no single selected file explains: …` line, exits `2`,
+writes no graph, and leaves an existing graph and sidecar unchanged.
