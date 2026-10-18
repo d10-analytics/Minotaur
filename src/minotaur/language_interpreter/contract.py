@@ -28,6 +28,7 @@ class DiagnosticCode(str, Enum):
     ORPHANED_FOREIGN_KEY = "orphaned-foreign-key"
     CIRCULAR_DEPENDENCY = "circular-dependency"
     VIEW_DEPTH_WARNING = "view-depth-warning"
+    INTERPRETER_ERROR = "interpreter-error"
 
 
 class DiagnosticSeverity(str, Enum):

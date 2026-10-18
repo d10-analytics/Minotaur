@@ -2095,7 +2095,78 @@ def _dispatch(
     if len(grouped) != 1:
         raise ValueError("selected files require unsupported multi-interpreter graph composition")
     registration, interpreter_files = next(iter(grouped.items()))
-    return registration.analyze(workspace, tuple(interpreter_files), sql_settings)
+    return _analyze_isolating_failures(
+        registration, workspace, tuple(interpreter_files), sql_settings
+    )
+
+
+#: Prefix of the command error raised when an interpreter failure cannot be
+#: attributed to any one selected file.
+_UNATTRIBUTED_FAILURE = "analysis failed in a way no single selected file explains: "
+
+
+def _analyze_isolating_failures(
+    registration: InterpreterRegistration,
+    workspace: Workspace,
+    files: tuple[Path, ...],
+    sql_settings: SqlSettings | None,
+) -> AnalysisResult:
+    """Run one interpreter, isolating any file whose own analysis raises.
+
+    A healthy run makes exactly one interpreter call.  When that call raises,
+    its partial result is discarded and every file is analyzed on its own, in
+    root-relative order, only to learn which files fail alone; those solo
+    results are discarded too.  The remaining files are then analyzed together
+    once more, so cross-file facts among them (calls, resolved imports) come
+    from one joint analysis, exactly as in a healthy run.  Each isolated file
+    becomes one error diagnostic and contributes no facts.
+
+    The retry is deliberately not a loop.  A failure that no single file
+    causes, or a final joint analysis that still fails, is reported as a
+    command error instead of blaming an arbitrary file, so the caller writes
+    nothing and an existing graph stays intact.
+
+    Every attempt is made from this frame, so a failure that depends on stack
+    depth behaves the same in each attempt.  Only ``Exception`` is handled:
+    an interrupt or exit request must still stop the command.
+    """
+    try:
+        return registration.analyze(workspace, files, sql_settings)
+    except Exception as error:  # Attributed below, outside this handler.
+        unexplained = error
+    ordered = sorted(files, key=lambda path: path.relative_to(workspace.root).as_posix())
+    failures: list[tuple[Path, str]] = []
+    for path in ordered:
+        try:
+            registration.analyze(workspace, (path,), sql_settings)
+        except Exception as error:  # The file fails on its own.
+            failures.append((path, _exception_text(error)))
+    if not failures:
+        raise ValueError(_UNATTRIBUTED_FAILURE + _exception_text(unexplained)) from unexplained
+    # Release the first attempt's traceback, and with it that attempt's state.
+    del unexplained
+    failed = {path for path, _ in failures}
+    remaining = tuple(path for path in files if path not in failed)
+    try:
+        result = registration.analyze(workspace, remaining, sql_settings)
+    except Exception as error:  # The remaining files still fail together.
+        raise ValueError(_UNATTRIBUTED_FAILURE + _exception_text(error)) from error
+    isolated = tuple(
+        Diagnostic(
+            DiagnosticCode.INTERPRETER_ERROR,
+            path.relative_to(workspace.root).as_posix(),
+            message,
+        )
+        for path, message in failures
+    )
+    return replace(result, diagnostics=(*result.diagnostics, *isolated))
+
+
+def _exception_text(error: BaseException) -> str:
+    """Name an exception's class and, when it has any, its message."""
+    text = str(error)
+    name = type(error).__name__
+    return f"{name}: {text}" if text else name
 
 
 def _stamp_if_validated(path: Path, loaded: LoadedGraph) -> None:

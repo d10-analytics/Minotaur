@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -16,6 +17,9 @@ from minotaur import cli
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import stamp_path
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
+
+if TYPE_CHECKING:
+    from conftest import InterpreterFault
 
 
 def _git(root: Path, *args: str) -> None:
@@ -671,3 +675,38 @@ def test_committed_diff_help_survives_config_locate_error(
     assert "--config CONFIG" in output.out
     assert "--scope NAME" in output.out
     assert calls == []
+
+
+def test_committed_diff_isolates_a_failing_file_and_exits_on_the_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interpreter_fault: InterpreterFault,
+) -> None:
+    root = _repo(tmp_path)
+    _write_config(root, targets='targets = ["a.py", "b.py", "c.py"]')
+    (root / "a.py").write_text("def f_a():\n    return 1\n", encoding="utf-8")
+    (root / "b.py").write_text("def f_b():\n    return 2\n", encoding="utf-8")
+    (root / "c.py").write_text(
+        "from a import f_a\n\n\ndef f_c():\n    return f_a()\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(root)
+    interpreter_fault.install("python", "b.py", RuntimeError("injected fault"))
+    assert cli.main(["analyze"]) == 1
+    capsys.readouterr()
+    _commit_all(root)
+
+    status = cli.main(["query", "diff", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert (
+        "b.py: interpreter-error: RuntimeError: injected fault [severity=error]"
+        in captured.err.splitlines()
+    )
+    assert "Traceback" not in captured.err
+    payload = json.loads(captured.out)
+    # Every one of these lists counts as a structural change, so empty lists
+    # mean the exit status comes from the diagnostic alone.
+    for key in ("added", "removed", "relocated", "relationships_added", "relationships_removed"):
+        assert payload[key] == [], key

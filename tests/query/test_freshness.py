@@ -7,12 +7,16 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from minotaur import cli
-from minotaur.graph_model.loading import load_graph_file, stamp_path
+from minotaur.graph_model.loading import graph_digest, load_graph_file, stamp_path
 from minotaur.query.freshness import content_sha256, drift
+
+if TYPE_CHECKING:
+    from conftest import InterpreterFault
 
 
 def _write(root: Path, relative: str, content: str) -> Path:
@@ -488,3 +492,97 @@ def test_public_query_wrong_root_preserves_graph_even_with_new_files(
     assert [result["symbol"] for result in saved["results"]] == ["pkg.app.foo"]
     assert output.read_bytes() == before
     assert stamp_path(output).read_bytes() == sidecar
+
+
+_UNATTRIBUTED = (
+    "minotaur: error: analysis failed in a way no single selected file explains: "
+    "RuntimeError: cross-file fault"
+)
+
+
+def _isolation_root(tmp_path: Path) -> Path:
+    """Three modules whose only cross-file facts link ``a.py`` and ``c.py``."""
+    root = tmp_path / "source"
+    _write(root, "a.py", "def f_a():\n    return 1\n")
+    _write(root, "b.py", "def f_b():\n    return 2\n")
+    _write(root, "c.py", "from a import f_a\n\n\ndef f_c():\n    return f_a()\n")
+    return root
+
+
+def _query_symbol(root: Path, output: Path, symbol: str) -> int:
+    return cli.main(["query", "definitions", symbol, "--graph", str(output), "--root", str(root)])
+
+
+def _file_node_paths(output: Path) -> list[str]:
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    return sorted(node["path"] for node in graph["nodes"] if node["node_class"] == "file")
+
+
+def test_refresh_isolates_a_failing_file_and_rewrites_the_graph_without_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], interpreter_fault: InterpreterFault
+) -> None:
+    root = _isolation_root(tmp_path)
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    capsys.readouterr()
+    interpreter_fault.install("python", "b.py", RuntimeError("injected fault"))
+    _write(root, "b.py", "def f_b():\n    return 3\n")
+
+    assert _query_symbol(root, output, "f_a") == 1
+
+    captured = capsys.readouterr()
+    assert "a.py:1  a.f_a  function" in captured.out
+    assert "Traceback" not in captured.err
+    # A refresh reports its error count through the exit status only.
+    assert "interpreter-error" not in captured.err
+    assert all(line.startswith("minotaur: ") for line in captured.err.splitlines())
+    content = output.read_bytes()
+    graph = json.loads(content)
+    assert _file_node_paths(output) == ["a.py", "c.py"]
+    assert not any(node.get("path") == "b.py" for node in graph["nodes"])
+    assert graph["extensions"]["minotaur"]["errors"] == 1
+    assert stamp_path(output).read_text(encoding="ascii") == f"{graph_digest(content)}\n"
+
+
+def test_refresh_failure_no_single_file_explains_keeps_the_graph(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], interpreter_fault: InterpreterFault
+) -> None:
+    root = _isolation_root(tmp_path)
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    capsys.readouterr()
+    graph_before = output.read_bytes()
+    sidecar_before = stamp_path(output).read_bytes()
+    _write(root, "c.py", "from a import f_a\n\n\ndef f_c():\n    return f_a() + 1\n")
+    # b.py fails only when a.py shares the attempt, so every file analyzes alone.
+    interpreter_fault.install("python", "b.py", RuntimeError("cross-file fault"), alongside="a.py")
+
+    assert _query_symbol(root, output, "f_a") == 2
+
+    stderr = capsys.readouterr().err
+    assert [line for line in stderr.splitlines() if line.startswith("minotaur: error:")] == [
+        _UNATTRIBUTED
+    ]
+    assert "Traceback" not in stderr
+    assert output.read_bytes() == graph_before
+    assert stamp_path(output).read_bytes() == sidecar_before
+
+
+def test_isolated_explicit_target_is_reanalyzed_once_its_failure_is_gone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], interpreter_fault: InterpreterFault
+) -> None:
+    root = _isolation_root(tmp_path)
+    output = tmp_path / "graph.json"
+    interpreter_fault.install("python", "b.py", RuntimeError("injected fault"))
+    assert _analyze(root, output, root / "a.py", root / "b.py", root / "c.py") == 1
+    capsys.readouterr()
+    assert _file_node_paths(output) == ["a.py", "c.py"]
+
+    interpreter_fault.undo()
+
+    assert _query_symbol(root, output, "f_b") == 0
+    captured = capsys.readouterr()
+    assert "b.py:1  b.f_b  function" in captured.out
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    assert _file_node_paths(output) == ["a.py", "b.py", "c.py"]
+    assert "errors" not in graph["extensions"]["minotaur"]
