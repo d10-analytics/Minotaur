@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import ast
 import builtins
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -249,6 +249,47 @@ def _module_suffixes(modules: Mapping[str, object]) -> dict[str, str]:
     return suffixes
 
 
+def _child_nodes(node: ast.AST) -> Iterator[ast.AST]:
+    """Yield ``node``'s direct AST children exactly as ``generic_visit`` reads them.
+
+    Fields come in ``ast.iter_fields`` order; a list field contributes its AST
+    items and a single field its AST value. Fields are read lazily, as the
+    standard visitor reads them, so a field is fetched only after every
+    earlier sibling has been fully visited.
+    """
+    for _field, value in ast.iter_fields(node):
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, ast.AST):
+                    yield item
+        elif isinstance(value, ast.AST):
+            yield value
+
+
+def _visit_children(visitor: ast.NodeVisitor, node: ast.AST) -> None:
+    """Visit ``node``'s descendants in ``ast.NodeVisitor`` order at constant depth.
+
+    The inherited ``generic_visit`` recurses once per syntax level, so a long
+    left-deep expression such as ``a + a + ...`` exhausts the interpreter stack.
+    Here a child with a ``visit_<Class>`` method is dispatched to it, exactly as
+    ``NodeVisitor.visit`` would; any other child is expanded in place on a
+    last-in-first-out stack of child iterators. The visitor-call sequence is
+    therefore identical to the recursive traversal, while depth no longer grows
+    with nesting that no dedicated method handles.
+    """
+    pending = [_child_nodes(node)]
+    while pending:
+        child = next(pending[-1], None)
+        if child is None:
+            pending.pop()
+            continue
+        method = getattr(visitor, "visit_" + child.__class__.__name__, None)
+        if method is None:
+            pending.append(_child_nodes(child))
+        else:
+            method(child)
+
+
 class _ScopeCallVisitor(ast.NodeVisitor):
     """Collect calls nested within one top-level lexical scope."""
 
@@ -284,6 +325,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self.class_header_expressions: set[ast.AST] = set()
         self.definition_header_expressions: set[ast.AST] = set()
         self._reference_snapshots: dict[ast.Name | ast.Attribute, _ExpressionSnapshot] = {}
+
+    def generic_visit(self, node: ast.AST) -> None:
+        _visit_children(self, node)
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
@@ -1506,6 +1550,9 @@ class _BindingCollector(ast.NodeVisitor):
         self.nonlocal_names: set[str] = set()
         self._module_name = module_name
         self._is_package = is_package
+
+    def generic_visit(self, node: ast.AST) -> None:
+        _visit_children(self, node)
 
     def visit_Global(self, node: ast.Global) -> None:
         self.global_names.update(node.names)
