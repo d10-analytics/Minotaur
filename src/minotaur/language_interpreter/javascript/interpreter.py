@@ -159,18 +159,27 @@ def _call_observations(
 
 
 def _iter_nodes(node: Any) -> Iterator[Any]:
-    """Yield ESTree nodes without following interpreter-only annotations."""
-    if node is None or not hasattr(node, "type"):
-        return
-    yield node
-    for name, value in vars(node).items():
-        if name in {"_minotaur_node", "loc", "range", "tokens", "comments", "errors"}:
+    """Yield ESTree nodes in pre-order without following interpreter-only annotations.
+
+    An explicit stack keeps the depth constant however deeply expressions nest;
+    each node's children are pushed in reverse so they are yielded in field and
+    list order, exactly as a recursive pre-order walk would yield them.
+    """
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if current is None or not hasattr(current, "type"):
             continue
-        if isinstance(value, list):
-            for child in value:
-                yield from _iter_nodes(child)
-        else:
-            yield from _iter_nodes(value)
+        yield current
+        children: list[Any] = []
+        for name, value in vars(current).items():
+            if name in {"_minotaur_node", "loc", "range", "tokens", "comments", "errors"}:
+                continue
+            if isinstance(value, list):
+                children.extend(value)
+            else:
+                children.append(value)
+        pending.extend(reversed(children))
 
 
 def _make_module(path: str, source: str, tree: Any, line_index: LineIndex) -> _Module:
@@ -667,129 +676,171 @@ def _walk(
     skip_declaration: bool = False,
     member_fact: bool = True,
 ) -> None:
-    if node is None or not hasattr(node, "type"):
-        return
-    # EDGE-EXPR-004: supports unsupported import locals and new callees as references.
-    typ = node.type
-    shadows = shadows or set()
-    if typ == "Identifier":
-        if node.name in shadows:
-            return
-        target = bindings.get(node.name)
-        location = _node_location(module.path, node, module.line_index)
-        if target is not None:
-            relationships.add(owner, target.node_id, RelationshipKind.REFERENCES.value, location)
-        else:
-            seen.unresolved(owner, node.name, location, nodes, relationships)
-        return
-    if typ in {
-        "FunctionDeclaration",
-        "ClassDeclaration",
-        "FunctionExpression",
-        "ArrowFunctionExpression",
-    }:
-        # Declaration identifiers are not uses. Their executable bodies remain
-        # attributed to the enclosing emitted owner for nested declarations.
-        if typ == "ClassDeclaration":
-            # A superclass expression executes while the class is evaluated,
-            # so its uses belong to the emitted class symbol.
-            _walk(
-                getattr(node, "superClass", None),
-                owner,
-                module,
-                bindings,
-                relationships,
-                nodes,
-                seen,
-                shadows,
-            )
-            body = getattr(getattr(node, "body", None), "body", ())
-            for child in body:
-                if getattr(child, "type", None) == "MethodDefinition":
-                    if getattr(node, "_minotaur_node", None) is not None:
-                        continue
-                    value = getattr(child, "value", None)
-                    if getattr(child, "computed", False):
-                        # A nested class declaration has no emitted class
-                        # symbol, so its computed key executes under the
-                        # nearest emitted owner, exactly as the
-                        # MethodDefinition branch does for class expressions.
-                        key = getattr(child, "key", None)
-                        if not _is_deferred_callable(key):
-                            _walk(
-                                key,
-                                owner,
-                                module,
-                                bindings,
-                                relationships,
-                                nodes,
-                                seen,
-                                shadows,
-                            )
-                    _walk(
-                        value,
-                        owner,
-                        module,
-                        bindings,
-                        relationships,
-                        nodes,
-                        seen,
-                        set(shadows) | _scope_shadows(value),
-                    )
-                elif getattr(child, "type", None) == "StaticBlock":
-                    # Static blocks execute, but class-field and static-field
-                    # initializers are intentionally excluded from this slice.
-                    _walk(child, owner, module, bindings, relationships, nodes, seen, shadows)
-                else:
-                    # PropertyDefinition/FieldDefinition nodes are excluded:
-                    # field initialization and dispatch need runtime semantics.
-                    continue
-        else:
-            # Parameter initializers execute under the function owner before
-            # the body.  All formal names shadow outer bindings for every
-            # initializer (including later names); traversal remains in source
-            # order so evidence locations stay deterministic.
-            parameters = getattr(node, "params", ()) or ()
-            parameter_shadows = set(shadows)
-            for parameter in parameters:
-                parameter_shadows.update(_bound_names(parameter))
-            if typ == "FunctionExpression" and getattr(node, "id", None) is not None:
-                parameter_shadows.add(str(node.id.name))
-            for parameter in parameters:
-                _walk_parameter_defaults(
-                    parameter,
+    # Nodes without a dedicated branch are walked from an explicit stack rather
+    # than by recursion, so a long binary or logical chain costs no stack depth
+    # per operand.  Each pending entry holds a node, the shadow set it inherits,
+    # and whether a member expression there records its member text.  Children
+    # of the classified fallback inherit the owner and shadows and always record
+    # member text, so ``skip_declaration`` and ``member_fact`` apply to the root
+    # node only.
+    pending: list[tuple[Any, set[str] | None, bool]] = [(node, shadows, member_fact)]
+    while pending:
+        node, shadows, member_fact = pending.pop()
+        if node is None or not hasattr(node, "type"):
+            continue
+        # EDGE-EXPR-004: supports unsupported import locals and new callees as references.
+        typ = node.type
+        shadows = shadows or set()
+        if typ == "Identifier":
+            if node.name in shadows:
+                continue
+            target = bindings.get(node.name)
+            location = _node_location(module.path, node, module.line_index)
+            if target is not None:
+                relationships.add(
+                    owner, target.node_id, RelationshipKind.REFERENCES.value, location
+                )
+            else:
+                seen.unresolved(owner, node.name, location, nodes, relationships)
+            continue
+        if typ in {
+            "FunctionDeclaration",
+            "ClassDeclaration",
+            "FunctionExpression",
+            "ArrowFunctionExpression",
+        }:
+            # Declaration identifiers are not uses. Their executable bodies remain
+            # attributed to the enclosing emitted owner for nested declarations.
+            if typ == "ClassDeclaration":
+                # A superclass expression executes while the class is evaluated,
+                # so its uses belong to the emitted class symbol.
+                _walk(
+                    getattr(node, "superClass", None),
                     owner,
                     module,
                     bindings,
                     relationships,
                     nodes,
                     seen,
-                    parameter_shadows,
+                    shadows,
                 )
-            nested_shadows = set(shadows) | _scope_shadows(node)
-            if typ == "FunctionExpression" and getattr(node, "id", None) is not None:
-                # A named function expression's name is a private recursive
-                # binding visible in its body, not a module-level reference.
-                nested_shadows.add(str(node.id.name))
-            _walk(
-                getattr(node, "body", None),
-                owner,
-                module,
-                bindings,
-                relationships,
-                nodes,
-                seen,
-                nested_shadows,
-            )
-        return
-    if typ == "VariableDeclaration":
-        for declarator in getattr(node, "declarations", ()):
-            # Nested and loop-header declarations reach their pattern defaults
-            # through the same shared walker as top-level and parameter
-            # patterns.  Each declarator gets its own shadow copy so the
-            # walker's in-place bound-name accumulation cannot leak.
+                body = getattr(getattr(node, "body", None), "body", ())
+                for child in body:
+                    if getattr(child, "type", None) == "MethodDefinition":
+                        if getattr(node, "_minotaur_node", None) is not None:
+                            continue
+                        value = getattr(child, "value", None)
+                        if getattr(child, "computed", False):
+                            # A nested class declaration has no emitted class
+                            # symbol, so its computed key executes under the
+                            # nearest emitted owner, exactly as the
+                            # MethodDefinition branch does for class expressions.
+                            key = getattr(child, "key", None)
+                            if not _is_deferred_callable(key):
+                                _walk(
+                                    key,
+                                    owner,
+                                    module,
+                                    bindings,
+                                    relationships,
+                                    nodes,
+                                    seen,
+                                    shadows,
+                                )
+                        _walk(
+                            value,
+                            owner,
+                            module,
+                            bindings,
+                            relationships,
+                            nodes,
+                            seen,
+                            set(shadows) | _scope_shadows(value),
+                        )
+                    elif getattr(child, "type", None) == "StaticBlock":
+                        # Static blocks execute, but class-field and static-field
+                        # initializers are intentionally excluded from this slice.
+                        _walk(child, owner, module, bindings, relationships, nodes, seen, shadows)
+                    else:
+                        # PropertyDefinition/FieldDefinition nodes are excluded:
+                        # field initialization and dispatch need runtime semantics.
+                        continue
+            else:
+                # Parameter initializers execute under the function owner before
+                # the body.  All formal names shadow outer bindings for every
+                # initializer (including later names); traversal remains in source
+                # order so evidence locations stay deterministic.
+                parameters = getattr(node, "params", ()) or ()
+                parameter_shadows = set(shadows)
+                for parameter in parameters:
+                    parameter_shadows.update(_bound_names(parameter))
+                if typ == "FunctionExpression" and getattr(node, "id", None) is not None:
+                    parameter_shadows.add(str(node.id.name))
+                for parameter in parameters:
+                    _walk_parameter_defaults(
+                        parameter,
+                        owner,
+                        module,
+                        bindings,
+                        relationships,
+                        nodes,
+                        seen,
+                        parameter_shadows,
+                    )
+                nested_shadows = set(shadows) | _scope_shadows(node)
+                if typ == "FunctionExpression" and getattr(node, "id", None) is not None:
+                    # A named function expression's name is a private recursive
+                    # binding visible in its body, not a module-level reference.
+                    nested_shadows.add(str(node.id.name))
+                _walk(
+                    getattr(node, "body", None),
+                    owner,
+                    module,
+                    bindings,
+                    relationships,
+                    nodes,
+                    seen,
+                    nested_shadows,
+                )
+            continue
+        if typ == "VariableDeclaration":
+            for declarator in getattr(node, "declarations", ()):
+                # Nested and loop-header declarations reach their pattern defaults
+                # through the same shared walker as top-level and parameter
+                # patterns.  Each declarator gets its own shadow copy so the
+                # walker's in-place bound-name accumulation cannot leak.
+                _walk_parameter_defaults(
+                    getattr(declarator, "id", None),
+                    owner,
+                    module,
+                    bindings,
+                    relationships,
+                    nodes,
+                    seen,
+                    set(shadows),
+                )
+                _walk(
+                    getattr(declarator, "init", None),
+                    owner,
+                    module,
+                    bindings,
+                    relationships,
+                    nodes,
+                    seen,
+                    shadows,
+                )
+            continue
+        if typ == "BlockStatement":
+            block_shadows = set(shadows) | _scope_shadows(node)
+            for child in getattr(node, "body", ()):
+                _walk(child, owner, module, bindings, relationships, nodes, seen, block_shadows)
+            continue
+        if typ == "CatchClause":
+            # A catch parameter pattern's defaults execute under the enclosing
+            # owner, exactly as a function parameter's do.  The parameter's own
+            # bindings stay out of the incoming set so the copy does not leak.
             _walk_parameter_defaults(
-                getattr(declarator, "id", None),
+                getattr(node, "param", None),
                 owner,
                 module,
                 bindings,
@@ -798,8 +849,75 @@ def _walk(
                 seen,
                 set(shadows),
             )
+            catch_shadows = set(shadows) | _bound_names(getattr(node, "param", None))
             _walk(
-                getattr(declarator, "init", None),
+                getattr(node, "body", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                catch_shadows,
+            )
+            continue
+        if typ == "ForStatement":
+            loop_shadows = set(shadows)
+            init = getattr(node, "init", None)
+            if getattr(init, "type", None) == "VariableDeclaration" and getattr(
+                init, "kind", None
+            ) in {
+                "let",
+                "const",
+            }:
+                for declarator in getattr(init, "declarations", ()):
+                    loop_shadows.update(_bound_names(getattr(declarator, "id", None)))
+            _walk(init, owner, module, bindings, relationships, nodes, seen, loop_shadows)
+            _walk(
+                getattr(node, "test", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                loop_shadows,
+            )
+            _walk(
+                getattr(node, "update", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                loop_shadows,
+            )
+            _walk(
+                getattr(node, "body", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                loop_shadows,
+            )
+            continue
+        if typ in {"ForInStatement", "ForOfStatement", "ForAwaitStatement"}:
+            loop_shadows = set(shadows)
+            left = getattr(node, "left", None)
+            if getattr(left, "type", None) == "VariableDeclaration" and getattr(
+                left, "kind", None
+            ) in {
+                "let",
+                "const",
+            }:
+                for declarator in getattr(left, "declarations", ()):
+                    loop_shadows.update(_bound_names(getattr(declarator, "id", None)))
+            _walk(left, owner, module, bindings, relationships, nodes, seen, shadows)
+            _walk(
+                getattr(node, "right", None),
                 owner,
                 module,
                 bindings,
@@ -808,181 +926,20 @@ def _walk(
                 seen,
                 shadows,
             )
-        return
-    if typ == "BlockStatement":
-        block_shadows = set(shadows) | _scope_shadows(node)
-        for child in getattr(node, "body", ()):
-            _walk(child, owner, module, bindings, relationships, nodes, seen, block_shadows)
-        return
-    if typ == "CatchClause":
-        # A catch parameter pattern's defaults execute under the enclosing
-        # owner, exactly as a function parameter's do.  The parameter's own
-        # bindings stay out of the incoming set so the copy does not leak.
-        _walk_parameter_defaults(
-            getattr(node, "param", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            set(shadows),
-        )
-        catch_shadows = set(shadows) | _bound_names(getattr(node, "param", None))
-        _walk(
-            getattr(node, "body", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            catch_shadows,
-        )
-        return
-    if typ == "ForStatement":
-        loop_shadows = set(shadows)
-        init = getattr(node, "init", None)
-        if getattr(init, "type", None) == "VariableDeclaration" and getattr(init, "kind", None) in {
-            "let",
-            "const",
-        }:
-            for declarator in getattr(init, "declarations", ()):
-                loop_shadows.update(_bound_names(getattr(declarator, "id", None)))
-        _walk(init, owner, module, bindings, relationships, nodes, seen, loop_shadows)
-        _walk(
-            getattr(node, "test", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            loop_shadows,
-        )
-        _walk(
-            getattr(node, "update", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            loop_shadows,
-        )
-        _walk(
-            getattr(node, "body", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            loop_shadows,
-        )
-        return
-    if typ in {"ForInStatement", "ForOfStatement", "ForAwaitStatement"}:
-        loop_shadows = set(shadows)
-        left = getattr(node, "left", None)
-        if getattr(left, "type", None) == "VariableDeclaration" and getattr(left, "kind", None) in {
-            "let",
-            "const",
-        }:
-            for declarator in getattr(left, "declarations", ()):
-                loop_shadows.update(_bound_names(getattr(declarator, "id", None)))
-        _walk(left, owner, module, bindings, relationships, nodes, seen, shadows)
-        _walk(
-            getattr(node, "right", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-        )
-        _walk(
-            getattr(node, "body", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            loop_shadows,
-        )
-        return
-    if typ == "SwitchStatement":
-        _walk(
-            getattr(node, "discriminant", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-        )
-        switch_shadows = set(shadows)
-        for case in getattr(node, "cases", ()):
-            switch_shadows.update(_scope_shadows(case))
-        for case in getattr(node, "cases", ()):
-            _walk(case, owner, module, bindings, relationships, nodes, seen, switch_shadows)
-        return
-    if typ == "CallExpression":
-        callee = getattr(node, "callee", None)
-        if getattr(callee, "type", None) == "Import":
-            literal = (
-                _static_literal_text(getattr(node, "arguments", [None])[0])
-                if getattr(node, "arguments", ())
-                else None
-            )
-            text = f"{literal}#dynamic" if literal is not None else "import()"
-            _unsupported(module, text, node, relationships, nodes, seen, owner=module.module_id)
-            return
-        elif getattr(callee, "type", None) == "Identifier":
-            location = _node_location(module.path, callee, module.line_index)
-            assert callee is not None
-            callee_name = str(callee.name)
-            if callee_name not in shadows:
-                target = bindings.get(callee_name)
-                if target is not None:
-                    relationships.add(owner, target.node_id, RelationshipKind.CALLS.value, location)
-                else:
-                    seen.unresolved(owner, callee_name, location, nodes, relationships)
-        else:
             _walk(
-                callee,
+                getattr(node, "body", None),
                 owner,
                 module,
                 bindings,
                 relationships,
                 nodes,
                 seen,
-                shadows,
-                member_fact=member_fact,
+                loop_shadows,
             )
-        # Member dispatch and IIFE callee forms are deliberately outside the
-        # direct bare-identifier call contract; their bases and bodies remain
-        # ordinary executable expressions.
-        for argument in getattr(node, "arguments", ()):
-            _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
-        return
-    if typ == "MemberExpression":
-        _walk(
-            getattr(node, "object", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-            member_fact=False,
-        )
-        if getattr(node, "computed", False):
+            continue
+        if typ == "SwitchStatement":
             _walk(
-                getattr(node, "property", None),
+                getattr(node, "discriminant", None),
                 owner,
                 module,
                 bindings,
@@ -991,122 +948,190 @@ def _walk(
                 seen,
                 shadows,
             )
-        if member_fact:
-            root = _member_root(node)
-            if root is not None and root not in shadows:
-                member_label = _member_text(node, module.source)
-                if member_label is not None:
-                    seen.unresolved(
-                        owner,
-                        member_label,
-                        _node_location(module.path, node, module.line_index),
-                        nodes,
-                        relationships,
-                    )
-        return
-    if typ == "Property":
-        if getattr(node, "computed", False):
-            # Computed keys execute while the object is created unless the key
-            # itself is a deferred callable value.
-            key = getattr(node, "key", None)
-            if not _is_deferred_callable(key):
-                _walk(key, owner, module, bindings, relationships, nodes, seen, shadows)
-        if getattr(node, "method", False):
-            return
-        if _is_deferred_callable(getattr(node, "value", None)):
-            # A function-valued object property is deferred until runtime and
-            # has no stable emitted owner.  An immediately evaluated property
-            # expression (for example an IIFE) is a CallExpression instead and
-            # remains walkable below.
-            return
-        _walk(
-            getattr(node, "value", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-        )
-        return
-    if typ in {"ObjectPattern", "ArrayPattern", "AssignmentPattern", "RestElement"}:
-        # A binding pattern reached through the walker is an assignment target:
-        # its target names are not uses, but its defaults, computed keys, and
-        # member-expression targets still execute.  An assignment target
-        # introduces no binding, so an earlier target name never shadows a
-        # later default or computed key that uses the same existing variable.
-        _walk_parameter_defaults(
-            node,
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-            introduces_bindings=False,
-        )
-        return
-    if typ == "MethodDefinition":
-        # A class member key names the member; only a computed key executes.
-        # EDGE-EXPR-006: supports class field and static-field exclusion for both class forms.
-        # Field and static-field definitions have empty dispatch-table entries,
-        # so neither their keys nor their initializers are walked, and a class
-        # expression excludes them exactly as an emitted class declaration does.
-        if getattr(node, "computed", False):
-            key = getattr(node, "key", None)
-            if not _is_deferred_callable(key):
-                _walk(key, owner, module, bindings, relationships, nodes, seen, shadows)
-        _walk(
-            getattr(node, "value", None),
-            owner,
-            module,
-            bindings,
-            relationships,
-            nodes,
-            seen,
-            shadows,
-        )
-        return
-    # Types without a dedicated branch walk their classified child fields.
-    # EDGE-EXPR-001: supports non-use identifiers emitting no reference edges.
-    _walk_classified_fields(node, owner, module, bindings, relationships, nodes, seen, shadows)
+            switch_shadows = set(shadows)
+            for case in getattr(node, "cases", ()):
+                switch_shadows.update(_scope_shadows(case))
+            for case in getattr(node, "cases", ()):
+                _walk(case, owner, module, bindings, relationships, nodes, seen, switch_shadows)
+            continue
+        if typ == "CallExpression":
+            callee = getattr(node, "callee", None)
+            if getattr(callee, "type", None) == "Import":
+                literal = (
+                    _static_literal_text(getattr(node, "arguments", [None])[0])
+                    if getattr(node, "arguments", ())
+                    else None
+                )
+                text = f"{literal}#dynamic" if literal is not None else "import()"
+                _unsupported(module, text, node, relationships, nodes, seen, owner=module.module_id)
+                continue
+            elif getattr(callee, "type", None) == "Identifier":
+                location = _node_location(module.path, callee, module.line_index)
+                assert callee is not None
+                callee_name = str(callee.name)
+                if callee_name not in shadows:
+                    target = bindings.get(callee_name)
+                    if target is not None:
+                        relationships.add(
+                            owner, target.node_id, RelationshipKind.CALLS.value, location
+                        )
+                    else:
+                        seen.unresolved(owner, callee_name, location, nodes, relationships)
+            else:
+                _walk(
+                    callee,
+                    owner,
+                    module,
+                    bindings,
+                    relationships,
+                    nodes,
+                    seen,
+                    shadows,
+                    member_fact=member_fact,
+                )
+            # Member dispatch and IIFE callee forms are deliberately outside the
+            # direct bare-identifier call contract; their bases and bodies remain
+            # ordinary executable expressions.
+            for argument in getattr(node, "arguments", ()):
+                _walk(argument, owner, module, bindings, relationships, nodes, seen, shadows)
+            continue
+        if typ == "MemberExpression":
+            _walk(
+                getattr(node, "object", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+                member_fact=False,
+            )
+            if getattr(node, "computed", False):
+                _walk(
+                    getattr(node, "property", None),
+                    owner,
+                    module,
+                    bindings,
+                    relationships,
+                    nodes,
+                    seen,
+                    shadows,
+                )
+            if member_fact:
+                root = _member_root(node)
+                if root is not None and root not in shadows:
+                    member_label = _member_text(node, module.source)
+                    if member_label is not None:
+                        seen.unresolved(
+                            owner,
+                            member_label,
+                            _node_location(module.path, node, module.line_index),
+                            nodes,
+                            relationships,
+                        )
+            continue
+        if typ == "Property":
+            if getattr(node, "computed", False):
+                # Computed keys execute while the object is created unless the key
+                # itself is a deferred callable value.
+                key = getattr(node, "key", None)
+                if not _is_deferred_callable(key):
+                    _walk(key, owner, module, bindings, relationships, nodes, seen, shadows)
+            if getattr(node, "method", False):
+                continue
+            if _is_deferred_callable(getattr(node, "value", None)):
+                # A function-valued object property is deferred until runtime and
+                # has no stable emitted owner.  An immediately evaluated property
+                # expression (for example an IIFE) is a CallExpression instead and
+                # remains walkable below.
+                continue
+            _walk(
+                getattr(node, "value", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+            )
+            continue
+        if typ in {"ObjectPattern", "ArrayPattern", "AssignmentPattern", "RestElement"}:
+            # A binding pattern reached through the walker is an assignment target:
+            # its target names are not uses, but its defaults, computed keys, and
+            # member-expression targets still execute.  An assignment target
+            # introduces no binding, so an earlier target name never shadows a
+            # later default or computed key that uses the same existing variable.
+            _walk_parameter_defaults(
+                node,
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+                introduces_bindings=False,
+            )
+            continue
+        if typ == "MethodDefinition":
+            # A class member key names the member; only a computed key executes.
+            # EDGE-EXPR-006: supports class field and static-field exclusion for both class forms.
+            # Field and static-field definitions have empty dispatch-table entries,
+            # so neither their keys nor their initializers are walked, and a class
+            # expression excludes them exactly as an emitted class declaration does.
+            if getattr(node, "computed", False):
+                key = getattr(node, "key", None)
+                if not _is_deferred_callable(key):
+                    _walk(key, owner, module, bindings, relationships, nodes, seen, shadows)
+            _walk(
+                getattr(node, "value", None),
+                owner,
+                module,
+                bindings,
+                relationships,
+                nodes,
+                seen,
+                shadows,
+            )
+            continue
+        # Types without a dedicated branch walk their classified child fields.
+        # EDGE-EXPR-001: supports non-use identifiers emitting no reference edges.
+        # The children are pushed in reverse so they are walked in field order.
+        children = _classified_children(node)
+        pending.extend((child, shadows, True) for child in reversed(children))
 
 
-def _walk_classified_fields(
-    node: Any,
-    owner: str,
-    module: _Module,
-    bindings: dict[str, _Binding],
-    relationships: RelationshipAccumulator,
-    nodes: list[Node],
-    seen: NodeEmitter,
-    shadows: set[str],
-) -> None:
-    """Walk the child fields classified for a node type without a branch."""
+def _classified_children(node: Any) -> list[Any]:
+    """Return the child values ``_walk`` visits for a type without a branch.
+
+    The values are returned in field and list order; ``_walk`` walks each with
+    the node's owner and shadows.
+    """
     specification = _CHILD_FIELDS.get(node.type)
+    children: list[Any] = []
     if specification is None:
         # An unclassified type is walked field by field, but a field holding an
         # Identifier names a target rather than using one: without a
         # classification the field is not known to be an expression position.
         for value in vars(node).values():
             if isinstance(value, list):
-                for item in value:
-                    if getattr(item, "type", None) != "Identifier":
-                        _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
+                children.extend(
+                    item for item in value if getattr(item, "type", None) != "Identifier"
+                )
             elif getattr(value, "type", None) != "Identifier":
-                _walk(value, owner, module, bindings, relationships, nodes, seen, shadows)
-        return
+                children.append(value)
+        return children
     for field_name, category in specification.items():
         if category != _EXPRESSION:
             continue
         value = getattr(node, field_name, None)
         if isinstance(value, list):
-            for item in value:
-                _walk(item, owner, module, bindings, relationships, nodes, seen, shadows)
+            children.extend(value)
         else:
-            _walk(value, owner, module, bindings, relationships, nodes, seen, shadows)
+            children.append(value)
+    return children
 
 
 def _is_deferred_callable(node: Any) -> bool:
@@ -1227,47 +1252,50 @@ def _scope_shadows(node: Any) -> set[str]:
     for parameter in getattr(node, "params", ()) or ():
         names.update(_bound_names(parameter))
 
-    def collect(
-        current: Any, *, allow_root_block: bool = False, in_for_header: bool = False
-    ) -> None:
-        if not hasattr(current, "type"):
-            return
-        typ = current.type
-        if typ in {"FunctionDeclaration", "ClassDeclaration"}:
-            if current is not node and getattr(current, "id", None) is not None:
-                names.add(str(current.id.name))
-            return  # nested scope's locals do not shadow this scope
-        if typ == "CatchClause":
-            return  # catch parameters belong to the catch block's scope
-        if typ == "BlockStatement" and not allow_root_block:
-            return  # block lexical declarations belong to that block only
-        if typ == "SwitchStatement":
-            return  # switch lexical declarations belong to the switch only
+    def collect(root: Any, *, allow_root_block: bool = False) -> None:
+        # Each pending entry carries whether it may be the scope's own block
+        # (only the root may) and whether it is a for-statement header field.
+        # The walk only fills a set, so the stack's visiting order is irrelevant.
+        pending: list[tuple[Any, bool, bool]] = [(root, allow_root_block, False)]
+        while pending:
+            current, allow_block, in_for_header = pending.pop()
+            if not hasattr(current, "type"):
+                continue
+            typ = current.type
+            if typ in {"FunctionDeclaration", "ClassDeclaration"}:
+                if current is not node and getattr(current, "id", None) is not None:
+                    names.add(str(current.id.name))
+                continue  # nested scope's locals do not shadow this scope
+            if typ == "CatchClause":
+                continue  # catch parameters belong to the catch block's scope
+            if typ == "BlockStatement" and not allow_block:
+                continue  # block lexical declarations belong to that block only
+            if typ == "SwitchStatement":
+                continue  # switch lexical declarations belong to the switch only
 
-        if typ == "VariableDeclaration":
-            if not (in_for_header and getattr(current, "kind", None) != "var"):
-                for declarator in getattr(current, "declarations", ()):
-                    names.update(_bound_names(getattr(declarator, "id", None)))
-                    collect(getattr(declarator, "init", None))
-            return
+            if typ == "VariableDeclaration":
+                if not (in_for_header and getattr(current, "kind", None) != "var"):
+                    for declarator in getattr(current, "declarations", ()):
+                        names.update(_bound_names(getattr(declarator, "id", None)))
+                        pending.append((getattr(declarator, "init", None), False, False))
+                continue
 
-        if typ in {"ForStatement", "ForInStatement", "ForOfStatement"}:
-            for field_name, value in vars(current).items():
-                if field_name == "type":
-                    continue
+            if typ in {"ForStatement", "ForInStatement", "ForOfStatement"}:
+                for field_name, value in vars(current).items():
+                    if field_name == "type":
+                        continue
+                    header = field_name in {"init", "left"}
+                    if isinstance(value, list):
+                        pending.extend((child, False, header) for child in value)
+                    else:
+                        pending.append((value, False, header))
+                continue
+
+            for value in vars(current).values():
                 if isinstance(value, list):
-                    for child in value:
-                        collect(child, in_for_header=field_name in {"init", "left"})
+                    pending.extend((child, False, False) for child in value)
                 else:
-                    collect(value, in_for_header=field_name in {"init", "left"})
-            return
-
-        for value in vars(current).values():
-            if isinstance(value, list):
-                for child in value:
-                    collect(child)
-            else:
-                collect(value)
+                    pending.append((value, False, False))
 
     body = getattr(node, "body", None)
     if body is None and getattr(node, "type", None) == "SwitchCase":
@@ -1278,30 +1306,33 @@ def _scope_shadows(node: Any) -> set[str]:
     elif body is not None:
         collect(body, allow_root_block=True)
 
-    def collect_function_vars(current: Any) -> None:
-        if not hasattr(current, "type"):
-            return
-        typ = current.type
-        if (
-            typ
-            in {
-                "FunctionDeclaration",
-                "FunctionExpression",
-                "ArrowFunctionExpression",
-                "ClassDeclaration",
-            }
-            and current is not node
-        ):
-            return
-        if typ == "VariableDeclaration" and getattr(current, "kind", None) == "var":
-            for declarator in getattr(current, "declarations", ()):
-                names.update(_bound_names(getattr(declarator, "id", None)))
-        for value in vars(current).values():
-            if isinstance(value, list):
-                for child in value:
-                    collect_function_vars(child)
-            else:
-                collect_function_vars(value)
+    def collect_function_vars(root: Any) -> None:
+        # Like ``collect``, this only fills a set, so stack order is irrelevant.
+        pending: list[Any] = [root]
+        while pending:
+            current = pending.pop()
+            if not hasattr(current, "type"):
+                continue
+            typ = current.type
+            if (
+                typ
+                in {
+                    "FunctionDeclaration",
+                    "FunctionExpression",
+                    "ArrowFunctionExpression",
+                    "ClassDeclaration",
+                }
+                and current is not node
+            ):
+                continue
+            if typ == "VariableDeclaration" and getattr(current, "kind", None) == "var":
+                for declarator in getattr(current, "declarations", ()):
+                    names.update(_bound_names(getattr(declarator, "id", None)))
+            for value in vars(current).values():
+                if isinstance(value, list):
+                    pending.extend(value)
+                else:
+                    pending.append(value)
 
     if getattr(node, "type", None) in {
         "Program",
