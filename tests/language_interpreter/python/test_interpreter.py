@@ -369,6 +369,114 @@ def test_module_too_deep_for_the_parser_is_a_parse_error_beside_its_siblings(
     assert validate_document(result.document).is_valid
 
 
+_CHAIN_TERMS = 1_000
+_CALLER_BUDGET = 800
+_EXPECTED_VALUE_LIMIT = 20_000
+
+
+def _frame_depth() -> int:
+    depth = 0
+    frame = sys._getframe(1)
+    while frame is not None:
+        depth += 1
+        frame = frame.f_back
+    return depth
+
+
+def _analyze_with_caller_budget(root: Path, files: tuple[Path, ...]) -> AnalysisResult:
+    """Analyze with only ``_CALLER_BUDGET`` frames above the caller.
+
+    A traversal that recurses once per chain element needs more than that many
+    frames for a ``_CHAIN_TERMS`` chain, while a constant-depth one does not.
+    """
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(_frame_depth() + _CALLER_BUDGET)
+    try:
+        return analyze_python_files(Workspace(root), files)
+    finally:
+        sys.setrecursionlimit(previous)
+
+
+def _stdlib_call_digest(source: str) -> str:
+    """Return the digest of the single call in ``source`` from ``ast.dump`` itself."""
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(_frame_depth() + _EXPECTED_VALUE_LIMIT)
+    try:
+        calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)]
+        assert len(calls) == 1
+        options = {"show_empty": True} if sys.version_info >= (3, 13) else {}
+        text = ast.dump(calls[0], annotate_fields=True, include_attributes=False, **options)
+    finally:
+        sys.setrecursionlimit(previous)
+    return hashlib.sha256(b"python\0" + text.encode()).hexdigest()
+
+
+def _node_facts(result: AnalysisResult) -> list[tuple[object, ...]]:
+    return [
+        (
+            node.node_class,
+            node.label,
+            node.symbol_kind,
+            None if node.location is None else node.location.range.start.line,
+            None if node.location is None else node.location.range.start.character,
+        )
+        for node in result.document.nodes
+    ]
+
+
+@pytest.mark.parametrize("operator", ["+", "|"])
+def test_long_binary_chain_analyzes_without_per_term_recursion(
+    tmp_path: Path, operator: str
+) -> None:
+    _write(tmp_path, "mod.py", "x = " + f" {operator} ".join(["a"] * _CHAIN_TERMS) + "\n")
+
+    result = _analyze_with_caller_budget(tmp_path, (tmp_path / "mod.py",))
+
+    assert result.diagnostics == ()
+    file_node = result.document.nodes[0]
+    assert (file_node.node_class, file_node.label, file_node.path) == (
+        NodeClass.FILE,
+        "mod.py",
+        "mod.py",
+    )
+    assert _node_facts(result)[1:] == [
+        (NodeClass.SYMBOL, "mod", SymbolKind.MODULE.value, 0, 0),
+        *(
+            (NodeClass.UNRESOLVED_REFERENCE, "a", None, 0, 4 + 4 * index)
+            for index in range(_CHAIN_TERMS)
+        ),
+    ]
+    assert validate_document(result.document).is_valid
+
+
+def test_long_binary_chain_argument_analyzes_and_fingerprints_its_call(tmp_path: Path) -> None:
+    source = "def f(v):\n    return v\ny = f(" + " + ".join(["a"] * _CHAIN_TERMS) + ")\n"
+    _write(tmp_path, "mod.py", source)
+    expected_fingerprint = _stdlib_call_digest(source)
+
+    result = _analyze_with_caller_budget(tmp_path, (tmp_path / "mod.py",))
+
+    assert result.diagnostics == ()
+    file_node = result.document.nodes[0]
+    assert (file_node.node_class, file_node.label, file_node.path) == (
+        NodeClass.FILE,
+        "mod.py",
+        "mod.py",
+    )
+    assert _node_facts(result)[1:] == [
+        (NodeClass.SYMBOL, "mod", SymbolKind.MODULE.value, 0, 0),
+        (NodeClass.SYMBOL, "mod.f", SymbolKind.FUNCTION.value, 0, 0),
+        *(
+            (NodeClass.UNRESOLVED_REFERENCE, "a", None, 2, 6 + 4 * index)
+            for index in range(_CHAIN_TERMS)
+        ),
+    ]
+    assert [observation.fingerprint for observation in result.call_expressions] == [
+        expected_fingerprint
+    ]
+    assert validate_document(result.document).is_valid
+
+
 def test_type_comment_is_parsed_without_a_parse_error(tmp_path: Path) -> None:
     _write(tmp_path, "typed.py", "x: int # type: int\n")
 
