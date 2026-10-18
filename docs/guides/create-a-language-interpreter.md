@@ -44,6 +44,17 @@ from the CLI. Its public docstring should state the assumptions so direct
 library callers understand that they are responsible for equivalent
 validation.
 
+One CLI command may call the selected-file function more than once. When a
+call raises, the CLI calls the function again with each selected file on its
+own, discarding those results, to find the files that fail alone, and then
+calls it once more with the remaining files. Each file that fails alone becomes one
+`interpreter-error` diagnostic and contributes no facts; see
+[Current Python analysis](analyze-python.md#diagnostics-and-unresolved-references).
+Keep every accumulator inside the call and never mutate module-level state, so
+a call's result depends only on its arguments and a failed call cannot affect
+the next one. Report an expected source problem, such as a read or parse
+failure, as an ordinary diagnostic rather than raising.
+
 ## Optional whole-workspace convenience API
 
 The language interpreter template omits the whole-workspace helper, so a new
