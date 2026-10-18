@@ -170,7 +170,14 @@ Parsing is all-or-nothing per file. A malformed JavaScript file produces a
 `PARSE_ERROR` diagnostic and contributes no nodes or relationships from a
 recovered parser fragment. A source-read failure has the same per-file
 exclusion. Other selected, readable, valid files continue to produce their
-facts, and the command reports the diagnostic alongside the partial graph.
+facts, and the command reports the diagnostic alongside the partial graph. A
+file whose analysis makes the analyzer itself fail unexpectedly is excluded
+the same way: it is reported as one error-severity `interpreter-error`
+diagnostic with no location, naming the exception class and its text, and
+contributes no facts, while the other files are analyzed together, the partial
+graph is written, and `analyze` exits `1`. A failure that no single selected
+file explains is a command error that exits `2` and writes no graph; see
+[Current Python analysis](analyze-python.md#diagnostics-and-unresolved-references).
 
 ## Explicit exclusions
 

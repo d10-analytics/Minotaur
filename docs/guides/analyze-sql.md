@@ -73,7 +73,14 @@ noncyclic view paths (`view-depth-warning`); warnings include namespaced
 `minotaur-sql` metadata with the canonical path and, for depth findings, the
 measured depth. Warnings are printed with severity and do not fail `analyze`;
 parse or other error diagnostics still produce the existing nonzero status
-while the partial graph is written.
+while the partial graph is written. That includes `interpreter-error`: when the
+analyzer itself fails unexpectedly on one file, that file is reported as one
+error-severity `interpreter-error` diagnostic with no location, naming the
+exception class and its text, and contributes no facts, while the other files
+are analyzed together, the partial graph is written, and `analyze` exits `1`.
+A failure that no single selected file explains is a command error that exits
+`2` and writes no graph; see
+[Current Python analysis](analyze-python.md#diagnostics-and-unresolved-references).
 
 Duplicate declarations are warning-only diagnostics. Every declaration in a
 duplicate group keeps its source location and receives the exact structured
