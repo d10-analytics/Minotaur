@@ -281,9 +281,11 @@ Module and class execution use source order. Immediate calls and loads see the
 route active at their own expression. Function and method bodies are deferred
 and use final module state; nested deferred functions, lambdas, and methods use
 the final state of their owning enclosing function. Defaults, decorators,
-annotations, and class headers execute in their enclosing scope at definition
-time. A lambda body is deferred, but its defaults and parameters are immediate
-or lexical. This policy does not simulate invocation or callable side effects.
+unquoted annotations, and class headers execute in their enclosing scope at
+definition time; a quoted annotation is evaluated later, as described under
+[declared names and annotations](#declared-names-annotations-and-header-uses).
+A lambda body is deferred, but its defaults and parameters are immediate or
+lexical. This policy does not simulate invocation or callable side effects.
 
 Class headers run in the enclosing scope, while the class body has a separate
 sequential namespace. Earlier class assignments or imports can affect later
@@ -373,25 +375,44 @@ in Python, so a call to it stays unemitted. Proofs:
 
 A string annotation (`-> "list[Other]"`, `x: "Handler"`) is parsed as an
 expression and contributes `references` or unresolved references, located at
-the string literal's span. An unparsable string, or one containing binding or
-scope syntax (`:=`, lambda, comprehension, `yield`, `await`), is ignored
-silently, as are `Literal[...]` arguments and `Annotated[...]` metadata, which
+the string literal's span. Python evaluates a quoted annotation later, against
+the module's final bindings, so its name resolves only when the binding at the
+annotation's position is also the module's final binding. When a later import,
+assignment, or top-level definition changes that binding, the quoted use is an
+unresolved reference rather than an edge to the earlier binding. An unquoted
+annotation runs at definition time and still resolves at its source position,
+so the two forms record the same facts whenever the name is not rebound later.
+An unparsable string, or one containing binding or scope syntax (`:=`, lambda,
+comprehension, `yield`, `await`), is ignored silently, as are `Literal[...]` arguments and `Annotated[...]` metadata, which
 are values rather than type uses. Proofs: `test_quoted_return_annotation_references_its_target`,
 `test_quoted_annotation_records_the_same_facts_as_the_unquoted_form`,
 `test_string_annotation_location_lies_inside_the_literal`,
 `test_unparsable_or_binding_string_annotations_emit_nothing`,
 `test_literal_arguments_are_values_not_type_uses`, and
-`test_annotated_metadata_is_a_value_and_only_the_wrapped_type_is_a_use`.
+`test_annotated_metadata_is_a_value_and_only_the_wrapped_type_is_a_use`;
+for late evaluation,
+`test_quoted_annotation_does_not_use_an_import_the_module_later_rebinds`,
+`test_quoted_annotation_does_not_use_an_import_a_later_class_replaces`, and
+`test_quoted_annotation_keeps_an_import_the_module_never_rebinds`.
 
 A call and a load of the same name in a nested-class header, a nested-class
 body, a nested-class method body, or a class defined inside a function resolve
-identically and to the binding Python consults: only uncertainty introduced by
-an enclosing class body is ignored, while uncertainty from the module flow
-state or the owning function is kept. Proofs:
+identically. Only uncertainty introduced by an enclosing class body is
+ignored, while uncertainty from the module flow state or the owning function
+is kept. A class body inside a function consults that function's imports
+before the module's: after module `from lib import helper`, a `from other
+import helper` inside `def outer()` makes every use of `helper` in a nested
+`class K` resolve to `other.helper`. Proofs:
 `test_invalidated_declared_name_stays_unresolved_in_every_nested_use`,
 `test_imported_name_resolves_in_every_nested_use`,
-`test_enclosing_class_import_does_not_reach_nested_class_uses`, and
-`test_calls_and_loads_resolve_through_the_one_header_helper`.
+`test_enclosing_class_import_does_not_reach_nested_class_uses`,
+`test_function_local_import_governs_every_use_in_a_function_nested_class`, and
+`test_calls_and_loads_resolve_through_the_one_header_helper`. An import
+written in a class's own body is still not a route for later uses in that
+same body (see [binding timing and class boundaries](#binding-timing-and-class-boundaries)):
+in a module-level class those uses stay unresolved, but in a class defined
+inside a function they can resolve to the function or module binding that
+the class import shadows.
 
 ### Query consequences
 
