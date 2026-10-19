@@ -7402,3 +7402,347 @@ def test_inner_if_in_loop_resolves_prewrite_use_but_freezes_post_loop_route(
     assert references == {6}
     assert _unresolved_sites(result) == {("app.run", "helper", 8)}
     assert ("app.run", "other.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
+
+
+_REBOUND_DECLARATIONS = (
+    "import sys\n\n"  # 1-2
+    "def open_file():\n    pass\n\n"  # 3-5
+    "def speed():\n    pass\n\n"  # 6-8
+    "def gone():\n    pass\n\n"  # 9-11
+    "class Service:\n    pass\n\n"  # 12-14
+    "{rebinding}"
+    "open_file()\n"
+    "speed()\n"
+    "gone()\n"
+    "Service()\n"
+)
+_REBINDING_STATEMENTS = (
+    'if sys.platform == "win32":\n'
+    "    open_file = other_open\n"
+    "try:\n"
+    "    from fastlib import speed\n"
+    "except ImportError:\n"
+    "    pass\n"
+    "del gone\n"
+    "Service = make_service()\n\n"
+)
+
+
+def _calls_and_references(result: AnalysisResult) -> set[tuple[str, str, str]]:
+    return {
+        edge
+        for edge in _edge_labels(result)
+        if edge[2] in (RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value)
+    }
+
+
+def _unresolved_texts(result: AnalysisResult, owner: str) -> set[str]:
+    return _unresolved_by_source(result).get(owner, set())
+
+
+def _calls_between(result: AnalysisResult, source: str, target: str) -> bool:
+    return (source, target, RelationshipKind.CALLS.value) in _edge_labels(result)
+
+
+def test_rebinding_a_declared_name_makes_every_later_use_unresolved(tmp_path: Path) -> None:
+    source = _REBOUND_DECLARATIONS.format(rebinding=_REBINDING_STATEMENTS)
+    _write(tmp_path, "app.py", source)
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+
+    assert {"open_file", "speed", "gone", "Service"} <= _unresolved_texts(result, "app")
+    for name in ("open_file", "speed", "gone", "Service"):
+        assert not {edge for edge in edges if edge[1] == f"app.{name}"} - {
+            ("app", f"app.{name}", RelationshipKind.CONTAINS.value)
+        }
+    use_lines = {
+        name: source.splitlines().index(f"{name}()") + 1
+        for name in ("open_file", "speed", "gone", "Service")
+    }
+    assert _unresolved_sites(result) >= {("app", name, line) for name, line in use_lines.items()}
+
+
+def test_the_same_declarations_without_rebinding_keep_their_call_edges(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", _REBOUND_DECLARATIONS.format(rebinding=""))
+
+    result = analyze_python_workspace(tmp_path)
+
+    for name in ("open_file", "speed", "gone", "Service"):
+        assert _calls_between(result, "app", f"app.{name}")
+    assert _unresolved_texts(result, "app") == {"sys"}
+
+
+def test_assigning_over_a_declared_function_does_not_redirect_to_another_declaration(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def rebind():\n    pass\n\ndef other():\n    pass\n\nrebind = other\nrebind()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert "rebind" in _unresolved_texts(result, "app")
+    assert not _calls_between(result, "app", "app.other")
+    assert not _calls_between(result, "app", "app.rebind")
+
+
+def test_module_call_before_rebinding_keeps_edge_and_function_body_follows_final_state(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nf()\nf = other\n\ndef caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _calls_between(result, "app", "app.f")
+    assert not _calls_between(result, "app.caller", "app.f")
+    assert _unresolved_sites(result) >= {("app.caller", "f", 8)}
+    assert ("app", "f", 4) not in _unresolved_sites(result)
+
+
+def test_class_body_global_write_invalidates_module_use_but_class_local_write_does_not(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nclass Directive:\n    global f\n    f = other\n\nf()\n",
+    )
+    _write(
+        tmp_path,
+        "local.py",
+        "def f():\n    pass\n\nclass Local:\n    f = other\n\nf()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert ("app", "f", 8) in _unresolved_sites(result)
+    assert _calls_between(result, "local", "local.f")
+    assert "f" not in _unresolved_texts(result, "local")
+
+
+def test_second_top_level_definition_reestablishes_a_rebound_name(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nf = other\n\ndef f():\n    pass\n\ndef caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    second = next(node for node in _nodes(result, "app.f") if node.location.range.start.line == 5)
+    caller = _node_id(result, "app.caller")
+
+    assert {
+        relationship.target
+        for relationship in result.document.relationships
+        if relationship.source == caller and relationship.kind == RelationshipKind.CALLS.value
+    } == {second.id}
+    assert "f" not in _unresolved_texts(result, "app.caller")
+
+
+def test_repeated_direct_definition_stays_last_wins_without_rebinding(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\ndef f():\n    pass\n\ndef caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    last = max(_nodes(result, "app.f"), key=lambda node: node.location.range.start.line)
+    caller = _node_id(result, "app.caller")
+
+    assert {
+        relationship.target
+        for relationship in result.document.relationships
+        if relationship.source == caller and relationship.kind == RelationshipKind.CALLS.value
+    } == {last.id}
+
+
+def test_definition_after_an_import_of_the_same_name_keeps_both_uses_unresolved(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import something\n\n"
+        "def something():\n    pass\n\n"
+        "something()\n\n"
+        "def caller():\n    something()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.something")
+    assert not _calls_between(result, "app.caller", "app.something")
+    assert ("app", "something", 6) in _unresolved_sites(result)
+    assert ("app.caller", "something", 9) in _unresolved_sites(result)
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    ["if flag:\n    f = other\n", "if flag:\n    del f\n", "if flag:\n    from lib import *\n"],
+)
+def test_conditional_rebinding_invalidates_a_declared_name_after_the_join(
+    tmp_path: Path, rebinding: str
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\n" + rebinding + "\nf()\n\ndef caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert not _calls_between(result, "app.caller", "app.f")
+    assert "f" in _unresolved_texts(result, "app")
+    assert "f" in _unresolved_texts(result, "app.caller")
+
+
+def test_declared_name_is_still_tracked_for_a_rebinding_that_follows_a_join(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\n"
+        "if flag:\n    pass\n"
+        "else:\n    pass\n\n"
+        "f = other\n"
+        "f()\n\n"
+        "def caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert not _calls_between(result, "app.caller", "app.f")
+    assert ("app", "f", 10) in _unresolved_sites(result)
+    assert ("app.caller", "f", 13) in _unresolved_sites(result)
+
+
+@pytest.mark.parametrize(
+    ("declaration", "name", "conditional"),
+    [
+        ("def f():\n    pass\n", "f", "if flag:\n    def f():\n        pass\n"),
+        ("class K:\n    pass\n", "K", "if flag:\n    class K:\n        pass\n"),
+    ],
+)
+def test_conditional_definition_of_a_declared_name_makes_later_uses_unresolved(
+    tmp_path: Path, declaration: str, name: str, conditional: str
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        declaration + "\n" + conditional + f"\n{name}()\n\ndef caller():\n    {name}()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", f"app.{name}")
+    assert not _calls_between(result, "app.caller", f"app.{name}")
+    assert name in _unresolved_texts(result, "app")
+    assert name in _unresolved_texts(result, "app.caller")
+
+
+def test_except_as_target_invalidates_a_declared_name_and_deletion_reaches_the_same_recorder(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def e():\n    pass\n\ntry:\n    pass\nexcept ValueError as e:\n    pass\n\ne()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.e")
+    assert ("app", "e", 9) in _unresolved_sites(result)
+    assert not hasattr(_ScopeCallVisitor, "_record_deleted_names")
+
+
+def test_unrebound_class_local_imported_and_builtin_names_are_not_over_invalidated(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def kept():\n    pass\n\n"
+        "def other():\n    pass\n\n"
+        "other = 1\n"
+        "kept()\n\n"
+        "def local_shadow():\n"
+        "    kept = 1\n"
+        "    kept()\n\n"
+        "len([])\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _calls_between(result, "app", "app.kept")
+    assert "kept" not in _unresolved_texts(result, "app")
+    assert _unresolved_texts(result, "app.local_shadow") == set()
+    assert "len" not in _unresolved_texts(result, "app")
+
+
+def test_star_import_invalidates_declared_and_imported_names_but_not_builtins(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def x():\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import x\nfrom other import *\nx()\n",
+    )
+    _write(
+        tmp_path,
+        "star.py",
+        "def star_victim():\n    pass\n\n"
+        "from lib import *\n"
+        "star_victim()\n"
+        "items = []\n"
+        "len(items)\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("star", "star_victim", 5) in _unresolved_sites(result)
+    assert not _calls_between(result, "star", "star.star_victim")
+    assert "len" not in _unresolved_texts(result, "star")
+    assert ("app", "x", 3) in _unresolved_sites(result)
+    assert not _calls_between(result, "app", "lib.x")
+
+
+def test_star_import_inside_a_conditional_invalidates_a_declared_name_after_the_join(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nif flag:\n    from lib import *\n\nf()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert ("app", "f", 7) in _unresolved_sites(result)
+
+
+def test_star_import_inside_a_loop_touches_a_declared_name(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nfor _ in range(2):\n    from lib import *\n\nf()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert ("app", "f", 7) in _unresolved_sites(result)

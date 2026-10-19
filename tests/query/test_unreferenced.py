@@ -928,3 +928,24 @@ def test_javascript_new_callee_reference_clears_unreferenced(
     # clears app.Widget rather than the query reporting nothing.
     assert captured.out.splitlines() == ["app.js:2  app.orphan  function"]
     assert "app.Widget" not in captured.out
+
+
+def test_unreferenced_lists_declarations_invalidated_by_a_later_rebinding(
+    tmp_path: Path, capsys: object
+) -> None:
+    _write(
+        tmp_path,
+        "fixture.py",
+        "def rebound():\n    pass\n\ndef kept():\n    pass\n\nrebound = other\nrebound()\nkept()\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    arguments = ["query", "unreferenced", "--graph", str(graph), "--root", str(tmp_path)]
+
+    assert cli.main(arguments) == 0
+    plain = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert cli.main([*arguments, "--text-fallback"]) == 0
+    fallback = capsys.readouterr().out  # type: ignore[attr-defined]
+
+    assert plain == "fixture.py:1  fixture.rebound  function\n"
+    assert fallback == "fixture.py:1  fixture.rebound  function [text-mention]\n"
