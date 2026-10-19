@@ -35,26 +35,6 @@ class CallExpressionObservation:
     expression_location: Location
     fingerprint: str | None
 
-    @property
-    def callee(self) -> Location:
-        """Compatibility alias for the callee source location."""
-        return self.callee_location
-
-    @property
-    def expression(self) -> Location:
-        """Compatibility alias for the full expression source location."""
-        return self.expression_location
-
-    @property
-    def structural_fingerprint(self) -> str | None:
-        """Compatibility alias for the normalized syntax fingerprint."""
-        return self.fingerprint
-
-    @property
-    def available(self) -> bool:
-        """Whether comparable syntax was available for this occurrence."""
-        return self.fingerprint is not None
-
 
 def python_call_fingerprint(node: ast.Call) -> str:
     """Return a deterministic fingerprint for a Python call AST.

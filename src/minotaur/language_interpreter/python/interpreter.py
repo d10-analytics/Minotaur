@@ -112,7 +112,6 @@ class _ScopeContext:
     # a local rebinding can be told apart from the module alias it shadows.
     import_targets: Mapping[str, str] = field(default_factory=dict)
     plain_import_names: frozenset[str] = frozenset()
-    local_plain_import_names: frozenset[str] = frozenset()
     module_resolution: _ModuleResolution | None = None
     # When analyzing a direct class body, retain the class-only contribution
     # separately so a nested class method can discard every enclosing class
@@ -580,7 +579,6 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         *,
         enclosing_import_targets: Mapping[str, str] | None = None,
         enclosing_uncertain_names: frozenset[str] = frozenset(),
-        enclosing_local_import_names: frozenset[str] = frozenset(),
     ) -> None:
         """Visit a directly attributed function body with flow-sensitive imports."""
         bound_names, local_import_names, uncertain_import_names = _scope_binders(
@@ -3019,7 +3017,6 @@ def _calls(
             function_scope,
             enclosing_import_targets=context.import_targets,
             enclosing_uncertain_names=context.uncertain_import_names,
-            enclosing_local_import_names=context.authoritative_import_names,
         )
     else:
         # Module and class execution are source ordered too. A flow frame here
@@ -3561,7 +3558,14 @@ def _syntax_location(path: str, error: SyntaxError) -> Location | None:
     if error.lineno is None:
         return None
     line = error.lineno - 1
-    column = max((error.offset or 1) - 1, 0)
+    character_column = max((error.offset or 1) - 1, 0)
+    # The parser's offset counts characters of the reported line; every other
+    # Python location is a UTF-8 byte offset into the decoded text.
+    column = (
+        len(error.text[:character_column].encode("utf-8"))
+        if error.text is not None
+        else character_column
+    )
     return Location(path, Range(Position(line, column), Position(line, column)))
 
 
