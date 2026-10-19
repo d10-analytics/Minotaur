@@ -2071,24 +2071,41 @@ def _join_flow_states(states: tuple[_ImportFlowState, ...]) -> _ImportFlowState:
 
 def _apply_class_directive_writes(visitor: _ScopeCallVisitor, node: ast.ClassDef) -> None:
     """Apply immediate class global/nonlocal writes to the module timeline."""
-    directives = _global_names_in_statements(node.body) | _nonlocal_names_in_statements(node.body)
+    directives = _class_directive_names(node)
     if not directives or not visitor._scope_frames:
         return
     state = visitor._scope_frames[-1].import_state
     for statement in node.body:
-        touched = _flow_touched_names((statement,)) & directives
-        if not touched:
-            continue
-        affected = _touched_tracked_names(state, touched)
-        if not affected:
-            continue
-        state = replace(
-            state,
-            targets=_without_import_roots(state.targets, affected),
-            uncertain_names=state.uncertain_names | affected,
-            plain_roots=state.plain_roots - affected,
-        )
+        state = _state_after_class_directive_write(state, statement, directives)
     visitor._scope_frames[-1].import_state = state
+
+
+def _class_directive_names(node: ast.ClassDef) -> frozenset[str]:
+    """Return the names a class body declares ``global`` or ``nonlocal``."""
+    return _global_names_in_statements(node.body) | _nonlocal_names_in_statements(node.body)
+
+
+def _state_after_class_directive_write(
+    state: _ImportFlowState, statement: ast.stmt, directives: frozenset[str]
+) -> _ImportFlowState:
+    """Invalidate the enclosing-scope names one class statement writes through directives.
+
+    A ``global`` or ``nonlocal`` name written in a class body changes the
+    enclosing binding, not a class local, so the enclosing timeline treats it
+    like any other non-import write.
+    """
+    touched = _flow_touched_names((statement,)) & directives
+    if not touched:
+        return state
+    affected = _touched_tracked_names(state, touched)
+    if not affected:
+        return state
+    return replace(
+        state,
+        targets=_without_import_roots(state.targets, affected),
+        uncertain_names=state.uncertain_names | affected,
+        plain_roots=state.plain_roots - affected,
+    )
 
 
 def _context_for_flow_state(context: _ScopeContext, state: _ImportFlowState) -> _ScopeContext:
@@ -2684,11 +2701,17 @@ def _analyze_module(
                 bound_names=frozenset(_type_param_names(statement)),
                 class_scope_bound_names=frozenset(_type_param_names(statement)),
                 class_scope_type_param_names=frozenset(_type_param_names(statement)),
-                class_scope_outer_import_targets=context.import_targets,
-                class_scope_outer_plain_import_names=context.plain_import_names,
+                class_scope_outer_import_targets=state.targets,
+                class_scope_outer_plain_import_names=state.plain_roots,
                 class_scope_outer_uncertain_import_names=state.uncertain_names,
                 declared_names=frozenset(),
             )
+            # The module state a nested class consults while this body runs:
+            # the state at the class statement plus the writes this body makes
+            # through ``global``/``nonlocal`` directives, which change the
+            # module binding rather than a class local.
+            class_directives = _class_directive_names(statement)
+            outer_state = state
             _calls(
                 class_context,
                 [],
@@ -2733,14 +2756,25 @@ def _analyze_module(
                         function_scope=member,
                     )
                 else:
+                    # Nested function bodies run after the module finishes,
+                    # so they are deferred to the final module state.
                     _calls(
                         class_context,
                         [member],
                         symbols[statement].node_id,
                         symbols[statement].class_declarations,
+                        deferred_state=final_module_state,
                     )
-                class_context = _class_context_after_statement(
-                    class_context, member, module.name, module.is_package
+                outer_state = _state_after_class_directive_write(
+                    outer_state, member, class_directives
+                )
+                class_context = replace(
+                    _class_context_after_statement(
+                        class_context, member, module.name, module.is_package
+                    ),
+                    class_scope_outer_import_targets=outer_state.targets,
+                    class_scope_outer_plain_import_names=outer_state.plain_roots,
+                    class_scope_outer_uncertain_import_names=outer_state.uncertain_names,
                 )
         else:
             pending.append(statement)
@@ -3111,14 +3145,29 @@ def _resolve_header_use(
     import_bound = snapshot.import_bound - snapshot.bound_names
     uncertain = set(snapshot.uncertain_import_names)
     blocked_plain_names: frozenset[str] = frozenset()
+
+    def class_routes_in_use(names: frozenset[str]) -> frozenset[str]:
+        # A route the use still shares with the enclosing class context came
+        # from that class body; a nearer frame or the final module state
+        # seen by a deferred body supplies its own route, which is kept.
+        return frozenset(
+            name
+            for name in names
+            if snapshot.import_targets.get(name) == context.import_targets.get(name)
+        )
+
     if inside_nested_class:
         if in_definition_header:
             if has_enclosing_class_context:
                 expression_context = _without_enclosing_class_scope(context)
-                import_targets = _without_import_roots(import_targets, enclosing_class_target_names)
+                import_targets = _without_import_roots(
+                    import_targets, class_routes_in_use(enclosing_class_target_names)
+                )
         elif has_enclosing_class_context or snapshot.in_class_body:
             expression_context = _without_enclosing_class_scope(context)
-            import_targets = _without_import_roots(import_targets, enclosing_class_target_names)
+            import_targets = _without_import_roots(
+                import_targets, class_routes_in_use(enclosing_class_target_names)
+            )
             import_targets.update(
                 {
                     name: target
