@@ -102,3 +102,29 @@ def string_annotations(
 
     item: "Holder" = Holder()  # noqa: UP037
     return [item]
+
+
+from workflow.util import format_report as Forward  # noqa: E402, N812
+
+
+def forward_reference(value: "Forward") -> "Forward":  # noqa: UP037
+    """Annotate with a quoted name the module rebinds afterwards."""
+
+    return value
+
+
+from workflow.util import summarize as Forward  # noqa: E402, F811, N812
+
+
+def local_import_class() -> type[object]:
+    """Call and load a function-local import from a nested class body."""
+
+    from workflow.util import format_report as Forward  # noqa: F811, N812, PLC0415
+
+    class Local:
+        """Resolve the function's import, not the module's."""
+
+        value = Forward([1])
+        loaded = Forward
+
+    return Local

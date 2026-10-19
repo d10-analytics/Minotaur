@@ -21,8 +21,10 @@ conditional assignment, a `try` import, and a star import) and then calls, a
 `from workflow.helper import fixture_helper` import beside a same-module `def
 helper()`, a class body with an annotation-only name, a function with an
 annotation-only local, a nested class whose header and body call and load a
-module name, and string annotations beside `Literal[...]` and `Annotated[...]`
-arguments. It defines no `main` and calls neither `workflow.util.unused_helper`
+module name, string annotations beside `Literal[...]` and `Annotated[...]`
+arguments, a quoted annotation whose name the module imports again after the
+function, and a nested class whose body uses a function-local import that
+differs from the module's import of the same name. It defines no `main` and calls neither `workflow.util.unused_helper`
 nor `workflow.service.Service.run`; its star import carries inline `# noqa`
 codes for Ruff.
 
@@ -31,15 +33,15 @@ The tree is small on purpose: every query class in
 definitions of `main`, a symbol with more than one caller, a symbol with no
 callers at all (`workflow.util.unused_helper`), an import graph for `impact`,
 and a stable line for `context`. `minotaur query unreferenced workflow` reports
-twenty symbols: the uncalled `workflow.util.unused_helper`, the other
+twenty-two symbols: the uncalled `workflow.util.unused_helper`, the other
 fixture-only definitions (`workflow.package_scope_probe`, `workflow.cli.main`,
 `workflow.service.main`, `workflow.service.Service.total`,
 `workflow.declarations.Gauge`, `workflow.declarations.scale`, and the
 `workflow.util` scope probes `fixture_outer`, `FixtureScopes`,
 `generic_scope_probe`, `DeletedBindingScope`, and `ImportedOuterScope`), and
 from the binding-lifecycle sample `replaced`, `deleted`, `conditional`,
-`guarded`, `starred`, `Holder.label_text`, `local_annotation`, and
-`string_annotations`. Under `--text-fallback` the five rebound declarations
+`guarded`, `starred`, `Holder.label_text`, `local_annotation`,
+`string_annotations`, `forward_reference`, and `local_import_class`. Under `--text-fallback` the five rebound declarations
 (`replaced`, `deleted`, `conditional`, `guarded`, `starred`) and the older
 `workflow.cli.main`, `workflow.service.main`, and
 `workflow.service.Service.total` gain a `[text-mention]` marker, because their
