@@ -8103,3 +8103,57 @@ def test_a_plain_string_assignment_is_not_an_annotation(tmp_path: Path) -> None:
 
     assert not {edge for edge in _use_edges(result) if edge[1] == "models.Other"}
     assert not _unresolved_by_source(result)
+
+
+@pytest.mark.parametrize(
+    ("template", "owner"),
+    [
+        ("def f(x: \"list['Other']\"):\n    pass\n", "app.f"),
+        ("def f() -> \"dict[str, 'Other']\":\n    pass\n", "app.f"),
+        ("x: \"Optional['Other']\"\n", "app"),
+    ],
+    ids=["list", "dict", "module-optional"],
+)
+def test_quoted_annotation_with_an_inner_quoted_name_records_the_use(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], template: str, owner: str
+) -> None:
+    result = _annotation_workspace(
+        tmp_path, "from models import Other\nfrom typing import Optional\n\n" + template
+    )
+
+    assert {edge for edge in _use_edges(result) if edge[1] == "models.Other"} == {
+        (owner, "models.Other", RelationshipKind.REFERENCES.value)
+    }
+    output = _unreferenced_output(tmp_path, capsys)
+    assert "models.Other" not in output
+    assert "models.Unused" in output
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "Literal['helper']",
+        "typing.Literal['helper']",
+        "Annotated[Other, 'helper']",
+        "list[(y := 'helper')]",
+        "list[lambda: 'helper']",
+    ],
+    ids=["literal", "typing-literal", "annotated", "walrus", "lambda"],
+)
+def test_quoted_guard_cases_stay_silent_about_inner_strings(
+    tmp_path: Path, annotation: str
+) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "import typing\nfrom typing import Annotated, Literal\nfrom models import Other\n"
+        "from library import helper\n\n"
+        f'def f(x: "{annotation}"):\n    pass\n',
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "library.helper"}
+    assert "helper" not in {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert result.diagnostics == ()
