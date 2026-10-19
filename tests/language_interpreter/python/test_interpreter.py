@@ -2497,7 +2497,7 @@ def test_from_import_does_not_alias_its_module_name_over_a_same_module_definitio
 
 
 def test_from_import_does_not_make_its_module_name_a_prefix_root(tmp_path: Path) -> None:
-    _write(tmp_path, "pkg/utils.py", "def foo():\n    return 1\n")
+    _write(tmp_path, "pkg/utils.py", "def foo():\n    return 1\n\ndef bar():\n    return 2\n")
     _write(
         tmp_path,
         "app.py",
