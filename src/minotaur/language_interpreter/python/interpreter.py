@@ -2686,7 +2686,7 @@ def _analyze_module(
                 class_scope_type_param_names=frozenset(_type_param_names(statement)),
                 class_scope_outer_import_targets=context.import_targets,
                 class_scope_outer_plain_import_names=context.plain_import_names,
-                class_scope_outer_uncertain_import_names=context.uncertain_import_names,
+                class_scope_outer_uncertain_import_names=state.uncertain_names,
                 declared_names=frozenset(),
             )
             _calls(
@@ -3045,202 +3045,129 @@ def _calls(
         if name not in outer_targets or outer_targets[name] != target
     )
     for candidate in visitor.calls:
-        call_snapshot = visitor._call_snapshots[candidate]
-        expression_context = context
-        blocked_plain_names: frozenset[str] = frozenset()
-        if (
-            call_snapshot.excludes_enclosing_class
-            and (
-                context.class_scope_outer_import_targets is not None or call_snapshot.in_class_body
-            )
-            and candidate.func not in definition_header_nodes
-        ):
-            expression_context = _without_enclosing_class_scope(context)
-        call_import_targets = call_snapshot.import_targets
-        if (
-            call_snapshot.excludes_enclosing_class
-            and (
-                context.class_scope_outer_import_targets is not None or call_snapshot.in_class_body
-            )
-            and candidate.func not in definition_header_nodes
-        ):
-            stripped_call_import_targets = _without_import_roots(
-                call_import_targets, enclosing_class_target_names
-            )
-            stripped_call_import_targets.update(
-                {
-                    name: target
-                    for name, target in call_import_targets.items()
-                    if name.partition(".")[0] in call_snapshot.local_import_names
-                }
-            )
-            call_import_targets = stripped_call_import_targets
-        call_import_bound = call_snapshot.import_bound - call_snapshot.bound_names
-        if (
-            call_snapshot.excludes_enclosing_class
-            and (
-                context.class_scope_outer_import_targets is not None or call_snapshot.in_class_body
-            )
-            and candidate.func not in definition_header_nodes
-        ):
-            call_import_bound -= context.import_targets.keys()
-        call_uncertain_names = call_snapshot.uncertain_import_names
-        if (
-            call_snapshot.excludes_enclosing_class
-            and (
-                context.class_scope_outer_import_targets is not None or call_snapshot.in_class_body
-            )
-            and candidate.func not in definition_header_nodes
-        ):
-            call_uncertain_names -= context.uncertain_import_names - (
-                context.class_scope_outer_uncertain_import_names or frozenset()
-            )
-        call_plain_import_names = call_snapshot.plain_import_names
-        if context.class_scope_outer_import_targets is not None:
-            blocked_plain_names = frozenset(call_plain_import_names | class_local_plain_names)
-            call_plain_import_names = frozenset(
-                call_plain_import_names & context.plain_import_names
-            )
-            call_import_targets = _without_import_roots(call_import_targets, blocked_plain_names)
-        if candidate.func in class_header_nodes:
-            call_uncertain_names = frozenset(
-                set(call_uncertain_names)
-                | (
-                    context.class_scope_deleted_plain_names
-                    & frozenset((_base_identifier(candidate.func),))
-                )
-            )
+        expression_context, scoped_declarations = _resolve_header_use(
+            context,
+            visitor._call_snapshots[candidate],
+            candidate.func,
+            class_declarations,
+            class_header_nodes,
+            definition_header_nodes,
+            enclosing_class_target_names,
+            class_local_plain_names,
+        )
         _emit_expression_facts(
-            _scoped_context(
-                replace(
-                    expression_context,
-                    receiver_name=call_snapshot.receiver_name,
-                    receiver_parameter=call_snapshot.receiver_parameter,
-                ),
-                expression_context.bound_names | call_snapshot.bound_names,
-                call_snapshot.global_names,
-                call_snapshot.shadow_names,
-                call_import_targets,
-                call_plain_import_names,
-                call_import_bound,
-                call_uncertain_names,
-                call_snapshot.authoritative_import_names,
-                call_snapshot.bound_names | call_import_bound | blocked_plain_names,
-            ),
+            expression_context,
             caller,
             candidate.func,
             _location(context.path, candidate.func),
-            None if call_snapshot.excludes_enclosing_class else class_declarations,
+            scoped_declarations,
             RelationshipKind.CALLS.value,
         )
     for reference in visitor.references:
-        reference_snapshot = visitor._reference_snapshots[reference]
-        expression_context = context
-        blocked_plain_names = frozenset()
-        if (
-            reference_snapshot.excludes_enclosing_class
-            and (
-                context.class_scope_outer_import_targets is not None
-                or reference_snapshot.in_class_body
-            )
-            and reference not in definition_header_nodes
-        ):
-            expression_context = _without_enclosing_class_scope(context)
-        reference_import_targets = reference_snapshot.import_targets
-        if (
-            reference_snapshot.excludes_enclosing_class
-            and (
-                context.class_scope_outer_import_targets is not None
-                or reference_snapshot.in_class_body
-            )
-            and reference not in definition_header_nodes
-        ):
-            stripped_reference_import_targets = _without_import_roots(
-                reference_import_targets, enclosing_class_target_names
-            )
-            stripped_reference_import_targets.update(
-                {
-                    name: target
-                    for name, target in reference_import_targets.items()
-                    if name.partition(".")[0] in reference_snapshot.local_import_names
-                }
-            )
-            reference_import_targets = stripped_reference_import_targets
-        reference_import_bound = reference_snapshot.import_bound - reference_snapshot.bound_names
-        if (
-            reference_snapshot.excludes_enclosing_class
-            and (
-                context.class_scope_outer_import_targets is not None
-                or reference_snapshot.in_class_body
-            )
-            and reference not in definition_header_nodes
-        ):
-            reference_import_bound -= context.import_targets.keys()
-        reference_uncertain_names = set(reference_snapshot.uncertain_import_names)
-        if (
-            reference_snapshot.excludes_enclosing_class
-            and reference in definition_header_nodes
-            and context.class_scope_outer_import_targets is not None
-        ):
-            expression_context = _without_enclosing_class_scope(context)
-            reference_import_targets = _without_import_roots(
-                reference_import_targets, enclosing_class_target_names
-            )
-            reference_uncertain_names -= context.uncertain_import_names - (
-                context.class_scope_outer_uncertain_import_names or frozenset()
-            )
-        if reference_snapshot.excludes_enclosing_class and reference not in definition_header_nodes:
-            reference_uncertain_names -= context.uncertain_import_names - (
-                context.class_scope_outer_uncertain_import_names or frozenset()
-            )
-            if context.class_scope_outer_import_targets is None and reference in class_header_nodes:
-                reference_uncertain_names.update(
-                    name
-                    for name in _import_binding_roots(reference_snapshot.import_targets)
-                    if context.import_targets.get(name)
-                    != reference_snapshot.import_targets.get(name)
-                )
-        reference_plain_import_names = reference_snapshot.plain_import_names
-        if context.class_scope_outer_import_targets is not None:
-            blocked_plain_names = frozenset(reference_plain_import_names | class_local_plain_names)
-            reference_plain_import_names = frozenset(
-                reference_plain_import_names & context.plain_import_names
-            )
-            reference_import_targets = _without_import_roots(
-                reference_import_targets, blocked_plain_names
-            )
-        if reference in class_header_nodes:
-            reference_uncertain_names.update(
-                context.class_scope_deleted_plain_names & frozenset((_base_identifier(reference),))
-            )
+        expression_context, scoped_declarations = _resolve_header_use(
+            context,
+            visitor._reference_snapshots[reference],
+            reference,
+            class_declarations,
+            class_header_nodes,
+            definition_header_nodes,
+            enclosing_class_target_names,
+            class_local_plain_names,
+        )
         _emit_expression_facts(
-            _scoped_context(
-                replace(
-                    expression_context,
-                    receiver_name=reference_snapshot.receiver_name,
-                    receiver_parameter=reference_snapshot.receiver_parameter,
-                ),
-                expression_context.bound_names | reference_snapshot.bound_names,
-                reference_snapshot.global_names,
-                reference_snapshot.shadow_names,
-                reference_import_targets,
-                reference_plain_import_names,
-                reference_import_bound
-                - (
-                    context.class_scope_bound_names
-                    if reference in class_header_nodes
-                    else frozenset()
-                ),
-                frozenset(reference_uncertain_names),
-                reference_snapshot.authoritative_import_names,
-                reference_snapshot.bound_names | reference_import_bound | blocked_plain_names,
-            ),
+            expression_context,
             caller,
             reference,
             _location(context.path, reference),
-            (None if reference_snapshot.excludes_enclosing_class else class_declarations),
+            scoped_declarations,
             RelationshipKind.REFERENCES.value,
         )
+
+
+def _resolve_header_use(
+    context: _ScopeContext,
+    snapshot: _ExpressionSnapshot,
+    node: ast.expr,
+    class_declarations: Mapping[str, str] | None,
+    class_header_nodes: set[ast.AST],
+    definition_header_nodes: set[ast.AST],
+    enclosing_class_target_names: frozenset[str],
+    class_local_plain_names: frozenset[str],
+) -> tuple[_ScopeContext, Mapping[str, str] | None]:
+    """Narrow the analysis context to the bindings Python consults for one use.
+
+    A use inside a nested class body or header cannot see the namespace of the
+    class that encloses it, so only the uncertainty and import routes those
+    enclosing class bodies introduced are withheld. Uncertainty the module
+    flow state or an owning function frame carries stays visible. Calls and
+    loads resolve through this one function so they cannot disagree.
+    """
+    inside_nested_class = snapshot.excludes_enclosing_class
+    in_definition_header = node in definition_header_nodes
+    in_class_header = node in class_header_nodes
+    has_enclosing_class_context = context.class_scope_outer_import_targets is not None
+    expression_context = context
+    import_targets = snapshot.import_targets
+    import_bound = snapshot.import_bound - snapshot.bound_names
+    uncertain = set(snapshot.uncertain_import_names)
+    blocked_plain_names: frozenset[str] = frozenset()
+    if inside_nested_class:
+        if in_definition_header:
+            if has_enclosing_class_context:
+                expression_context = _without_enclosing_class_scope(context)
+                import_targets = _without_import_roots(import_targets, enclosing_class_target_names)
+        elif has_enclosing_class_context or snapshot.in_class_body:
+            expression_context = _without_enclosing_class_scope(context)
+            import_targets = _without_import_roots(import_targets, enclosing_class_target_names)
+            import_targets.update(
+                {
+                    name: target
+                    for name, target in snapshot.import_targets.items()
+                    if name.partition(".")[0] in snapshot.local_import_names
+                }
+            )
+            import_bound = import_bound - context.import_targets.keys()
+        # Only uncertainty that enclosing class bodies introduced is hidden.
+        # A class in a function has no recorded class-introduced set, so the
+        # module and function uncertainty it inherits is kept whole.
+        outer_uncertain = (
+            context.uncertain_import_names
+            if context.class_scope_outer_uncertain_import_names is None
+            else context.class_scope_outer_uncertain_import_names
+        )
+        uncertain -= context.uncertain_import_names - outer_uncertain
+        if not in_definition_header and not has_enclosing_class_context and in_class_header:
+            uncertain.update(
+                name
+                for name in _import_binding_roots(snapshot.import_targets)
+                if context.import_targets.get(name) != snapshot.import_targets.get(name)
+            )
+    plain_import_names = snapshot.plain_import_names
+    if has_enclosing_class_context:
+        blocked_plain_names = frozenset(plain_import_names | class_local_plain_names)
+        plain_import_names = frozenset(plain_import_names & context.plain_import_names)
+        import_targets = _without_import_roots(import_targets, blocked_plain_names)
+    if in_class_header:
+        uncertain.update(
+            context.class_scope_deleted_plain_names & frozenset((_base_identifier(node),))
+        )
+    scoped = _scoped_context(
+        replace(
+            expression_context,
+            receiver_name=snapshot.receiver_name,
+            receiver_parameter=snapshot.receiver_parameter,
+        ),
+        expression_context.bound_names | snapshot.bound_names,
+        snapshot.global_names,
+        snapshot.shadow_names,
+        import_targets,
+        plain_import_names,
+        import_bound - (context.class_scope_bound_names if in_class_header else frozenset()),
+        frozenset(uncertain),
+        snapshot.authoritative_import_names,
+        snapshot.bound_names | import_bound | blocked_plain_names,
+    )
+    return scoped, (None if inside_nested_class else class_declarations)
 
 
 def _without_enclosing_class_scope(context: _ScopeContext) -> _ScopeContext:
