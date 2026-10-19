@@ -3026,15 +3026,42 @@ def _calls(
         # lets an import install a route before its first use and lets a later
         # direct write remove that route, while deferred function bodies keep
         # their dedicated final-state handling below.
+        outer_import_targets = context.class_scope_outer_import_targets
+        if outer_import_targets is not None:
+            # A class body runs on top of the module state it was entered
+            # with. Its own bindings live in a class frame that nested class
+            # bodies and method bodies drop, so they consult that module
+            # state, or the final one when deferred, never the class namespace.
+            visitor._push_scope(
+                frozenset(),
+                frozenset(),
+                frozenset(),
+                import_targets=dict(outer_import_targets),
+                import_uncertain_names=(
+                    context.class_scope_outer_uncertain_import_names or frozenset()
+                ),
+                local_import_names=_import_binding_roots(outer_import_targets),
+                declared_names=context.declared_names,
+                import_flow_sensitive=True,
+            )
+        # The class frame replaces the module frame beneath it for the class
+        # body's own uses, which see exactly the class context.
         visitor._push_scope(
             frozenset(),
             frozenset(),
-            frozenset(),
+            (
+                frozenset()
+                if outer_import_targets is None
+                else _import_binding_roots(outer_import_targets)
+                | (context.class_scope_outer_uncertain_import_names or frozenset())
+            ),
             import_targets=dict(context.import_targets),
             import_uncertain_names=context.uncertain_import_names,
             local_import_names=context.authoritative_import_names,
             declared_names=context.declared_names,
             import_flow_sensitive=True,
+            class_scope=outer_import_targets is not None,
+            type_param_names=context.class_scope_type_param_names,
         )
         visitor._flow_mutate_targets = True
         if deferred_state is not None:
@@ -3060,6 +3087,8 @@ def _calls(
                         deferred_type_param_names=deferred_type_params,
                     )
         visitor._pop_scope()
+        if outer_import_targets is not None:
+            visitor._pop_scope()
     class_header_nodes = {
         child for header in visitor.class_header_expressions for child in ast.walk(header)
     }
@@ -3132,9 +3161,13 @@ def _resolve_header_use(
 
     A use inside a nested class body or header cannot see the namespace of the
     class that encloses it, so only the uncertainty and import routes those
-    enclosing class bodies introduced are withheld. Uncertainty the module
-    flow state or an owning function frame carries stays visible. Calls and
-    loads resolve through this one function so they cannot disagree.
+    enclosing class bodies introduced are withheld. For a module class the
+    walk keeps that namespace in a class frame the nested scopes drop, so the
+    use resolves against the module state at the class statement, advanced by
+    the body's directive writes, or the final state for a deferred body.
+    Uncertainty the module flow state or an owning function frame carries
+    stays visible. Calls and loads resolve through this one function so they
+    cannot disagree.
     """
     inside_nested_class = snapshot.excludes_enclosing_class
     in_definition_header = node in definition_header_nodes
@@ -3146,28 +3179,18 @@ def _resolve_header_use(
     uncertain = set(snapshot.uncertain_import_names)
     blocked_plain_names: frozenset[str] = frozenset()
 
-    def class_routes_in_use(names: frozenset[str]) -> frozenset[str]:
-        # A route the use still shares with the enclosing class context came
-        # from that class body; a nearer frame or the final module state
-        # seen by a deferred body supplies its own route, which is kept.
-        return frozenset(
-            name
-            for name in names
-            if snapshot.import_targets.get(name) == context.import_targets.get(name)
-        )
-
     if inside_nested_class:
-        if in_definition_header:
-            if has_enclosing_class_context:
-                expression_context = _without_enclosing_class_scope(context)
-                import_targets = _without_import_roots(
-                    import_targets, class_routes_in_use(enclosing_class_target_names)
-                )
-        elif has_enclosing_class_context or snapshot.in_class_body:
+        if has_enclosing_class_context:
+            # The visitor already dropped the enclosing class frame, so the
+            # snapshot holds only the module state this use consults.
             expression_context = _without_enclosing_class_scope(context)
-            import_targets = _without_import_roots(
-                import_targets, class_routes_in_use(enclosing_class_target_names)
-            )
+            if not in_definition_header:
+                import_bound = import_bound - context.import_targets.keys()
+        elif not in_definition_header and snapshot.in_class_body:
+            # A class inside a function: its body consults the function and
+            # module bindings the analysis context already carries, whose
+            # uncertainty is kept whole.
+            import_targets = _without_import_roots(import_targets, enclosing_class_target_names)
             import_targets.update(
                 {
                     name: target
@@ -3176,15 +3199,6 @@ def _resolve_header_use(
                 }
             )
             import_bound = import_bound - context.import_targets.keys()
-        # Only uncertainty that enclosing class bodies introduced is hidden.
-        # A class in a function has no recorded class-introduced set, so the
-        # module and function uncertainty it inherits is kept whole.
-        outer_uncertain = (
-            context.uncertain_import_names
-            if context.class_scope_outer_uncertain_import_names is None
-            else context.class_scope_outer_uncertain_import_names
-        )
-        uncertain -= context.uncertain_import_names - outer_uncertain
         if not in_definition_header and not has_enclosing_class_context and in_class_header:
             uncertain.update(
                 name
