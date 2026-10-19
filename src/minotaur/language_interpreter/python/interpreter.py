@@ -139,6 +139,9 @@ class _ScopeContext:
     receiver_name: str | None = None
     receiver_parameter: str | None = None
     modules: Mapping[str, _Module] = field(default_factory=dict)
+    # The module's binding state after its last statement. A quoted annotation
+    # is evaluated against it, not against the state at its source position.
+    module_final_state: _ImportFlowState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +202,14 @@ class _ExpressionSnapshot:
     receiver_name: str | None
     receiver_parameter: str | None
     excludes_enclosing_class: bool
+    owner_import_targets: Mapping[str, str] | None = None
+    """Import routes of the non-class frames, for a use directly in a class body.
+
+    A class body consults the function and module bindings around it, but not
+    the class frames the walk already drops. The routes here omit every name
+    the innermost class frame binds itself, so only bindings the use can see
+    through lexical scoping remain.
+    """
 
 
 @dataclass
@@ -435,7 +446,23 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             excludes_enclosing_class=any(
                 frame.excludes_enclosing_class for frame in self._scope_frames
             ),
+            owner_import_targets=self._scope_owner_imports(),
         )
+
+    def _scope_owner_imports(self) -> Mapping[str, str] | None:
+        """Return the import routes a class body sees from its enclosing frames."""
+        if not self._scope_frames or not self._scope_frames[-1].is_class:
+            return None
+        class_frame = self._scope_frames[-1]
+        class_state = class_frame.import_state
+        class_names = (
+            _import_binding_roots(class_state.targets)
+            | class_state.uncertain_names
+            | class_frame.bound_names
+            | class_frame.shadow_names
+        )
+        merged = self._scope_imports(skip_class_frames=True)
+        return _without_import_roots(merged, class_names)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         if self._defer_nested_bodies:
@@ -1276,7 +1303,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 return frame.receiver_override
         return self._receiver_name, self._receiver_parameter
 
-    def _scope_imports(self) -> Mapping[str, str]:
+    def _scope_imports(self, *, skip_class_frames: bool = False) -> Mapping[str, str]:
         """Return the import binding each visible name resolves to.
 
         The nearest frame wins, matching how a name is bound at run time: an
@@ -1285,6 +1312,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         """
         merged: dict[str, str] = {}
         for frame in self._scope_frames:
+            if skip_class_frames and frame.is_class:
+                continue
             shadow_names = frame.shadow_names
             global_names = frame.global_names
             state = frame.import_state
@@ -2610,6 +2639,7 @@ def _analyze_module(
         modules=modules,
         module_resolution=module_resolution,
         plain_import_names=module_resolution.plain_roots,
+        module_final_state=final_module_state,
     )
     for symbol in symbols.values():
         relationships.add(
@@ -3107,7 +3137,9 @@ def _calls(
     for candidate in visitor.calls:
         expression_context, scoped_declarations = _resolve_header_use(
             context,
-            visitor._call_snapshots[candidate],
+            _forward_reference_snapshot(
+                context, visitor._call_snapshots[candidate], candidate.func
+            ),
             candidate.func,
             class_declarations,
             class_header_nodes,
@@ -3126,7 +3158,9 @@ def _calls(
     for reference in visitor.references:
         expression_context, scoped_declarations = _resolve_header_use(
             context,
-            visitor._reference_snapshots[reference],
+            _forward_reference_snapshot(
+                context, visitor._reference_snapshots[reference], reference
+            ),
             reference,
             class_declarations,
             class_header_nodes,
@@ -3142,6 +3176,45 @@ def _calls(
             scoped_declarations,
             RelationshipKind.REFERENCES.value,
         )
+
+
+def _forward_reference_snapshot(
+    context: _ScopeContext,
+    snapshot: _ExpressionSnapshot,
+    node: ast.expr,
+) -> _ExpressionSnapshot:
+    """Withhold a definite route a quoted annotation's late evaluation would not use.
+
+    A quoted annotation is evaluated after the module has run, so it consults
+    the module's final bindings rather than the ones at its source position.
+    When the root name's import route at the position differs from the final
+    one, or the final state is uncertain about it, the position-based route
+    may name the wrong binding; the name becomes uncertain and is reported as
+    unresolved rather than as an edge to that binding.
+    """
+    final_state = context.module_final_state
+    if final_state is None or not _in_quoted_annotation(node):
+        return snapshot
+    root = _base_identifier(node)
+    if root is None or root in snapshot.bound_names:
+        return snapshot
+
+    def routes(targets: Mapping[str, str]) -> dict[str, str]:
+        return {name: target for name, target in targets.items() if name.partition(".")[0] == root}
+
+    # Frames the walk pushed take priority; a header the walk visited without
+    # a flow frame consults the context's state at its source position.
+    position_routes = routes(snapshot.import_targets) or routes(context.import_targets)
+    if root not in final_state.uncertain_names and position_routes == routes(final_state.targets):
+        return snapshot
+    return replace(
+        snapshot,
+        uncertain_import_names=snapshot.uncertain_import_names | frozenset((root,)),
+    )
+
+
+def _in_quoted_annotation(node: ast.AST) -> bool:
+    return getattr(node, _QUOTED_ANNOTATION_MARK, False) is True
 
 
 def _resolve_header_use(
@@ -3185,14 +3258,24 @@ def _resolve_header_use(
                 import_bound = import_bound - context.import_targets.keys()
         elif not in_definition_header and snapshot.in_class_body:
             # A class inside a function: its body consults the function and
-            # module bindings the analysis context already carries, whose
-            # uncertainty is kept whole.
+            # module bindings the snapshot already carries, with enclosing
+            # class frames dropped by the walk. A function-local import
+            # therefore keeps priority over a module import, and the owning
+            # frame's uncertainty is kept whole. The class frame's own
+            # bindings keep their separate handling below.
             import_targets = _without_import_roots(import_targets, enclosing_class_target_names)
             import_targets.update(
                 {
                     name: target
                     for name, target in snapshot.import_targets.items()
                     if name.partition(".")[0] in snapshot.local_import_names
+                }
+            )
+            import_targets.update(
+                {
+                    name: target
+                    for name, target in (snapshot.owner_import_targets or {}).items()
+                    if context.import_targets.get(name) != target
                 }
             )
             import_bound = import_bound - context.import_targets.keys()
@@ -3586,6 +3669,9 @@ def _parse_python(source: str, relative: str) -> ast.Module:
         raise ParseFailure(str(error), None) from error
 
 
+_QUOTED_ANNOTATION_MARK = "minotaur_quoted_annotation"
+"""Attribute set on every expression node parsed out of a quoted annotation."""
+
 _BINDING_SYNTAX = (
     ast.NamedExpr,
     ast.Lambda,
@@ -3664,6 +3750,7 @@ def _parse_annotation_string(literal: ast.Constant) -> ast.expr:
     if any(isinstance(child, _BINDING_SYNTAX) for child in nodes):
         return literal
     for child in nodes:
+        setattr(child, _QUOTED_ANNOTATION_MARK, True)
         if "lineno" in child._attributes:
             child.lineno = literal.lineno  # type: ignore[attr-defined]
             child.col_offset = literal.col_offset  # type: ignore[attr-defined]
