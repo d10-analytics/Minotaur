@@ -2944,8 +2944,6 @@ def _imports(
                     )
                     if statement in module_statements:
                         _update_named_import_binding(aliases, alias.asname or alias.name, reference)
-            if statement in module_statements and target_module is not None and base is not None:
-                aliases.setdefault(base.rsplit(".", 1)[-1], base)
     return aliases
 
 
@@ -3376,10 +3374,8 @@ def _suppress_builtin(expression: ast.expr, context: _ScopeContext) -> bool:
     imported name that happens to shadow a builtin (``from externallib import
     list``) is a workspace dependency rather than a builtin.
 
-    Only real bindings count. ``aliases`` also holds resolution shorthands the
-    module never bound -- ``from pkg.list import helper`` records ``list`` so
-    that ``list.helper`` resolves -- and treating those as bindings would let
-    the builtin escape suppression in every such module.
+    Only real bindings count: ``from pkg.list import helper`` binds ``helper``,
+    not ``list``, so the builtin keeps its suppression in that module.
     """
     root = _attribute_root_name(expression)
     return (
