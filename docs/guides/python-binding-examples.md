@@ -104,3 +104,36 @@ Within `Service`, `self.run()` resolves through the owning class. In `unknown`,
 The tool does not guess that it refers to `Service.run` merely because the
 method names match. Read the [Python analysis reference](analyze-python.md)
 for the precise boundaries, including branches that return or raise.
+
+## Declared names and annotations
+
+A name defined with `def` or `class` is invalidated by a later rebinding in the
+same way as an imported name:
+
+```python
+def helper():
+    return 1
+
+
+helper = choose()
+helper()  # unresolved: not a call to the original helper
+```
+
+A star import (`from other import *`) does the same to every name the module
+already tracks. A bare annotation does not bind a name in a class or module
+body, but it makes the name local in a function body:
+
+```python
+class Service:
+    name: str  # annotation only: does not bind `name`
+
+def run():
+    total: int  # annotation only: `total` is local to `run`
+    total()     # stays unemitted, not a call to a module `total`
+```
+
+String annotations such as `-> "list[Service]"` are parsed, so `Service`
+counts as a use, while `Literal["Service"]` holds a value and does not. The
+`from pkg.utils import foo` form no longer creates an alias for `utils`, so a
+same-module `def utils()` resolves normally. The proofs for each rule are named
+in the [Python analysis reference](analyze-python.md#declared-names-annotations-and-header-uses).
