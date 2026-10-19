@@ -8157,3 +8157,258 @@ def test_quoted_guard_cases_stay_silent_about_inner_strings(
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE
     }
     assert result.diagnostics == ()
+
+
+_SIX_USES = (
+    "x = {n}()  # body-call\n"
+    "y = {n}  # body-load\n"
+    "def m(\n"
+    "    self,\n"
+    "    a={n}(),  # header-call\n"
+    "    b={n},  # header-load\n"
+    "):\n"
+    "    {n}()  # method-call\n"
+    "    return {n}  # method-load\n"
+)
+
+
+def _indent(text: str, prefix: str) -> str:
+    return "".join(f"{prefix}{line}\n" for line in text.splitlines())
+
+
+def _six_use_source(
+    prelude: str, placement: str, name: str, class_prelude: str = ""
+) -> tuple[str, str]:
+    """Return the module source and owner for one placement of the six uses.
+
+    ``module`` nests ``class I`` in ``class O`` (every use owned by ``app.O``);
+    ``function`` defines ``class K`` inside ``def outer()`` (owned by ``app.outer``).
+    """
+    uses = _SIX_USES.format(n=name)
+    if placement == "module":
+        shape = "class O:\n" + _indent(class_prelude, "    ")
+        shape += "    class I:\n" + _indent(uses, "        ")
+        return prelude + shape, "app.O"
+    shape = "def outer():\n    class K:\n" + _indent(uses, "        ")
+    return prelude + shape, "app.outer"
+
+
+def _use_sites(result: AnalysisResult) -> set[tuple[str, str, str, int]]:
+    """Return (owner, kind, target label or ``?text`` when unresolved, line)."""
+    nodes = {node.id: node for node in result.document.nodes}
+    sites = set()
+    for relationship in result.document.relationships:
+        if relationship.kind not in (
+            RelationshipKind.CALLS.value,
+            RelationshipKind.REFERENCES.value,
+        ):
+            continue
+        target = nodes[relationship.target]
+        label = (
+            f"?{target.reference_text}"
+            if target.node_class == NodeClass.UNRESOLVED_REFERENCE
+            else target.label
+        )
+        for evidence in relationship.evidence:
+            for location in evidence.locations:
+                sites.add(
+                    (
+                        nodes[relationship.source].label,
+                        relationship.kind,
+                        label,
+                        location.range.start.line + 1,
+                    )
+                )
+    return sites
+
+
+def _expected_uses(
+    source: str, owner: str, name: str, target: str | None
+) -> set[tuple[str, str, str, int]]:
+    """Expect each tagged use to hit ``target`` or stay an unresolved ``name``."""
+    expected = set()
+    for number, text in enumerate(source.splitlines(), start=1):
+        if "# " not in text:
+            continue
+        role = text.split("# ", 1)[1]
+        is_call = role.endswith("call")
+        kind = (
+            RelationshipKind.CALLS.value
+            if is_call and target is not None
+            else RelationshipKind.REFERENCES.value
+        )
+        expected.add((owner, kind, target or f"?{name}", number))
+    return expected
+
+
+def _analyze_six_uses(
+    root: Path, prelude: str, placement: str, name: str, class_prelude: str = ""
+) -> tuple[AnalysisResult, str, str]:
+    source, owner = _six_use_source(prelude, placement, name, class_prelude)
+    _write(root, "lib.py", "def f():\n    pass\n\n\ndef helper():\n    pass\n")
+    _write(root, "other.py", "def helper():\n    pass\n")
+    _write(root, "app.py", source)
+    return analyze_python_workspace(root), source, owner
+
+
+_PLACEMENTS = ("module", "function")
+_CONDITIONAL_IMPORT = "def f():\n    pass\n\n\nif True:\n    from lib import f\n\n\n"
+_CONDITIONAL_REBIND = "def f():\n    pass\n\n\nif flag:\n    f = g\n\n\n"
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+@pytest.mark.parametrize(
+    "prelude", [_CONDITIONAL_IMPORT, _CONDITIONAL_REBIND], ids=["conditional-import", "rebind"]
+)
+def test_invalidated_declared_name_stays_unresolved_in_every_nested_use(
+    tmp_path: Path, placement: str, prelude: str
+) -> None:
+    result, source, owner = _analyze_six_uses(tmp_path, prelude, placement, "f")
+    sites = _use_sites(result)
+
+    assert {site for site in sites if site[3] > prelude.count("\n")} == _expected_uses(
+        source, owner, "f", None
+    )
+    assert not {site for site in sites if site[2] in ("app.f", "lib.f")}
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_imported_name_resolves_in_every_nested_use(tmp_path: Path, placement: str) -> None:
+    prelude = "from lib import f\n\n\n"
+    result, source, owner = _analyze_six_uses(tmp_path, prelude, placement, "f")
+
+    assert _use_sites(result) == _expected_uses(source, owner, "f", "lib.f")
+
+
+@pytest.mark.parametrize(
+    "class_prelude",
+    ["if flag:\n    from other import helper\n\n", "from other import helper\n\n"],
+    ids=["conditional-class-import", "class-import"],
+)
+def test_enclosing_class_import_does_not_reach_nested_class_uses(
+    tmp_path: Path, class_prelude: str
+) -> None:
+    prelude = "from lib import helper\n\n\n"
+    result, source, owner = _analyze_six_uses(tmp_path, prelude, "module", "helper", class_prelude)
+
+    assert {site for site in _use_sites(result) if site[2].endswith("helper")} == _expected_uses(
+        source, owner, "helper", "lib.helper"
+    )
+
+
+_TOP_LEVEL_USES = (
+    "def h(\n"
+    "    a=f(),  # h-header-call\n"
+    "    b=f,  # h-header-load\n"
+    "):\n"
+    "    pass\n\n\n"
+    "class C(\n"
+    "    f(),  # base-call\n"
+    "    metaclass=f,  # base-load\n"
+    "):\n"
+    "    class I(\n"
+    "        f(),  # nested-base-call\n"
+    "        metaclass=f,  # nested-base-load\n"
+    "    ):\n"
+    "        pass\n\n"
+    "    x = f()  # class-body-call\n"
+    "    y = f  # class-body-load\n"
+    "    def m(\n"
+    "        self,\n"
+    "        a=f(),  # method-header-call\n"
+    "        b=f,  # method-header-load\n"
+    "    ):\n"
+    "        f()  # method-call\n"
+    "        return f  # method-load\n"
+)
+
+_TOP_LEVEL_OWNERS = {
+    "h-header": "app.h",
+    "base": "app.C",
+    "nested-base": "app.C",
+    "class-body": "app.C",
+    "method-header": "app.C.m",
+    "method": "app.C.m",
+}
+
+
+@pytest.mark.parametrize(
+    ("prelude", "target"),
+    [(_CONDITIONAL_IMPORT, None), ("from lib import f\n\n\n", "lib.f")],
+    ids=["invalidated", "imported"],
+)
+def test_top_level_header_uses_follow_the_same_binding(
+    tmp_path: Path, prelude: str, target: str | None
+) -> None:
+    source = prelude + _TOP_LEVEL_USES
+    _write(tmp_path, "lib.py", "def f():\n    pass\n")
+    _write(tmp_path, "app.py", source)
+    sites = {
+        site
+        for site in _use_sites(analyze_python_workspace(tmp_path))
+        if site[3] > prelude.count("\n")
+    }
+
+    expected = set()
+    for number, text in enumerate(source.splitlines(), start=1):
+        if "# " not in text:
+            continue
+        role = text.split("# ", 1)[1]
+        owner = next(
+            owner
+            for key, owner in sorted(_TOP_LEVEL_OWNERS.items(), key=lambda i: -len(i[0]))
+            if role.startswith(key)
+        )
+        kind = (
+            RelationshipKind.CALLS.value
+            if role.endswith("call") and target
+            else RelationshipKind.REFERENCES.value
+        )
+        expected.add((owner, kind, target or "?f", number))
+    assert sites == expected
+
+
+def test_quoted_nested_class_method_return_matches_the_unquoted_reference(
+    tmp_path: Path,
+) -> None:
+    edges = {}
+    for label, annotation in (("plain", "Other"), ("quoted", '"Other"')):
+        root = tmp_path / label
+        root.mkdir()
+        _write(root, "models.py", "class Other:\n    pass\n")
+        _write(
+            root,
+            "app.py",
+            "from models import Other\n\n\n"
+            "class O:\n    class I:\n"
+            f"        def m(self) -> {annotation}:\n            pass\n",
+        )
+        edges[label] = {
+            edge
+            for edge in _calls_and_references(analyze_python_workspace(root))
+            if edge[1] == "models.Other"
+        }
+
+    assert edges["plain"] == {("app.O", "models.Other", RelationshipKind.REFERENCES.value)}
+    assert edges["quoted"] == edges["plain"]
+
+
+def test_calls_and_loads_resolve_through_the_one_header_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[str, str]] = []
+    original = python_interpreter._resolve_header_use
+
+    def spy(context, snapshot, node, *args):
+        seen.append((type(node).__name__, getattr(node, "id", "")))
+        return original(context, snapshot, node, *args)
+
+    monkeypatch.setattr(python_interpreter, "_resolve_header_use", spy)
+    _write(tmp_path, "lib.py", "def f():\n    pass\n")
+    _write(tmp_path, "app.py", "from lib import f\n\nf()\nvalue = f\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert {("app", "lib.f", RelationshipKind.CALLS.value)} <= _calls_and_references(result)
+    assert ("Name", "f") in seen
+    assert seen.count(("Name", "f")) == 2
