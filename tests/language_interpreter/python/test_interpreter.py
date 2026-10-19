@@ -8524,3 +8524,58 @@ def test_class_local_assignment_in_an_enclosing_class_body_stays_class_local(
         source, owner, "f", _roles("app.f", "app.f")
     )
     assert ("app", RelationshipKind.CALLS.value, "app.f") in {site[:3] for site in sites}
+
+
+@pytest.mark.parametrize(
+    "class_prelude",
+    ["from other import f\n\n", "if flag:\n    from other import f\n\n"],
+    ids=["class-import", "conditional-class-import"],
+)
+def test_enclosing_class_import_matching_a_later_module_import_keeps_both_timings(
+    tmp_path: Path, class_prelude: str
+) -> None:
+    # The enclosing class imports the same target the module imports later.
+    # The nested body and method defaults still consult the module binding at
+    # the class statement, and the method body still sees the final one.
+    source, owner = _six_use_source("from lib import f\n\n\n", "module", "f", class_prelude)
+    source += "\n\nfrom other import f\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner and site[2] != "?flag"} == _expected_by_role(
+        source, owner, "f", _roles("lib.f", "other.f")
+    )
+
+
+def test_conditional_global_import_in_an_enclosing_class_body_leaves_every_use_uncertain(
+    tmp_path: Path,
+) -> None:
+    source, owner = _six_use_source(
+        "from lib import helper\n\n\n",
+        "module",
+        "helper",
+        "global helper\nif flag:\n    from other import helper\n\n",
+    )
+    source += "\n\nafter = helper()\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner and site[2] != "?flag"} == _expected_by_role(
+        source, owner, "helper", _roles(None, None)
+    )
+    assert ("app", RelationshipKind.REFERENCES.value, "?helper") in {site[:3] for site in sites}
+    assert not {site for site in sites if site[2] in ("lib.helper", "other.helper")}
+
+
+def test_global_directive_without_a_write_keeps_the_module_route(tmp_path: Path) -> None:
+    source, owner = _six_use_source(
+        "from lib import helper\n\n\n", "module", "helper", "global helper\n\n"
+    )
+    source += "\n\nafter = helper()\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner} == _expected_by_role(
+        source, owner, "helper", _roles("lib.helper", "lib.helper")
+    )
+    assert ("app", RelationshipKind.CALLS.value, "lib.helper") in {site[:3] for site in sites}
