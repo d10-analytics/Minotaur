@@ -327,12 +327,19 @@ rebinding exactly as an imported name is: an assignment, a conditional
 assignment, `del`, a `try` import, or a star import (`from m import *`) makes
 every later use an unresolved reference rather than a `calls` edge to the
 original definition. For example, after `def rebound(): ...` and `rebound =
-other`, a call `rebound()` is unresolved and does not redirect to `app.other`.
+other`, a call `rebound()` is unresolved and does not redirect to `app.other` (proof:
+`test_assigning_over_a_declared_function_does_not_redirect_to_another_declaration`).
 A star import marks every tracked name uncertain from that point (declared
 names, assigned locals, and import roots); builtins and never-bound names are
 untouched. A call written before the rebinding keeps its edge, and a function
-body follows the module's final state. A repeated direct `def` still resolves
-to the last definition, and a conditional `def` stays unemitted.
+body follows the module's final state (proof:
+`test_module_call_before_rebinding_keeps_edge_and_function_body_follows_final_state`).
+A repeated direct `def` still resolves to the last definition, and a
+conditional `def` stays unemitted (proofs:
+`test_plain_shadowed_definition_body_and_containment_use_statement_identity`
+and `test_conditional_function_redefinitions_remain_unemitted_and_unresolved`).
+A later top-level definition of a rebound name re-establishes it (proof:
+`test_second_top_level_definition_reestablishes_a_rebound_name`).
 Because such a declaration then has no resolved use, it appears in graph
 `unreferenced` output and as `[text-mention]` under `--text-fallback`.
 Proofs, in `tests/language_interpreter/python/test_interpreter.py`: `test_rebinding_a_declared_name_makes_every_later_use_unresolved`,
@@ -344,10 +351,12 @@ in `tests/query/test_unreferenced.py`,
 `test_unreferenced_lists_declarations_invalidated_by_a_later_rebinding`.
 
 `from pkg.utils import foo` no longer creates an alias for the module name
-`utils`. The removed shorthand never produced a correct resolution, but it did
-resolve an unbound `utils.attr` call whose text exactly matched an imported
-target, and it could hide a same-module `def utils()`, binding calls to an
-incorrect target. A same-module definition now resolves normally, and the
+`utils`. The removed shorthand never produced a correct resolution. It could
+resolve an unbound call such as `lib.helper()` after `from lib import helper`
+only when the call's head text exactly matched the imported module's name,
+yielding a binding Python would not create (`lib` is unbound, so Python raises
+`NameError`); and it could hide a same-module `def utils()`, binding calls to
+an incorrect target. A same-module definition now resolves normally, and the
 `--text-fallback` path is unchanged. Proofs:
 `test_from_import_does_not_alias_its_module_name_over_a_same_module_definition`
 and `test_from_import_does_not_make_its_module_name_a_prefix_root` in `tests/language_interpreter/python/test_interpreter.py`;

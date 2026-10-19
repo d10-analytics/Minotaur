@@ -40,8 +40,10 @@ fixture-only definitions (`workflow.package_scope_probe`, `workflow.cli.main`,
 from the binding-lifecycle sample `replaced`, `deleted`, `conditional`,
 `guarded`, `starred`, `Holder.label_text`, `local_annotation`, and
 `string_annotations`. Under `--text-fallback` the five rebound declarations
-(`replaced`, `deleted`, `conditional`, `guarded`, `starred`) gain a
-`[text-mention]` marker, because their names still appear as text.
+(`replaced`, `deleted`, `conditional`, `guarded`, `starred`) and the older
+`workflow.cli.main`, `workflow.service.main`, and
+`workflow.service.Service.total` gain a `[text-mention]` marker, because their
+names still appear as text.
 
 Nothing outside the harness imports this package; it is source material to be
 analyzed, not code to be executed.
