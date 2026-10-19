@@ -75,8 +75,9 @@ def test_unavailable_fingerprint_is_explicit_on_an_observation() -> None:
         fingerprint=None,
     )
 
-    assert observation.available is False
-    assert observation.structural_fingerprint is None
+    assert observation.fingerprint is None
+    for removed in ("callee", "expression", "structural_fingerprint", "available"):
+        assert not hasattr(observation, removed)
     assert javascript_call_fingerprint(object()) is None
 
 

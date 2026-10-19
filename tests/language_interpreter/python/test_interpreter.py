@@ -340,6 +340,92 @@ def test_syntax_error_is_reported_without_erasing_other_workspace_facts(tmp_path
     assert validate_document(result.document).is_valid
 
 
+def _parse_error_location(root: Path, name: str, content: bytes) -> Location | None:
+    (root / name).write_bytes(content)
+    result = analyze_python_workspace(root)
+    assert [d.code for d in result.diagnostics] == [DiagnosticCode.PARSE_ERROR]
+    return result.diagnostics[0].location
+
+
+def _point(path: str, line: int, column: int) -> Location:
+    return Location(path, Range(Position(line, column), Position(line, column)))
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param('x = "ééééé" + )\n'.encode(), (0, 19), id="multibyte-same-line"),
+        pytest.param('y = "éééé"\nx = "éé" + )\n'.encode(), (1, 13), id="line-2-prefix-only"),
+        pytest.param(
+            b'# -*- coding: latin-1 -*-\nx = "\xe9" + )\n', (1, 11), id="latin-1-decoded-text"
+        ),
+        pytest.param(b"def repaired(:\n", (0, 13), id="ascii"),
+    ],
+)
+def test_parse_error_column_is_a_utf8_byte_offset_of_the_decoded_line(
+    tmp_path: Path, content: bytes, expected: tuple[int, int]
+) -> None:
+    location = _parse_error_location(tmp_path, "app.py", content)
+
+    assert location == _point("app.py", *expected)
+
+
+def test_syntax_error_without_a_line_number_has_no_location() -> None:
+    assert python_interpreter._syntax_location("app.py", SyntaxError("boom")) is None
+
+
+def test_removed_scope_plumbing_is_absent() -> None:
+    import inspect
+
+    assert "local_plain_import_names" not in python_interpreter._ScopeContext.__dataclass_fields__
+    assert (
+        "enclosing_local_import_names"
+        not in inspect.signature(_ScopeCallVisitor.visit_function_body).parameters
+    )
+
+
+def test_augmented_assignment_reads_a_function_local_imported_name(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def caller():\n    from library import helper\n    helper += 1\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app.caller", "library.helper", RelationshipKind.REFERENCES.value) in _edge_labels(
+        result
+    )
+
+
+def test_unreachable_rebinding_after_return_keeps_the_import_route(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def target():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    from library import target\n    return\n    target = other\n    target()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _calls_between(result, "app.f", "library.target")
+
+
+def test_unreachable_rebinding_after_raise_keeps_the_import_route(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def target():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    from library import target\n    raise ValueError\n"
+        "    target = other\n    target()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _calls_between(result, "app.f", "library.target")
+
+
 def test_module_too_deep_for_the_parser_is_a_parse_error_beside_its_siblings(
     tmp_path: Path,
 ) -> None:
