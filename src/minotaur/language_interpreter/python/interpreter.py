@@ -1607,6 +1607,10 @@ class _BindingCollector(ast.NodeVisitor):
 
     def __init__(self, module_name: str = "", is_package: bool = False) -> None:
         self.names: set[str] = set()
+        # A value-less ``name: T`` declares a function local without binding the
+        # name, so it is kept apart from ``names``; only a function scope adds
+        # these back (``_scope_binders``).
+        self.annotated_names: set[str] = set()
         self.deleted_names: set[str] = set()
         self.import_targets: dict[str, str] = {}
         self.import_names: set[str] = set()
@@ -1663,6 +1667,13 @@ class _BindingCollector(ast.NodeVisitor):
             self.names.add(node.id)
         elif isinstance(node.ctx, ast.Store):
             self.names.add(node.id)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is None and node.simple and isinstance(node.target, ast.Name):
+            self.annotated_names.add(node.target.id)
+            self.visit(node.annotation)
+        else:
+            _visit_children(self, node)
 
     def visit_Match(self, node: ast.Match) -> None:
         self.visit(node.subject)
@@ -1840,6 +1851,7 @@ def _scope_binders(
     collector.names.update(entry_dynamic_names)
     for body_statement in statement.body:
         collector.visit(body_statement)
+    collector.names.update(collector.annotated_names)
     collector.names.difference_update(collector.global_names | collector.nonlocal_names)
     local_import_names = (
         frozenset(collector.import_names)
@@ -3571,11 +3583,99 @@ def _parse_python(source: str, relative: str) -> ast.Module:
     parse failure without a location so its siblings still analyze.
     """
     try:
-        return ast.parse(source, filename=relative)
+        tree = ast.parse(source, filename=relative)
+        _normalize_string_annotations(tree)
+        return tree
     except SyntaxError as error:
         raise ParseFailure(error.msg, _syntax_location(relative, error)) from error
     except RecursionError as error:
         raise ParseFailure(str(error), None) from error
+
+
+_BINDING_SYNTAX = (
+    ast.NamedExpr,
+    ast.Lambda,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+    ast.Yield,
+    ast.YieldFrom,
+    ast.Await,
+)
+
+
+def _normalize_string_annotations(tree: ast.Module) -> None:
+    """Replace string annotations with their parsed expressions, in place.
+
+    This is the single owner of string-annotation parsing: every later consumer
+    (signature nodes, header node sets, annotated assignments, nested function
+    visitors) reads the same parsed nodes, so a quoted annotation yields the
+    same facts as the unquoted one.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+                *(a for a in (arguments.vararg, arguments.kwarg) if a is not None),
+            ):
+                if argument.annotation is not None:
+                    argument.annotation = _normalize_annotation(argument.annotation)
+            if node.returns is not None:
+                node.returns = _normalize_annotation(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            node.annotation = _normalize_annotation(node.annotation)
+
+
+def _annotation_subscript_head(node: ast.Subscript) -> str | None:
+    value = node.value
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute):
+        return value.attr
+    return None
+
+
+def _normalize_annotation(node: ast.expr) -> ast.expr:
+    """Return ``node`` with the type-use strings inside it parsed."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return _parse_annotation_string(node)
+    if isinstance(node, ast.Subscript):
+        head = _annotation_subscript_head(node)
+        if head == "Literal":
+            return node
+        if head == "Annotated" and isinstance(node.slice, ast.Tuple) and node.slice.elts:
+            node.slice.elts[0] = _normalize_annotation(node.slice.elts[0])
+            return node
+        node.slice = _normalize_annotation(node.slice)
+    elif isinstance(node, (ast.Tuple, ast.List)):
+        node.elts = [_normalize_annotation(element) for element in node.elts]
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        node.left = _normalize_annotation(node.left)
+        node.right = _normalize_annotation(node.right)
+    return node
+
+
+def _parse_annotation_string(literal: ast.Constant) -> ast.expr:
+    """Parse one string annotation, or return the literal when it is not a type use."""
+    assert isinstance(literal.value, str)
+    try:
+        parsed = ast.parse(literal.value.strip(), mode="eval").body
+    except (SyntaxError, ValueError, RecursionError):
+        return literal
+    nodes = list(ast.walk(parsed))
+    if any(isinstance(child, _BINDING_SYNTAX) for child in nodes):
+        return literal
+    for child in nodes:
+        if "lineno" in child._attributes:
+            child.lineno = literal.lineno  # type: ignore[attr-defined]
+            child.col_offset = literal.col_offset  # type: ignore[attr-defined]
+            child.end_lineno = literal.end_lineno  # type: ignore[attr-defined]
+            child.end_col_offset = literal.end_col_offset  # type: ignore[attr-defined]
+    return parsed
 
 
 _LABEL_PLACEHOLDER = "_"
