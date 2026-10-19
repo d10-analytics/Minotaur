@@ -281,9 +281,11 @@ Module and class execution use source order. Immediate calls and loads see the
 route active at their own expression. Function and method bodies are deferred
 and use final module state; nested deferred functions, lambdas, and methods use
 the final state of their owning enclosing function. Defaults, decorators,
-annotations, and class headers execute in their enclosing scope at definition
-time. A lambda body is deferred, but its defaults and parameters are immediate
-or lexical. This policy does not simulate invocation or callable side effects.
+unquoted annotations, and class headers execute in their enclosing scope at
+definition time; a quoted annotation is evaluated later, as described under
+[declared names and annotations](#declared-names-annotations-and-header-uses).
+A lambda body is deferred, but its defaults and parameters are immediate or
+lexical. This policy does not simulate invocation or callable side effects.
 
 Class headers run in the enclosing scope, while the class body has a separate
 sequential namespace. Earlier class assignments or imports can affect later
@@ -319,6 +321,98 @@ targets. List, set, and dict comprehension bodies are eager and a walrus can
 update the enclosing callable overlay. A generator expression body is lazy and
 does not update that overlay; the analyzer does not simulate generator
 invocation.
+
+### Declared names, annotations, and header uses
+
+A top-level `def` or `class` name is invalidated by a later module-level
+rebinding exactly as an imported name is: an assignment, a conditional
+assignment, `del`, a `try` import, or a star import (`from m import *`) makes
+every later use an unresolved reference rather than a `calls` edge to the
+original definition. For example, after `def rebound(): ...` and `rebound =
+other`, a call `rebound()` is unresolved and does not redirect to `app.other` (proof:
+`test_assigning_over_a_declared_function_does_not_redirect_to_another_declaration`).
+A star import marks every tracked name uncertain from that point (declared
+names, assigned locals, and import roots); builtins and never-bound names are
+untouched. A call written before the rebinding keeps its edge, and a function
+body follows the module's final state (proof:
+`test_module_call_before_rebinding_keeps_edge_and_function_body_follows_final_state`).
+A repeated direct `def` still resolves to the last definition, and a
+conditional `def` stays unemitted (proofs:
+`test_plain_shadowed_definition_body_and_containment_use_statement_identity`
+and `test_conditional_function_redefinitions_remain_unemitted_and_unresolved`).
+A later top-level definition of a rebound name re-establishes it (proof:
+`test_second_top_level_definition_reestablishes_a_rebound_name`).
+Because such a declaration then has no resolved use, it appears in graph
+`unreferenced` output and as `[text-mention]` under `--text-fallback`.
+Proofs, in `tests/language_interpreter/python/test_interpreter.py`: `test_rebinding_a_declared_name_makes_every_later_use_unresolved`,
+`test_conditional_rebinding_invalidates_a_declared_name_after_the_join`,
+`test_conditional_definition_of_a_declared_name_makes_later_uses_unresolved`,
+`test_star_import_invalidates_declared_and_imported_names_but_not_builtins`,
+and `test_star_import_inside_a_conditional_invalidates_a_declared_name_after_the_join`;
+in `tests/query/test_unreferenced.py`,
+`test_unreferenced_lists_declarations_invalidated_by_a_later_rebinding`.
+
+`from pkg.utils import foo` no longer creates an alias for the module name
+`utils`. The removed shorthand never produced a correct resolution. It could
+resolve an unbound call such as `lib.helper()` after `from lib import helper`
+only when the call's head text exactly matched the imported module's name,
+yielding a binding Python would not create (`lib` is unbound, so Python raises
+`NameError`); and it could hide a same-module `def utils()`, binding calls to
+an incorrect target. A same-module definition now resolves normally, and the
+`--text-fallback` path is unchanged. Proofs:
+`test_from_import_does_not_alias_its_module_name_over_a_same_module_definition`
+and `test_from_import_does_not_make_its_module_name_a_prefix_root` in `tests/language_interpreter/python/test_interpreter.py`;
+`test_unreferenced_does_not_list_a_function_named_like_a_from_imported_module`
+in `tests/query/test_unreferenced.py`.
+
+In a class or module body, `name: T` with no value does not bind `name`, so a
+later use resolves against the enclosing scopes (or is unresolved) and is never
+silently dropped. In a function body the same statement makes `name` local, as
+in Python, so a call to it stays unemitted. Proofs:
+`test_class_body_annotation_without_value_does_not_bind_the_name`,
+`test_module_annotation_without_value_keeps_the_imported_name`, and
+`test_function_body_annotation_without_value_makes_the_name_local`.
+
+A string annotation (`-> "list[Other]"`, `x: "Handler"`) is parsed as an
+expression and contributes `references` or unresolved references, located at
+the string literal's span. Python evaluates a quoted annotation later, against
+the module's final bindings, so its name resolves only when the binding at the
+annotation's position is also the module's final binding. When a later import,
+assignment, or top-level definition changes that binding, the quoted use is an
+unresolved reference rather than an edge to the earlier binding. An unquoted
+annotation runs at definition time and still resolves at its source position,
+so the two forms record the same facts whenever the name is not rebound later.
+An unparsable string, or one containing binding or scope syntax (`:=`, lambda,
+comprehension, `yield`, `await`), is ignored silently, as are `Literal[...]` arguments and `Annotated[...]` metadata, which
+are values rather than type uses. Proofs: `test_quoted_return_annotation_references_its_target`,
+`test_quoted_annotation_records_the_same_facts_as_the_unquoted_form`,
+`test_string_annotation_location_lies_inside_the_literal`,
+`test_unparsable_or_binding_string_annotations_emit_nothing`,
+`test_literal_arguments_are_values_not_type_uses`, and
+`test_annotated_metadata_is_a_value_and_only_the_wrapped_type_is_a_use`;
+for late evaluation,
+`test_quoted_annotation_does_not_use_an_import_the_module_later_rebinds`,
+`test_quoted_annotation_does_not_use_an_import_a_later_class_replaces`, and
+`test_quoted_annotation_keeps_an_import_the_module_never_rebinds`.
+
+A call and a load of the same name in a nested-class header, a nested-class
+body, a nested-class method body, or a class defined inside a function resolve
+identically. Only uncertainty introduced by an enclosing class body is
+ignored, while uncertainty from the module flow state or the owning function
+is kept. A class body inside a function consults that function's imports
+before the module's: after module `from lib import helper`, a `from other
+import helper` inside `def outer()` makes every use of `helper` in a nested
+`class K` resolve to `other.helper`. Proofs:
+`test_invalidated_declared_name_stays_unresolved_in_every_nested_use`,
+`test_imported_name_resolves_in_every_nested_use`,
+`test_enclosing_class_import_does_not_reach_nested_class_uses`,
+`test_function_local_import_governs_every_use_in_a_function_nested_class`, and
+`test_calls_and_loads_resolve_through_the_one_header_helper`. An import
+written in a class's own body is still not a route for later uses in that
+same body (see [binding timing and class boundaries](#binding-timing-and-class-boundaries)):
+in a module-level class those uses stay unresolved, but in a class defined
+inside a function they can resolve to the function or module binding that
+the class import shadows.
 
 ### Query consequences
 
@@ -395,7 +489,12 @@ honoured. Recorded positions are always UTF-8 offsets into the decoded text,
 whatever the file's encoding: in a `latin-1` file, the call in `x = "é"; f()`
 starts at character 10, the UTF-8 length of `x = "é"; `, rather than at its
 byte offset 9 in the file. A
-declaration that cannot be honoured (an unknown codec, a byte-order mark that
+`parse-error` diagnostic follows the same rule: its column is the UTF-8 length
+of the decoded line text before the parser's error position, so `x = "ééééé" + )`
+reports column 19, not the parser's character offset (proof:
+`test_parse_error_column_is_a_utf8_byte_offset_of_the_decoded_line` in
+`tests/language_interpreter/python/test_interpreter.py`).
+A declaration that cannot be honoured (an unknown codec, a byte-order mark that
 contradicts it, or a codec that is not an ASCII-compatible text codec), or
 bytes the selected codec cannot decode, yields one `source-read-error` for
 that file while analysis continues with the others. The

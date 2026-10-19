@@ -340,6 +340,92 @@ def test_syntax_error_is_reported_without_erasing_other_workspace_facts(tmp_path
     assert validate_document(result.document).is_valid
 
 
+def _parse_error_location(root: Path, name: str, content: bytes) -> Location | None:
+    (root / name).write_bytes(content)
+    result = analyze_python_workspace(root)
+    assert [d.code for d in result.diagnostics] == [DiagnosticCode.PARSE_ERROR]
+    return result.diagnostics[0].location
+
+
+def _point(path: str, line: int, column: int) -> Location:
+    return Location(path, Range(Position(line, column), Position(line, column)))
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param('x = "ééééé" + )\n'.encode(), (0, 19), id="multibyte-same-line"),
+        pytest.param('y = "éééé"\nx = "éé" + )\n'.encode(), (1, 13), id="line-2-prefix-only"),
+        pytest.param(
+            b'# -*- coding: latin-1 -*-\nx = "\xe9" + )\n', (1, 11), id="latin-1-decoded-text"
+        ),
+        pytest.param(b"def repaired(:\n", (0, 13), id="ascii"),
+    ],
+)
+def test_parse_error_column_is_a_utf8_byte_offset_of_the_decoded_line(
+    tmp_path: Path, content: bytes, expected: tuple[int, int]
+) -> None:
+    location = _parse_error_location(tmp_path, "app.py", content)
+
+    assert location == _point("app.py", *expected)
+
+
+def test_syntax_error_without_a_line_number_has_no_location() -> None:
+    assert python_interpreter._syntax_location("app.py", SyntaxError("boom")) is None
+
+
+def test_removed_scope_plumbing_is_absent() -> None:
+    import inspect
+
+    assert "local_plain_import_names" not in python_interpreter._ScopeContext.__dataclass_fields__
+    assert (
+        "enclosing_local_import_names"
+        not in inspect.signature(_ScopeCallVisitor.visit_function_body).parameters
+    )
+
+
+def test_augmented_assignment_reads_a_function_local_imported_name(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def caller():\n    from library import helper\n    helper += 1\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app.caller", "library.helper", RelationshipKind.REFERENCES.value) in _edge_labels(
+        result
+    )
+
+
+def test_unreachable_rebinding_after_return_keeps_the_import_route(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def target():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    from library import target\n    return\n    target = other\n    target()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _calls_between(result, "app.f", "library.target")
+
+
+def test_unreachable_rebinding_after_raise_keeps_the_import_route(tmp_path: Path) -> None:
+    _write(tmp_path, "library.py", "def target():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    from library import target\n    raise ValueError\n"
+        "    target = other\n    target()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _calls_between(result, "app.f", "library.target")
+
+
 def test_module_too_deep_for_the_parser_is_a_parse_error_beside_its_siblings(
     tmp_path: Path,
 ) -> None:
@@ -2468,11 +2554,54 @@ def test_module_named_after_a_builtin_does_not_exempt_that_builtin(tmp_path: Pat
 
     result = analyze_python_workspace(tmp_path)
 
-    # Importing *from* ``pkg.list`` binds ``helper``, not ``list``. The member
-    # load is an ordinary builtin use and is suppressed, and the bare call
-    # resolves through the module shorthand: neither leaves the builtin behind
-    # as an unresolved workspace dependency.
+    # Importing *from* ``pkg.list`` binds ``helper``, not ``list``. Both the
+    # member load and the bare call are ordinary builtin uses and are
+    # suppressed, so neither leaves the builtin behind as an unresolved
+    # workspace dependency.
     assert "app.use" not in _unresolved_by_source(result)
+
+
+def test_from_import_does_not_alias_its_module_name_over_a_same_module_definition(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/utils.py", "def foo():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from pkg.utils import foo\n\n"
+        "def utils():\n    return 1\n\n"
+        "def a():\n    return utils()\n\n"
+        "def b():\n    return utils()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    relationships = _edge_labels(result)
+    assert ("app.a", "app.utils", RelationshipKind.CALLS.value) in relationships
+    assert ("app.b", "app.utils", RelationshipKind.CALLS.value) in relationships
+    assert _unresolved_by_source(result) == {}
+
+
+def test_from_import_does_not_make_its_module_name_a_prefix_root(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/utils.py", "def foo():\n    return 1\n\ndef bar():\n    return 2\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from pkg.utils import foo\n\n"
+        "def utils():\n    return 1\n\n"
+        "def a():\n    return utils.bar()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # ``utils`` is bound only by the ``def``; the import binds ``foo``. The
+    # attribute call stays an unresolved reference to its exact text and is not
+    # resolved to the module or to the same-module function.
+    assert _unresolved_by_source(result) == {"app.a": {"utils.bar"}}
+    assert not any(
+        label[0] == "app.a" and label[2] == RelationshipKind.CALLS.value
+        for label in _edge_labels(result)
+    )
 
 
 def test_nested_scope_import_of_a_builtin_name_is_not_suppressed(tmp_path: Path) -> None:
@@ -4720,7 +4849,7 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
 ) -> None:
     _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
     source = (
-        "from lib import helper\n\n"
+        "import lib\nfrom lib import helper\n\n"
         "def outer():\n"
         "    helper = object()\n"
         "    local = object()\n"
@@ -7402,3 +7531,1212 @@ def test_inner_if_in_loop_resolves_prewrite_use_but_freezes_post_loop_route(
     assert references == {6}
     assert _unresolved_sites(result) == {("app.run", "helper", 8)}
     assert ("app.run", "other.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
+
+
+_REBOUND_DECLARATIONS = (
+    "import sys\n\n"  # 1-2
+    "def open_file():\n    pass\n\n"  # 3-5
+    "def speed():\n    pass\n\n"  # 6-8
+    "def gone():\n    pass\n\n"  # 9-11
+    "class Service:\n    pass\n\n"  # 12-14
+    "{rebinding}"
+    "open_file()\n"
+    "speed()\n"
+    "gone()\n"
+    "Service()\n"
+)
+_REBINDING_STATEMENTS = (
+    'if sys.platform == "win32":\n'
+    "    open_file = other_open\n"
+    "try:\n"
+    "    from fastlib import speed\n"
+    "except ImportError:\n"
+    "    pass\n"
+    "del gone\n"
+    "Service = make_service()\n\n"
+)
+
+
+def _calls_and_references(result: AnalysisResult) -> set[tuple[str, str, str]]:
+    return {
+        edge
+        for edge in _edge_labels(result)
+        if edge[2] in (RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value)
+    }
+
+
+def _unresolved_texts(result: AnalysisResult, owner: str) -> set[str]:
+    return _unresolved_by_source(result).get(owner, set())
+
+
+def _calls_between(result: AnalysisResult, source: str, target: str) -> bool:
+    return (source, target, RelationshipKind.CALLS.value) in _edge_labels(result)
+
+
+def test_rebinding_a_declared_name_makes_every_later_use_unresolved(tmp_path: Path) -> None:
+    source = _REBOUND_DECLARATIONS.format(rebinding=_REBINDING_STATEMENTS)
+    _write(tmp_path, "app.py", source)
+
+    result = analyze_python_workspace(tmp_path)
+    edges = _edge_labels(result)
+
+    assert {"open_file", "speed", "gone", "Service"} <= _unresolved_texts(result, "app")
+    for name in ("open_file", "speed", "gone", "Service"):
+        assert not {edge for edge in edges if edge[1] == f"app.{name}"} - {
+            ("app", f"app.{name}", RelationshipKind.CONTAINS.value)
+        }
+    use_lines = {
+        name: source.splitlines().index(f"{name}()") + 1
+        for name in ("open_file", "speed", "gone", "Service")
+    }
+    assert _unresolved_sites(result) >= {("app", name, line) for name, line in use_lines.items()}
+
+
+def test_the_same_declarations_without_rebinding_keep_their_call_edges(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", _REBOUND_DECLARATIONS.format(rebinding=""))
+
+    result = analyze_python_workspace(tmp_path)
+
+    for name in ("open_file", "speed", "gone", "Service"):
+        assert _calls_between(result, "app", f"app.{name}")
+    assert _unresolved_texts(result, "app") == {"sys"}
+
+
+def test_assigning_over_a_declared_function_does_not_redirect_to_another_declaration(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def rebind():\n    pass\n\ndef other():\n    pass\n\nrebind = other\nrebind()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert "rebind" in _unresolved_texts(result, "app")
+    assert not _calls_between(result, "app", "app.other")
+    assert not _calls_between(result, "app", "app.rebind")
+
+
+def test_module_call_before_rebinding_keeps_edge_and_function_body_follows_final_state(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nf()\nf = other\n\ndef caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _calls_between(result, "app", "app.f")
+    assert not _calls_between(result, "app.caller", "app.f")
+    assert _unresolved_sites(result) >= {("app.caller", "f", 8)}
+    assert ("app", "f", 4) not in _unresolved_sites(result)
+
+
+def test_class_body_global_write_invalidates_module_use_but_class_local_write_does_not(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nclass Directive:\n    global f\n    f = other\n\nf()\n",
+    )
+    _write(
+        tmp_path,
+        "local.py",
+        "def f():\n    pass\n\nclass Local:\n    f = other\n\nf()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert ("app", "f", 8) in _unresolved_sites(result)
+    assert _calls_between(result, "local", "local.f")
+    assert "f" not in _unresolved_texts(result, "local")
+
+
+def test_second_top_level_definition_reestablishes_a_rebound_name(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nf = other\n\ndef f():\n    pass\n\ndef caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    second = next(node for node in _nodes(result, "app.f") if node.location.range.start.line == 5)
+    caller = _node_id(result, "app.caller")
+
+    assert {
+        relationship.target
+        for relationship in result.document.relationships
+        if relationship.source == caller and relationship.kind == RelationshipKind.CALLS.value
+    } == {second.id}
+    assert "f" not in _unresolved_texts(result, "app.caller")
+
+
+def test_repeated_direct_definition_stays_last_wins_without_rebinding(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\ndef f():\n    pass\n\ndef caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+    last = max(_nodes(result, "app.f"), key=lambda node: node.location.range.start.line)
+    caller = _node_id(result, "app.caller")
+
+    assert {
+        relationship.target
+        for relationship in result.document.relationships
+        if relationship.source == caller and relationship.kind == RelationshipKind.CALLS.value
+    } == {last.id}
+
+
+def test_definition_after_an_import_of_the_same_name_keeps_both_uses_unresolved(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import something\n\n"
+        "def something():\n    pass\n\n"
+        "something()\n\n"
+        "def caller():\n    something()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.something")
+    assert not _calls_between(result, "app.caller", "app.something")
+    assert ("app", "something", 6) in _unresolved_sites(result)
+    assert ("app.caller", "something", 9) in _unresolved_sites(result)
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    ["if flag:\n    f = other\n", "if flag:\n    del f\n", "if flag:\n    from lib import *\n"],
+)
+def test_conditional_rebinding_invalidates_a_declared_name_after_the_join(
+    tmp_path: Path, rebinding: str
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\n" + rebinding + "\nf()\n\ndef caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert not _calls_between(result, "app.caller", "app.f")
+    assert "f" in _unresolved_texts(result, "app")
+    assert "f" in _unresolved_texts(result, "app.caller")
+
+
+def test_declared_name_is_still_tracked_for_a_rebinding_that_follows_a_join(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\n"
+        "if flag:\n    pass\n"
+        "else:\n    pass\n\n"
+        "f = other\n"
+        "f()\n\n"
+        "def caller():\n    f()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert not _calls_between(result, "app.caller", "app.f")
+    assert ("app", "f", 10) in _unresolved_sites(result)
+    assert ("app.caller", "f", 13) in _unresolved_sites(result)
+
+
+@pytest.mark.parametrize(
+    ("declaration", "name", "conditional"),
+    [
+        ("def f():\n    pass\n", "f", "if flag:\n    def f():\n        pass\n"),
+        ("class K:\n    pass\n", "K", "if flag:\n    class K:\n        pass\n"),
+    ],
+)
+def test_conditional_definition_of_a_declared_name_makes_later_uses_unresolved(
+    tmp_path: Path, declaration: str, name: str, conditional: str
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        declaration + "\n" + conditional + f"\n{name}()\n\ndef caller():\n    {name}()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", f"app.{name}")
+    assert not _calls_between(result, "app.caller", f"app.{name}")
+    assert name in _unresolved_texts(result, "app")
+    assert name in _unresolved_texts(result, "app.caller")
+
+
+def test_except_as_target_invalidates_a_declared_name_and_deletion_reaches_the_same_recorder(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def e():\n    pass\n\ntry:\n    pass\nexcept ValueError as e:\n    pass\n\ne()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.e")
+    assert ("app", "e", 9) in _unresolved_sites(result)
+    assert not hasattr(_ScopeCallVisitor, "_record_deleted_names")
+
+
+def test_unrebound_class_local_imported_and_builtin_names_are_not_over_invalidated(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def kept():\n    pass\n\n"
+        "def other():\n    pass\n\n"
+        "other = 1\n"
+        "kept()\n\n"
+        "def local_shadow():\n"
+        "    kept = 1\n"
+        "    kept()\n\n"
+        "len([])\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _calls_between(result, "app", "app.kept")
+    assert "kept" not in _unresolved_texts(result, "app")
+    assert _unresolved_texts(result, "app.local_shadow") == set()
+    assert "len" not in _unresolved_texts(result, "app")
+
+
+def test_star_import_invalidates_declared_and_imported_names_but_not_builtins(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", "def x():\n    pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import x\nfrom other import *\nx()\n",
+    )
+    _write(
+        tmp_path,
+        "star.py",
+        "def star_victim():\n    pass\n\n"
+        "from lib import *\n"
+        "star_victim()\n"
+        "items = []\n"
+        "len(items)\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("star", "star_victim", 5) in _unresolved_sites(result)
+    assert not _calls_between(result, "star", "star.star_victim")
+    assert "len" not in _unresolved_texts(result, "star")
+    assert ("app", "x", 3) in _unresolved_sites(result)
+    assert not _calls_between(result, "app", "lib.x")
+
+
+def test_star_import_inside_a_conditional_invalidates_a_declared_name_after_the_join(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nif flag:\n    from lib import *\n\nf()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert ("app", "f", 7) in _unresolved_sites(result)
+
+
+def test_star_import_inside_a_loop_touches_a_declared_name(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\nfor _ in range(2):\n    from lib import *\n\nf()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not _calls_between(result, "app", "app.f")
+    assert ("app", "f", 7) in _unresolved_sites(result)
+
+
+@pytest.mark.parametrize(
+    "uncertain",
+    ["from lib import *\n", "if flag:\n    from lib import f\n"],
+    ids=["star-import", "conditional-import"],
+)
+def test_top_level_definition_reestablishes_a_name_left_uncertain_without_an_import_route(
+    tmp_path: Path, uncertain: str
+) -> None:
+    source = (
+        "def f():\n    pass\n\n"
+        + uncertain
+        + "\nbefore = f()\n\n"
+        + "def f():\n    pass\n\n"
+        + "after = f()\n\n"
+        + "def caller():\n    f()\n"
+    )
+    _write(tmp_path, "app.py", source)
+    lines = source.splitlines()
+    before_line = lines.index("before = f()") + 1
+    second_line = lines.index("def f():", before_line) + 1
+
+    result = analyze_python_workspace(tmp_path)
+    second = next(
+        node
+        for node in _nodes(result, "app.f")
+        if node.location.range.start.line + 1 == second_line
+    )
+    app = _node_id(result, "app")
+    caller = _node_id(result, "app.caller")
+    call_targets = {
+        (relationship.source, relationship.target)
+        for relationship in result.document.relationships
+        if relationship.kind == RelationshipKind.CALLS.value
+    }
+
+    assert ("app", "f", before_line) in _unresolved_sites(result)
+    assert {target for source_id, target in call_targets if source_id == app} == {second.id}
+    assert {target for source_id, target in call_targets if source_id == caller} == {second.id}
+    assert "f" not in _unresolved_texts(result, "app.caller")
+
+
+_ANNOTATION_LIBRARY = "def helper():\n    pass\n"
+
+
+def _use_edges(result: AnalysisResult) -> set[tuple[str, str, str]]:
+    return _calls_and_references(result)
+
+
+def _annotation_workspace(root: Path, app: str, **extra: str) -> AnalysisResult:
+    _write(root, "library.py", _ANNOTATION_LIBRARY)
+    _write(root, "models.py", "class Other:\n    pass\n\n\nclass Unused:\n    pass\n")
+    _write(root, "app.py", app)
+    for path, source in extra.items():
+        _write(root, path, source)
+    return analyze_python_workspace(root)
+
+
+def test_class_body_annotation_without_value_does_not_bind_the_name(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from library import helper\n\n"
+        "class C:\n"
+        "    helper: int\n\n"
+        "    def m(self, a=helper()):\n        pass\n\n"
+        "    def n(self, a=helper):\n        pass\n",
+    )
+
+    assert {edge for edge in _use_edges(result) if edge[1] == "library.helper"} == {
+        ("app.C.m", "library.helper", RelationshipKind.CALLS.value),
+        ("app.C.n", "library.helper", RelationshipKind.REFERENCES.value),
+    }
+
+
+def test_class_body_annotation_with_value_still_binds_the_name(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from library import helper\n\n"
+        "class C:\n"
+        "    helper: int = 3\n\n"
+        "    def m(self, a=helper()):\n        pass\n\n"
+        "    def n(self, a=helper):\n        pass\n",
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "library.helper"}
+
+
+def test_function_body_annotation_without_value_makes_the_name_local(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from library import helper\n\n"
+        "def f():\n    helper: int\n    return helper()\n\n"
+        "def g():\n    missing: int\n    return missing()\n",
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[0] in ("app.f", "app.g")}
+    assert "helper" not in _unresolved_texts(result, "app.f")
+    assert "missing" not in _unresolved_texts(result, "app.g")
+    assert "missing" not in {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+
+def test_module_annotation_without_value_keeps_the_imported_name(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from library import helper\nhelper: int\nhelper()\n\ndef f():\n    helper()\n",
+    )
+
+    assert {edge for edge in _use_edges(result) if edge[1] == "library.helper"} == {
+        ("app", "library.helper", RelationshipKind.CALLS.value),
+        ("app.f", "library.helper", RelationshipKind.CALLS.value),
+    }
+
+
+@pytest.mark.parametrize(
+    "suite",
+    [
+        "for _ in ():\n    helper: int\n",
+        "try:\n    helper: int\nexcept E:\n    pass\n",
+        "if flag:\n    helper: int\n",
+    ],
+    ids=["for", "try", "if"],
+)
+@pytest.mark.parametrize(
+    ("prefix", "target"),
+    [
+        ("from library import helper\n", "library.helper"),
+        ("def helper():\n    pass\n", "app.helper"),
+    ],
+    ids=["imported", "declared"],
+)
+def test_annotation_without_value_in_a_suite_does_not_touch_the_name(
+    tmp_path: Path, suite: str, prefix: str, target: str
+) -> None:
+    result = _annotation_workspace(
+        tmp_path, prefix + suite + "helper()\n\ndef f():\n    helper()\n"
+    )
+
+    helper_calls = {edge for edge in _use_edges(result) if edge[1] == target}
+    assert helper_calls >= {("app", target, RelationshipKind.CALLS.value)}
+    if "if flag" not in suite:
+        assert ("app.f", target, RelationshipKind.CALLS.value) in helper_calls
+    assert "helper" not in _unresolved_texts(result, "app")
+    assert "helper" not in _unresolved_texts(result, "app.f")
+
+
+def test_annotated_receiver_still_resolves_self_members(tmp_path: Path) -> None:
+    source = (
+        "class C:\n"
+        "    def other(self):\n        pass\n\n"
+        "    def m(self):\n        self: C\n        self.other()\n"
+    )
+    result = _annotation_workspace(tmp_path, source)
+
+    assert _calls_between(result, "app.C.m", "app.C.other")
+
+
+def test_annotated_receiver_with_value_is_still_a_rebound_local(tmp_path: Path) -> None:
+    source = (
+        "class C:\n"
+        "    def other(self):\n        pass\n\n"
+        "    def m(self):\n        self: C = make()\n        self.other()\n"
+    )
+    result = _annotation_workspace(tmp_path, source)
+
+    assert not _calls_between(result, "app.C.m", "app.C.other")
+
+
+def _unreferenced_output(root: Path, capsys: pytest.CaptureFixture[str]) -> str:
+    graph = root / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(graph), str(root)]) == 0
+    capsys.readouterr()
+    assert cli.main(["query", "unreferenced", "--graph", str(graph), "--root", str(root)]) == 0
+    return capsys.readouterr().out
+
+
+def test_quoted_return_annotation_references_its_target(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = _annotation_workspace(
+        tmp_path, 'from models import Other\n\ndef f() -> "list[Other]":\n    pass\n'
+    )
+
+    assert _use_edges(result) >= {("app.f", "models.Other", RelationshipKind.REFERENCES.value)}
+    output = _unreferenced_output(tmp_path, capsys)
+    assert "models.Other" not in output
+    assert "models.Unused" in output
+
+
+_QUOTED_FORMS = [
+    ("def f(x: {a}):\n    pass\n", "app.f"),
+    ("def f() -> {a}:\n    pass\n", "app.f"),
+    ("def f(x: list[{a}]):\n    pass\n", "app.f"),
+    ("x: {a}\n", "app"),
+    ("class K:\n    x: {a}\n", "app.K"),
+    ("class O:\n    def m(self) -> {a}:\n        pass\n", "app.O.m"),
+    ("def outer():\n    def inner() -> {a}:\n        pass\n", "app.outer"),
+    ("def outer():\n    x: {a}\n", "app.outer"),
+    ("def f(x: {a} | None):\n    pass\n", "app.f"),
+]
+
+
+@pytest.mark.parametrize(("template", "owner"), _QUOTED_FORMS)
+def test_quoted_annotation_records_the_same_facts_as_the_unquoted_form(
+    tmp_path: Path, template: str, owner: str
+) -> None:
+    header = "from models import Other\n\n"
+    unquoted = _annotation_workspace(tmp_path / "plain", header + template.format(a="Other"))
+    quoted = _annotation_workspace(tmp_path / "quoted", header + template.format(a='"Other"'))
+    assert (owner, "models.Other", RelationshipKind.REFERENCES.value) in _use_edges(unquoted)
+    assert _use_edges(quoted) == _use_edges(unquoted)
+
+
+def test_nested_quoted_string_in_a_subscript_is_parsed(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path, 'from models import Other\n\ndef f(x: list["Other"]):\n    pass\n'
+    )
+
+    assert (
+        "app.f",
+        "models.Other",
+        RelationshipKind.REFERENCES.value,
+    ) in _use_edges(result)
+
+
+def test_string_annotation_location_lies_inside_the_literal(tmp_path: Path) -> None:
+    source = 'from models import Other\n\ndef f() -> "  list[Other]":\n    pass\n'
+    result = _annotation_workspace(tmp_path, source)
+    other = next(node for node in result.document.nodes if node.label == "models.Other")
+    relation = _relationship_map(result)[
+        (_node_id(result, "app.f"), other.id, RelationshipKind.REFERENCES.value)
+    ]
+
+    literal_start = source.splitlines()[2].index('"')
+    literal_end = source.splitlines()[2].rindex('"') + 1
+    assert {
+        (
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        )
+        for evidence in relation.evidence
+        for location in evidence.locations
+    } == {(2, literal_start, 2, literal_end)}
+
+
+_FORWARD_LIBRARY = "class Foo:\n    pass\n\n\nclass Bar:\n    pass\n"
+
+
+def test_quoted_annotation_does_not_use_an_import_the_module_later_rebinds(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", _FORWARD_LIBRARY)
+    _write(
+        tmp_path,
+        "app.py",
+        'from lib import Foo\n\ndef f(a: "Foo"):\n    pass\n\nfrom lib import Bar as Foo\n',
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not {edge for edge in _use_edges(result) if edge[1] in ("lib.Foo", "lib.Bar")}
+    assert _unresolved_texts(result, "app.f") == {"Foo"}
+
+
+def test_quoted_annotation_does_not_use_an_import_a_later_class_replaces(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", _FORWARD_LIBRARY)
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import Foo\n\n"
+        'def use(n: "Foo"):\n    pass\n\n\n'
+        "class Foo:\n"
+        '    def method(self, other: "Foo"):\n        pass\n',
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "lib.Foo"}
+    assert _unresolved_texts(result, "app.use") == {"Foo"}
+    assert _unresolved_texts(result, "app.Foo.method") == {"Foo"}
+
+
+def test_quoted_annotation_keeps_an_import_the_module_never_rebinds(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", _FORWARD_LIBRARY)
+    _write(
+        tmp_path,
+        "app.py",
+        'from lib import Foo\n\ndef f(a: "Foo"):\n    pass\n\nfrom lib import Bar\n',
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app.f", "lib.Foo", RelationshipKind.REFERENCES.value) in _use_edges(result)
+    assert "Foo" not in _unresolved_texts(result, "app.f")
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "not valid (",
+        "(y := Other)",
+        "lambda: Other",
+        "[Other for _ in range(2)]",
+        "(yield Other)",
+        "(await Other)",
+    ],
+    ids=["invalid", "walrus", "lambda", "comprehension", "yield", "await"],
+)
+def test_unparsable_or_binding_string_annotations_emit_nothing(
+    tmp_path: Path, annotation: str
+) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        f"from models import Other\n\ndef f() -> {annotation!r}:\n    pass\n\nx: {annotation!r}\n",
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[0] in ("app", "app.f")}
+    assert not _unresolved_by_source(result)
+    assert result.diagnostics == ()
+
+
+@pytest.mark.parametrize("literal", ["Literal", "typing.Literal"])
+def test_literal_arguments_are_values_not_type_uses(tmp_path: Path, literal: str) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "import typing\nfrom typing import Literal\nfrom library import helper\n\n"
+        f'def f(x: {literal}["helper"]) -> {literal}["helper", "Other"]:\n    pass\n\n'
+        f'y: {literal}["helper"]\n',
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "library.helper"}
+    assert "helper" not in {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+
+def test_annotated_metadata_is_a_value_and_only_the_wrapped_type_is_a_use(
+    tmp_path: Path,
+) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from typing import Annotated\nfrom models import Other\nfrom library import helper\n\n"
+        'def f(x: Annotated[Other, "helper"]):\n    pass\n',
+    )
+
+    assert {edge for edge in _use_edges(result) if edge[0] == "app.f"} == {
+        ("app.f", "models.Other", RelationshipKind.REFERENCES.value),
+        ("app.f", "Annotated", RelationshipKind.REFERENCES.value),
+    }
+    assert "helper" not in _unresolved_texts(result, "app.f")
+
+
+def test_a_plain_string_assignment_is_not_an_annotation(tmp_path: Path) -> None:
+    result = _annotation_workspace(tmp_path, 'from models import Other\n\nx = "Other"\n')
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "models.Other"}
+    assert not _unresolved_by_source(result)
+
+
+@pytest.mark.parametrize(
+    ("template", "owner"),
+    [
+        ("def f(x: \"list['Other']\"):\n    pass\n", "app.f"),
+        ("def f() -> \"dict[str, 'Other']\":\n    pass\n", "app.f"),
+        ("x: \"Optional['Other']\"\n", "app"),
+    ],
+    ids=["list", "dict", "module-optional"],
+)
+def test_quoted_annotation_with_an_inner_quoted_name_records_the_use(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], template: str, owner: str
+) -> None:
+    result = _annotation_workspace(
+        tmp_path, "from models import Other\nfrom typing import Optional\n\n" + template
+    )
+
+    assert {edge for edge in _use_edges(result) if edge[1] == "models.Other"} == {
+        (owner, "models.Other", RelationshipKind.REFERENCES.value)
+    }
+    output = _unreferenced_output(tmp_path, capsys)
+    assert "models.Other" not in output
+    assert "models.Unused" in output
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "Literal['helper']",
+        "typing.Literal['helper']",
+        "Annotated[Other, 'helper']",
+        "list[(y := 'helper')]",
+        "list[lambda: 'helper']",
+    ],
+    ids=["literal", "typing-literal", "annotated", "walrus", "lambda"],
+)
+def test_quoted_guard_cases_stay_silent_about_inner_strings(
+    tmp_path: Path, annotation: str
+) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "import typing\nfrom typing import Annotated, Literal\nfrom models import Other\n"
+        "from library import helper\n\n"
+        f'def f(x: "{annotation}"):\n    pass\n',
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "library.helper"}
+    assert "helper" not in {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+    assert result.diagnostics == ()
+
+
+_SIX_USES = (
+    "x = {n}()  # body-call\n"
+    "y = {n}  # body-load\n"
+    "def m(\n"
+    "    self,\n"
+    "    a={n}(),  # header-call\n"
+    "    b={n},  # header-load\n"
+    "):\n"
+    "    {n}()  # method-call\n"
+    "    return {n}  # method-load\n"
+)
+
+
+def _indent(text: str, prefix: str) -> str:
+    return "".join(f"{prefix}{line}\n" for line in text.splitlines())
+
+
+def _six_use_source(
+    prelude: str, placement: str, name: str, class_prelude: str = ""
+) -> tuple[str, str]:
+    """Return the module source and owner for one placement of the six uses.
+
+    ``module`` nests ``class I`` in ``class O`` (every use owned by ``app.O``);
+    ``function`` defines ``class K`` inside ``def outer()`` (owned by ``app.outer``).
+    """
+    uses = _SIX_USES.format(n=name)
+    if placement == "module":
+        shape = "class O:\n" + _indent(class_prelude, "    ")
+        shape += "    class I:\n" + _indent(uses, "        ")
+        return prelude + shape, "app.O"
+    shape = "def outer():\n    class K:\n" + _indent(uses, "        ")
+    return prelude + shape, "app.outer"
+
+
+def _use_sites(result: AnalysisResult) -> set[tuple[str, str, str, int]]:
+    """Return (owner, kind, target label or ``?text`` when unresolved, line)."""
+    nodes = {node.id: node for node in result.document.nodes}
+    sites = set()
+    for relationship in result.document.relationships:
+        if relationship.kind not in (
+            RelationshipKind.CALLS.value,
+            RelationshipKind.REFERENCES.value,
+        ):
+            continue
+        target = nodes[relationship.target]
+        label = (
+            f"?{target.reference_text}"
+            if target.node_class == NodeClass.UNRESOLVED_REFERENCE
+            else target.label
+        )
+        for evidence in relationship.evidence:
+            for location in evidence.locations:
+                sites.add(
+                    (
+                        nodes[relationship.source].label,
+                        relationship.kind,
+                        label,
+                        location.range.start.line + 1,
+                    )
+                )
+    return sites
+
+
+def _expected_uses(
+    source: str, owner: str, name: str, target: str | None
+) -> set[tuple[str, str, str, int]]:
+    """Expect each tagged use to hit ``target`` or stay an unresolved ``name``."""
+    expected = set()
+    for number, text in enumerate(source.splitlines(), start=1):
+        if "# " not in text:
+            continue
+        role = text.split("# ", 1)[1]
+        is_call = role.endswith("call")
+        kind = (
+            RelationshipKind.CALLS.value
+            if is_call and target is not None
+            else RelationshipKind.REFERENCES.value
+        )
+        expected.add((owner, kind, target or f"?{name}", number))
+    return expected
+
+
+def _analyze_six_uses(
+    root: Path, prelude: str, placement: str, name: str, class_prelude: str = ""
+) -> tuple[AnalysisResult, str, str]:
+    source, owner = _six_use_source(prelude, placement, name, class_prelude)
+    _write(root, "lib.py", "def f():\n    pass\n\n\ndef helper():\n    pass\n")
+    _write(root, "other.py", "def helper():\n    pass\n")
+    _write(root, "app.py", source)
+    return analyze_python_workspace(root), source, owner
+
+
+_PLACEMENTS = ("module", "function")
+_CONDITIONAL_IMPORT = "def f():\n    pass\n\n\nif True:\n    from lib import f\n\n\n"
+_CONDITIONAL_REBIND = "def f():\n    pass\n\n\nif flag:\n    f = g\n\n\n"
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+@pytest.mark.parametrize(
+    "prelude", [_CONDITIONAL_IMPORT, _CONDITIONAL_REBIND], ids=["conditional-import", "rebind"]
+)
+def test_invalidated_declared_name_stays_unresolved_in_every_nested_use(
+    tmp_path: Path, placement: str, prelude: str
+) -> None:
+    result, source, owner = _analyze_six_uses(tmp_path, prelude, placement, "f")
+    sites = _use_sites(result)
+
+    assert {site for site in sites if site[3] > prelude.count("\n")} == _expected_uses(
+        source, owner, "f", None
+    )
+    assert not {site for site in sites if site[2] in ("app.f", "lib.f")}
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_imported_name_resolves_in_every_nested_use(tmp_path: Path, placement: str) -> None:
+    prelude = "from lib import f\n\n\n"
+    result, source, owner = _analyze_six_uses(tmp_path, prelude, placement, "f")
+
+    assert _use_sites(result) == _expected_uses(source, owner, "f", "lib.f")
+
+
+def test_function_local_import_governs_every_use_in_a_function_nested_class(
+    tmp_path: Path,
+) -> None:
+    uses = _SIX_USES.format(n="helper")
+    source = (
+        "from lib import helper\n\n\n"
+        "def outer():\n"
+        "    from other import helper\n\n"
+        "    class K:\n" + _indent(uses, "        ")
+    )
+    _write(tmp_path, "lib.py", "def helper():\n    pass\n")
+    _write(tmp_path, "other.py", "def helper():\n    pass\n")
+    _write(tmp_path, "app.py", source)
+
+    sites = _use_sites(analyze_python_workspace(tmp_path))
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_uses(
+        source, "app.outer", "helper", "other.helper"
+    )
+    assert not {site for site in sites if site[2] == "lib.helper"}
+
+
+@pytest.mark.parametrize(
+    "class_prelude",
+    ["if flag:\n    from other import helper\n\n", "from other import helper\n\n"],
+    ids=["conditional-class-import", "class-import"],
+)
+def test_enclosing_class_import_does_not_reach_nested_class_uses(
+    tmp_path: Path, class_prelude: str
+) -> None:
+    prelude = "from lib import helper\n\n\n"
+    result, source, owner = _analyze_six_uses(tmp_path, prelude, "module", "helper", class_prelude)
+
+    assert {site for site in _use_sites(result) if site[2].endswith("helper")} == _expected_uses(
+        source, owner, "helper", "lib.helper"
+    )
+
+
+_TOP_LEVEL_USES = (
+    "def h(\n"
+    "    a=f(),  # h-header-call\n"
+    "    b=f,  # h-header-load\n"
+    "):\n"
+    "    pass\n\n\n"
+    "class C(\n"
+    "    f(),  # base-call\n"
+    "    metaclass=f,  # base-load\n"
+    "):\n"
+    "    class I(\n"
+    "        f(),  # nested-base-call\n"
+    "        metaclass=f,  # nested-base-load\n"
+    "    ):\n"
+    "        pass\n\n"
+    "    x = f()  # class-body-call\n"
+    "    y = f  # class-body-load\n"
+    "    def m(\n"
+    "        self,\n"
+    "        a=f(),  # method-header-call\n"
+    "        b=f,  # method-header-load\n"
+    "    ):\n"
+    "        f()  # method-call\n"
+    "        return f  # method-load\n"
+)
+
+_TOP_LEVEL_OWNERS = {
+    "h-header": "app.h",
+    "base": "app.C",
+    "nested-base": "app.C",
+    "class-body": "app.C",
+    "method-header": "app.C.m",
+    "method": "app.C.m",
+}
+
+
+@pytest.mark.parametrize(
+    ("prelude", "target"),
+    [(_CONDITIONAL_IMPORT, None), ("from lib import f\n\n\n", "lib.f")],
+    ids=["invalidated", "imported"],
+)
+def test_top_level_header_uses_follow_the_same_binding(
+    tmp_path: Path, prelude: str, target: str | None
+) -> None:
+    source = prelude + _TOP_LEVEL_USES
+    _write(tmp_path, "lib.py", "def f():\n    pass\n")
+    _write(tmp_path, "app.py", source)
+    sites = {
+        site
+        for site in _use_sites(analyze_python_workspace(tmp_path))
+        if site[3] > prelude.count("\n")
+    }
+
+    expected = set()
+    for number, text in enumerate(source.splitlines(), start=1):
+        if "# " not in text:
+            continue
+        role = text.split("# ", 1)[1]
+        owner = next(
+            owner
+            for key, owner in sorted(_TOP_LEVEL_OWNERS.items(), key=lambda i: -len(i[0]))
+            if role.startswith(key)
+        )
+        kind = (
+            RelationshipKind.CALLS.value
+            if role.endswith("call") and target
+            else RelationshipKind.REFERENCES.value
+        )
+        expected.add((owner, kind, target or "?f", number))
+    assert sites == expected
+
+
+def test_quoted_nested_class_method_return_matches_the_unquoted_reference(
+    tmp_path: Path,
+) -> None:
+    edges = {}
+    for label, annotation in (("plain", "Other"), ("quoted", '"Other"')):
+        root = tmp_path / label
+        root.mkdir()
+        _write(root, "models.py", "class Other:\n    pass\n")
+        _write(
+            root,
+            "app.py",
+            "from models import Other\n\n\n"
+            "class O:\n    class I:\n"
+            f"        def m(self) -> {annotation}:\n            pass\n",
+        )
+        edges[label] = {
+            edge
+            for edge in _calls_and_references(analyze_python_workspace(root))
+            if edge[1] == "models.Other"
+        }
+
+    assert edges["plain"] == {("app.O", "models.Other", RelationshipKind.REFERENCES.value)}
+    assert edges["quoted"] == edges["plain"]
+
+
+def test_calls_and_loads_resolve_through_the_one_header_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[str, str]] = []
+    original = python_interpreter._resolve_header_use
+
+    def spy(context, snapshot, node, *args):
+        seen.append((type(node).__name__, getattr(node, "id", "")))
+        return original(context, snapshot, node, *args)
+
+    monkeypatch.setattr(python_interpreter, "_resolve_header_use", spy)
+    _write(tmp_path, "lib.py", "def f():\n    pass\n")
+    _write(tmp_path, "app.py", "from lib import f\n\nf()\nvalue = f\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert {("app", "lib.f", RelationshipKind.CALLS.value)} <= _calls_and_references(result)
+    assert ("Name", "f") in seen
+    assert seen.count(("Name", "f")) == 2
+
+
+def _analyze_six_use_source(root: Path, source: str) -> set[tuple[str, str, str, int]]:
+    _write(root, "lib.py", "def f():\n    pass\n\n\ndef helper():\n    pass\n")
+    _write(root, "other.py", "def f():\n    pass\n\n\ndef helper():\n    pass\n")
+    _write(root, "app.py", source)
+    return _use_sites(analyze_python_workspace(root))
+
+
+def _expected_by_role(
+    source: str, owner: str, name: str, targets: dict[str, str | None]
+) -> set[tuple[str, str, str, int]]:
+    """Expect each tagged use to hit its role's target, or stay unresolved on ``None``."""
+    expected = set()
+    for number, text in enumerate(source.splitlines(), start=1):
+        if "# " not in text:
+            continue
+        role = text.split("# ", 1)[1]
+        target = targets[role]
+        kind = (
+            RelationshipKind.CALLS.value
+            if role.endswith("call") and target is not None
+            else RelationshipKind.REFERENCES.value
+        )
+        expected.add((owner, kind, target or f"?{name}", number))
+    return expected
+
+
+def _roles(definition_time: str | None, deferred: str | None) -> dict[str, str | None]:
+    return {
+        "body-call": definition_time,
+        "body-load": definition_time,
+        "header-call": definition_time,
+        "header-load": definition_time,
+        "method-call": deferred,
+        "method-load": deferred,
+    }
+
+
+@pytest.mark.parametrize(
+    ("placement", "definition_time"),
+    [("module", "lib.f"), ("function", "other.f")],
+    ids=["module", "function"],
+)
+def test_module_rebinding_after_the_class_reaches_only_uses_that_run_later(
+    tmp_path: Path, placement: str, definition_time: str
+) -> None:
+    # A module-level class body and its method defaults run at the class
+    # statement, before the later import; the method body runs afterwards.
+    # A class inside a function is built when the function is called, after
+    # the module has finished, so every use sees the final binding.
+    source, owner = _six_use_source("from lib import f\n\n\n", placement, "f")
+    source += "\n\nfrom other import f\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner} == _expected_by_role(
+        source, owner, "f", _roles(definition_time, "other.f")
+    )
+
+
+def test_global_import_in_an_enclosing_class_body_is_a_module_write(tmp_path: Path) -> None:
+    source, owner = _six_use_source(
+        "from lib import helper\n\n\n",
+        "module",
+        "helper",
+        "global helper\nfrom other import helper\n\n",
+    )
+    source += "\n\nafter = helper()\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    # The module timeline invalidates a name a class body writes through
+    # ``global``; nested uses follow that module state instead of the
+    # earlier ``lib`` route, exactly like the module-level use after it.
+    assert {site for site in sites if site[0] == owner} == _expected_by_role(
+        source, owner, "helper", _roles(None, None)
+    )
+    assert ("app", RelationshipKind.REFERENCES.value, "?helper") in {site[:3] for site in sites}
+    assert not {site for site in sites if site[2] in ("lib.helper", "other.helper")}
+
+
+def test_global_write_to_a_declared_name_in_an_enclosing_class_body_invalidates_it(
+    tmp_path: Path,
+) -> None:
+    source, owner = _six_use_source(
+        "def f():\n    pass\n\n\n",
+        "module",
+        "f",
+        "global f\nif flag:\n    f = g\n\n",
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {
+        site for site in sites if site[0] == owner and site[2] not in ("?flag", "?g")
+    } == _expected_by_role(source, owner, "f", _roles(None, None))
+    assert not {site for site in sites if site[2] == "app.f"}
+
+
+def test_class_local_assignment_in_an_enclosing_class_body_stays_class_local(
+    tmp_path: Path,
+) -> None:
+    source, owner = _six_use_source("def f():\n    pass\n\n\n", "module", "f", "f = g\n\n")
+    source += "\n\nafter = f()\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner and site[2] != "?g"} == _expected_by_role(
+        source, owner, "f", _roles("app.f", "app.f")
+    )
+    assert ("app", RelationshipKind.CALLS.value, "app.f") in {site[:3] for site in sites}
+
+
+@pytest.mark.parametrize(
+    "class_prelude",
+    ["from other import f\n\n", "if flag:\n    from other import f\n\n"],
+    ids=["class-import", "conditional-class-import"],
+)
+def test_enclosing_class_import_matching_a_later_module_import_keeps_both_timings(
+    tmp_path: Path, class_prelude: str
+) -> None:
+    # The enclosing class imports the same target the module imports later.
+    # The nested body and method defaults still consult the module binding at
+    # the class statement, and the method body still sees the final one.
+    source, owner = _six_use_source("from lib import f\n\n\n", "module", "f", class_prelude)
+    source += "\n\nfrom other import f\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner and site[2] != "?flag"} == _expected_by_role(
+        source, owner, "f", _roles("lib.f", "other.f")
+    )
+
+
+def test_conditional_global_import_in_an_enclosing_class_body_leaves_every_use_uncertain(
+    tmp_path: Path,
+) -> None:
+    source, owner = _six_use_source(
+        "from lib import helper\n\n\n",
+        "module",
+        "helper",
+        "global helper\nif flag:\n    from other import helper\n\n",
+    )
+    source += "\n\nafter = helper()\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner and site[2] != "?flag"} == _expected_by_role(
+        source, owner, "helper", _roles(None, None)
+    )
+    assert ("app", RelationshipKind.REFERENCES.value, "?helper") in {site[:3] for site in sites}
+    assert not {site for site in sites if site[2] in ("lib.helper", "other.helper")}
+
+
+def test_global_directive_without_a_write_keeps_the_module_route(tmp_path: Path) -> None:
+    source, owner = _six_use_source(
+        "from lib import helper\n\n\n", "module", "helper", "global helper\n\n"
+    )
+    source += "\n\nafter = helper()\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner} == _expected_by_role(
+        source, owner, "helper", _roles("lib.helper", "lib.helper")
+    )
+    assert ("app", RelationshipKind.CALLS.value, "lib.helper") in {site[:3] for site in sites}

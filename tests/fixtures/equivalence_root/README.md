@@ -15,12 +15,37 @@ calls its one function at module scope after a non-ASCII string literal, so it
 adds no `unreferenced` hit; `pyproject.toml` excludes it from Ruff, which
 rejects any source file that is not valid UTF-8.
 
+`workflow/binding_lifecycle.py`, the binding-lifecycle sample, defines
+top-level functions that a later statement rebinds (an assignment, a `del`, a
+conditional assignment, a `try` import, and a star import) and then calls, a
+`from workflow.helper import fixture_helper` import beside a same-module `def
+helper()`, a class body with an annotation-only name, a function with an
+annotation-only local, a nested class whose header and body call and load a
+module name, string annotations beside `Literal[...]` and `Annotated[...]`
+arguments, a quoted annotation whose name the module imports again after the
+function, and a nested class whose body uses a function-local import that
+differs from the module's import of the same name. It defines no `main` and calls neither `workflow.util.unused_helper`
+nor `workflow.service.Service.run`; its star import carries inline `# noqa`
+codes for Ruff.
+
 The tree is small on purpose: every query class in
 `scripts/equivalence_queries.json` has a real, non-empty hit here — several
 definitions of `main`, a symbol with more than one caller, a symbol with no
-callers at all (`workflow.util.unused_helper`, which is also the
-`unreferenced` hit), an import graph for `impact`, and a stable line for
-`context`.
+callers at all (`workflow.util.unused_helper`), an import graph for `impact`,
+and a stable line for `context`. `minotaur query unreferenced workflow` reports
+twenty-two symbols: the uncalled `workflow.util.unused_helper`, the other
+fixture-only definitions (`workflow.package_scope_probe`, `workflow.cli.main`,
+`workflow.service.main`, `workflow.service.Service.total`,
+`workflow.declarations.Gauge`, `workflow.declarations.scale`, and the
+`workflow.util` scope probes `fixture_outer`, `FixtureScopes`,
+`generic_scope_probe`, `DeletedBindingScope`, and `ImportedOuterScope`), and
+from the binding-lifecycle sample `replaced`, `deleted`, `conditional`,
+`guarded`, `starred`, `Holder.label_text`, `local_annotation`,
+`string_annotations`, `forward_reference`, and `local_import_class`. Under `--text-fallback` the five rebound declarations
+(`replaced`, `deleted`, `conditional`, `guarded`, `starred`) and the older
+`workflow.cli.main`, `workflow.service.main`, and
+`workflow.service.Service.total` gain a `[text-mention]` marker, because their
+names still appear as text.
 
 Nothing outside the harness imports this package; it is source material to be
 analyzed, not code to be executed.
