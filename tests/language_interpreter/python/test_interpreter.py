@@ -2468,11 +2468,54 @@ def test_module_named_after_a_builtin_does_not_exempt_that_builtin(tmp_path: Pat
 
     result = analyze_python_workspace(tmp_path)
 
-    # Importing *from* ``pkg.list`` binds ``helper``, not ``list``. The member
-    # load is an ordinary builtin use and is suppressed, and the bare call
-    # resolves through the module shorthand: neither leaves the builtin behind
-    # as an unresolved workspace dependency.
+    # Importing *from* ``pkg.list`` binds ``helper``, not ``list``. Both the
+    # member load and the bare call are ordinary builtin uses and are
+    # suppressed, so neither leaves the builtin behind as an unresolved
+    # workspace dependency.
     assert "app.use" not in _unresolved_by_source(result)
+
+
+def test_from_import_does_not_alias_its_module_name_over_a_same_module_definition(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/utils.py", "def foo():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from pkg.utils import foo\n\n"
+        "def utils():\n    return 1\n\n"
+        "def a():\n    return utils()\n\n"
+        "def b():\n    return utils()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    relationships = _edge_labels(result)
+    assert ("app.a", "app.utils", RelationshipKind.CALLS.value) in relationships
+    assert ("app.b", "app.utils", RelationshipKind.CALLS.value) in relationships
+    assert _unresolved_by_source(result) == {}
+
+
+def test_from_import_does_not_make_its_module_name_a_prefix_root(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/utils.py", "def foo():\n    return 1\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from pkg.utils import foo\n\n"
+        "def utils():\n    return 1\n\n"
+        "def a():\n    return utils.bar()\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    # ``utils`` is bound only by the ``def``; the import binds ``foo``. The
+    # attribute call stays an unresolved reference to its exact text and is not
+    # resolved to the module or to the same-module function.
+    assert _unresolved_by_source(result) == {"app.a": {"utils.bar"}}
+    assert not any(
+        label[0] == "app.a" and label[2] == RelationshipKind.CALLS.value
+        for label in _edge_labels(result)
+    )
 
 
 def test_nested_scope_import_of_a_builtin_name_is_not_suppressed(tmp_path: Path) -> None:
@@ -4720,7 +4763,7 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
 ) -> None:
     _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
     source = (
-        "from lib import helper\n\n"
+        "import lib\nfrom lib import helper\n\n"
         "def outer():\n"
         "    helper = object()\n"
         "    local = object()\n"
