@@ -8412,3 +8412,115 @@ def test_calls_and_loads_resolve_through_the_one_header_helper(
     assert {("app", "lib.f", RelationshipKind.CALLS.value)} <= _calls_and_references(result)
     assert ("Name", "f") in seen
     assert seen.count(("Name", "f")) == 2
+
+
+def _analyze_six_use_source(root: Path, source: str) -> set[tuple[str, str, str, int]]:
+    _write(root, "lib.py", "def f():\n    pass\n\n\ndef helper():\n    pass\n")
+    _write(root, "other.py", "def f():\n    pass\n\n\ndef helper():\n    pass\n")
+    _write(root, "app.py", source)
+    return _use_sites(analyze_python_workspace(root))
+
+
+def _expected_by_role(
+    source: str, owner: str, name: str, targets: dict[str, str | None]
+) -> set[tuple[str, str, str, int]]:
+    """Expect each tagged use to hit its role's target, or stay unresolved on ``None``."""
+    expected = set()
+    for number, text in enumerate(source.splitlines(), start=1):
+        if "# " not in text:
+            continue
+        role = text.split("# ", 1)[1]
+        target = targets[role]
+        kind = (
+            RelationshipKind.CALLS.value
+            if role.endswith("call") and target is not None
+            else RelationshipKind.REFERENCES.value
+        )
+        expected.add((owner, kind, target or f"?{name}", number))
+    return expected
+
+
+def _roles(definition_time: str | None, deferred: str | None) -> dict[str, str | None]:
+    return {
+        "body-call": definition_time,
+        "body-load": definition_time,
+        "header-call": definition_time,
+        "header-load": definition_time,
+        "method-call": deferred,
+        "method-load": deferred,
+    }
+
+
+@pytest.mark.parametrize(
+    ("placement", "definition_time"),
+    [("module", "lib.f"), ("function", "other.f")],
+    ids=["module", "function"],
+)
+def test_module_rebinding_after_the_class_reaches_only_uses_that_run_later(
+    tmp_path: Path, placement: str, definition_time: str
+) -> None:
+    # A module-level class body and its method defaults run at the class
+    # statement, before the later import; the method body runs afterwards.
+    # A class inside a function is built when the function is called, after
+    # the module has finished, so every use sees the final binding.
+    source, owner = _six_use_source("from lib import f\n\n\n", placement, "f")
+    source += "\n\nfrom other import f\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner} == _expected_by_role(
+        source, owner, "f", _roles(definition_time, "other.f")
+    )
+
+
+def test_global_import_in_an_enclosing_class_body_is_a_module_write(tmp_path: Path) -> None:
+    source, owner = _six_use_source(
+        "from lib import helper\n\n\n",
+        "module",
+        "helper",
+        "global helper\nfrom other import helper\n\n",
+    )
+    source += "\n\nafter = helper()\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    # The module timeline invalidates a name a class body writes through
+    # ``global``; nested uses follow that module state instead of the
+    # earlier ``lib`` route, exactly like the module-level use after it.
+    assert {site for site in sites if site[0] == owner} == _expected_by_role(
+        source, owner, "helper", _roles(None, None)
+    )
+    assert ("app", RelationshipKind.REFERENCES.value, "?helper") in {site[:3] for site in sites}
+    assert not {site for site in sites if site[2] in ("lib.helper", "other.helper")}
+
+
+def test_global_write_to_a_declared_name_in_an_enclosing_class_body_invalidates_it(
+    tmp_path: Path,
+) -> None:
+    source, owner = _six_use_source(
+        "def f():\n    pass\n\n\n",
+        "module",
+        "f",
+        "global f\nif flag:\n    f = g\n\n",
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {
+        site for site in sites if site[0] == owner and site[2] not in ("?flag", "?g")
+    } == _expected_by_role(source, owner, "f", _roles(None, None))
+    assert not {site for site in sites if site[2] == "app.f"}
+
+
+def test_class_local_assignment_in_an_enclosing_class_body_stays_class_local(
+    tmp_path: Path,
+) -> None:
+    source, owner = _six_use_source("def f():\n    pass\n\n\n", "module", "f", "f = g\n\n")
+    source += "\n\nafter = f()\n"
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[0] == owner and site[2] != "?g"} == _expected_by_role(
+        source, owner, "f", _roles("app.f", "app.f")
+    )
+    assert ("app", RelationshipKind.CALLS.value, "app.f") in {site[:3] for site in sites}
