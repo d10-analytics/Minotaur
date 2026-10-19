@@ -3675,7 +3675,7 @@ def _parse_annotation_string(literal: ast.Constant) -> ast.expr:
             child.col_offset = literal.col_offset  # type: ignore[attr-defined]
             child.end_lineno = literal.end_lineno  # type: ignore[attr-defined]
             child.end_col_offset = literal.end_col_offset  # type: ignore[attr-defined]
-    return parsed
+    return _normalize_annotation(parsed)
 
 
 _LABEL_PLACEHOLDER = "_"
