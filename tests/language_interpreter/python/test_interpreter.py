@@ -7746,3 +7746,44 @@ def test_star_import_inside_a_loop_touches_a_declared_name(tmp_path: Path) -> No
 
     assert not _calls_between(result, "app", "app.f")
     assert ("app", "f", 7) in _unresolved_sites(result)
+
+
+@pytest.mark.parametrize(
+    "uncertain",
+    ["from lib import *\n", "if flag:\n    from lib import f\n"],
+    ids=["star-import", "conditional-import"],
+)
+def test_top_level_definition_reestablishes_a_name_left_uncertain_without_an_import_route(
+    tmp_path: Path, uncertain: str
+) -> None:
+    source = (
+        "def f():\n    pass\n\n"
+        + uncertain
+        + "\nbefore = f()\n\n"
+        + "def f():\n    pass\n\n"
+        + "after = f()\n\n"
+        + "def caller():\n    f()\n"
+    )
+    _write(tmp_path, "app.py", source)
+    lines = source.splitlines()
+    before_line = lines.index("before = f()") + 1
+    second_line = lines.index("def f():", before_line) + 1
+
+    result = analyze_python_workspace(tmp_path)
+    second = next(
+        node
+        for node in _nodes(result, "app.f")
+        if node.location.range.start.line + 1 == second_line
+    )
+    app = _node_id(result, "app")
+    caller = _node_id(result, "app.caller")
+    call_targets = {
+        (relationship.source, relationship.target)
+        for relationship in result.document.relationships
+        if relationship.kind == RelationshipKind.CALLS.value
+    }
+
+    assert ("app", "f", before_line) in _unresolved_sites(result)
+    assert {target for source_id, target in call_targets if source_id == app} == {second.id}
+    assert {target for source_id, target in call_targets if source_id == caller} == {second.id}
+    assert "f" not in _unresolved_texts(result, "app.caller")
