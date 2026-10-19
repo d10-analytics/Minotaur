@@ -8126,6 +8126,59 @@ def test_string_annotation_location_lies_inside_the_literal(tmp_path: Path) -> N
     } == {(2, literal_start, 2, literal_end)}
 
 
+_FORWARD_LIBRARY = "class Foo:\n    pass\n\n\nclass Bar:\n    pass\n"
+
+
+def test_quoted_annotation_does_not_use_an_import_the_module_later_rebinds(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", _FORWARD_LIBRARY)
+    _write(
+        tmp_path,
+        "app.py",
+        'from lib import Foo\n\ndef f(a: "Foo"):\n    pass\n\nfrom lib import Bar as Foo\n',
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not {edge for edge in _use_edges(result) if edge[1] in ("lib.Foo", "lib.Bar")}
+    assert _unresolved_texts(result, "app.f") == {"Foo"}
+
+
+def test_quoted_annotation_does_not_use_an_import_a_later_class_replaces(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", _FORWARD_LIBRARY)
+    _write(
+        tmp_path,
+        "app.py",
+        "from lib import Foo\n\n"
+        'def use(n: "Foo"):\n    pass\n\n\n'
+        "class Foo:\n"
+        '    def method(self, other: "Foo"):\n        pass\n',
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "lib.Foo"}
+    assert _unresolved_texts(result, "app.use") == {"Foo"}
+    assert _unresolved_texts(result, "app.Foo.method") == {"Foo"}
+
+
+def test_quoted_annotation_keeps_an_import_the_module_never_rebinds(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", _FORWARD_LIBRARY)
+    _write(
+        tmp_path,
+        "app.py",
+        'from lib import Foo\n\ndef f(a: "Foo"):\n    pass\n\nfrom lib import Bar\n',
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert ("app.f", "lib.Foo", RelationshipKind.REFERENCES.value) in _use_edges(result)
+    assert "Foo" not in _unresolved_texts(result, "app.f")
+
+
 @pytest.mark.parametrize(
     "annotation",
     [
@@ -8364,6 +8417,28 @@ def test_imported_name_resolves_in_every_nested_use(tmp_path: Path, placement: s
     result, source, owner = _analyze_six_uses(tmp_path, prelude, placement, "f")
 
     assert _use_sites(result) == _expected_uses(source, owner, "f", "lib.f")
+
+
+def test_function_local_import_governs_every_use_in_a_function_nested_class(
+    tmp_path: Path,
+) -> None:
+    uses = _SIX_USES.format(n="helper")
+    source = (
+        "from lib import helper\n\n\n"
+        "def outer():\n"
+        "    from other import helper\n\n"
+        "    class K:\n" + _indent(uses, "        ")
+    )
+    _write(tmp_path, "lib.py", "def helper():\n    pass\n")
+    _write(tmp_path, "other.py", "def helper():\n    pass\n")
+    _write(tmp_path, "app.py", source)
+
+    sites = _use_sites(analyze_python_workspace(tmp_path))
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_uses(
+        source, "app.outer", "helper", "other.helper"
+    )
+    assert not {site for site in sites if site[2] == "lib.helper"}
 
 
 @pytest.mark.parametrize(
