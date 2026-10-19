@@ -7830,3 +7830,276 @@ def test_top_level_definition_reestablishes_a_name_left_uncertain_without_an_imp
     assert {target for source_id, target in call_targets if source_id == app} == {second.id}
     assert {target for source_id, target in call_targets if source_id == caller} == {second.id}
     assert "f" not in _unresolved_texts(result, "app.caller")
+
+
+_ANNOTATION_LIBRARY = "def helper():\n    pass\n"
+
+
+def _use_edges(result: AnalysisResult) -> set[tuple[str, str, str]]:
+    return _calls_and_references(result)
+
+
+def _annotation_workspace(root: Path, app: str, **extra: str) -> AnalysisResult:
+    _write(root, "library.py", _ANNOTATION_LIBRARY)
+    _write(root, "models.py", "class Other:\n    pass\n\n\nclass Unused:\n    pass\n")
+    _write(root, "app.py", app)
+    for path, source in extra.items():
+        _write(root, path, source)
+    return analyze_python_workspace(root)
+
+
+def test_class_body_annotation_without_value_does_not_bind_the_name(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from library import helper\n\n"
+        "class C:\n"
+        "    helper: int\n\n"
+        "    def m(self, a=helper()):\n        pass\n\n"
+        "    def n(self, a=helper):\n        pass\n",
+    )
+
+    assert {edge for edge in _use_edges(result) if edge[1] == "library.helper"} == {
+        ("app.C.m", "library.helper", RelationshipKind.CALLS.value),
+        ("app.C.n", "library.helper", RelationshipKind.REFERENCES.value),
+    }
+
+
+def test_class_body_annotation_with_value_still_binds_the_name(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from library import helper\n\n"
+        "class C:\n"
+        "    helper: int = 3\n\n"
+        "    def m(self, a=helper()):\n        pass\n\n"
+        "    def n(self, a=helper):\n        pass\n",
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "library.helper"}
+
+
+def test_function_body_annotation_without_value_makes_the_name_local(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from library import helper\n\n"
+        "def f():\n    helper: int\n    return helper()\n\n"
+        "def g():\n    missing: int\n    return missing()\n",
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[0] in ("app.f", "app.g")}
+    assert "helper" not in _unresolved_texts(result, "app.f")
+    assert "missing" not in _unresolved_texts(result, "app.g")
+    assert "missing" not in {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+
+def test_module_annotation_without_value_keeps_the_imported_name(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from library import helper\nhelper: int\nhelper()\n\ndef f():\n    helper()\n",
+    )
+
+    assert {edge for edge in _use_edges(result) if edge[1] == "library.helper"} == {
+        ("app", "library.helper", RelationshipKind.CALLS.value),
+        ("app.f", "library.helper", RelationshipKind.CALLS.value),
+    }
+
+
+@pytest.mark.parametrize(
+    "suite",
+    [
+        "for _ in ():\n    helper: int\n",
+        "try:\n    helper: int\nexcept E:\n    pass\n",
+        "if flag:\n    helper: int\n",
+    ],
+    ids=["for", "try", "if"],
+)
+@pytest.mark.parametrize(
+    ("prefix", "target"),
+    [
+        ("from library import helper\n", "library.helper"),
+        ("def helper():\n    pass\n", "app.helper"),
+    ],
+    ids=["imported", "declared"],
+)
+def test_annotation_without_value_in_a_suite_does_not_touch_the_name(
+    tmp_path: Path, suite: str, prefix: str, target: str
+) -> None:
+    result = _annotation_workspace(
+        tmp_path, prefix + suite + "helper()\n\ndef f():\n    helper()\n"
+    )
+
+    helper_calls = {edge for edge in _use_edges(result) if edge[1] == target}
+    assert helper_calls >= {("app", target, RelationshipKind.CALLS.value)}
+    if "if flag" not in suite:
+        assert ("app.f", target, RelationshipKind.CALLS.value) in helper_calls
+    assert "helper" not in _unresolved_texts(result, "app")
+    assert "helper" not in _unresolved_texts(result, "app.f")
+
+
+def test_annotated_receiver_still_resolves_self_members(tmp_path: Path) -> None:
+    source = (
+        "class C:\n"
+        "    def other(self):\n        pass\n\n"
+        "    def m(self):\n        self: C\n        self.other()\n"
+    )
+    result = _annotation_workspace(tmp_path, source)
+
+    assert _calls_between(result, "app.C.m", "app.C.other")
+
+
+def test_annotated_receiver_with_value_is_still_a_rebound_local(tmp_path: Path) -> None:
+    source = (
+        "class C:\n"
+        "    def other(self):\n        pass\n\n"
+        "    def m(self):\n        self: C = make()\n        self.other()\n"
+    )
+    result = _annotation_workspace(tmp_path, source)
+
+    assert not _calls_between(result, "app.C.m", "app.C.other")
+
+
+def _unreferenced_output(root: Path, capsys: pytest.CaptureFixture[str]) -> str:
+    graph = root / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(graph), str(root)]) == 0
+    capsys.readouterr()
+    assert cli.main(["query", "unreferenced", "--graph", str(graph), "--root", str(root)]) == 0
+    return capsys.readouterr().out
+
+
+def test_quoted_return_annotation_references_its_target(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = _annotation_workspace(
+        tmp_path, 'from models import Other\n\ndef f() -> "list[Other]":\n    pass\n'
+    )
+
+    assert _use_edges(result) >= {("app.f", "models.Other", RelationshipKind.REFERENCES.value)}
+    output = _unreferenced_output(tmp_path, capsys)
+    assert "models.Other" not in output
+    assert "models.Unused" in output
+
+
+_QUOTED_FORMS = [
+    ("def f(x: {a}):\n    pass\n", "app.f"),
+    ("def f() -> {a}:\n    pass\n", "app.f"),
+    ("def f(x: list[{a}]):\n    pass\n", "app.f"),
+    ("x: {a}\n", "app"),
+    ("class K:\n    x: {a}\n", "app.K"),
+    ("class O:\n    def m(self) -> {a}:\n        pass\n", "app.O.m"),
+    ("def outer():\n    def inner() -> {a}:\n        pass\n", "app.outer"),
+    ("def outer():\n    x: {a}\n", "app.outer"),
+    ("def f(x: {a} | None):\n    pass\n", "app.f"),
+]
+
+
+@pytest.mark.parametrize(("template", "owner"), _QUOTED_FORMS)
+def test_quoted_annotation_records_the_same_facts_as_the_unquoted_form(
+    tmp_path: Path, template: str, owner: str
+) -> None:
+    header = "from models import Other\n\n"
+    unquoted = _annotation_workspace(tmp_path / "plain", header + template.format(a="Other"))
+    quoted = _annotation_workspace(tmp_path / "quoted", header + template.format(a='"Other"'))
+    assert (owner, "models.Other", RelationshipKind.REFERENCES.value) in _use_edges(unquoted)
+    assert _use_edges(quoted) == _use_edges(unquoted)
+
+
+def test_nested_quoted_string_in_a_subscript_is_parsed(tmp_path: Path) -> None:
+    result = _annotation_workspace(
+        tmp_path, 'from models import Other\n\ndef f(x: list["Other"]):\n    pass\n'
+    )
+
+    assert (
+        "app.f",
+        "models.Other",
+        RelationshipKind.REFERENCES.value,
+    ) in _use_edges(result)
+
+
+def test_string_annotation_location_lies_inside_the_literal(tmp_path: Path) -> None:
+    source = 'from models import Other\n\ndef f() -> "  list[Other]":\n    pass\n'
+    result = _annotation_workspace(tmp_path, source)
+    other = next(node for node in result.document.nodes if node.label == "models.Other")
+    relation = _relationship_map(result)[
+        (_node_id(result, "app.f"), other.id, RelationshipKind.REFERENCES.value)
+    ]
+
+    literal_start = source.splitlines()[2].index('"')
+    literal_end = source.splitlines()[2].rindex('"') + 1
+    assert {
+        (
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        )
+        for evidence in relation.evidence
+        for location in evidence.locations
+    } == {(2, literal_start, 2, literal_end)}
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "not valid (",
+        "(y := Other)",
+        "lambda: Other",
+        "[Other for _ in range(2)]",
+        "(yield Other)",
+        "(await Other)",
+    ],
+    ids=["invalid", "walrus", "lambda", "comprehension", "yield", "await"],
+)
+def test_unparsable_or_binding_string_annotations_emit_nothing(
+    tmp_path: Path, annotation: str
+) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        f"from models import Other\n\ndef f() -> {annotation!r}:\n    pass\n\nx: {annotation!r}\n",
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[0] in ("app", "app.f")}
+    assert not _unresolved_by_source(result)
+    assert result.diagnostics == ()
+
+
+@pytest.mark.parametrize("literal", ["Literal", "typing.Literal"])
+def test_literal_arguments_are_values_not_type_uses(tmp_path: Path, literal: str) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "import typing\nfrom typing import Literal\nfrom library import helper\n\n"
+        f'def f(x: {literal}["helper"]) -> {literal}["helper", "Other"]:\n    pass\n\n'
+        f'y: {literal}["helper"]\n',
+    )
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "library.helper"}
+    assert "helper" not in {
+        node.reference_text
+        for node in result.document.nodes
+        if node.node_class == NodeClass.UNRESOLVED_REFERENCE
+    }
+
+
+def test_annotated_metadata_is_a_value_and_only_the_wrapped_type_is_a_use(
+    tmp_path: Path,
+) -> None:
+    result = _annotation_workspace(
+        tmp_path,
+        "from typing import Annotated\nfrom models import Other\nfrom library import helper\n\n"
+        'def f(x: Annotated[Other, "helper"]):\n    pass\n',
+    )
+
+    assert {edge for edge in _use_edges(result) if edge[0] == "app.f"} == {
+        ("app.f", "models.Other", RelationshipKind.REFERENCES.value),
+        ("app.f", "Annotated", RelationshipKind.REFERENCES.value),
+    }
+    assert "helper" not in _unresolved_texts(result, "app.f")
+
+
+def test_a_plain_string_assignment_is_not_an_annotation(tmp_path: Path) -> None:
+    result = _annotation_workspace(tmp_path, 'from models import Other\n\nx = "Other"\n')
+
+    assert not {edge for edge in _use_edges(result) if edge[1] == "models.Other"}
+    assert not _unresolved_by_source(result)
