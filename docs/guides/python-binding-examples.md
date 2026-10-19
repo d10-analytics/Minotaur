@@ -127,9 +127,10 @@ body, but it makes the name local in a function body:
 class Service:
     name: str  # annotation only: does not bind `name`
 
+
 def run():
     total: int  # annotation only: `total` is local to `run`
-    total()     # stays unemitted, not a call to a module `total`
+    total()  # stays unemitted, not a call to a module `total`
 ```
 
 String annotations such as `-> "list[Service]"` are parsed, so `Service`
