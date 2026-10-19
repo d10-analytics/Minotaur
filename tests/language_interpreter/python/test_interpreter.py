@@ -369,6 +369,249 @@ def test_module_too_deep_for_the_parser_is_a_parse_error_beside_its_siblings(
     assert validate_document(result.document).is_valid
 
 
+_CHAIN_TERMS = 1_000
+_CALLER_BUDGET = 800
+_EXPECTED_VALUE_LIMIT = 20_000
+
+
+def _frame_depth() -> int:
+    depth = 0
+    frame = sys._getframe(1)
+    while frame is not None:
+        depth += 1
+        frame = frame.f_back
+    return depth
+
+
+def _analyze_with_caller_budget(root: Path, files: tuple[Path, ...]) -> AnalysisResult:
+    """Analyze with only ``_CALLER_BUDGET`` frames above the caller.
+
+    A traversal that recurses once per chain element needs more than that many
+    frames for a ``_CHAIN_TERMS`` chain, while a constant-depth one does not.
+    """
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(_frame_depth() + _CALLER_BUDGET)
+    try:
+        return analyze_python_files(Workspace(root), files)
+    finally:
+        sys.setrecursionlimit(previous)
+
+
+def _stdlib_call_digest(source: str) -> str:
+    """Return the digest of the single call in ``source`` from ``ast.dump`` itself."""
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(_frame_depth() + _EXPECTED_VALUE_LIMIT)
+    try:
+        calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)]
+        assert len(calls) == 1
+        options = {"show_empty": True} if sys.version_info >= (3, 13) else {}
+        text = ast.dump(calls[0], annotate_fields=True, include_attributes=False, **options)
+    finally:
+        sys.setrecursionlimit(previous)
+    return hashlib.sha256(b"python\0" + text.encode()).hexdigest()
+
+
+def _node_facts(result: AnalysisResult) -> list[tuple[object, ...]]:
+    return [
+        (
+            node.node_class,
+            node.label,
+            node.symbol_kind,
+            None if node.location is None else node.location.range.start.line,
+            None if node.location is None else node.location.range.start.character,
+        )
+        for node in result.document.nodes
+    ]
+
+
+@pytest.mark.parametrize("operator", ["+", "|"])
+def test_long_binary_chain_analyzes_without_per_term_recursion(
+    tmp_path: Path, operator: str
+) -> None:
+    _write(tmp_path, "mod.py", "x = " + f" {operator} ".join(["a"] * _CHAIN_TERMS) + "\n")
+
+    result = _analyze_with_caller_budget(tmp_path, (tmp_path / "mod.py",))
+
+    assert result.diagnostics == ()
+    file_node = result.document.nodes[0]
+    assert (file_node.node_class, file_node.label, file_node.path) == (
+        NodeClass.FILE,
+        "mod.py",
+        "mod.py",
+    )
+    assert _node_facts(result)[1:] == [
+        (NodeClass.SYMBOL, "mod", SymbolKind.MODULE.value, 0, 0),
+        *(
+            (NodeClass.UNRESOLVED_REFERENCE, "a", None, 0, 4 + 4 * index)
+            for index in range(_CHAIN_TERMS)
+        ),
+    ]
+    assert validate_document(result.document).is_valid
+
+
+def test_long_binary_chain_argument_analyzes_and_fingerprints_its_call(tmp_path: Path) -> None:
+    source = "def f(v):\n    return v\ny = f(" + " + ".join(["a"] * _CHAIN_TERMS) + ")\n"
+    _write(tmp_path, "mod.py", source)
+    expected_fingerprint = _stdlib_call_digest(source)
+
+    result = _analyze_with_caller_budget(tmp_path, (tmp_path / "mod.py",))
+
+    assert result.diagnostics == ()
+    file_node = result.document.nodes[0]
+    assert (file_node.node_class, file_node.label, file_node.path) == (
+        NodeClass.FILE,
+        "mod.py",
+        "mod.py",
+    )
+    assert _node_facts(result)[1:] == [
+        (NodeClass.SYMBOL, "mod", SymbolKind.MODULE.value, 0, 0),
+        (NodeClass.SYMBOL, "mod.f", SymbolKind.FUNCTION.value, 0, 0),
+        *(
+            (NodeClass.UNRESOLVED_REFERENCE, "a", None, 2, 6 + 4 * index)
+            for index in range(_CHAIN_TERMS)
+        ),
+    ]
+    assert [observation.fingerprint for observation in result.call_expressions] == [
+        expected_fingerprint
+    ]
+    assert validate_document(result.document).is_valid
+
+
+_MIXED_CHAIN_STEPS = 300
+
+
+def _assert_file_and_module_then(result: AnalysisResult, facts: list[tuple[object, ...]]) -> None:
+    assert result.diagnostics == ()
+    file_node = result.document.nodes[0]
+    assert (file_node.node_class, file_node.label, file_node.path) == (
+        NodeClass.FILE,
+        "mod.py",
+        "mod.py",
+    )
+    assert _node_facts(result)[1:] == [
+        (NodeClass.SYMBOL, "mod", SymbolKind.MODULE.value, 0, 0),
+        *facts,
+    ]
+    assert validate_document(result.document).is_valid
+
+
+def test_long_attribute_chain_is_one_reference_labelled_with_its_full_text(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "mod.py", "x = a" + ".b" * _CHAIN_TERMS + "\n")
+
+    result = _analyze_with_caller_budget(tmp_path, (tmp_path / "mod.py",))
+
+    _assert_file_and_module_then(
+        result,
+        [(NodeClass.UNRESOLVED_REFERENCE, "a" + ".b" * _CHAIN_TERMS, None, 0, 4)],
+    )
+
+
+def test_long_method_chain_reports_every_callee_outermost_first(tmp_path: Path) -> None:
+    _write(tmp_path, "mod.py", "x = a" + ".b()" * _CHAIN_TERMS + "\n")
+
+    result = _analyze_with_caller_budget(tmp_path, (tmp_path / "mod.py",))
+
+    _assert_file_and_module_then(
+        result,
+        [
+            (
+                NodeClass.UNRESOLVED_REFERENCE,
+                "a" + ".b()" * (_CHAIN_TERMS - 1 - k) + ".b",
+                None,
+                0,
+                4,
+            )
+            for k in range(_CHAIN_TERMS)
+        ],
+    )
+
+
+def test_long_mixed_chain_reports_callees_then_interiors_innermost_first(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "mod.py", "x = a" + ".b(c)[d]" * _MIXED_CHAIN_STEPS + "\n")
+
+    result = _analyze_with_caller_budget(tmp_path, (tmp_path / "mod.py",))
+
+    callees = [
+        (
+            NodeClass.UNRESOLVED_REFERENCE,
+            "a" + ".b(c)[d]" * (_MIXED_CHAIN_STEPS - 1 - k) + ".b",
+            None,
+            0,
+            4,
+        )
+        for k in range(_MIXED_CHAIN_STEPS)
+    ]
+    interiors = [
+        (NodeClass.UNRESOLVED_REFERENCE, name, None, 0, column + 8 * step)
+        for step in range(_MIXED_CHAIN_STEPS)
+        for name, column in (("c", 8), ("d", 11))
+    ]
+    _assert_file_and_module_then(result, [*callees, *interiors])
+
+
+def test_chain_walk_keeps_callee_argument_keyword_and_member_order(tmp_path: Path) -> None:
+    """Interior references follow source evaluation order around a chain.
+
+    A subscript callee yields its table chain's keys before its own key, a
+    call yields positional and starred arguments before keyword values, and a
+    member load is recorded before the chain beneath it is walked.
+    """
+    _write(tmp_path, "mod.py", "x = t[i][k](a, *s, key=b, **m)\ny = p.q(c.d).r\n")
+
+    result = analyze_python_files(Workspace(tmp_path), (tmp_path / "mod.py",))
+
+    _assert_file_and_module_then(
+        result,
+        [
+            (NodeClass.UNRESOLVED_REFERENCE, label, None, line, column)
+            for label, line, column in (
+                ("t[i][k]", 0, 4),
+                ("p.q", 1, 4),
+                ("i", 0, 6),
+                ("k", 0, 9),
+                ("a", 0, 12),
+                ("s", 0, 16),
+                ("b", 0, 23),
+                ("m", 0, 28),
+                ("p.q(c.d).r", 1, 4),
+                ("c.d", 1, 8),
+            )
+        ],
+    )
+
+
+_LABEL_PARITY_CORPUS = (
+    "a",
+    "a.b.c.d",
+    'Service(name="service").total(3)',
+    "a.b(1, *args, key=value, **kwargs).c(*rest, **options).d(x, y=2)",
+    "a.b[1:2].c[1:2, ::3]['key'][0]",
+    "a[1:2, ::3]",
+    "(1).real",
+    "(1).real.imag",
+    "super().run",
+    "(a + b).c()",
+    "(lambda: x)().y",
+    'a.b(\'single\', "double").c("it\'s", \'say "hi"\')',
+    "a.b(f\"{table['key']!r:>{width}}\", f'{\"inner\"}').c",
+    "a.b(b'\\x00bytes', -1)[-2].c(-3.5)",
+    "a" + ".b(c)[d]" * 50,
+    "a + b",
+    "x if y else z",
+)
+
+
+@pytest.mark.parametrize("source", _LABEL_PARITY_CORPUS)
+def test_expression_label_is_exactly_the_standard_library_unparse_text(source: str) -> None:
+    expression = ast.parse(source, mode="eval").body
+
+    assert python_interpreter._expression_text(expression) == ast.unparse(expression)
+
+
 def test_type_comment_is_parsed_without_a_parse_error(tmp_path: Path) -> None:
     _write(tmp_path, "typed.py", "x: int # type: int\n")
 

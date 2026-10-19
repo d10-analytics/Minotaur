@@ -4299,6 +4299,28 @@ def test_isolated_failure_is_counted_in_the_graph_and_reanalyzed_on_the_next_run
     assert _diagnostic_lines(stderr) == [_interpreter_error_line("b.py")]
 
 
+def test_long_python_method_chain_analyzes_at_the_default_recursion_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    steps = 1_000
+    root = tmp_path / "root"
+    _write(root, "mod.py", "x = a" + ".b()" * steps + "\n")
+    output = tmp_path / "graph.json"
+    monkeypatch.chdir(tmp_path)
+
+    assert _analyze_in_process(root, output, root) == 0
+
+    assert "interpreter-error" not in capsys.readouterr().err
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    labels = [
+        node["label"] for node in graph["nodes"] if node["node_class"] == "unresolved-reference"
+    ]
+    assert len(labels) == steps
+    assert set(labels) == {"a" + ".b()" * (steps - 1 - k) + ".b" for k in range(steps)}
+
+
 def test_interpreter_interrupt_is_not_isolated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

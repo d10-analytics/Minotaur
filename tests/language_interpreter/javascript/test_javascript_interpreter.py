@@ -4,6 +4,8 @@ import ast
 import hashlib
 import importlib.metadata
 import inspect
+import json
+import sys
 import textwrap
 
 import esprima
@@ -16,6 +18,7 @@ from minotaur.graph_model.provenance import (
     IdentityBasis,
     NodeClass,
     RelationshipKind,
+    SymbolKind,
 )
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_model.validation import validate_document
@@ -2314,3 +2317,223 @@ def test_every_esprima_node_type_is_dispatched_or_explicitly_excused(tmp_path):
     rejected = _analyze(tmp_path, {"a.js": "function f() {}\nwith (target) { f(); }\n"})
     assert [diagnostic.code for diagnostic in rejected.diagnostics] == [DiagnosticCode.PARSE_ERROR]
     assert not rejected.document.relationships
+
+
+_CHAIN_TERMS = 1_000
+_CALLER_BUDGET = 800
+_EXPECTED_VALUE_LIMIT = 20_000
+
+
+def _frame_depth() -> int:
+    depth = 0
+    frame = sys._getframe(1)
+    while frame is not None:
+        depth += 1
+        frame = frame.f_back
+    return depth
+
+
+def _analyze_with_caller_budget(tmp_path, source: str):
+    """Analyze ``mod.js`` with only ``_CALLER_BUDGET`` frames above the caller.
+
+    A walker that recurses once per chain element needs more than that many
+    frames for a ``_CHAIN_TERMS`` chain, while a constant-depth one does not.
+    """
+    path = tmp_path / "mod.js"
+    path.write_text(source, encoding="utf-8")
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(_frame_depth() + _CALLER_BUDGET)
+    try:
+        return analyze_javascript_files(Workspace(tmp_path), (path,))
+    finally:
+        sys.setrecursionlimit(previous)
+
+
+def _chain_node_facts(result):
+    return [
+        (
+            node.node_class,
+            node.label,
+            node.symbol_kind,
+            None if node.location is None else node.location.range.start.line,
+            None if node.location is None else node.location.range.start.character,
+        )
+        for node in result.document.nodes
+    ]
+
+
+def _assert_file_and_module_then(result, facts) -> None:
+    assert result.diagnostics == ()
+    file_node = result.document.nodes[0]
+    assert (file_node.node_class, file_node.label, file_node.path) == (
+        NodeClass.FILE,
+        "mod.js",
+        "mod.js",
+    )
+    assert _chain_node_facts(result)[1:] == [
+        (NodeClass.SYMBOL, "mod", SymbolKind.MODULE.value, 0, 0),
+        *facts,
+    ]
+    assert validate_document(result.document).is_valid
+
+
+@pytest.mark.parametrize(("operator", "stride"), [("+", 4), ("||", 5)])
+def test_long_binary_and_logical_chains_report_every_operand_in_column_order(
+    tmp_path, operator, stride
+):
+    source = "export const x = " + f" {operator} ".join(["a"] * _CHAIN_TERMS) + ";\n"
+
+    result = _analyze_with_caller_budget(tmp_path, source)
+
+    _assert_file_and_module_then(
+        result,
+        [
+            (NodeClass.UNRESOLVED_REFERENCE, "a", None, 0, 17 + stride * index)
+            for index in range(_CHAIN_TERMS)
+        ],
+    )
+
+
+def _stdlib_chain_call_digest() -> str:
+    """Digest of ``f(a + a + ...)`` serialized by ``json.dumps`` itself."""
+    operand = {"name": "a", "type": "Identifier"}
+    chain: dict[str, object] = dict(operand)
+    for _ in range(_CHAIN_TERMS - 1):
+        chain = {"left": chain, "operator": "+", "right": dict(operand), "type": "BinaryExpression"}
+    call = {
+        "arguments": [chain],
+        "callee": {"name": "f", "type": "Identifier"},
+        "optional": False,
+        "type": "CallExpression",
+    }
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(_frame_depth() + _EXPECTED_VALUE_LIMIT)
+    try:
+        text = json.dumps(
+            call, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    finally:
+        sys.setrecursionlimit(previous)
+    return hashlib.sha256(b"javascript\0" + text.encode()).hexdigest()
+
+
+def test_long_binary_chain_argument_analyzes_and_fingerprints_its_call(tmp_path):
+    source = (
+        "function f(v) { return v; }\nexport const y = f("
+        + " + ".join(["a"] * _CHAIN_TERMS)
+        + ");\n"
+    )
+    expected_fingerprint = _stdlib_chain_call_digest()
+
+    result = _analyze_with_caller_budget(tmp_path, source)
+
+    _assert_file_and_module_then(
+        result,
+        [
+            (NodeClass.SYMBOL, "mod.f", SymbolKind.FUNCTION.value, 0, 0),
+            *(
+                (NodeClass.UNRESOLVED_REFERENCE, "a", None, 1, 19 + 4 * index)
+                for index in range(_CHAIN_TERMS)
+            ),
+        ],
+    )
+    assert [observation.fingerprint for observation in result.call_expressions] == [
+        expected_fingerprint
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "references"),
+    [
+        (
+            "export const x = (a.b || c.d).e;\n",
+            [("a", 18), ("a.b", 18), ("c", 25), ("c.d", 25)],
+        ),
+        ("export const y = (p.q + r).s();\n", [("p", 18), ("p.q", 18), ("r", 24)]),
+    ],
+)
+def test_member_text_resumes_below_an_operator_that_is_a_member_object(
+    tmp_path, source, references
+):
+    # The outer member's object records no member text of its own, but the
+    # members nested inside that binary or logical object still do.
+    result = _analyze(tmp_path, {"mod.js": source})
+
+    _assert_file_and_module_then(
+        result,
+        [(NodeClass.UNRESOLVED_REFERENCE, label, None, 0, column) for label, column in references],
+    )
+
+
+def test_var_in_a_nested_function_or_class_does_not_shadow_the_enclosing_function(tmp_path):
+    # A ``var`` belongs to its nearest function or static block, so declarations
+    # inside nested functions, arrows and class static blocks leave the
+    # enclosing function's call resolved to the module binding.
+    result = _analyze(
+        tmp_path,
+        {
+            "app.js": (
+                "function target() {}\n"
+                "function outer() {\n"
+                "  function inner() { var target = 1; }\n"
+                "  const expression = function () { var target = 2; };\n"
+                "  const arrow = () => { var target = 3; };\n"
+                "  class Holder { static { var target = 4; } }\n"
+                "  target();\n"
+                "}\n"
+            )
+        },
+    )
+    target = _node(result, "app.target")
+    outer = _node(result, "app.outer")
+    assert [
+        location.range.start.line
+        for edge in _edges(result, RelationshipKind.CALLS.value)
+        if edge.source == outer.id and edge.target == target.id
+        for location in edge.evidence[0].locations
+    ] == [6]
+
+
+def test_long_member_chain_reports_its_base_then_its_member_text(tmp_path):
+    result = _analyze_with_caller_budget(
+        tmp_path, "export const x = a" + ".b" * _CHAIN_TERMS + ";\n"
+    )
+
+    _assert_file_and_module_then(
+        result,
+        [
+            (NodeClass.UNRESOLVED_REFERENCE, "a", None, 0, 17),
+            (NodeClass.UNRESOLVED_REFERENCE, "a" + ".b" * _CHAIN_TERMS, None, 0, 17),
+        ],
+    )
+
+
+def test_long_method_call_chain_reports_only_its_base(tmp_path):
+    # Every member in the chain has a call as its object, so none has an
+    # identifier root and only the base name is a reference.
+    result = _analyze_with_caller_budget(
+        tmp_path, "export const x = a" + ".b()" * _CHAIN_TERMS + ";\n"
+    )
+
+    _assert_file_and_module_then(result, [(NodeClass.UNRESOLVED_REFERENCE, "a", None, 0, 17)])
+
+
+def test_member_callee_text_follows_its_object_and_key_and_precedes_the_arguments(tmp_path):
+    # The member text is recorded after the object and the computed key it
+    # contains, and the call's arguments are walked only after the callee.
+    result = _analyze(tmp_path, {"mod.js": "export const x = a[c].d(e, f.g);\n"})
+
+    _assert_file_and_module_then(
+        result,
+        [
+            (NodeClass.UNRESOLVED_REFERENCE, label, None, 0, column)
+            for label, column in [
+                ("a", 17),
+                ("c", 19),
+                ("a[c].d", 17),
+                ("e", 24),
+                ("f", 27),
+                ("f.g", 27),
+            ]
+        ],
+    )
