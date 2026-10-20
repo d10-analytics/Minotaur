@@ -52,11 +52,13 @@ too, but they do not trigger this warning.
 Only a path that ends in the exact lowercase suffix `.py` gets a module name.
 A `.PY` or other spelling is still selected and keeps its file node, but it
 gets no module, because Python does not import it under that name. A file with
-a dotted path component, such as `a.b.py` or `v1.2/x.py`, also gets no module
-name, because its dotted name would alias a different module. A file named
+a path component that has a dot between two non-empty parts, such as `a.b.py`
+or `v1.2/x.py`, also gets no module name, because its dotted name would alias
+a different module. A component with an empty dot segment (`r..s.py`) keeps
+its name, as does a leading dot. A file named
 `.py` has no file extension, so the CLI never selects it: a directory scan
 omits it, and naming it as a target is a command error (exit `2`). Hidden directories such as
-`.github` keep their names. When two files claim the same module name, a
+`.github` keep their names (`.github/x.py` is module `.github.x`). When two files claim the same module name, a
 package beats a same-named sibling module (`pkg/__init__.py` over `pkg.py`);
 candidates of equal rank, such as a root `__init__.py` and
 `__init__/__init__.py`, all lose. Each file left without a module reports one
