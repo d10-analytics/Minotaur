@@ -54,7 +54,8 @@ A `.PY` or other spelling is still selected and keeps its file node, but it
 gets no module, because Python does not import it under that name. A file with
 a dotted path component, such as `a.b.py` or `v1.2/x.py`, also gets no module
 name, because its dotted name would alias a different module. A file named
-`.py` has an empty stem and gets none either. Hidden directories such as
+`.py` has no file extension, so the CLI never selects it: a directory scan
+omits it, and naming it as a target is a command error (exit `2`). Hidden directories such as
 `.github` keep their names. When two files claim the same module name, a
 package beats a same-named sibling module (`pkg/__init__.py` over `pkg.py`);
 candidates of equal rank, such as a root `__init__.py` and
