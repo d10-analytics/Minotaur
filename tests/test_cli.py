@@ -882,6 +882,8 @@ def test_selection_containment_exclusions_and_direct_overrides(tmp_path: Path) -
     assert _paths(ordinary_output) == {"visible.py"}
     assert explicit_hidden.returncode == 0, explicit_hidden.stderr
     assert _paths(hidden_output) == {".hidden/hidden.py"}
+    hidden_graph = json.loads(hidden_output.read_text(encoding="utf-8"))
+    assert ".hidden.hidden" in {node.get("label") for node in hidden_graph["nodes"]}
     assert explicit_venv.returncode == 0, explicit_venv.stderr
     assert _paths(venv_output) == {".venv/internal.py"}
     assert outside_result.returncode == 2
@@ -4506,3 +4508,123 @@ def test_importing_module_entry_leaves_sys_path_and_cli_unloaded(
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "False"
+
+
+_PATH_OUTPUT_SOURCES = {
+    ".py": "value = 1\n",
+    ".js": "function ok() {}\n",
+    ".sql": "CREATE TABLE t (id int);\n",
+}
+
+
+def _write_raw(root: Path, name: str, extension: str) -> None:
+    (root / f"{name}{extension}").write_bytes(_PATH_OUTPUT_SOURCES[extension].encode("utf-8"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="raw-byte names are a POSIX filename feature")
+@pytest.mark.parametrize("extension", [".py", ".js", ".sql"])
+def test_analyze_reports_non_utf8_name_as_one_source_read_error(
+    tmp_path: Path, extension: str
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write_raw(root, "ok", extension)
+    try:
+        _write_raw(root, "bad\udcff", extension)
+    except OSError:
+        pytest.skip("filesystem refuses non-UTF-8 file names")
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root)
+
+    assert completed.returncode == 1
+    assert load_graph_file(output) is not None
+    assert _paths(output) == {f"ok{extension}"}
+    lines = completed.stderr.splitlines()
+    assert completed.stderr.count("source-read-error") == 1
+    (read_error,) = [line for line in lines if "source-read-error" in line]
+    assert read_error.startswith(f"bad\\udcff{extension}: source-read-error:")
+    assert not any("interpreter-error" in line for line in lines)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="backslash is a valid POSIX filename character")
+@pytest.mark.parametrize("extension", [".py", ".js", ".sql"])
+def test_analyze_reports_backslash_name_as_one_source_read_error(
+    tmp_path: Path, extension: str
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write_raw(root, "ok", extension)
+    _write_raw(root, "we\\ird", extension)
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root)
+
+    assert completed.returncode == 1
+    assert load_graph_file(output) is not None
+    assert _paths(output) == {f"ok{extension}"}
+    assert completed.stderr.count("source-read-error") == 1
+    assert "interpreter-error" not in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="raw-byte names are a POSIX filename feature")
+def test_analyze_rejects_explicit_non_utf8_target_naming_it(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    try:
+        _write_raw(root, "bad\udcff", ".py")
+    except OSError:
+        pytest.skip("filesystem refuses non-UTF-8 file names")
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root / "bad\udcff.py")
+
+    assert completed.returncode == 2
+    assert not output.exists()
+    assert completed.stderr.startswith("minotaur: error:")
+    assert "bad\\udcff.py" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="backslash is a valid POSIX filename character")
+def test_analyze_rejects_explicit_backslash_target(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write_raw(root, "we\\ird", ".py")
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root / "we\\ird.py")
+
+    assert completed.returncode == 2
+    assert not output.exists()
+    assert completed.stderr.startswith("minotaur: error:")
+    assert "we\\ird.py" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="control characters in names are POSIX only")
+def test_analyze_accepts_control_character_file_names(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write_raw(root, "nl\nname", ".py")
+    _write_raw(root, "ctl\x1b[31mred", ".py")
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root)
+
+    assert completed.returncode == 0
+    assert _paths(output) == {"nl\nname.py", "ctl\x1b[31mred.py"}
+
+
+def test_analyze_warns_about_a_file_without_a_module_name_and_exits_zero(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "ok.py", "pass\n")
+    _write(root, "a.b.py", "pass\n")
+    output = tmp_path / "graph.json"
+
+    result = _run(root, output, root)
+
+    assert result.returncode == 0, result.stderr
+    assert _paths(output) == {"ok.py", "a.b.py"}
+    assert "a.b.py: module-name-unavailable:" in result.stderr
+    assert "[severity=warning]" in result.stderr

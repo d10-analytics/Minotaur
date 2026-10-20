@@ -38,11 +38,14 @@ from minotaur.language_interpreter.contract import (
     IMPORTS_ROOT_MISMATCHED,
     IMPORTS_UNRESOLVED,
     AnalysisResult,
+    Diagnostic,
+    DiagnosticCode,
+    DiagnosticSeverity,
 )
 from minotaur.language_interpreter.emission import NodeEmitter, file_node, symbol_node
 from minotaur.language_interpreter.paths import resolve_relative
 from minotaur.language_interpreter.python.discovery import discover_python_files
-from minotaur.language_interpreter.reading import ParseFailure, read_and_parse
+from minotaur.language_interpreter.reading import ParsedSource, ParseFailure, read_and_parse
 from minotaur.language_interpreter.source_text import LineIndex
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.source_encoding import decode_python_source
@@ -2374,15 +2377,36 @@ def analyze_python_files(workspace: Workspace, files: tuple[Path, ...]) -> Analy
     sources, diagnostics = read_and_parse(
         workspace, files, _parse_python, decode=decode_python_source
     )
+    winners, unnamed = _rank_module_names(sources)
     for parsed in sources:
-        module = _make_module(parsed.relative, parsed.tree, parsed.source, LineIndex(parsed.source))
-        modules.append(module)
-        nodes.extend(
-            (
-                file_node(parsed.relative, parsed.content, NAMESPACE, "python"),
-                _module_node(module),
-            )
+        nodes.append(file_node(parsed.relative, parsed.content, NAMESPACE, "python"))
+        identity = winners.get(parsed.relative)
+        if identity is None:
+            continue
+        module = _make_module(
+            parsed.relative,
+            identity,
+            parsed.tree,
+            parsed.source,
+            LineIndex(parsed.source),
         )
+        modules.append(module)
+        nodes.append(_module_node(module))
+    diagnostics = sorted(
+        (
+            *diagnostics,
+            *(
+                Diagnostic(
+                    DiagnosticCode.MODULE_NAME_UNAVAILABLE,
+                    path,
+                    message,
+                    severity=DiagnosticSeverity.WARNING,
+                )
+                for path, message in unnamed.items()
+            ),
+        ),
+        key=lambda diagnostic: diagnostic.path,
+    )
 
     module_by_name = {module.name: module for module in modules}
     declarations: dict[str, str] = {}
@@ -2471,8 +2495,14 @@ def _call_observations(
     return tuple(observations)
 
 
-def _make_module(path: str, tree: ast.Module, source: str, line_index: LineIndex) -> _Module:
-    name = _module_name(path)
+def _make_module(
+    path: str,
+    identity: tuple[str, bool],
+    tree: ast.Module,
+    source: str,
+    line_index: LineIndex,
+) -> _Module:
+    name, is_package = identity
     file_identity = NodeIdentity(IdentityBasis.FILE_PATH, NAMESPACE)
     file_id = compute_node_id(file_identity, node_class=NodeClass.FILE.value, path=path)
     module_identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, NAMESPACE)
@@ -2486,7 +2516,7 @@ def _make_module(path: str, tree: ast.Module, source: str, line_index: LineIndex
     return _Module(
         path,
         name,
-        path.rsplit("/", 1)[-1] == "__init__.py",
+        is_package,
         tree,
         source,
         line_index,
@@ -3581,11 +3611,73 @@ def _resolve_call(
     return context.declarations.get(f"{context.module_name}.{text}")
 
 
-def _module_name(path: str) -> str:
+def _module_identity(path: str) -> tuple[str, bool] | None:
+    """Return ``(module name, is_package)``, or ``None`` when Python would not import it.
+
+    Only an exact lowercase ``.py`` suffix names a module. A component with a
+    dot between non-empty segments would alias a different dotted module, and a
+    file named just ``.py`` has no stem. Hidden directories (``.github``) keep
+    their names.
+    """
+    if _unnamed_reason(path) is not None:
+        return None
     parts = path.removesuffix(".py").split("/")
-    if parts[-1] == "__init__":
+    is_package = parts[-1] == "__init__"
+    if is_package:
         parts.pop()
-    return ".".join(parts) or "__init__"
+    return ".".join(parts) or "__init__", is_package
+
+
+def _unnamed_reason(path: str) -> str | None:
+    """Name why ``path`` cannot be a module, or ``None`` when it can."""
+    if not path.endswith(".py"):
+        return "module name unavailable: the path does not end in the exact suffix '.py'"
+    parts = path.removesuffix(".py").split("/")
+    if not parts[-1]:
+        return "module name unavailable: the file name has an empty stem"
+    for component in parts:
+        if "." in component and all(component.split(".")):
+            return f"module name unavailable: path component '{component}' contains a dot"
+    return None
+
+
+def _rank_module_names(
+    sources: Iterable[ParsedSource],
+) -> tuple[dict[str, tuple[str, bool]], dict[str, str]]:
+    """Choose at most one file per module name, independent of input order.
+
+    A package outranks a same-named sibling module; candidates tied at the top
+    all lose. Returns the winners' identities and a reason for each other file.
+    """
+    candidates: dict[str, list[tuple[str, bool]]] = {}
+    unnamed: dict[str, str] = {}
+    for parsed in sources:
+        reason = _unnamed_reason(parsed.relative)
+        if reason is not None:
+            unnamed[parsed.relative] = reason
+            continue
+        identity = _module_identity(parsed.relative)
+        assert identity is not None
+        candidates.setdefault(identity[0], []).append((parsed.relative, identity[1]))
+    winners: dict[str, tuple[str, bool]] = {}
+    for name, group in candidates.items():
+        top_is_package = any(is_package for _, is_package in group)
+        top = sorted(path for path, is_package in group if is_package == top_is_package)
+        if len(top) == 1:
+            winners[top[0]] = (name, top_is_package)
+        for path, is_package in group:
+            if is_package == top_is_package and len(top) == 1:
+                continue
+            if is_package == top_is_package:
+                unnamed[path] = (
+                    f"module name unavailable: module '{name}' is claimed equally by "
+                    + ", ".join(top)
+                )
+            else:
+                unnamed[path] = (
+                    f"module name unavailable: module '{name}' is shadowed by " + ", ".join(top)
+                )
+    return winners, unnamed
 
 
 def _relative_module(

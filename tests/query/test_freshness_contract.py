@@ -882,3 +882,32 @@ def test_freshness_documents_content_keyed_reuse_and_last_generation_provenance(
     assert "Git snapshot context are current" not in javascript_guide
     assert "Git branch/commit metadata equals the graph's metadata" not in freshness
     assert "checks three conditions" not in freshness
+
+
+def test_file_without_a_module_name_stays_fresh(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "source"
+    _write(root, "ok.py", "pass\n")
+    _write(root, "a.b.py", "pass\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    capsys.readouterr()
+
+    again = cli.main(["analyze", "--root", str(root), "--output", str(output), str(root)])
+    assert again == 0
+    assert capsys.readouterr().err == "minotaur: graph is up to date, skipping analysis\n"
+
+    query = cli.main(
+        [
+            "query",
+            "definitions",
+            "ok",
+            "--graph",
+            str(output),
+            "--root",
+            str(root),
+            "--no-refresh",
+        ]
+    )
+    assert query == 0
+    assert "stale:" not in capsys.readouterr().err
+    assert drift(_document(output), root).is_clean

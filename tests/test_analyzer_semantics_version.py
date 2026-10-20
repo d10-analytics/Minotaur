@@ -87,6 +87,31 @@ def test_samples_exercise_every_declaration_role(tmp_path: Path) -> None:
     assert {role for counts in roles.values() for role in counts} == _DECLARATION_ROLES
 
 
+def test_python_sample_covers_module_naming_cases(tmp_path: Path) -> None:
+    copied = tmp_path / "python"
+    shutil.copytree(SAMPLES["python"], copied)
+    _, _, result = cli._produce_selection(copied, (copied,))
+    assert not result.errors, result.diagnostics
+    assert sorted(
+        (item.path, item.severity.value)
+        for item in result.diagnostics
+        if item.code.value == "module-name-unavailable"
+    ) == [
+        ("naming/Upper.PY", "warning"),
+        ("naming/dotted.name.py", "warning"),
+        ("naming/shadow.py", "warning"),
+    ]
+    nodes = result.document.nodes
+    assert {
+        node.location.path
+        for node in nodes
+        if node.label == "naming.shadow" and node.location is not None
+    } == {"naming/shadow/__init__.py"}
+    assert not [node for node in nodes if node.label.startswith("naming.Upper")]
+    file_paths = {node.path for node in nodes if node.path is not None}
+    assert {"naming/dotted.name.py", "naming/Upper.PY"} <= file_paths
+
+
 @pytest.mark.parametrize("language", ["python", "javascript", "sql"])
 def test_each_interpreter_output_contributes_to_fingerprint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
+
 from minotaur.graph_model.location import Location, Position, Range
-from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode
+from minotaur.graph_model.provenance import NodeClass
+from minotaur.graph_model.serialization import serialize
+from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode, DiagnosticSeverity
+from minotaur.language_interpreter.python.interpreter import analyze_python_workspace
 from minotaur.language_interpreter.reading import (
     ParsedSource,
     ParseFailure,
@@ -11,6 +17,8 @@ from minotaur.language_interpreter.reading import (
     read_and_parse,
     read_sources,
 )
+from minotaur.language_interpreter.registry import default_registry
+from minotaur.language_interpreter.selection import select_sources
 from minotaur.language_interpreter.workspace import Workspace
 
 
@@ -208,3 +216,92 @@ def test_parsed_source_is_frozen() -> None:
         pass
     else:
         raise AssertionError("ParsedSource must be immutable")
+
+
+_BAD_NAME = "bad\udcff"
+_BACKSLASH_NAME = "we\\ird"
+_MINIMAL_SOURCE = {
+    ".py": "value = 1\n",
+    ".js": "function ok() {}\n",
+    ".sql": "CREATE TABLE t (id int);\n",
+}
+
+
+def _write_stray_names(root: Path, extension: str) -> None:
+    """Create ``ok``, a backslash name and a non-UTF-8 name under ``root``."""
+    content = _MINIMAL_SOURCE[extension].encode("utf-8")
+    (root / f"ok{extension}").write_bytes(content)
+    if os.name != "posix":
+        pytest.skip("backslash and raw-byte names are POSIX filename features")
+    (root / f"{_BACKSLASH_NAME}{extension}").write_bytes(content)
+    try:
+        (root / f"{_BAD_NAME}{extension}").write_bytes(content)
+    except OSError:
+        pytest.skip("filesystem refuses non-UTF-8 file names")
+
+
+def _file_paths(document: object) -> set[str]:
+    return {
+        node.path
+        for node in document.nodes  # type: ignore[attr-defined]
+        if node.node_class is NodeClass.FILE
+    }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="raw-byte and backslash names are POSIX only")
+def test_read_sources_skips_unrepresentable_paths_and_keeps_control_characters(
+    tmp_path: Path,
+) -> None:
+    names = ["ok.py", "we\\ird.py", "nl\nname.py", "ctl\x1b[31mred.py"]
+    for name in names:
+        (tmp_path / name).write_text("x = 1\n", encoding="utf-8")
+    try:
+        (tmp_path / os.fsdecode(b"bad\xff.py")).write_text("x = 1\n", encoding="utf-8")
+    except OSError:
+        pytest.skip("filesystem refuses non-UTF-8 file names")
+    files = sorted(tmp_path.iterdir())
+
+    sources, diagnostics = read_sources(Workspace(tmp_path), files)
+
+    assert [source.relative for source in sources] == [
+        "ctl\x1b[31mred.py",
+        "nl\nname.py",
+        "ok.py",
+    ]
+    assert [(item.code, item.severity, item.path) for item in diagnostics] == [
+        (DiagnosticCode.SOURCE_READ_ERROR, DiagnosticSeverity.ERROR, "bad\udcff.py"),
+        (DiagnosticCode.SOURCE_READ_ERROR, DiagnosticSeverity.ERROR, "we\\ird.py"),
+    ]
+    for item in diagnostics:
+        assert "ird" not in item.message
+        assert "bad" not in item.message
+        assert "graph path" in item.message
+
+
+@pytest.mark.parametrize("extension", [".py", ".js", ".sql"])
+def test_selected_analysis_reports_unrepresentable_names_per_file(
+    tmp_path: Path, extension: str
+) -> None:
+    _write_stray_names(tmp_path, extension)
+    registry = default_registry()
+
+    workspace, selection = select_sources(tmp_path, (tmp_path,), registry)
+    registration = registry.registration_for(tmp_path / f"ok{extension}")
+    assert registration is not None
+    result = registration.analyze(workspace, selection.files)
+
+    assert _file_paths(result.document) == {f"ok{extension}"}
+    assert [(item.code, item.severity, item.path) for item in result.diagnostics] == [
+        (DiagnosticCode.SOURCE_READ_ERROR, DiagnosticSeverity.ERROR, f"{_BAD_NAME}{extension}"),
+        (
+            DiagnosticCode.SOURCE_READ_ERROR,
+            DiagnosticSeverity.ERROR,
+            f"{_BACKSLASH_NAME}{extension}",
+        ),
+    ]
+    assert serialize(result.document)
+
+    if extension == ".py":
+        public = analyze_python_workspace(tmp_path)
+        assert _file_paths(public.document) == _file_paths(result.document)
+        assert public.diagnostics == result.diagnostics

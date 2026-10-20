@@ -67,12 +67,13 @@ The Python interpreter keeps an older whole-workspace helper. Its
 `analyze_python_workspace()` API remains compatible for existing callers,
 while `analyze_python_files()` is the API used by the CLI.
 
-`discover_python_files()` is the discovery function behind that older helper.
-It decides what a full Python workspace scan means and is not used by the CLI,
-which instead selects registered extensions across all requested targets.
-This Python arrangement is not a pattern for new languages: a new language
-package defines no discovery function, and whole-root callers select its files
-through `select_sources()`.
+`discover_python_files()` is a retained helper behind that older helper. It no
+longer walks folders: it delegates to the same shared `select_sources()`
+selection the CLI uses and keeps the Python files, so containment, symlink and
+case rules match the CLI by construction. The CLI still selects registered
+extensions across all requested targets. This Python arrangement is not a
+pattern for new languages: a new language package defines no discovery
+function, and whole-root callers select its files through `select_sources()`.
 
 ## Register the extension
 

@@ -49,6 +49,24 @@ minotaur: warning: 52% of imports (161 of 310) only resolve with a different roo
 Third-party imports and imports of files outside the selection are unresolved
 too, but they do not trigger this warning.
 
+Only a path that ends in the exact lowercase suffix `.py` gets a module name.
+A `.PY` or other spelling is still selected and keeps its file node, but it
+gets no module, because Python does not import it under that name. A file with
+a path component that has a dot between two non-empty parts, such as `a.b.py`
+or `v1.2/x.py`, also gets no module name, because its dotted name would alias
+a different module. A component with an empty dot segment (`r..s.py`) keeps
+its name, as does a leading dot. A file named
+`.py` has no file extension, so the CLI never selects it: a directory scan
+omits it, and naming it as a target is a command error (exit `2`). Hidden directories such as
+`.github` keep their names (`.github/x.py` is module `.github.x`). When two files claim the same module name, a
+package beats a same-named sibling module (`pkg/__init__.py` over `pkg.py`);
+candidates of equal rank, such as a root `__init__.py` and
+`__init__/__init__.py`, all lose. Each file left without a module reports one
+`module-name-unavailable` warning that names the reason. The warning keeps the
+file in the graph and `analyze` still exits `0`; the file contributes no
+module, declarations or calls, and imports of the dropped module stay
+unresolved.
+
 Targets are resolved from the current working directory, like most command-line
 tools, not from `--root`: run `minotaur analyze --root src src/minotaur` from
 the repository root, not `--root src minotaur`. Every target must be an

@@ -29,6 +29,7 @@ class DiagnosticCode(str, Enum):
     CIRCULAR_DEPENDENCY = "circular-dependency"
     VIEW_DEPTH_WARNING = "view-depth-warning"
     INTERPRETER_ERROR = "interpreter-error"
+    MODULE_NAME_UNAVAILABLE = "module-name-unavailable"
 
 
 class DiagnosticSeverity(str, Enum):

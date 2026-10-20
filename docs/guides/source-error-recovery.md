@@ -53,13 +53,22 @@ siblings, and exits `1`. To repair it, add or correct the declaration so that
 it names the file's actual ASCII-compatible encoding, or re-encode the file as
 UTF-8 and remove any declaration that names another codec. Then analyze again.
 
+A file whose name cannot be a graph path gets the same treatment, in every
+language. A directory scan that finds a file whose root-relative path contains
+a backslash, or name bytes that are not valid UTF-8, in the file name or in any
+folder name on that path, reports one error-severity `source-read-error` for
+that file under its raw relative path, skips it, analyzes its siblings, writes
+the partial graph and exits `1`. To repair it, rename the file or folder whose
+name holds the character. Naming such a file or folder yourself as a target is
+a command error: `analyze` names the target, exits `2`, and writes no graph.
+
 A file that makes the analyzer itself fail unexpectedly is isolated the same
 way. Analysis retries each selected file of the failing language on its own,
 reports each file that fails alone as one error-severity `interpreter-error`
 with no location, such as `deep.py: interpreter-error: RecursionError: maximum
 recursion depth exceeded [severity=error]`, writes the partial graph from the
 remaining files, and exits `1`. The diagnostic reports a Minotaur limitation
-rather than a problem in the source, which may be valid. When no single
+rather than a problem in the source, which may be valid. A file name that cannot be a graph path is never reported this way; it is a `source-read-error`, as described above. When no single
 selected file explains the failure, analysis prints one `minotaur: error:
 analysis failed in a way no single selected file explains: …` line, exits `2`,
 writes no graph, and leaves an existing graph and sidecar unchanged.

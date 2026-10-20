@@ -109,7 +109,7 @@ $ minotaur query context --site minotaur/language_interpreter/selection.py:46 \
 minotaur/language_interpreter/selection.py:45-47
   45:     for target in targets:
 > 46:         resolved = _resolve_target(target, workspace.root)
-  47:         if resolved.is_file():
+  47:         # An explicit target is recorded in selection metadata, so one whose
 ```
 
 ## 7. Observe freshness and choose a snapshot
