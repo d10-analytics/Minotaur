@@ -4506,3 +4506,74 @@ def test_importing_module_entry_leaves_sys_path_and_cli_unloaded(
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "False"
+
+
+_PATH_OUTPUT_SOURCES = {
+    ".py": "value = 1\n",
+    ".js": "function ok() {}\n",
+    ".sql": "CREATE TABLE t (id int);\n",
+}
+
+
+def _write_raw(root: Path, name: str, extension: str) -> None:
+    (root / f"{name}{extension}").write_bytes(_PATH_OUTPUT_SOURCES[extension].encode("utf-8"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="raw-byte names are a POSIX filename feature")
+@pytest.mark.parametrize("extension", [".py", ".js", ".sql"])
+def test_analyze_reports_non_utf8_name_as_one_source_read_error(
+    tmp_path: Path, extension: str
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write_raw(root, "ok", extension)
+    try:
+        _write_raw(root, "bad\udcff", extension)
+    except OSError:
+        pytest.skip("filesystem refuses non-UTF-8 file names")
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root)
+
+    assert completed.returncode == 1
+    assert load_graph_file(output) is not None
+    assert _paths(output) == {f"ok{extension}"}
+    lines = completed.stderr.splitlines()
+    assert completed.stderr.count("source-read-error") == 1
+    (read_error,) = [line for line in lines if "source-read-error" in line]
+    assert read_error.startswith(f"bad\\udcff{extension}: source-read-error:")
+    assert not any("interpreter-error" in line for line in lines)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="backslash is a valid POSIX filename character")
+@pytest.mark.parametrize("extension", [".py", ".js", ".sql"])
+def test_analyze_reports_backslash_name_as_one_source_read_error(
+    tmp_path: Path, extension: str
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write_raw(root, "ok", extension)
+    _write_raw(root, "we\\ird", extension)
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root)
+
+    assert completed.returncode == 1
+    assert load_graph_file(output) is not None
+    assert _paths(output) == {f"ok{extension}"}
+    assert completed.stderr.count("source-read-error") == 1
+    assert "interpreter-error" not in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="control characters in names are POSIX only")
+def test_analyze_accepts_control_character_file_names(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write_raw(root, "nl\nname", ".py")
+    _write_raw(root, "ctl\x1b[31mred", ".py")
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root)
+
+    assert completed.returncode == 0
+    assert _paths(output) == {"nl\nname.py", "ctl\x1b[31mred.py"}
