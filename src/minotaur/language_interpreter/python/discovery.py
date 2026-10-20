@@ -4,17 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from minotaur.language_interpreter import exclusions
 from minotaur.language_interpreter.workspace import Workspace
 
 
 def discover_python_files(workspace: Workspace) -> tuple[Path, ...]:
     """Return regular ``.py`` files in canonical workspace-relative order."""
-    files = (
-        path
-        for path in workspace.root.rglob("*.py")
-        if path.is_file() and not exclusions.is_excluded(path.relative_to(workspace.root))
-    )
-    return tuple(
-        sorted(files, key=lambda path: exclusions.relative_order_key(path, workspace.root))
-    )
+    # The selection module imports the registry, which imports the Python
+    # interpreter, which imports this module; importing it here keeps the
+    # modules importable in either order.
+    from minotaur.language_interpreter.registry import default_registry
+    from minotaur.language_interpreter.selection import select_sources
+
+    _, selection = select_sources(workspace.root, (workspace.root,), default_registry())
+    return tuple(path for path in selection.files if path.suffix.lower() == ".py")
