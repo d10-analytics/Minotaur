@@ -841,3 +841,90 @@ def test_source_error_recovery_states_the_interpreter_error_and_no_blame_outcome
         "no single selected file explains, and writes no graph"
     ) in text
     assert "writes the partial graph from the remaining files, and exits `1`" in text
+
+
+# ---------------------------------------------------------------------------
+# Module entry guard: console-script-first launcher documentation
+# ---------------------------------------------------------------------------
+
+
+PYTHON_GUIDE = ROOT / "docs/guides/analyze-python.md"
+CONTRIBUTING = ROOT / "docs/guides/contributing.md"
+
+RESIDUAL_LIMIT = (
+    "CPython loads a few modules before that guard runs, and a project that "
+    "defines its own `minotaur` module still shadows the module form"
+)
+SAFE_FORM = "For an untrusted checkout, use the "
+PYTHONPATH_CAVEAT = (
+    "A `PYTHONPATH` that includes the project applies to every launcher, "
+    "console script included, so that "
+)
+
+
+def _hardening_paragraphs(path: Path) -> list[str]:
+    """Return every paragraph of ``path`` that mentions ``python -P -m minotaur``."""
+    paragraphs = re.split(r"\n\s*\n", path.read_text(encoding="utf-8"))
+    return [re.sub(r"\s+", " ", p) for p in paragraphs if "python -P -m" in re.sub(r"\s+", " ", p)]
+
+
+def test_readme_quick_start_runs_the_console_script_with_both_windows_fallbacks() -> None:
+    raw = README.read_text(encoding="utf-8")
+    text = _collapsed(README)
+    assert "python -m pip install -e .\nminotaur --help\n" in raw
+    assert "python -m minotaur --help" not in text
+    assert "`.\\.venv\\Scripts\\python.exe` instead of `python`" in text
+    assert "`.\\.venv\\Scripts\\minotaur.exe` instead of `minotaur`" in text
+
+
+def test_readme_calls_the_module_form_equivalent_and_scopes_p_to_python_311() -> None:
+    text = _collapsed(README)
+    assert "`python -m minotaur` is equivalent for ordinary projects" in text
+    paragraphs = _hardening_paragraphs(README)
+    assert paragraphs
+    for paragraph in paragraphs:
+        assert "3.11" in paragraph, paragraph
+
+
+def test_readme_limitations_state_the_residual_limit_and_pythonpath_caveat() -> None:
+    text = _collapsed(README)
+    limitations = text[text.index("## Supported behavior and limitations") :]
+    assert RESIDUAL_LIMIT in limitations
+    assert SAFE_FORM + "installed `minotaur` console script" in limitations
+    assert "or `python -P -m minotaur` on Python 3.11 or newer" in limitations
+    assert PYTHONPATH_CAVEAT in limitations
+    assert "only when your environment does not put the project on the import path" in limitations
+
+
+def test_python_guide_lists_the_console_script_before_the_module_form() -> None:
+    text = _collapsed(PYTHON_GUIDE)
+    console = text.index("minotaur analyze --root ROOT")
+    module = text.index("python -m minotaur analyze --root ROOT")
+    assert console < module
+    assert text.index("Run the installed console script") < text.index("`python -m minotaur`")
+
+
+def test_python_guide_non_execution_passage_carries_residual_limit_and_caveat() -> None:
+    text = _collapsed(PYTHON_GUIDE)
+    boundary = text[text.index("## Boundaries of the current slice") :]
+    assert RESIDUAL_LIMIT in boundary
+    assert (
+        SAFE_FORM + "console script, or `python -P -m minotaur` on Python 3.11 or newer" in boundary
+    )
+    assert PYTHONPATH_CAVEAT in boundary
+    assert "only when the environment does not put the project on the import path" in boundary
+
+
+def test_python_guide_scopes_every_p_mention_to_python_311() -> None:
+    paragraphs = _hardening_paragraphs(PYTHON_GUIDE)
+    assert paragraphs
+    for paragraph in paragraphs:
+        assert "3.11" in paragraph, paragraph
+
+
+def test_contributing_describes_the_entry_as_removing_the_working_directory() -> None:
+    text = _collapsed(CONTRIBUTING)
+    assert (
+        "which removes the working directory from the import path and then invokes "
+        "the same CLI as the installed command" in text
+    )

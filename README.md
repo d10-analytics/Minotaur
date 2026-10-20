@@ -142,17 +142,22 @@ py -3 -m venv .venv
 ```
 
 If PowerShell blocks activation, use `.\.venv\Scripts\python.exe` instead
-of `python` in the commands below; changing your execution policy is unnecessary.
+of `python` and `.\.venv\Scripts\minotaur.exe` instead of `minotaur` in the
+commands below; changing your execution policy is unnecessary.
 Once activated, `python` refers to the environment's interpreter. Install Minotaur:
 
 ```bash
 python -m pip install -e .
-python -m minotaur --help
+minotaur --help
 ```
 
 An editable install makes commands use the source in this checkout, so edits
-are available without reinstalling. `python -m` runs a Python module; the
-installed `minotaur` command runs the same CLI.
+are available without reinstalling. The installed `minotaur` command is the
+primary form. `python -m minotaur` is equivalent for ordinary projects: it
+runs the same CLI after removing the working directory from Python's import
+path. On Python 3.11 or newer, `python -P -m minotaur` additionally keeps the
+working directory off the import path for the whole process; Python 3.10 has
+no `-P` option.
 
 From the same repository directory, run the first walkthrough:
 
@@ -182,6 +187,15 @@ what target dynamic dispatch chooses, or whether an operation succeeds.
 Minotaur does not execute the project or observe runtime behavior. Unresolved
 references remain visible; `callers` also includes explicitly marked unresolved
 name matches as leads to inspect, not confirmed calls to the requested target.
+
+The module form `python -m minotaur` removes the working directory from the
+import path before it loads Minotaur, but CPython loads a few modules before
+that guard runs, and a project that defines its own `minotaur` module still
+shadows the module form. For an untrusted checkout, use the installed
+`minotaur` console script, or `python -P -m minotaur` on Python 3.11 or newer.
+A `PYTHONPATH` that includes the project applies to every launcher, console
+script included, so that advice holds only when your environment does not put
+the project on the import path.
 
 Queries use graph snapshots. By default, queries that support refresh check
 for source drift and can regenerate the graph; `--no-refresh` keeps the saved
