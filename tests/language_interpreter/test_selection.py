@@ -406,6 +406,51 @@ def test_root_name_ending_in_backslash_preserves_containment(tmp_path: Path) -> 
     assert selected.files == expected == (root / "a.py",)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="backslash is a valid POSIX filename character")
+def test_explicit_backslash_targets_are_rejected_but_discovery_keeps_them(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write(root, "we\\ird.py")
+    _write(root, "we\\ird/ok.py")
+    _write(root, "fine.py")
+
+    for target in (root / "we\\ird.py", root / "we\\ird"):
+        with pytest.raises(selection.SelectionError) as raised:
+            select_sources(root, (target,), default_registry())
+        assert str(target) in str(raised.value)
+
+    _, selected = select_sources(root, (root,), default_registry())
+    assert root / "we\\ird.py" in selected.files
+    assert root / "we\\ird" / "ok.py" in selected.files
+    assert root / "fine.py" in selected.files
+
+
+@pytest.mark.skipif(os.name != "posix", reason="raw-byte names are a POSIX filename feature")
+def test_explicit_non_utf8_target_is_rejected_naming_the_target(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "bad\udcff.py"
+    try:
+        target.write_text("value = 1\n", encoding="utf-8", errors="surrogateescape")
+    except OSError:
+        pytest.skip("filesystem refuses non-UTF-8 file names")
+
+    with pytest.raises(selection.SelectionError) as raised:
+        select_sources(root, (target,), default_registry())
+    assert str(target) in str(raised.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="backslash is a valid POSIX filename character")
+def test_explicit_target_check_exempts_a_backslash_named_root(tmp_path: Path) -> None:
+    root = tmp_path / "workspace\\"
+    root.mkdir()
+    _write(root, "a.py")
+
+    _, by_root = select_sources(root, (root,), default_registry())
+    _, by_file = select_sources(root, (root / "a.py",), default_registry())
+    assert by_root.files == by_file.files == (root / "a.py",)
+
+
 def test_filesystem_root_containment_discovers_child_without_scanning_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -4565,6 +4565,39 @@ def test_analyze_reports_backslash_name_as_one_source_read_error(
     assert "interpreter-error" not in completed.stderr
 
 
+@pytest.mark.skipif(os.name != "posix", reason="raw-byte names are a POSIX filename feature")
+def test_analyze_rejects_explicit_non_utf8_target_naming_it(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    try:
+        _write_raw(root, "bad\udcff", ".py")
+    except OSError:
+        pytest.skip("filesystem refuses non-UTF-8 file names")
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root / "bad\udcff.py")
+
+    assert completed.returncode == 2
+    assert not output.exists()
+    assert completed.stderr.startswith("minotaur: error:")
+    assert "bad\\udcff.py" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="backslash is a valid POSIX filename character")
+def test_analyze_rejects_explicit_backslash_target(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _write_raw(root, "we\\ird", ".py")
+    output = tmp_path / "graph.json"
+
+    completed = _run(root, output, root / "we\\ird.py")
+
+    assert completed.returncode == 2
+    assert not output.exists()
+    assert completed.stderr.startswith("minotaur: error:")
+    assert "we\\ird.py" in completed.stderr
+
+
 @pytest.mark.skipif(os.name != "posix", reason="control characters in names are POSIX only")
 def test_analyze_accepts_control_character_file_names(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
