@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from minotaur.language_interpreter import exclusions
+from minotaur.language_interpreter import exclusions, paths
 from minotaur.language_interpreter.registry import InterpreterRegistry
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -44,6 +44,14 @@ def select_sources(
     selected: dict[str, Path] = {}
     for target in targets:
         resolved = _resolve_target(target, workspace.root)
+        # An explicit target is recorded in selection metadata, so one whose
+        # root-relative path cannot be a graph path is a command error here
+        # rather than a late serialization failure.  Discovered files with such
+        # names are skipped by the reader instead.  The root itself is exempt.
+        if resolved != workspace.root and not paths.is_graph_path(
+            resolved.relative_to(workspace.root).as_posix()
+        ):
+            raise SelectionError(f"target path cannot be represented as a graph path: {target}")
         if resolved.is_file():
             if not registry.supports(resolved):
                 raise SelectionError(f"unsupported source file: {target}")
