@@ -54,12 +54,13 @@ it names the file's actual ASCII-compatible encoding, or re-encode the file as
 UTF-8 and remove any declaration that names another codec. Then analyze again.
 
 A file whose name cannot be a graph path gets the same treatment, in every
-language. A directory scan that finds a file name containing a backslash, or
-name bytes that are not valid UTF-8, reports one error-severity
-`source-read-error` for that file under its raw relative path, skips it,
-analyzes its siblings, writes the partial graph and exits `1`. To repair it,
-rename the file. Naming such a file yourself as a target is a command error:
-`analyze` names the target, exits `2`, and writes no graph.
+language. A directory scan that finds a file whose root-relative path contains
+a backslash, or name bytes that are not valid UTF-8, in the file name or in any
+folder name on that path, reports one error-severity `source-read-error` for
+that file under its raw relative path, skips it, analyzes its siblings, writes
+the partial graph and exits `1`. To repair it, rename the file or folder whose
+name holds the character. Naming such a file or folder yourself as a target is
+a command error: `analyze` names the target, exits `2`, and writes no graph.
 
 A file that makes the analyzer itself fail unexpectedly is isolated the same
 way. Analysis retries each selected file of the failing language on its own,
