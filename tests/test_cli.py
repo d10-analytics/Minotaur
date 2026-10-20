@@ -4336,3 +4336,173 @@ def test_interpreter_interrupt_is_not_isolated(
 
     assert not output.exists()
     assert not stamp_path(output).exists()
+
+
+_SHADOW_MODULES = (
+    "json.py",
+    "random.py",
+    "orjson.py",
+    "sqlglot.py",
+    "fnmatch.py",
+    "email/__init__.py",
+)
+
+
+def _module_entry_env() -> dict[str, str]:
+    """Child environment for module-entry probes: no ``PYTHONSAFEPATH``."""
+    env = dict(os.environ)
+    env.pop("PYTHONSAFEPATH", None)
+    return env
+
+
+def _shadow_project(root: Path) -> Path:
+    """A project whose top-level modules shadow imports Minotaur makes."""
+    _write(root, "app.py", "def greet():\n    return 'hi'\n")
+    for relative in _SHADOW_MODULES:
+        marker = "marker-" + relative.replace("/", "-").removesuffix(".py")
+        _write(
+            root,
+            relative,
+            f"open({marker!r}, 'w').close()\nraise SystemExit('hijacked {relative}')\n",
+        )
+    return root
+
+
+def _markers(root: Path) -> list[str]:
+    return sorted(path.name for path in root.glob("marker-*"))
+
+
+def _assert_shadow_free_analysis(root: Path, completed: subprocess.CompletedProcess[str]) -> None:
+    assert completed.returncode == 0, completed.stderr
+    assert _markers(root) == []
+    graph = load_graph_file(root / "out.json").document
+    assert any(node.label == "app.greet" and node.symbol_kind == "function" for node in graph.nodes)
+
+
+_ANALYZE_ARGV = ("analyze", "--root", ".", "--output", "out.json", "app.py")
+
+
+def test_module_entry_ignores_project_shadow_modules(tmp_path: Path) -> None:
+    root = _shadow_project(tmp_path / "project")
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "minotaur", *_ANALYZE_ARGV],
+        cwd=root,
+        env=_module_entry_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    _assert_shadow_free_analysis(root, completed)
+
+
+def test_shadow_fixture_hijacks_when_working_directory_is_importable(tmp_path: Path) -> None:
+    root = _shadow_project(tmp_path / "project")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from minotaur.cli import main; raise SystemExit(main())",
+            *_ANALYZE_ARGV,
+        ],
+        cwd=root,
+        env=_module_entry_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert _markers(root) != []
+
+
+def test_module_entry_strips_symlinked_pythonpath_entry(tmp_path: Path) -> None:
+    root = _shadow_project(tmp_path / "project")
+    link = tmp_path / "project-link"
+    link.symlink_to(root, target_is_directory=True)
+    env = _module_entry_env()
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(link), env.get("PYTHONPATH")]))
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "minotaur", *_ANALYZE_ARGV],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    _assert_shadow_free_analysis(root, completed)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux deleted working directory")
+def test_module_entry_survives_deleted_working_directory(tmp_path: Path) -> None:
+    doomed = tmp_path / "doomed"
+    doomed.mkdir()
+
+    completed = subprocess.run(
+        [
+            "sh",
+            "-c",
+            'cd "$1" && rmdir "$1" && exec "$2" -m minotaur --help',
+            "sh",
+            str(doomed),
+            sys.executable,
+        ],
+        cwd=tmp_path,
+        env=_module_entry_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "usage:" in completed.stdout
+
+
+def test_module_entry_runs_from_repository_src_directory() -> None:
+    src = Path(cli.__file__).resolve().parent.parent
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "minotaur", "--help"],
+        cwd=src,
+        env=_module_entry_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "usage:" in completed.stdout
+
+
+def test_importing_module_entry_leaves_sys_path_and_cli_unloaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = str(tmp_path.resolve())
+    monkeypatch.setattr(sys, "path", ["", resolved, *sys.path])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delitem(sys.modules, "minotaur.__main__", raising=False)
+    before = list(sys.path)
+
+    import minotaur.__main__  # noqa: F401
+
+    assert sys.path == before
+    sys.modules.pop("minotaur.__main__", None)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, minotaur.__main__; print('minotaur.cli' in sys.modules)",
+        ],
+        cwd=tmp_path,
+        env=_module_entry_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "False"
