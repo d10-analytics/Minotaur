@@ -20,7 +20,9 @@ the exact refresh, no-refresh, clean-skip, and graph-integrity contract.
 
 ## Analyze selected paths
 
-Run the same command through the installed console script or as a module. If
+Run the installed console script, which is the primary form, or the equivalent
+module form `python -m minotaur`. On Python 3.11 or newer, `python -P -m
+minotaur` also keeps the working directory off the import path. If
 `minotaur` reports `ModuleNotFoundError: No module named 'orjson'`, your
 editable install predates `orjson` becoming a required dependency; re-run
 `pip install -e ".[dev]"` to pick it up.
@@ -514,6 +516,15 @@ Its relationships are not runtime-dispatch claims, and it makes no support
 claim for relationships beyond this current subset. In particular, dynamic or
 otherwise unresolvable calls remain unresolved rather than being inferred from
 runtime behavior.
+
+Launching the analyzer is a separate matter from analyzing. The module form
+removes the working directory from the import path before it loads Minotaur,
+but CPython loads a few modules before that guard runs, and a project that
+defines its own `minotaur` module still shadows the module form. For an
+untrusted checkout, use the console script, or `python -P -m minotaur` on
+Python 3.11 or newer. A `PYTHONPATH` that includes the project applies to
+every launcher, console script included, so that holds only when the
+environment does not put the project on the import path.
 
 Start with [small binding examples](python-binding-examples.md) for branch imports,
 callbacks, and member resolution, or [source-error recovery](source-error-recovery.md)

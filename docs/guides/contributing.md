@@ -110,8 +110,9 @@ source; it does not call either function.
 
 1. [cli.py](../../src/minotaur/cli.py): `main` parses command-line arguments;
    `_analyze` resolves defaults and checks output policy. `python -m minotaur`
-   enters through [__main__.py](../../src/minotaur/__main__.py), which invokes
-   the same CLI as the installed command. Configuration resolution lives in
+   enters through [__main__.py](../../src/minotaur/__main__.py), which removes
+   the working directory from the import path and then invokes the same CLI
+   as the installed command. Configuration resolution lives in
    [config.py](../../src/minotaur/config.py), not in each interpreter.
 2. [selection.py](../../src/minotaur/language_interpreter/selection.py):
    `select_sources` validates the root and targets and returns a workspace and
