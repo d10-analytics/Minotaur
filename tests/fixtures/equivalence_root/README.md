@@ -47,6 +47,15 @@ from the binding-lifecycle sample `replaced`, `deleted`, `conditional`,
 `workflow.service.Service.total` gain a `[text-mention]` marker, because their
 names still appear as text.
 
+`naming/`, the module-naming sample, holds `dotted.name.py` (a dotted
+component), `Upper.PY` (a non-exact suffix), and `shadow.py` beside
+`shadow/__init__.py` (a sibling module shadowed by its package). Each file
+defines one uniquely named function and no `main`, and `scripts/equivalence_queries.json`
+queries none of them. The three files that cannot be modules keep a file node
+and one `module-name-unavailable` warning each, so the sample analyzes with no
+errors; only `naming.shadow`, from `naming/shadow/__init__.py`, becomes a
+module.
+
 Nothing outside the harness imports this package; it is source material to be
 analyzed, not code to be executed.
 
