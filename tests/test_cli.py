@@ -882,6 +882,8 @@ def test_selection_containment_exclusions_and_direct_overrides(tmp_path: Path) -
     assert _paths(ordinary_output) == {"visible.py"}
     assert explicit_hidden.returncode == 0, explicit_hidden.stderr
     assert _paths(hidden_output) == {".hidden/hidden.py"}
+    hidden_graph = json.loads(hidden_output.read_text(encoding="utf-8"))
+    assert ".hidden.hidden" in {node.get("label") for node in hidden_graph["nodes"]}
     assert explicit_venv.returncode == 0, explicit_venv.stderr
     assert _paths(venv_output) == {".venv/internal.py"}
     assert outside_result.returncode == 2
@@ -4610,3 +4612,19 @@ def test_analyze_accepts_control_character_file_names(tmp_path: Path) -> None:
 
     assert completed.returncode == 0
     assert _paths(output) == {"nl\nname.py", "ctl\x1b[31mred.py"}
+
+
+def test_analyze_warns_about_a_file_without_a_module_name_and_exits_zero(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "ok.py", "pass\n")
+    _write(root, "a.b.py", "pass\n")
+    output = tmp_path / "graph.json"
+
+    result = _run(root, output, root)
+
+    assert result.returncode == 0, result.stderr
+    assert _paths(output) == {"ok.py", "a.b.py"}
+    assert "a.b.py: module-name-unavailable:" in result.stderr
+    assert "[severity=warning]" in result.stderr

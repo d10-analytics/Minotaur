@@ -8740,3 +8740,239 @@ def test_global_directive_without_a_write_keeps_the_module_route(tmp_path: Path)
         source, owner, "helper", _roles("lib.helper", "lib.helper")
     )
     assert ("app", RelationshipKind.CALLS.value, "lib.helper") in {site[:3] for site in sites}
+
+
+def _located_nodes(result: AnalysisResult, path: str) -> list:
+    return [
+        node
+        for node in result.document.nodes
+        if node.location is not None and node.location.path == path
+    ]
+
+
+def _symbols(result: AnalysisResult) -> list:
+    return [node for node in result.document.nodes if node.node_class == NodeClass.SYMBOL]
+
+
+def _file_paths(result: AnalysisResult) -> set[str]:
+    return {node.path for node in result.document.nodes if node.node_class == NodeClass.FILE}
+
+
+def _located_evidence(result: AnalysisResult, path: str) -> list:
+    return [
+        relationship
+        for relationship in result.document.relationships
+        for evidence in relationship.evidence
+        for location in evidence.locations
+        if location.path == path
+    ]
+
+
+def _call_targets(result: AnalysisResult, label: str) -> set[str | None]:
+    """Return the paths of the symbols called by the node labelled ``label``."""
+    locations = {node.id: node.location for node in result.document.nodes}
+    source = _node_id(result, label)
+    return {
+        locations[relationship.target].path if locations[relationship.target] else None
+        for relationship in result.document.relationships
+        if relationship.source == source and relationship.kind == RelationshipKind.CALLS.value
+    }
+
+
+def _unavailable(result: AnalysisResult) -> dict[str, list[str]]:
+    by_path: dict[str, list[str]] = {}
+    for diagnostic in result.diagnostics:
+        if diagnostic.code is not DiagnosticCode.MODULE_NAME_UNAVAILABLE:
+            continue
+        assert diagnostic.severity is DiagnosticSeverity.WARNING
+        by_path.setdefault(diagnostic.path, []).append(diagnostic.message)
+    return by_path
+
+
+def _assert_only_file_node(result: AnalysisResult, path: str) -> None:
+    assert path in _file_paths(result)
+    assert _located_nodes(result, path) == []
+    assert _located_evidence(result, path) == []
+    assert [
+        item
+        for item in result.call_expressions
+        if item.callee_location.path == path or item.expression_location.path == path
+    ] == []
+
+
+def test_non_exact_suffix_package_is_excluded_before_it_can_shadow_a_module(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg.py", "def f():\n    return 1\n")
+    _write(tmp_path, "pkg/__init__.PY", "def f():\n    return 2\n")
+    _write(tmp_path, "main.py", "from pkg import f\n\n\ndef run():\n    f()\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert result.errors == ()
+    assert _call_targets(result, "main.run") == {"pkg.py"}
+    _assert_only_file_node(result, "pkg/__init__.PY")
+    unavailable = _unavailable(result)
+    assert set(unavailable) == {"pkg/__init__.PY"}
+    assert len(unavailable["pkg/__init__.PY"]) == 1
+    assert "'.py'" in unavailable["pkg/__init__.PY"][0]
+    assert "pkg.py" not in unavailable["pkg/__init__.PY"][0]
+
+
+def test_package_beats_same_named_sibling_module(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg.py", "def f():\n    return 1\n")
+    _write(tmp_path, "pkg/__init__.py", "def f():\n    return 2\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert [node.location.path for node in _nodes(result, "pkg.f")] == ["pkg/__init__.py"]
+    _assert_only_file_node(result, "pkg.py")
+    unavailable = _unavailable(result)
+    assert set(unavailable) == {"pkg.py"}
+    assert "pkg/__init__.py" in unavailable["pkg.py"][0]
+    assert result.errors == ()
+
+
+def test_dotted_file_loses_to_the_real_submodule_and_contributes_nothing(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "a.b.py", "def f():\n    return 1\n\n\ng = f()\n")
+    _write(tmp_path, "a/b.py", "def f():\n    return 2\n")
+    _write(tmp_path, "main.py", "from a.b import f\n\n\ndef run():\n    f()\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert [node.location.path for node in _nodes(result, "a.b.f")] == ["a/b.py"]
+    assert _call_targets(result, "main.run") == {"a/b.py"}
+    _assert_only_file_node(result, "a.b.py")
+    unavailable = _unavailable(result)
+    assert set(unavailable) == {"a.b.py"}
+    assert "'a.b'" in unavailable["a.b.py"][0]
+    assert "a/b.py" not in unavailable
+    assert result.errors == ()
+
+
+def test_import_of_a_dotted_file_is_unresolved(tmp_path: Path) -> None:
+    _write(tmp_path, "a.b.py", "def f():\n    return 1\n")
+    _write(tmp_path, "main.py", "import a.b\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert result.document.extensions["minotaur-python"]["imports_unresolved"] == 1
+    assert not [node for node in _symbols(result) if node.label.startswith("a.b")]
+    _assert_only_file_node(result, "a.b.py")
+
+
+def test_upper_case_suffix_file_gets_no_module(tmp_path: Path) -> None:
+    _write(tmp_path, "Tool.PY", "def f():\n    return 1\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert [n for n in _symbols(result) if n.label.startswith("Tool")] == []
+    _assert_only_file_node(result, "Tool.PY")
+    unavailable = _unavailable(result)
+    assert set(unavailable) == {"Tool.PY"}
+    assert len(unavailable["Tool.PY"]) == 1
+    assert "'.py'" in unavailable["Tool.PY"][0]
+    assert result.errors == ()
+
+
+def test_case_variant_suffix_files_each_warn_and_name_no_module(tmp_path: Path) -> None:
+    _write(tmp_path, "Tool.PY", "def f():\n    return 1\n")
+    _write(tmp_path, "Tool.Py", "def f():\n    return 2\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert [n for n in _symbols(result) if n.label.startswith("Tool")] == []
+    _assert_only_file_node(result, "Tool.PY")
+    _assert_only_file_node(result, "Tool.Py")
+    unavailable = _unavailable(result)
+    assert {path: len(messages) for path, messages in unavailable.items()} == {
+        "Tool.PY": 1,
+        "Tool.Py": 1,
+    }
+    assert result.errors == ()
+
+
+def test_dotted_directory_gets_no_module_and_names_the_component(tmp_path: Path) -> None:
+    _write(tmp_path, "v1.2/x.py", "def f():\n    return 1\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert [n for n in _symbols(result) if n.label.startswith("v1")] == []
+    _assert_only_file_node(result, "v1.2/x.py")
+    unavailable = _unavailable(result)
+    assert len(unavailable["v1.2/x.py"]) == 1
+    assert "'v1.2'" in unavailable["v1.2/x.py"][0]
+
+
+def test_dotted_file_with_a_syntax_error_reports_only_its_parse_error(tmp_path: Path) -> None:
+    _write(tmp_path, "bad.name.py", "def (:\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert [d.code for d in result.diagnostics] == [DiagnosticCode.PARSE_ERROR]
+    assert _unavailable(result) == {}
+
+
+def test_hidden_directory_component_keeps_its_module_name(tmp_path: Path) -> None:
+    _write(tmp_path, ".hidden/hidden.py", "pass\n")
+
+    result = analyze_python_files(Workspace(tmp_path), (tmp_path / ".hidden/hidden.py",))
+
+    assert len(_nodes(result, ".hidden.hidden")) == 1
+    assert _unavailable(result) == {}
+
+
+def test_input_order_does_not_change_the_package_over_module_result(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg.py", "def f():\n    return 1\n")
+    _write(tmp_path, "pkg/__init__.py", "def f():\n    return 2\n")
+    files = (tmp_path / "pkg.py", tmp_path / "pkg/__init__.py")
+
+    forward = analyze_python_files(Workspace(tmp_path), files)
+    backward = analyze_python_files(Workspace(tmp_path), files[::-1])
+
+    assert serialize(forward.document) == serialize(backward.document)
+    assert forward.diagnostics == backward.diagnostics
+    assert len(_nodes(forward, "pkg.f")) == 1
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_equal_rank_ties_all_lose_in_either_input_order(tmp_path: Path, reverse: bool) -> None:
+    _write(tmp_path, "__init__.py", "def f():\n    return 1\n")
+    _write(tmp_path, "__init__/__init__.py", "def f():\n    return 2\n")
+    files = (tmp_path / "__init__.py", tmp_path / "__init__/__init__.py")
+
+    result = analyze_python_files(Workspace(tmp_path), files[::-1] if reverse else files)
+
+    assert [n for n in _symbols(result) if n.label.startswith("__init__")] == []
+    for path in ("__init__.py", "__init__/__init__.py"):
+        _assert_only_file_node(result, path)
+    unavailable = _unavailable(result)
+    assert {path: len(messages) for path, messages in unavailable.items()} == {
+        "__init__.py": 1,
+        "__init__/__init__.py": 1,
+    }
+    for messages in unavailable.values():
+        assert "__init__.py" in messages[0]
+        assert "__init__/__init__.py" in messages[0]
+    assert result.errors == ()
+
+
+def test_empty_stem_files_get_no_module_and_name_the_empty_stem(tmp_path: Path) -> None:
+    _write(tmp_path, ".py", "def f():\n    return 1\n")
+    _write(tmp_path, "sub/.py", "def g():\n    return 1\n")
+
+    result = analyze_python_files(Workspace(tmp_path), (tmp_path / ".py", tmp_path / "sub/.py"))
+
+    assert _symbols(result) == []
+    for path in (".py", "sub/.py"):
+        _assert_only_file_node(result, path)
+    unavailable = _unavailable(result)
+    assert {path: len(messages) for path, messages in unavailable.items()} == {
+        ".py": 1,
+        "sub/.py": 1,
+    }
+    assert all("empty stem" in messages[0] for messages in unavailable.values())
+    assert len(result.diagnostics) == 2
+    assert result.errors == ()
