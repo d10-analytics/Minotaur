@@ -8976,3 +8976,27 @@ def test_empty_stem_files_get_no_module_and_name_the_empty_stem(tmp_path: Path) 
     assert all("empty stem" in messages[0] for messages in unavailable.values())
     assert len(result.diagnostics) == 2
     assert result.errors == ()
+
+
+def test_components_with_an_empty_dot_segment_keep_names_and_ties_name_both_paths(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "r..s.py", "def f():\n    return 0\n")
+    _write(tmp_path, "p..q.py", "def f():\n    return 1\n")
+    _write(tmp_path, "p./q.py", "def f():\n    return 2\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert [node.location.path for node in _nodes(result, "r..s.f")] == ["r..s.py"]
+    assert [n for n in _symbols(result) if n.label.startswith("p.")] == []
+    for path in ("p..q.py", "p./q.py"):
+        _assert_only_file_node(result, path)
+    unavailable = _unavailable(result)
+    assert {path: len(messages) for path, messages in unavailable.items()} == {
+        "p..q.py": 1,
+        "p./q.py": 1,
+    }
+    for messages in unavailable.values():
+        assert "p..q.py" in messages[0]
+        assert "p./q.py" in messages[0]
+    assert result.errors == ()
