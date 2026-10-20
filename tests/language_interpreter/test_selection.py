@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
+from minotaur.graph_model.provenance import NodeClass
 from minotaur.language_interpreter import exclusions, selection
+from minotaur.language_interpreter.python import analyze_python_workspace
 from minotaur.language_interpreter.python.discovery import discover_python_files
 from minotaur.language_interpreter.registry import (
     InterpreterRegistration,
@@ -500,6 +502,38 @@ def test_shared_exclusion_predicate_controls_both_walkers(
     assert discover_python_files(workspace) == (root / "keep/b.py",)
     _, selected = select_sources(root, (root,), default_registry())
     assert selected.files == (root / "keep/b.py",)
+
+
+def test_workspace_discovery_is_the_cli_selection_filtered_to_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("secret = 1\n", encoding="utf-8")
+    for relative in ("a.py", "Tool.PY", "sub/s.py", ".venv/v.py", "notes.txt"):
+        _write(root, relative)
+    (root / "link.py").symlink_to(outside / "secret.py")
+    (root / "alias.py").symlink_to(root / "a.py")
+    (root / "linkdir").symlink_to(root / "sub", target_is_directory=True)
+    workspace = Workspace(root)
+
+    discovered = discover_python_files(workspace)
+
+    assert discovered == (root / "Tool.PY", root / "a.py", root / "sub/s.py")
+    _, selected = select_sources(root, (root,), default_registry())
+    assert discovered == tuple(path for path in selected.files if path.suffix.lower() == ".py")
+    file_paths = {
+        node.path
+        for node in analyze_python_workspace(root).document.nodes
+        if node.node_class == NodeClass.FILE
+    }
+    assert file_paths == {"Tool.PY", "a.py", "sub/s.py"}
+
+    fixed = selection.SourceSelection(files=(root / "a.py", root / "notes.txt", root / "x.PY"))
+    monkeypatch.setattr(selection, "select_sources", lambda *_args: (workspace, fixed))
+    assert discover_python_files(workspace) == (root / "a.py", root / "x.PY")
 
 
 def test_excluded_directory_names_have_one_source_owner() -> None:
