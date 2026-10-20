@@ -9,6 +9,7 @@ from typing import Any
 
 from minotaur.graph_model.location import Location
 from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode
+from minotaur.language_interpreter.paths import is_graph_path
 from minotaur.language_interpreter.workspace import Workspace
 
 
@@ -61,12 +62,24 @@ def read_sources(
     defines its own encoding rule supplies its own ``decode``; the hook
     signals that a file cannot be decoded by raising :class:`UnicodeError`.
     Read and decoding failures are isolated to their source so eligible
-    siblings remain usable.
+    siblings remain usable. A file whose root-relative path cannot be a graph
+    path (see :func:`~minotaur.language_interpreter.paths.is_graph_path`) is
+    skipped without being read and reported with one error-severity
+    ``source-read-error`` diagnostic whose ``path`` is the raw relative path.
     """
     sources: list[RawSource] = []
     diagnostics: list[Diagnostic] = []
     for path in sorted(files, key=lambda item: item.relative_to(workspace.root).as_posix()):
         relative = path.relative_to(workspace.root).as_posix()
+        if not is_graph_path(relative):
+            diagnostics.append(
+                Diagnostic(
+                    DiagnosticCode.SOURCE_READ_ERROR,
+                    relative,
+                    "file name cannot be represented as a graph path",
+                )
+            )
+            continue
         try:
             content = path.read_bytes()
             source = decode(content)
