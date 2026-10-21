@@ -480,9 +480,9 @@ entry inside the selection is refused with status `2`, while one elsewhere is
 ignored. Links are handled differently on the two sides: inside targets and
 `systems_dir` the working-tree side omits links instead of refusing them; a
 link on a configured route is refused as described in
-[project configuration](project-configuration.md#path-confinement). Setting
-`systems_dir = "."` makes the whole configuration folder part of the selection,
-and `source_digest` covers exactly the captured selection.
+[project configuration](project-configuration.md#path-confinement). With the
+default `root`, setting `systems_dir = "."` makes the whole configuration folder
+part of the selection, and `source_digest` covers exactly the captured selection.
 
 The compact output ends with the old/new coverage and selection lines. With
 `--details`, each changed row is followed by its `old`, `new`, `old evidence`,
