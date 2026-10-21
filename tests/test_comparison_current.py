@@ -1261,3 +1261,70 @@ def test_prepare_comparison_attributes_a_config_missing_from_head_to_the_before_
     assert raised.value.path == ".minotaur.toml"
     assert "required config is absent" in raised.value.detail
     assert list(leftovers.iterdir()) == []
+
+
+def _sealed_paths(monkeypatch: pytest.MonkeyPatch) -> list[tuple[set[str], set[str]]]:
+    """Record both sealed manifest path sets of the ``capture_pair`` call."""
+    sealed: list[tuple[set[str], set[str]]] = []
+    original = comparison.capture_pair
+
+    def spy(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        before, after, result = original(*args, **kwargs)  # type: ignore[arg-type]
+        sealed.append(
+            (
+                {entry.path for entry in before.manifest.entries},
+                {entry.path for entry in after.manifest.entries},
+            )
+        )
+        return before, after, result
+
+    monkeypatch.setattr(comparison, "capture_pair", spy)
+    return sealed
+
+
+def test_prepare_comparison_selects_from_an_explicit_config_off_the_discovery_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(root, "other.py", "def other():\n    return 2\n")
+    _write(
+        root,
+        "alt.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "alt-graph.json"\n'
+        'targets = ["other.py"]\nsystems_dir = "alt-systems"\n',
+    )
+    _commit(root, "add an explicit alternative config")
+    sealed = _sealed_paths(monkeypatch)
+
+    prepared = prepare_comparison(root, Path("alt.toml"), _produce_selection)
+
+    # The explicitly selected config, not the discoverable .minotaur.toml,
+    # decides both sides' coordinates and both sides' selections.
+    assert prepared.historical.config_coordinate == "alt.toml"
+    assert prepared.current.config_coordinate == "alt.toml"
+    assert prepared.historical.normalized_targets == ("other.py",)
+    assert prepared.current.normalized_targets == ("other.py",)
+    assert sealed == [({"alt.toml", "other.py"}, {"alt.toml", "other.py"})]
+
+
+def test_prepare_comparison_captures_hidden_system_folders_of_an_unpruned_systems_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(
+        root,
+        "docs/systems/.staged/system.toml",
+        'schema_version = 1\nname = "staged"\nfiles = ["staged.py"]\n',
+    )
+    _commit(root, "add a hidden system folder")
+    sealed = _sealed_paths(monkeypatch)
+
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    # Analysis scans every child of systems_dir, hidden ones included, so the
+    # capture must not prune that subtree by the source exclusion rule.
+    assert {item.name for item in prepared.historical.systems} == {"core", "staged"}
+    assert {item.name for item in prepared.current.systems} == {"core", "staged"}
+    before, after = sealed[0]
+    assert "docs/systems/.staged/system.toml" in before
+    assert "docs/systems/.staged/system.toml" in after
