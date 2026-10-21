@@ -1170,3 +1170,45 @@ def test_included_path_present_as_a_directory_is_staged_as_a_directory_only(
     finally:
         first.close()
         second.close()
+
+
+@pytest.mark.parametrize(
+    ("layout", "blocked", "mode", "selection"),
+    [
+        # A route ancestor that cannot be searched, with the target beneath it.
+        (["pkg/sub/a.py"], "pkg", 0o000, CaptureSelection(trees={"pkg/sub": True})),
+        # An in-tree directory that can be listed but not searched.
+        (["pkg/sub/data/f.py"], "pkg/sub/data", 0o444, CaptureSelection(trees={"pkg": True})),
+        # A directory holding only an exactly selected file.
+        (["pkg/sub/a.py"], "pkg/sub", 0o000, CaptureSelection(files={"pkg/sub/a.py"})),
+    ],
+)
+def test_entry_inspection_failure_is_reported_at_the_directory_that_cannot_be_searched(
+    tmp_path: Path,
+    temp_root: Path,
+    layout: list[str],
+    blocked: str,
+    mode: int,
+    selection: CaptureSelection,
+) -> None:
+    _skip_when_permissions_are_not_enforced()
+    root = _init(tmp_path / "repo")
+    for relative in layout:
+        _write(root, relative)
+    _commit(root)
+    directory = root / blocked
+    directory.chmod(mode)
+    try:
+        if os.access(directory / "probe", os.F_OK) or (mode and os.access(directory, os.X_OK)):
+            pytest.skip("directory permission bits have no effect here")
+        with pytest.raises(SnapshotError) as error:
+            _pair(root, "HEAD", None, selection)
+    finally:
+        directory.chmod(0o755)
+
+    assert error.value.side == "after"
+    assert error.value.revision == "WORKTREE"
+    # The location is the text after "input at"; the OS error text that follows
+    # may name the entry that could not be inspected.
+    assert f"input at {directory.resolve()!r}: " in str(error.value)
+    assert _leftovers(temp_root) == []
