@@ -3573,3 +3573,58 @@ def test_systems_capture_starts_only_side_owned_listing_and_batch_git_processes(
         assert 1 <= len(batches) <= 2
         assert all(call == ("cat-file", "--batch") for call in batches)
         assert len(calls) == 2 + len(batches)
+
+
+def _alternative_config_repo(tmp_path: Path) -> Path:
+    """A committed repository whose ``alt.toml`` names a different systems folder."""
+    root = _configured_repo(tmp_path)
+    (root / "alt.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app", "consumer.py"]\nsystems_dir = "alt-systems"\n',
+        encoding="utf-8",
+    )
+    alternative = root / "alt-systems" / "other"
+    alternative.mkdir(parents=True)
+    (alternative / "system.toml").write_text(
+        'schema_version = 1\nname = "Other"\nfiles = ["app/api.py"]\n', encoding="utf-8"
+    )
+    _commit_all(root, "baseline")
+    return root
+
+
+@pytest.mark.parametrize("form", ("working-tree", "two-revision"))
+@pytest.mark.parametrize(
+    ("option", "expected_before", "expected_after"),
+    (
+        ("--before-config", ["Other"], ["App"]),
+        ("--config", ["Other"], ["Other"]),
+    ),
+)
+def test_systems_before_and_shared_config_options_select_the_captured_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    form: str,
+    option: str,
+    expected_before: list[str],
+    expected_after: list[str],
+) -> None:
+    """``--before-config`` and ``--config`` decide which configuration each side analyzes.
+
+    The discoverable ``.minotaur.toml`` declares the ``App`` system, so a side
+    that fell back to discovery instead of the requested ``alt.toml`` would
+    report ``App`` there.
+    """
+    root = _alternative_config_repo(tmp_path)
+    monkeypatch.chdir(root)
+    revisions = ("HEAD", "HEAD") if form == "two-revision" else ()
+
+    status, out, err = _diff(capsys, option, "alt.toml", *revisions, "--json")
+
+    assert status == (0 if expected_before == expected_after else 1), err
+    payload = json.loads(out)
+    assert payload["old_system_names"] == expected_before
+    assert payload["new_system_names"] == expected_after
+    assert payload["comparison"]["before"]["config_path"] == "alt.toml"
+    expected_after_path = "alt.toml" if option == "--config" else ".minotaur.toml"
+    assert payload["comparison"]["after"]["config_path"] == expected_after_path
