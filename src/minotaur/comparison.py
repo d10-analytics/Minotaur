@@ -1055,22 +1055,26 @@ def _capture_selection(stage: CaptureStage, config_coordinate: str) -> CaptureSe
     The selection holds the config, the analysis root (as a directory only),
     ``systems_dir`` (unpruned) and each target (pruned by the analysis's own
     exclusion rule unless the target itself is excluded, judged relative to
-    the analysis root). An absent or non-regular config, an unparseable one,
-    or a declaration that leaves the capture contributes only the config
-    coordinate: analysis of the captured side reports the error.
+    the analysis root). An absent or non-regular config, or an unparseable
+    one, contributes only the config coordinate. A declaration that leaves
+    the capture or the analysis root stops the derivation and keeps what was
+    resolved before it, so analysis of the captured side reports that error
+    rather than a consequence of a missing root.
     """
     config_only = CaptureSelection(files=(config_coordinate,))
     root = stage.root
     config_path = root.joinpath(*_coordinate_parts(config_coordinate))
     worktree_root = stage.pin.root
     directories: set[str] = set()
+    trees: dict[str, bool] = {}
 
-    def resolve(base: Path, raw: str, label: str) -> _CurrentRoute:
+    def resolve(base: Path, raw: str, label: str) -> tuple[_CurrentRoute, set[str]]:
         path = _captured_declaration_path(worktree_root, root, base, raw)
         route = _lexical_declaration(root, base, str(path), label=label)
         # A ``..`` is walked physically by analysis, so every directory it
         # passes through must be captured as well.
         walked: list[str] = []
+        passed: set[str] = set()
         for part in _relative_parts(root, route.path, label=label):
             if part in {"", "."}:
                 continue
@@ -1078,26 +1082,33 @@ def _capture_selection(stage: CaptureStage, config_coordinate: str) -> CaptureSe
                 walked.pop()
             else:
                 walked.append(part)
-                directories.add("/".join(walked))
-        return route
+                passed.add("/".join(walked))
+        return route, passed
 
     try:
         if not stat.S_ISREG(os.lstat(config_path).st_mode):
             return config_only
         raw_config = config.parse_config_bytes(config_path.read_bytes(), source=config_path)
-        root_route = resolve(config_path.parent, raw_config.root, "analysis root")
-        root_coordinate = root_route.coordinate
-        trees = {resolve(root_route.path, raw_config.systems_dir, "systems root").coordinate: False}
-        root_parts = _coordinate_parts(root_coordinate)
-        for raw_target in raw_config.targets:
-            target = resolve(root_route.path, raw_target, "target").coordinate
-            if _coordinate_parts(target)[: len(root_parts)] != root_parts:
-                return config_only
-            relative = _analysis_relative_coordinate(target, root_parts)
-            trees[target] = not exclusions.is_excluded(Path(relative))
     except Exception:
         return config_only
-    directories.add(root_coordinate)
+    try:
+        root_route, passed = resolve(config_path.parent, raw_config.root, "analysis root")
+        directories |= passed | {root_route.coordinate}
+        root_parts = _coordinate_parts(root_route.coordinate)
+        systems_route, passed = resolve(root_route.path, raw_config.systems_dir, "systems root")
+        directories |= passed
+        trees[systems_route.coordinate] = False
+        for raw_target in raw_config.targets:
+            target_route, passed = resolve(root_route.path, raw_target, "target")
+            target = target_route.coordinate
+            if _coordinate_parts(target)[: len(root_parts)] != root_parts:
+                break
+            directories |= passed
+            relative = _analysis_relative_coordinate(target, root_parts)
+            # An unpruned subtree wins over a pruned one at the same coordinate.
+            trees[target] = trees.get(target, True) and not exclusions.is_excluded(Path(relative))
+    except Exception:
+        pass
     return CaptureSelection(files=(config_coordinate,), directories=directories, trees=trees)
 
 
@@ -1203,9 +1214,9 @@ def prepare_comparison(
 ) -> PreparedComparison:
     """Analyze a complete old/new pair from isolated source captures.
 
-    The old side is a pinned ``HEAD`` tree and the new side is a read-only copy
-    of the working tree, so untracked and unstaged source participate without
-    mutating the checkout. Each side parses its own config and system
+    The old side is a pinned ``HEAD`` tree and the new side is a copy of the
+    working tree's analyzed selection, so untracked and unstaged source in it
+    participate without mutating the checkout. Each side parses its own config and system
     declarations and runs the same producer against its own root. Saved graph
     files and sidecars are intentionally not inputs to this operation.
     """
