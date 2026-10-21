@@ -583,29 +583,20 @@ def test_full_listing_is_one_recursive_call_with_exact_entries(
     assert calls == [(("ls-tree", "-r", "-t", "-z", sha), None)]
     by_path = {item.path: item for item in listing}
     assert len(by_path) == len(listing)
-    assert set(by_path) == {
-        "plain file.txt",
-        "run.sh",
-        "link",
-        "vendor",
-        "nested",
-        "nested/deep file.py",
-        "nested/dir with space",
-        "nested/dir with space/inner file.bin",
-        "binary.bin",
-        "empty.txt",
-        "text.txt",
-        os.fsdecode(b"bad\xffname.txt"),
+    assert {item.path: (item.mode, item.kind) for item in listing} == {
+        "plain file.txt": ("100644", "blob"),
+        "run.sh": ("100755", "blob"),
+        "link": ("120000", "blob"),
+        "vendor": ("160000", "commit"),
+        "nested": ("040000", "tree"),
+        "nested/deep file.py": ("100644", "blob"),
+        "nested/dir with space": ("040000", "tree"),
+        "nested/dir with space/inner file.bin": ("100644", "blob"),
+        "binary.bin": ("100644", "blob"),
+        "empty.txt": ("100644", "blob"),
+        "text.txt": ("100644", "blob"),
+        os.fsdecode(b"bad\xffname.txt"): ("100644", "blob"),
     }
-    assert (by_path["nested"].mode, by_path["nested"].kind) == ("040000", "tree")
-    assert (by_path["nested/dir with space"].mode, by_path["nested/dir with space"].kind) == (
-        "040000",
-        "tree",
-    )
-    assert (by_path["run.sh"].mode, by_path["run.sh"].kind) == ("100755", "blob")
-    assert (by_path["link"].mode, by_path["link"].kind) == ("120000", "blob")
-    assert (by_path["vendor"].mode, by_path["vendor"].kind) == ("160000", "commit")
-    assert by_path["plain file.txt"].mode == "100644"
     for item in listing:
         expected = _run(root, "rev-parse", f"{sha}:{item.path}").strip()
         assert item.oid == expected, item.path
@@ -736,9 +727,89 @@ def test_read_blobs_rejects_unavailable_probe_and_nonzero_exit(
     assert "batch exploded" in str(_assert_batch_failure(pinned, item))
 
 
-def test_run_git_without_input_does_not_write_stdin(tmp_path: Path) -> None:
+def test_run_git_passes_input_through_only_when_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[bytes | None] = []
+    real_run = subprocess.run
+
+    def spy(*args: Any, **kwargs: Any):
+        seen.append(kwargs.get("input", "absent"))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(git.subprocess, "run", spy)
     root, _ = _repository(tmp_path)
+    seen.clear()
+
     plain = git.run_git(root, ("rev-parse", "HEAD"))
     fed = git.run_git(root, ("cat-file", "--batch-check"), input=b"HEAD\n")
+
+    assert seen == [None, b"HEAD\n"]
     assert plain is not None and plain.returncode == 0
     assert fed is not None and fed.stdout.split()[1:2] == ["commit"]
+
+
+def _listing_failure(
+    pinned: git.PinnedCommit, monkeypatch: pytest.MonkeyPatch, result: object
+) -> git.GitInputError:
+    monkeypatch.setattr(git, "run_git", lambda *args, **kwargs: result)
+    with pytest.raises(git.GitInputError) as error:
+        pinned.full_listing()
+    assert error.value.side == pinned.side
+    assert error.value.commit == pinned.commit
+    assert error.value.path == "."
+    return error.value
+
+
+def test_full_listing_failures_are_side_attributed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha, side="before")
+
+    def done(code: int, out: object, err: bytes = b"") -> subprocess.CompletedProcess[Any]:
+        return subprocess.CompletedProcess(["git"], code, out, err)
+
+    assert "unavailable" in str(_listing_failure(pinned, monkeypatch, None))
+    assert "listing exploded" in str(
+        _listing_failure(pinned, monkeypatch, done(128, b"", b"listing exploded\n"))
+    )
+    assert "bytes" in str(_listing_failure(pinned, monkeypatch, done(0, "text")))
+    assert "invalid Git tree entry" in str(
+        _listing_failure(pinned, monkeypatch, done(0, b"no tab separator\0"))
+    )
+    assert "invalid Git tree entry" in str(
+        _listing_failure(pinned, monkeypatch, done(0, b"100644 blob\tshort\0"))
+    )
+
+
+def test_read_blobs_rejects_malformed_batch_output_and_oidless_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha)
+    item = _batch_item(pinned, "text.txt")
+    oid = item.oid
+
+    def feed(output: bytes) -> git.GitInputError:
+        monkeypatch.setattr(
+            git,
+            "run_git",
+            lambda *args, **kwargs: subprocess.CompletedProcess(["git"], 0, output, b""),
+        )
+        return _assert_batch_failure(pinned, item)
+
+    other = "0" * len(oid or "")
+    assert "header" in str(feed(f"{other} blob 1\nx\n".encode()))
+    assert "extra" in str(feed(f"{oid} blob 1\nx\n".encode() + b"junk"))
+    assert "header" in str(feed(f"{oid} blob abc\nx\n".encode()))
+
+    called: list[object] = []
+    monkeypatch.setattr(git, "run_git", lambda *args, **kwargs: called.append(args))
+    oidless = git.TreeEntry("text.txt", "100644", "blob")
+    with pytest.raises(git.GitInputError) as error:
+        pinned.read_blobs([oidless])
+    assert error.value.path == "text.txt"
+    assert error.value.commit == pinned.commit
+    assert "object id" in str(error.value)
+    assert called == []
