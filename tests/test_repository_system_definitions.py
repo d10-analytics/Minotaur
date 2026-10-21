@@ -350,6 +350,30 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
     )
 
 
+def test_systems_diff_completes_on_this_repository(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The comparison command runs on the real checkout, which tracks a symlink.
+
+    The repository tracks ``schemas/minotaur-graph/v1.json`` as a symbolic link
+    outside every analyzed path, so a comparison that refused links anywhere in
+    the tree would fail here.
+    """
+    monkeypatch.chdir(ROOT)
+
+    status = cli.main(["query", "diff", "--systems", "--json"])
+    captured = capsys.readouterr()
+    assert status in (0, 1), captured.err
+    assert "unsafe entry" not in captured.err
+    assert json.loads(captured.out)["comparison"]["after"]["kind"] == "working-tree"
+
+    status = cli.main(["query", "diff", "--systems", "HEAD", "HEAD", "--json"])
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert "unsafe entry" not in captured.err
+    assert json.loads(captured.out)["changed"] is False
+
+
 def test_configured_analysis_without_output_writes_only_isolated_root_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

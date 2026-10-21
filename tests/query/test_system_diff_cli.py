@@ -1129,27 +1129,30 @@ def test_systems_diff_refuses_a_linked_child_under_systems_dir(
 def test_systems_pinned_read_failure_is_attributed_before_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A selected blob that cannot be read fails the before side before any output."""
     root = _configured_repo(tmp_path)
     monkeypatch.chdir(root)
-    assert cli.main(["analyze"]) == 0
     _git(root, "add", ".")
     _git(root, "commit", "-qm", "baseline")
+    blob = subprocess.run(
+        ["git", "rev-parse", "HEAD:app/api.py"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    loose = root / ".git" / "objects" / blob[:2] / blob[2:]
+    assert loose.is_file()
+    loose.chmod(0o644)
+    loose.unlink()
     before = _state(root)
-    from minotaur.git import PinnedCommit
 
-    original = PinnedCommit.read_blob
-
-    def fail_read(self: PinnedCommit, relative: str) -> bytes:
-        if relative == "graph.json":
-            raise OSError("simulated pinned read failure")
-        return original(self, relative)
-
-    monkeypatch.setattr(PinnedCommit, "read_blob", fail_read)
     assert cli.main(["query", "diff", "--systems"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "before revision" in captured.err
-    assert "graph.json" in captured.err
+    assert "before" in captured.err
+    assert "app/api.py" in captured.err
+    assert "missing" in captured.err
     _assert_state(root, before)
 
 
@@ -2888,3 +2891,630 @@ def test_isolated_current_source_failure_names_the_file_in_the_capture_error(
     assert "captured source production failed" not in captured.err
     assert "Traceback" not in captured.err
     _assert_state(root, before)
+
+
+# --- Scoped capture through the public command -------------------------------
+
+
+def _commit_all(root: Path, message: str) -> None:
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", message)
+
+
+def _add_gitlink(root: Path, path: str) -> None:
+    commit = _head_sha(root)
+    result = subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", f"160000,{commit},{path}"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _edit_api(root: Path, value: int) -> None:
+    (root / "app" / "api.py").write_text(f"def receive():\n    return {value}\n", encoding="utf-8")
+
+
+def _diff(capsys: pytest.CaptureFixture[str], *arguments: str) -> tuple[int, str, str]:
+    status = cli.main(["query", "diff", "--systems", *arguments])
+    captured = capsys.readouterr()
+    return status, captured.out, captured.err
+
+
+def _two_revision_repo(tmp_path: Path) -> Path:
+    """A configured repository with one commit, ready for a second edit."""
+    root = _configured_repo(tmp_path)
+    (root / "notes.txt").write_text("notes\n", encoding="utf-8")
+    _commit_all(root, "baseline")
+    return root
+
+
+@pytest.mark.parametrize("form", ("working-tree", "two-revision"))
+def test_systems_diff_ignores_links_and_gitlinks_outside_the_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    form: str,
+) -> None:
+    """A tracked link or gitlink the analysis never reads does not refuse the run."""
+    root = _two_revision_repo(tmp_path)
+    (root / "schemas").mkdir()
+    (root / "schemas" / "target.json").write_text("{}\n", encoding="utf-8")
+    (root / "schemas" / "x.json").symlink_to("target.json")
+    (root / "app" / "__pycache__").mkdir()
+    (root / "app" / "__pycache__" / "real.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "app" / "__pycache__" / "cached.py").symlink_to("real.py")
+    _git(root, "add", "-A")
+    _git(root, "add", "-f", "app/__pycache__/cached.py", "app/__pycache__/real.py")
+    _add_gitlink(root, "vendor")
+    _git(root, "commit", "-qm", "links outside the selection")
+    monkeypatch.chdir(root)
+    arguments: tuple[str, ...] = ("--json",)
+    if form == "two-revision":
+        _edit_api(root, 2)
+        _commit_all(root, "edit")
+        arguments = ("HEAD~1", "HEAD", "--json")
+
+    status, out, err = _diff(capsys, *arguments)
+
+    assert status in (0, 1), err
+    assert "unsafe entry" not in err
+    assert json.loads(out)["comparison"]["before"]["kind"] == "commit"
+
+
+def test_systems_diff_refuses_an_in_selection_symlink_in_the_before_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _two_revision_repo(tmp_path)
+    (root / "app" / "alias.py").symlink_to("api.py")
+    _commit_all(root, "link inside the target")
+    (root / "app" / "alias.py").unlink()
+    _commit_all(root, "remove link")
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, "HEAD~1", "HEAD")
+
+    assert status == 2
+    assert out == ""
+    assert "before revision" in err
+    assert "unsafe entry 'app/alias.py': symbolic links are not captured" in err
+
+
+def test_systems_diff_refuses_an_in_selection_gitlink_in_the_before_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _two_revision_repo(tmp_path)
+    _add_gitlink(root, "app/inner")
+    _git(root, "commit", "-qm", "gitlink inside the target")
+    _git(root, "rm", "--cached", "-q", "app/inner")
+    _git(root, "commit", "-qm", "remove gitlink")
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, "HEAD~1", "HEAD")
+
+    assert status == 2
+    assert out == ""
+    assert "before revision" in err
+    assert "unsafe entry 'app/inner': Gitlink is not a source directory" in err
+
+
+def test_systems_diff_refuses_a_linked_route_component_of_systems_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _two_revision_repo(tmp_path)
+    _git(root, "mv", "docs", "realdocs")
+    (root / "docs").symlink_to("realdocs")
+    _commit_all(root, "docs is a link")
+    _git(root, "rm", "-q", "--cached", "docs")
+    (root / "docs").unlink()
+    _git(root, "mv", "realdocs", "docs")
+    _commit_all(root, "docs is a directory")
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, "HEAD~1", "HEAD")
+
+    assert status == 2
+    assert out == ""
+    assert "symbolic links are not captured" in err
+    assert "'docs'" in err
+
+
+def test_systems_diff_refuses_a_linked_discovery_candidate_below_the_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _two_revision_repo(tmp_path)
+    (root / "sub").mkdir()
+    (root / "sub" / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _commit_all(root, "sub directory")
+    (root / "sub" / ".minotaur.toml").symlink_to("../.minotaur.toml")
+    _commit_all(root, "linked candidate")
+    (root / "sub" / ".minotaur.toml").unlink()
+    _commit_all(root, "remove linked candidate")
+    monkeypatch.chdir(root / "sub")
+
+    status, out, err = _diff(capsys, "HEAD~1", "HEAD")
+
+    assert status == 2
+    assert out == ""
+    assert "sub/.minotaur.toml" in err
+    assert "symbolic link" in err
+
+
+def _minotaur_shaped_repo(tmp_path: Path) -> Path:
+    """Config at the root with ``root = "src"`` and systems outside the root."""
+    root = _repo(tmp_path)
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "src" / "pkg" / "mod.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "src"\ngraph = "../graph.json"\n'
+        'systems_dir = "../docs/systems"\ntargets = ["pkg"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "core"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "core"\nfiles = ["pkg/mod.py"]\n',
+        encoding="utf-8",
+    )
+    (root / "schemas").mkdir()
+    (root / "schemas" / "v1.json").write_text("{}\n", encoding="utf-8")
+    (root / "schemas" / "x.json").symlink_to("v1.json")
+    _commit_all(root, "baseline")
+    return root
+
+
+def test_systems_diff_completes_on_a_repository_shaped_like_minotaur(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _minotaur_shaped_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, "--json")
+    assert status == 0, err
+    assert "unsafe entry" not in err
+    assert json.loads(out)["comparison"]["after"]["kind"] == "working-tree"
+
+    (root / "src" / "pkg" / "mod.py").write_text("def run():\n    return 2\n", encoding="utf-8")
+    _commit_all(root, "edit")
+    status, out, err = _diff(capsys, "HEAD~1", "HEAD", "--json")
+    assert status in (0, 1), err
+    assert "unsafe entry" not in err
+    assert json.loads(out)["comparison"]["before"]["kind"] == "commit"
+
+
+def test_systems_diff_refuses_a_regular_file_at_the_analysis_root_position(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A non-directory root entry is captured as listed, so analysis reports it."""
+    root = _repo(tmp_path)
+    (root / "src").write_text("not a directory\n", encoding="utf-8")
+    config = (
+        '[minotaur]\nschema_version = 1\nroot = "src"\ngraph = "../graph.json"\n'
+        'systems_dir = "../docs/systems"\ntargets = ["pkg"]\n'
+    )
+    (root / ".minotaur.toml").write_text(config, encoding="utf-8")
+    (root / "docs" / "systems" / "core").mkdir(parents=True)
+    (root / "docs" / "systems" / "core" / "system.toml").write_text(
+        'schema_version = 1\nname = "core"\nfiles = ["pkg/mod.py"]\n', encoding="utf-8"
+    )
+    _commit_all(root, "src is a file")
+    (root / "src").unlink()
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg" / "mod.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    _commit_all(root, "src is a directory")
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, "HEAD~1", "HEAD")
+
+    assert status == 2
+    assert out == ""
+    assert "before" in err
+    assert "analysis root is not an ordinary directory" in err
+
+
+def test_systems_diff_captures_a_hidden_system_folder_below_a_dot_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unpruned systems tree wins over the enclosing pruned target."""
+    root = _repo(tmp_path)
+    (root / "app").mkdir()
+    (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    _edit_api(root, 1)
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["."]\n',
+        encoding="utf-8",
+    )
+    hidden = root / "docs" / "systems" / ".experimental"
+    hidden.mkdir(parents=True)
+    (hidden / "system.toml").write_text(
+        'schema_version = 1\nname = "Experimental"\nfiles = ["app/api.py"]\n', encoding="utf-8"
+    )
+    _commit_all(root, "baseline")
+    (root / "app" / "api.py").write_text(
+        "def receive():\n    return 1\n\ndef extra():\n    return receive()\n", encoding="utf-8"
+    )
+    _commit_all(root, "edit")
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, "HEAD~1", "HEAD", "--json")
+
+    assert status == 1, err
+    payload = json.loads(out)
+    assert payload["new_system_names"] == ["Experimental"]
+    assert [item["involved_systems"] for item in payload["call_changes"]] == [["Experimental"]]
+
+
+def test_systems_digest_ignores_files_outside_the_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The digest covers exactly the captured selection, not the whole tree."""
+    root = _two_revision_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, "--json")
+    assert status == 0, err
+    clean = json.loads(out)["comparison"]
+    assert clean["before"]["source_digest"] == clean["after"]["source_digest"]
+
+    (root / "extra").mkdir()
+    (root / "extra" / "untracked.txt").write_text("new\n", encoding="utf-8")
+    (root / "notes.txt").write_text("edited\n", encoding="utf-8")
+    status, out, err = _diff(capsys, "--json")
+    assert status == 0, err
+    dirty = json.loads(out)["comparison"]
+    assert dirty["after"]["source_digest"] == clean["after"]["source_digest"]
+    assert dirty["after"]["source_digest"] == dirty["before"]["source_digest"]
+
+
+class _GitRecorder:
+    """Record the Git processes started while ``capture_pair`` runs, by side."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from minotaur import git
+        from minotaur.git import PinnedCommit
+
+        self.calls: list[tuple[str | None, tuple[str, ...]]] = []
+        self.pair_calls = 0
+        self.manifests: list[dict[str, tuple[str, ...]]] = []
+        self._active = False
+        self._side: str | None = None
+        original_run = git.run_git
+        original_blobs = PinnedCommit.read_blobs
+        original_listing = PinnedCommit.full_listing
+        original_resolve = git.resolve_commit
+        original_pair = cli.capture_pair
+        recorder = self
+
+        def run_git(root: Path, arguments: object, **kwargs: object) -> object:
+            if recorder._active:
+                recorder.calls.append((recorder._side, tuple(arguments)))  # type: ignore[call-overload]
+            return original_run(root, arguments, **kwargs)  # type: ignore[arg-type]
+
+        def read_blobs(pin: PinnedCommit, requested: object) -> object:
+            previous, recorder._side = recorder._side, pin.side
+            try:
+                return original_blobs(pin, requested)  # type: ignore[arg-type]
+            finally:
+                recorder._side = previous
+
+        def full_listing(pin: PinnedCommit) -> object:
+            previous, recorder._side = recorder._side, pin.side
+            try:
+                return original_listing(pin)
+            finally:
+                recorder._side = previous
+
+        def resolve_commit(root: Path, revision: str, *, side: str = "historical") -> str:
+            previous, recorder._side = recorder._side, side
+            try:
+                return original_resolve(root, revision, side=side)
+            finally:
+                recorder._side = previous
+
+        def capture_pair(*args: object, **kwargs: object) -> object:
+            recorder.pair_calls += 1
+            recorder._active = True
+            try:
+                before, after, result = original_pair(*args, **kwargs)  # type: ignore[arg-type]
+            finally:
+                recorder._active = False
+            recorder.manifests.append(
+                {
+                    "before": tuple(entry.path for entry in before.manifest.entries),
+                    "after": tuple(entry.path for entry in after.manifest.entries),
+                }
+            )
+            return before, after, result
+
+        monkeypatch.setattr(git, "run_git", run_git)
+        monkeypatch.setattr(git, "resolve_commit", resolve_commit)
+        monkeypatch.setattr(PinnedCommit, "read_blobs", read_blobs)
+        monkeypatch.setattr(PinnedCommit, "full_listing", full_listing)
+        monkeypatch.setattr(cli, "capture_pair", capture_pair)
+
+    def subcommands(self, side: str | None) -> list[str]:
+        return [arguments[0] for owner, arguments in self.calls if owner == side]
+
+
+def _selection_repo(tmp_path: Path) -> Path:
+    root = _configured_repo(tmp_path)
+    (root / "sub").mkdir()
+    (root / "sub" / "keep.txt").write_text("keep\n", encoding="utf-8")
+    (root / "other").mkdir()
+    (root / "other" / "data.txt").write_text("unrelated\n", encoding="utf-8")
+    (root / "alt.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app", "consumer.py"]\n',
+        encoding="utf-8",
+    )
+    _commit_all(root, "baseline")
+    _edit_api(root, 2)
+    _commit_all(root, "edit")
+    return root
+
+
+_SELECTED_PATHS = (
+    ".minotaur.toml",
+    "app",
+    "app/__init__.py",
+    "app/api.py",
+    "consumer.py",
+    "docs",
+    "docs/systems",
+    "docs/systems/app",
+    "docs/systems/app/system.toml",
+    # The start directory is the route directory of the absent discovery
+    # candidate ``sub/.minotaur.toml``; the unrelated ``other`` is not selected.
+    "sub",
+)
+
+
+@pytest.mark.parametrize("explicit_after_config", (False, True))
+def test_systems_two_revision_capture_is_exactly_the_union_selection_in_bounded_git_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    explicit_after_config: bool,
+) -> None:
+    root = _selection_repo(tmp_path)
+    monkeypatch.chdir(root / "sub")
+    recorder = _GitRecorder(monkeypatch)
+    arguments = ["HEAD~1", "HEAD", "--json"]
+    expected = _SELECTED_PATHS
+    if explicit_after_config:
+        arguments = ["--after-config", "alt.toml", *arguments]
+        expected = tuple(sorted((*_SELECTED_PATHS, "alt.toml")))
+
+    status, _out, err = _diff(capsys, *arguments)
+
+    assert status in (0, 1), err
+    assert recorder.pair_calls == 1
+    manifest = recorder.manifests[0]
+    assert manifest["before"] == expected
+    assert manifest["after"] == expected
+    assert "other/data.txt" not in manifest["before"]
+    for side in ("before", "after"):
+        commands = recorder.subcommands(side)
+        assert commands.count("rev-parse") == 1
+        assert commands.count("ls-tree") == 1
+        assert 1 <= commands.count("cat-file") <= 2
+        assert "show" not in commands
+        assert len(commands) <= 4
+    listing = [args for owner, args in recorder.calls if args[0] == "ls-tree"]
+    assert all(args[:4] == ("ls-tree", "-r", "-t", "-z") for args in listing)
+
+
+def test_systems_working_tree_capture_issues_only_the_head_probe_on_the_after_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _selection_repo(tmp_path)
+    monkeypatch.chdir(root / "sub")
+    recorder = _GitRecorder(monkeypatch)
+
+    status, _out, err = _diff(capsys, "--json")
+
+    assert status in (0, 1), err
+    assert recorder.pair_calls == 1
+    assert recorder.manifests[0]["after"] == _SELECTED_PATHS
+    assert recorder.subcommands("after") == ["rev-parse"]
+    before = recorder.subcommands("before")
+    assert before.count("rev-parse") == 1 and before.count("ls-tree") == 1
+    assert 1 <= before.count("cat-file") <= 2 and "show" not in before
+
+
+def _normalized_git_calls(recorder: _GitRecorder) -> list[tuple[str | None, tuple[str, ...]]]:
+    import re
+
+    return [
+        (side, tuple(re.sub(r"[0-9a-f]{40}", "<sha>", item) for item in arguments))
+        for side, arguments in recorder.calls
+    ]
+
+
+def test_systems_capture_git_work_does_not_grow_with_files_outside_the_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sequences = []
+    for name, extra in (("small", 0), ("large", 2000)):
+        base = tmp_path / name
+        base.mkdir()
+        root = _configured_repo(base)
+        bulk = root / "bulk"
+        bulk.mkdir()
+        for index in range(extra):
+            (bulk / f"file{index}.txt").write_text(f"{index}\n", encoding="utf-8")
+        (root / "notes.txt").write_text("notes\n", encoding="utf-8")
+        _commit_all(root, "baseline")
+        _edit_api(root, 2)
+        _commit_all(root, "edit")
+        monkeypatch.chdir(root)
+        with monkeypatch.context() as scoped:
+            recorder = _GitRecorder(scoped)
+            status, _out, err = _diff(capsys, "HEAD~1", "HEAD", "--json")
+        assert status in (0, 1), err
+        sequences.append(_normalized_git_calls(recorder))
+
+    assert sequences[0]
+    assert sequences[0] == sequences[1]
+
+
+def _capture_tempdirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    import tempfile
+
+    temporary = tmp_path / "tmpdir"
+    temporary.mkdir()
+    monkeypatch.setenv("TMPDIR", str(temporary))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    return temporary
+
+
+def _leftovers(temporary: Path) -> list[str]:
+    return sorted(
+        item.name
+        for item in temporary.iterdir()
+        if item.name.startswith(("minotaur-revision-", "minotaur-working-"))
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_systems_working_tree_capture_reports_an_unreadable_directory_inside_a_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    (root / "app" / "inner").mkdir()
+    (root / "app" / "inner" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "other").mkdir()
+    (root / "other" / "data.txt").write_text("unrelated\n", encoding="utf-8")
+    _commit_all(root, "baseline")
+    (root / "app" / "__pycache__").mkdir()
+    (root / "app" / "__pycache__" / "cached.pyc").write_text("x", encoding="utf-8")
+    temporary = _capture_tempdirs(tmp_path, monkeypatch)
+    monkeypatch.chdir(root)
+
+    inside = root / "app" / "inner"
+    inside.chmod(0)
+    try:
+        status, out, err = _diff(capsys)
+    finally:
+        inside.chmod(0o755)
+    assert status == 2
+    assert out == ""
+    assert "app/inner" in err
+    assert _leftovers(temporary) == []
+
+    for harmless in (root / "other", root / "app" / "__pycache__"):
+        harmless.chmod(0)
+        try:
+            status, out, err = _diff(capsys)
+        finally:
+            harmless.chmod(0o755)
+        assert status in (0, 1), err
+        assert out != ""
+        assert _leftovers(temporary) == []
+
+
+def _commit_config(root: Path, text: str) -> None:
+    (root / ".minotaur.toml").write_text(text, encoding="utf-8")
+    _commit_all(root, "committed config")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app", "consumer.py"]\n',
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("committed", "message"),
+    (
+        ("not valid [[[\n", "at '.minotaur.toml': invalid captured configuration"),
+        (
+            '[minotaur]\nschema_version = 1\nroot = "../.."\ngraph = "graph.json"\n'
+            'targets = ["app"]\n',
+            "at '../..': unresolved traversal in analysis root",
+        ),
+    ),
+)
+def test_systems_working_tree_form_attributes_a_bad_head_config_without_temporary_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    committed: str,
+    message: str,
+) -> None:
+    root = _configured_repo(tmp_path)
+    _commit_config(root, committed)
+    temporary = _capture_tempdirs(tmp_path, monkeypatch)
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys)
+
+    assert status == 2
+    assert out == ""
+    assert err == f"minotaur: error: before input revision 'HEAD' {message}\n"
+    assert str(temporary) not in err
+    assert _leftovers(temporary) == []
+
+
+def test_systems_working_tree_form_reports_an_untracked_live_config_as_absent_on_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    (root / ".minotaur.toml").rename(root / "live.toml")
+    _commit_all(root, "no committed config")
+    (root / "live.toml").rename(root / ".minotaur.toml")
+    temporary = _capture_tempdirs(tmp_path, monkeypatch)
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys)
+
+    assert status == 2
+    assert out == ""
+    assert "before input revision 'HEAD'" in err
+    assert "required config is absent" in err
+    assert str(temporary) not in err
+    assert _leftovers(temporary) == []
+
+
+def test_systems_two_revision_form_captures_a_target_declared_only_by_the_after_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The union selection keeps the before copy of a target only the after config names."""
+    root = _repo(tmp_path)
+    (root / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (root / "b.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["a.py"]\n',
+        encoding="utf-8",
+    )
+    _commit_all(root, "baseline")
+    (root / "b.py").unlink()
+    (root / "alt.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["b.py"]\n',
+        encoding="utf-8",
+    )
+    _commit_all(root, "drop b")
+    monkeypatch.chdir(root)
+    recorder = _GitRecorder(monkeypatch)
+
+    status, _out, err = _diff(capsys, "--after-config", "alt.toml", "HEAD~1", "HEAD", "--json")
+
+    assert status in (0, 1), err
+    assert "absent on both comparison sides" not in err
+    assert "b.py" in recorder.manifests[0]["before"]
+    assert "b.py" not in recorder.manifests[0]["after"]
+
+
+def test_the_single_side_capture_functions_are_gone() -> None:
+    from minotaur import comparison_snapshot
+
+    for name in (
+        "capture_revision",
+        "capture_local_revision",
+        "capture_working_tree",
+        "_tree_files",
+        "_materialize_tree",
+    ):
+        assert not hasattr(comparison_snapshot, name)
+        assert name not in comparison_snapshot.__all__
