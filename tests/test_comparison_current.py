@@ -1159,8 +1159,9 @@ def test_prepare_comparison_analyzes_the_config_bytes_the_selection_was_derived_
     def parse_staged(data: bytes, *, source: Path | str):
         parsed = original_parse(data, source=source)
         sources.append(Path(source))
-        # The second parse is the plan reading the staged after config, which
-        # was staged before this live rewrite.
+        # Parses run in this order: live validation, the plan's read of the
+        # staged before config, then of the staged after config (staged before
+        # this rewrite), then the two analyses. This is the before-side read.
         if len(sources) == 2:
             live["rewrites"] += 1
             _write(root, "other.py", "def other():\n    return 9\n")
@@ -1328,3 +1329,82 @@ def test_prepare_comparison_captures_hidden_system_folders_of_an_unpruned_system
     before, after = sealed[0]
     assert "docs/systems/.staged/system.toml" in before
     assert "docs/systems/.staged/system.toml" in after
+
+
+@pytest.mark.parametrize(
+    ("systems_dir", "target", "detail", "path"),
+    [
+        (
+            "systems",
+            "../app.py",
+            "configured target escapes the captured analysis root",
+            "lib/../app.py",
+        ),
+        (
+            "/nonexistent-outside/systems",
+            "x.py",
+            "systems root escapes the selected worktree",
+            "/nonexistent-outside/systems",
+        ),
+        (
+            "systems",
+            "sub/../../app.py",
+            "configured target escapes the captured analysis root",
+            "lib/sub/../../app.py",
+        ),
+    ],
+)
+def test_prepare_comparison_reports_an_escaping_declaration_not_a_missing_root(
+    tmp_path: Path, systems_dir: str, target: str, detail: str, path: str
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(root, "lib/x.py", "def x():\n    return 1\n")
+    _write(root, "lib/sub/y.py", "def y():\n    return 2\n")
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "lib"\ngraph = "graph.json"\n'
+        f'targets = ["{target}"]\nsystems_dir = "{systems_dir}"\n',
+    )
+    _commit(root, "root below the repository root with an escaping declaration")
+    _set_config(root, targets=["app.py"])
+
+    with pytest.raises(CurrentInputError) as raised:
+        prepare_comparison(root, None, _produce_selection)
+
+    assert raised.value.side == "before"
+    assert raised.value.detail == detail
+    assert raised.value.path == path
+
+
+def test_prepare_comparison_keeps_hidden_systems_when_a_target_is_the_systems_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(root, "src/core.py", "def core():\n    return 1\n")
+    _write(
+        root,
+        "src/core/system.toml",
+        'schema_version = 1\nname = "core"\nfiles = ["core.py"]\n',
+    )
+    _write(root, "src/staged.py", "def staged():\n    return 2\n")
+    _write(
+        root,
+        "src/.staged/system.toml",
+        'schema_version = 1\nname = "staged"\nfiles = ["staged.py"]\n',
+    )
+    _write(
+        root,
+        ".minotaur.toml",
+        '[minotaur]\nschema_version = 1\nroot = "src"\ngraph = "graph.json"\n'
+        'targets = ["."]\nsystems_dir = "."\n',
+    )
+    _commit(root, "systems directory that is also a target")
+    sealed = _sealed_paths(monkeypatch)
+
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    assert {item.name for item in prepared.historical.systems} == {"core", "staged"}
+    assert {item.name for item in prepared.current.systems} == {"core", "staged"}
+    assert "src/.staged/system.toml" in sealed[0][0]
+    assert "src/.staged/system.toml" in sealed[0][1]
