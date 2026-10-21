@@ -3518,3 +3518,58 @@ def test_the_single_side_capture_functions_are_gone() -> None:
     ):
         assert not hasattr(comparison_snapshot, name)
         assert name not in comparison_snapshot.__all__
+
+
+def _rev_sha(root: Path, revision: str) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", f"{revision}^{{commit}}"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("form", ("discovery", "explicit-after", "working-tree"))
+def test_systems_capture_starts_only_side_owned_listing_and_batch_git_processes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    form: str,
+) -> None:
+    """No Git process outside the per-side probe, listing and batches runs during capture.
+
+    Counting only side-attributed calls would miss a per-path ``git show`` (or
+    any other Git process) started outside the pinned listing and batch
+    readers, so every recorded call must belong to a side and have the bounded
+    shape.
+    """
+    root = _selection_repo(tmp_path)
+    shas = {"before": _rev_sha(root, "HEAD~1"), "after": _rev_sha(root, "HEAD")}
+    monkeypatch.chdir(root / "sub")
+    recorder = _GitRecorder(monkeypatch)
+    arguments = ["HEAD~1", "HEAD", "--json"]
+    if form == "explicit-after":
+        arguments = ["--after-config", "alt.toml", *arguments]
+    elif form == "working-tree":
+        arguments = ["--json"]
+        shas["before"] = shas["after"]
+
+    status, _out, err = _diff(capsys, *arguments)
+
+    assert status in (0, 1), err
+    assert recorder.pair_calls == 1
+    assert [arguments for owner, arguments in recorder.calls if owner is None] == []
+    for side in ("before", "after"):
+        calls = [arguments for owner, arguments in recorder.calls if owner == side]
+        assert [call[:2] for call in calls if call[0] == "rev-parse"] == [("rev-parse", "--verify")]
+        if side == "after" and form == "working-tree":
+            assert len(calls) == 1
+            continue
+        assert [call for call in calls if call[0] == "ls-tree"] == [
+            ("ls-tree", "-r", "-t", "-z", shas[side])
+        ]
+        batches = [call for call in calls if call[0] == "cat-file"]
+        assert 1 <= len(batches) <= 2
+        assert all(call == ("cat-file", "--batch") for call in batches)
+        assert len(calls) == 2 + len(batches)
