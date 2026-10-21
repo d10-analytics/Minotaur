@@ -777,13 +777,16 @@ class CaptureStage:
                     if not scope.admits(child):
                         continue
                     source = directory / name
-                    failing_path = source
+                    # A failure to inspect an entry means its directory could
+                    # not be searched, so the directory is the location.
+                    failing_path = directory
                     try:
                         info = source.lstat()
                     except FileNotFoundError:
                         if scope.in_tree(relative):
                             raise
                         continue
+                    failing_path = source
                     target = self.root / child
                     if stat.S_ISDIR(info.st_mode):
                         target.mkdir(parents=True, exist_ok=True)
