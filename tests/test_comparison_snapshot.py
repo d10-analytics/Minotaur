@@ -1066,3 +1066,107 @@ def test_working_tree_never_enters_git_even_inside_an_unpruned_tree(tmp_path: Pa
     finally:
         first.close()
         second.close()
+
+
+# Failure location, seal cleanup, route listing and staging as listed.
+
+
+def test_unreadable_directory_is_the_reported_location_not_the_previous_entry(
+    tmp_path: Path,
+) -> None:
+    """The ``at`` location names the directory, even when a sibling was visited last."""
+    _skip_when_permissions_are_not_enforced()
+    root = _init(tmp_path / "repo")
+    _write(root, "pkg/a_first.py")
+    _write(root, "pkg/data/file.py")
+    _write(root, "pkg/z_last.py")
+    _commit(root)
+    data = (root / "pkg" / "data").resolve()
+    data.chmod(0o000)
+    try:
+        with pytest.raises(SnapshotError) as error:
+            _pair(root, "HEAD", None, CaptureSelection(trees={"pkg": True}))
+    finally:
+        data.chmod(0o755)
+
+    assert f"could not capture working-tree input at {data!r}:" in str(error.value)
+
+
+@pytest.mark.parametrize("after", ["HEAD", None])
+def test_seal_failure_after_the_other_side_sealed_removes_every_directory(
+    tmp_path: Path, temp_root: Path, after: str | None
+) -> None:
+    root, old, _ = _repository(tmp_path)
+    # Holding the stages keeps the temporary-directory finalizers from running,
+    # so only an explicit removal by the capture owner empties the root.
+    stages: list[CaptureStage] = []
+
+    def plan(before: CaptureStage, after_stage: CaptureStage) -> tuple[CaptureSelection, None]:
+        stages.extend((before, after_stage))
+        os.symlink("elsewhere", after_stage.root / "planted")
+        return CaptureSelection(files={"app.py"}), None
+
+    with pytest.raises(SnapshotError, match="captured path is not an ordinary file: planted"):
+        _pair(root, old, after, plan=plan)
+
+    assert len(stages) == 2
+    assert _leftovers(temp_root) == []
+
+
+def test_working_tree_lists_only_selected_subtrees_never_route_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _init(tmp_path / "repo")
+    _write(root, "pkg/sub/a.py")
+    _write(root, "pkg/sub/inner/b.py")
+    _write(root, "pkg/beside.py")
+    _write(root, "cfg/c.toml")
+    _write(root, "cfg/unrelated.toml")
+    _write(root, "data/big.bin")
+    _commit(root)
+    listed: list[Path] = []
+    original = os.listdir
+
+    def recording_listdir(path: Any = ".") -> list[str]:
+        listed.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(snapshots.os, "listdir", recording_listdir)
+    selection = CaptureSelection(files={"cfg/c.toml"}, trees={"pkg/sub": True})
+
+    first, second = _pair(root, "HEAD", None, selection)
+    try:
+        assert {p for p, kind in _manifest_paths(second).items() if kind == "file"} == {
+            "cfg/c.toml",
+            "pkg/sub/a.py",
+            "pkg/sub/inner/b.py",
+        }
+    finally:
+        first.close()
+        second.close()
+
+    resolved = root.resolve()
+    assert {path.relative_to(resolved).as_posix() for path in listed} == {
+        "pkg/sub",
+        "pkg/sub/inner",
+    }
+
+
+@pytest.mark.parametrize("after", ["HEAD", None])
+def test_included_path_present_as_a_directory_is_staged_as_a_directory_only(
+    tmp_path: Path, after: str | None
+) -> None:
+    root, old, _ = _repository(tmp_path)
+
+    def plan(before: CaptureStage, after_stage: CaptureStage) -> tuple[CaptureSelection, None]:
+        before.include({"docs"})
+        after_stage.include({"docs"})
+        return CaptureSelection(files={"app.py"}), None
+
+    first, second = _pair(root, old, after, plan=plan)
+    try:
+        for snapshot in (first, second):
+            assert _manifest_paths(snapshot) == {"app.py": "file", "docs": "directory"}
+    finally:
+        first.close()
+        second.close()
