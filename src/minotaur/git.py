@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -65,8 +65,12 @@ def run_git(
     arguments: Sequence[str],
     *,
     text: bool = True,
+    input: bytes | None = None,
 ) -> subprocess.CompletedProcess[Any] | None:
-    """Run a Git probe, decoding text with filesystem encoding semantics."""
+    """Run a Git probe, decoding text with filesystem encoding semantics.
+
+    *input*, when given, is written to the probe's standard input as bytes.
+    """
     try:
         completed: subprocess.CompletedProcess[Any] = subprocess.run(
             ["git", *arguments],
@@ -74,6 +78,7 @@ def run_git(
             capture_output=True,
             check=False,
             text=False,
+            input=input,
             env=_probe_environment(),
         )
     except (OSError, subprocess.SubprocessError):
@@ -201,6 +206,8 @@ class TreeEntry:
     path: str
     mode: str
     kind: str
+    # Object id from a listing; informational, so it never affects equality.
+    oid: str | None = field(default=None, compare=False)
 
     @property
     def is_regular_file(self) -> bool:
@@ -282,6 +289,12 @@ class PinnedCommit:
         output = completed.stdout
         if not isinstance(output, bytes):
             raise self._error(display_path, "Git tree listing did not return bytes")
+        return self._parse_tree_records(output, display_path, relative)
+
+    def _parse_tree_records(
+        self, output: bytes, display_path: str, prefix: str
+    ) -> tuple[TreeEntry, ...]:
+        """Parse NUL-separated ``ls-tree`` records into sorted entries."""
         result: list[TreeEntry] = []
         for raw in output.split(b"\0"):
             if not raw:
@@ -295,12 +308,79 @@ class PinnedCommit:
             try:
                 mode = fields[0].decode("ascii")
                 kind = fields[1].decode("ascii")
+                oid = fields[2].decode("ascii")
             except UnicodeDecodeError:
                 raise self._error(display_path, "invalid Git tree entry") from None
             name = name_bytes.decode("utf-8", errors="surrogateescape")
-            path = f"{relative}/{name}" if relative else name
-            result.append(TreeEntry(path=path, mode=mode, kind=kind))
+            path = f"{prefix}/{name}" if prefix else name
+            result.append(TreeEntry(path=path, mode=mode, kind=kind, oid=oid))
         return tuple(sorted(result, key=lambda entry: entry.path))
+
+    def full_listing(self) -> tuple[TreeEntry, ...]:
+        """List every entry, trees included, with one recursive Git call."""
+        completed = run_git(self.root, ("ls-tree", "-r", "-t", "-z", self.commit), text=False)
+        if completed is None:
+            raise self._error(".", "Git tree listing probe was unavailable")
+        if completed.returncode != 0:
+            raise self._error(".", _error_text(completed.stderr))
+        output = completed.stdout
+        if not isinstance(output, bytes):
+            raise self._error(".", "Git tree listing did not return bytes")
+        return self._parse_tree_records(output, ".", "")
+
+    def read_blobs(self, requested: Sequence[TreeEntry]) -> tuple[bytes, ...]:
+        """Read the blob bytes of *requested* listing entries in one Git call.
+
+        The result is aligned with *requested*. A missing object, a non-blob
+        object, or any framing mismatch raises a side-attributed error naming
+        the offending entry's path; an empty request runs no process.
+        """
+        if not requested:
+            return ()
+        for item in requested:
+            if not item.oid:
+                raise self._error(item.path, "entry has no object id")
+        completed = run_git(
+            self.root,
+            ("cat-file", "--batch"),
+            text=False,
+            input="".join(f"{item.oid}\n" for item in requested).encode("ascii"),
+        )
+        first = requested[0].path
+        if completed is None:
+            raise self._error(first, "Git blob read probe was unavailable")
+        if completed.returncode != 0:
+            raise self._error(first, _error_text(completed.stderr))
+        output = completed.stdout
+        if not isinstance(output, bytes):
+            raise self._error(first, "Git blob read did not return bytes")
+        blobs: list[bytes] = []
+        offset = 0
+        for item in requested:
+            assert item.oid is not None
+            newline = output.find(b"\n", offset)
+            if newline < 0:
+                raise self._error(item.path, "Git blob read ended before this object")
+            fields = output[offset:newline].split(b" ")
+            offset = newline + 1
+            if len(fields) == 2 and fields[1] == b"missing":
+                raise self._error(item.path, f"object {item.oid} is missing")
+            if len(fields) != 3 or fields[0].decode("ascii", "replace") != item.oid:
+                raise self._error(item.path, "invalid Git blob read header")
+            if fields[1] != b"blob":
+                kind = fields[1].decode("ascii", "replace")
+                raise self._error(item.path, f"object is a {kind}, not a blob")
+            if not fields[2].isdigit():
+                raise self._error(item.path, "invalid Git blob read header")
+            size = int(fields[2])
+            end = offset + size
+            if end + 1 > len(output) or output[end : end + 1] != b"\n":
+                raise self._error(item.path, "Git blob read payload was truncated")
+            blobs.append(output[offset:end])
+            offset = end + 1
+        if offset != len(output):
+            raise self._error(first, "Git blob read returned unexpected extra output")
+        return tuple(blobs)
 
     def entry(self, relative: str) -> TreeEntry | None:
         """Find one pinned entry, distinguishing confirmed absence from failure."""
