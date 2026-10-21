@@ -1101,9 +1101,9 @@ def _capture_selection(stage: CaptureStage, config_coordinate: str) -> CaptureSe
         for raw_target in raw_config.targets:
             target_route, passed = resolve(root_route.path, raw_target, "target")
             target = target_route.coordinate
+            directories |= passed - {target}
             if _coordinate_parts(target)[: len(root_parts)] != root_parts:
                 break
-            directories |= passed
             relative = _analysis_relative_coordinate(target, root_parts)
             # An unpruned subtree wins over a pruned one at the same coordinate.
             trees[target] = trees.get(target, True) and not exclusions.is_excluded(Path(relative))
