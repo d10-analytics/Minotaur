@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import tempfile
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
@@ -18,7 +20,7 @@ from test_comparison_history import (
     _write,
 )
 
-from minotaur import cli, config, git
+from minotaur import cli, comparison, config, git
 from minotaur.cli import _produce_selection
 from minotaur.comparison import CurrentInputError, prepare_comparison
 from minotaur.comparison_snapshot import SnapshotMutationError
@@ -424,7 +426,8 @@ def test_prepare_comparison_retains_every_captured_config_coordinate_after_live_
     monkeypatch.setattr(config, "parse_config_bytes", parse_once)
     prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
-    assert calls == 3
+    # Live validation, both staged-config reads in the plan, then both analyses.
+    assert calls == 5
     assert prepared.current.config_coordinate == ".minotaur.toml"
     assert prepared.current.config.root == "changed-root"
     assert prepared.current.config.graph == "changed-graph.json"
@@ -938,7 +941,7 @@ def test_prepare_comparison_captures_current_config_once_before_live_edit(
     monkeypatch.setattr(config, "parse_config_bytes", parse_once)
     prepared = prepare_comparison(root, None, _produce_selection)
 
-    assert calls == 3
+    assert calls == 5
     assert prepared.current.normalized_targets == ("changed.py",)
     assert prepared.current.config.targets == ("changed.py",)
 
@@ -947,18 +950,18 @@ def test_prepare_comparison_keeps_pinned_history_when_head_moves_during_acquisit
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, old_sha, old_graph = _repository(tmp_path)
-    original_entries = git.PinnedCommit.entries
+    original_listing = git.PinnedCommit.full_listing
     moved = False
 
-    def move_head_once(pinned: git.PinnedCommit, relative: str = "") -> tuple[git.TreeEntry, ...]:
+    def move_head_once(pinned: git.PinnedCommit) -> tuple[git.TreeEntry, ...]:
         nonlocal moved
         if not moved:
             moved = True
             _write(root, "new.py", "def new():\n    return 4\n")
             _commit(root, "advance current head during pair acquisition")
-        return original_entries(pinned, relative)
+        return original_listing(pinned)
 
-    monkeypatch.setattr(git.PinnedCommit, "entries", move_head_once)
+    monkeypatch.setattr(git.PinnedCommit, "full_listing", move_head_once)
     prepared = prepare_comparison(root, None, _produce_selection)
 
     assert moved
@@ -1113,3 +1116,148 @@ def test_prepare_comparison_verifies_manifest_around_each_side_analysis(tmp_path
     assert error.value.side == "before"
     assert error.value.pinned_sha
     assert "app.py" in str(error.value)
+
+
+def _spy_capture_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[
+    list[tuple[tuple[object, ...], functools.partial[object]]],
+    list[tuple[set[str], set[str], bytes]],
+]:
+    """Wrap the ``capture_pair`` that ``comparison`` calls, passing through."""
+    plans: list[tuple[tuple[object, ...], functools.partial[object]]] = []
+    sealed: list[tuple[set[str], set[str], bytes]] = []
+    original = comparison.capture_pair
+
+    def spy(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        before, after, result = original(*args, **kwargs)  # type: ignore[arg-type]
+        plan = kwargs["plan"]
+        assert isinstance(plan, functools.partial)
+        plans.append((args, plan))
+        sealed.append(
+            (
+                {entry.path for entry in before.manifest.entries},
+                {entry.path for entry in after.manifest.entries},
+                (after.root / ".minotaur.toml").read_bytes(),
+            )
+        )
+        return before, after, result
+
+    monkeypatch.setattr(comparison, "capture_pair", spy)
+    return plans, sealed
+
+
+def test_prepare_comparison_analyzes_the_config_bytes_the_selection_was_derived_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    original_bytes = (root / ".minotaur.toml").read_bytes()
+    original_parse = config.parse_config_bytes
+    live = {"rewrites": 0}
+    sources: list[Path] = []
+
+    def parse_staged(data: bytes, *, source: Path | str):
+        parsed = original_parse(data, source=source)
+        sources.append(Path(source))
+        # The second parse is the plan reading the staged after config, which
+        # was staged before this live rewrite.
+        if len(sources) == 2:
+            live["rewrites"] += 1
+            _write(root, "other.py", "def other():\n    return 9\n")
+            _set_config(root, targets=["other.py"])
+        return parsed
+
+    monkeypatch.setattr(config, "parse_config_bytes", parse_staged)
+    _, sealed = _spy_capture_pair(monkeypatch)
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    assert live["rewrites"] == 1
+    assert sources[0] == root / ".minotaur.toml"
+    assert root not in sources[1].parents
+    assert (root / ".minotaur.toml").read_bytes() != original_bytes
+    assert prepared.current.normalized_targets == ("app.py",)
+    assert prepared.current.config.targets == ("app.py",)
+    assert sealed[0][2] == original_bytes
+    assert "other.py" not in sealed[0][1]
+
+
+def test_prepare_comparison_captures_only_the_selection_through_one_planned_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(root, "notes/readme.txt", "tracked, outside the selection\n")
+    _commit(root, "add notes")
+    _write(root, "other/data.txt", "untracked, outside the selection\n")
+    plans, sealed = _spy_capture_pair(monkeypatch)
+
+    prepare_comparison(root, None, _produce_selection, validate=False)
+
+    assert len(plans) == 1
+    assert plans[0][0] == (root, "HEAD", None)
+    assert plans[0][1].func is comparison._comparison_plan
+    expected = {
+        ".minotaur.toml",
+        "app.py",
+        "docs",
+        "docs/systems",
+        "docs/systems/core",
+        "docs/systems/core/system.toml",
+    }
+    assert sealed[0][0] == expected
+    assert sealed[0][1] == expected
+
+
+def test_prepare_comparison_judges_target_exclusion_from_the_analysis_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _set_config(root, targets=["pkg"], root_value=".src")
+    _write(root, ".src/pkg/mod.py", "def mod():\n    return 1\n")
+    _write(root, ".src/pkg/__pycache__/x.pyc", b"\x00cache")
+    _commit(root, "hidden analysis root")
+    _, sealed = _spy_capture_pair(monkeypatch)
+
+    prepare_comparison(root, None, _produce_selection)
+
+    before, after, _ = sealed[0]
+    assert before == after
+    assert ".src/pkg/mod.py" in before
+    assert ".src/pkg/__pycache__" not in before
+    assert ".src/pkg/__pycache__/x.pyc" not in before
+    assert (root / ".src/pkg/__pycache__/x.pyc").exists()
+
+
+def test_prepare_comparison_keeps_hidden_content_of_a_directly_declared_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _set_config(root, targets=[".tools"])
+    _write(root, ".tools/run.py", "def run():\n    return 1\n")
+    _write(root, ".tools/.inner/x.py", "def inner():\n    return 2\n")
+    _commit(root, "hidden target")
+    _, sealed = _spy_capture_pair(monkeypatch)
+
+    prepare_comparison(root, None, _produce_selection)
+
+    before, after, _ = sealed[0]
+    assert before == after
+    assert {".tools/run.py", ".tools/.inner/x.py"} <= before
+
+
+def test_prepare_comparison_attributes_a_config_missing_from_head_to_the_before_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _run(root, "rm", "--cached", "--quiet", ".minotaur.toml")
+    _run(root, "commit", "--quiet", "-m", "stop tracking the config")
+    leftovers = tmp_path / "captures"
+    leftovers.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(leftovers))
+
+    with pytest.raises(CurrentInputError) as raised:
+        prepare_comparison(root, None, _produce_selection)
+
+    assert raised.value.side == "before"
+    assert raised.value.path == ".minotaur.toml"
+    assert "required config is absent" in raised.value.detail
+    assert list(leftovers.iterdir()) == []
