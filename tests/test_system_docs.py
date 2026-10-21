@@ -402,9 +402,14 @@ def test_query_reference_documents_system_query_shared_option_behavior() -> None
 def test_query_reference_documents_system_comparison_capture_scope() -> None:
     text = _collapsed(QUERY_REFERENCE)
     assert "Each side captures only the comparison selection" in text
-    assert "its `.minotaur.toml` discovery candidates, the analysis root as a directory" in text
+    assert (
+        "the configuration file and, when it is discovered rather than given, its "
+        "`.minotaur.toml` discovery candidates, the analysis root as a directory"
+    ) in text
     assert "the `systems_dir` subtree, and the targets" in text
-    assert "hidden, cache and virtual-environment directories are pruned as analysis" in text
+    assert (
+        "Inside the targets, hidden, cache and virtual-environment directories are pruned" in text
+    )
     assert "while untracked or Git-ignored files are captured" in text
     assert "such as `.venv` or data directories, is neither read nor copied" in text
     assert (
@@ -416,7 +421,10 @@ def test_query_reference_documents_system_comparison_capture_scope() -> None:
         "refusing them; a link on a configured route is refused as described in "
         "[project configuration](project-configuration.md#path-confinement)"
     ) in text
-    assert '`systems_dir = "."` makes the whole configuration folder part of the selection' in text
+    assert (
+        'With the default `root`, setting `systems_dir = "."` makes the whole '
+        "configuration folder part of the selection"
+    ) in text
     assert "`source_digest` covers exactly the captured selection" in text
 
 
