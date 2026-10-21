@@ -268,7 +268,7 @@ def test_capture_rejects_gitlink_entries_instead_of_materializing_empty_director
 def test_capture_attributes_in_selection_missing_object_to_side(
     tmp_path: Path, temp_root: Path
 ) -> None:
-    """AC-03: a blob inside the selection that cannot be read is a side error."""
+    """A blob inside the selection that cannot be read is a side error."""
     root = _init(tmp_path / "repo")
     _write(root, "inside.py", "inside = 'unique inside'\n")
     _write(root, "outside.py", "outside = 'unique outside'\n")
@@ -290,7 +290,7 @@ def test_capture_attributes_in_selection_missing_object_to_side(
 def test_capture_never_reads_blobs_outside_the_selection(
     tmp_path: Path, temp_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-03: an unreadable blob outside the selection is never asked for."""
+    """An unreadable blob outside the selection is never asked for."""
     root = _init(tmp_path / "repo")
     _write(root, "inside.py", "inside = 'unique inside'\n")
     _write(root, "outside.py", "outside = 'unique outside'\n")
@@ -450,7 +450,7 @@ def test_manifest_digest_still_detects_executable_bit_changes(tmp_path: Path) ->
         second.close()
 
 
-# AC-02: the number of Git probes does not depend on the repository size.
+# The number of Git probes does not depend on the repository size.
 
 
 def _sized_repository(tmp_path: Path, count: int) -> Path:
@@ -535,7 +535,7 @@ def test_probe_sequence_has_the_same_shape_for_small_and_large_repositories(
     assert shapes[0] == shapes[1]
 
 
-# AC-04: working-tree pruning follows the analysis exclusion rule.
+# Working-tree pruning follows the analysis exclusion rule.
 
 
 def _pruning_repository(tmp_path: Path, *, venv_files: int = 2000) -> Path:
@@ -640,7 +640,7 @@ def test_exclusion_is_judged_relative_to_the_analysis_root(tmp_path: Path) -> No
         working.close()
 
 
-# AC-05: an unreadable directory is reported by its own location.
+# An unreadable directory is reported by its own location.
 
 
 def _skip_when_permissions_are_not_enforced() -> None:
@@ -692,7 +692,7 @@ def test_unreadable_directories_outside_the_selection_or_under_pruned_names_are_
             path.chmod(0o755)
 
 
-# AC-08: links are refused inside the selection and ignored outside it.
+# Links are refused inside the selection and ignored outside it.
 
 _MESSAGES = {
     "symlink": "symbolic links are not captured",
@@ -872,7 +872,7 @@ def test_unpruned_systems_directory_keeps_hidden_folders_inside_a_pruned_enclosi
         _pair(root, refused, None, selection)
 
 
-# AC-09: capture selects what the analysis selects.
+# Capture selects what the analysis selects.
 
 
 def _analysis_files(capture_root: Path, targets: tuple[str, ...]) -> set[str]:
@@ -944,7 +944,7 @@ def test_capture_honours_a_patched_exclusion_predicate(
         working.close()
 
 
-# AC-10: lifecycle, write-once staging and pinning.
+# Lifecycle, write-once staging and pinning.
 
 
 def test_plan_failure_propagates_unchanged_and_removes_every_directory(
