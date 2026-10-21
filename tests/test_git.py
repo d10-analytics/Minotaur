@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -537,3 +538,207 @@ def test_work_tree_root_raises_for_named_missing_git_directory(
     monkeypatch.setattr(git.subprocess, "run", failed)
     with pytest.raises(git.GitProbeError, match=re.escape(f"not a git repository: {named}")):
         git.work_tree_root(tmp_path)
+
+
+def _listing_repository(tmp_path: Path) -> tuple[Path, str]:
+    root, _ = _repository(tmp_path)
+    (root / "nested" / "dir with space").mkdir()
+    (root / "nested" / "dir with space" / "inner file.bin").write_bytes(b"inner\n")
+    (root / "binary.bin").write_bytes(b"\x00\x01\xffbinary\x00\n")
+    (root / "empty.txt").write_bytes(b"")
+    (root / "text.txt").write_bytes(b"text without trailing newline")
+    (root / os.fsdecode(b"bad\xffname.txt")).write_bytes(b"non-utf8 name\n")
+    _run(root, "add", "--all", "--", ":!vendor")
+    _run(root, "commit", "--quiet", "-m", "listing fixture")
+    return root, _run(root, "rev-parse", "HEAD").strip()
+
+
+def _record_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[tuple[str, ...], bytes | None]]:
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+    original = git.run_git
+
+    def recorder(root_arg: Path, arguments: tuple[str, ...], **kwargs: Any):
+        calls.append((tuple(arguments), kwargs.get("input")))
+        return original(root_arg, arguments, **kwargs)
+
+    monkeypatch.setattr(git, "run_git", recorder)
+    return calls
+
+
+def _batch_item(pinned: git.PinnedCommit, path: str) -> git.TreeEntry:
+    return next(item for item in pinned.full_listing() if item.path == path)
+
+
+def test_full_listing_is_one_recursive_call_with_exact_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha)
+    calls = _record_calls(monkeypatch)
+
+    listing = pinned.full_listing()
+
+    assert calls == [(("ls-tree", "-r", "-t", "-z", sha), None)]
+    by_path = {item.path: item for item in listing}
+    assert len(by_path) == len(listing)
+    assert set(by_path) == {
+        "plain file.txt",
+        "run.sh",
+        "link",
+        "vendor",
+        "nested",
+        "nested/deep file.py",
+        "nested/dir with space",
+        "nested/dir with space/inner file.bin",
+        "binary.bin",
+        "empty.txt",
+        "text.txt",
+        os.fsdecode(b"bad\xffname.txt"),
+    }
+    assert (by_path["nested"].mode, by_path["nested"].kind) == ("040000", "tree")
+    assert (by_path["nested/dir with space"].mode, by_path["nested/dir with space"].kind) == (
+        "040000",
+        "tree",
+    )
+    assert (by_path["run.sh"].mode, by_path["run.sh"].kind) == ("100755", "blob")
+    assert (by_path["link"].mode, by_path["link"].kind) == ("120000", "blob")
+    assert (by_path["vendor"].mode, by_path["vendor"].kind) == ("160000", "commit")
+    assert by_path["plain file.txt"].mode == "100644"
+    for item in listing:
+        expected = _run(root, "rev-parse", f"{sha}:{item.path}").strip()
+        assert item.oid == expected, item.path
+
+
+def test_read_blobs_uses_one_batch_call_and_returns_exact_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha)
+    paths = ["binary.bin", "empty.txt", "text.txt", "nested/dir with space/inner file.bin"]
+    items = [_batch_item(pinned, path) for path in paths]
+    calls = _record_calls(monkeypatch)
+
+    blobs = pinned.read_blobs(items)
+
+    assert calls == [
+        (("cat-file", "--batch"), "".join(f"{item.oid}\n" for item in items).encode("ascii"))
+    ]
+    assert blobs == (b"\x00\x01\xffbinary\x00\n", b"", b"text without trailing newline", b"inner\n")
+    for item, blob in zip(items, blobs, strict=True):
+        expected = subprocess.run(
+            ["git", "cat-file", "blob", item.oid],
+            cwd=root,
+            capture_output=True,
+            check=True,
+        ).stdout
+        assert blob == expected
+
+
+def test_read_blobs_empty_request_issues_no_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha)
+    calls = _record_calls(monkeypatch)
+
+    assert pinned.read_blobs([]) == ()
+    assert calls == []
+
+
+def _assert_batch_failure(
+    pinned: git.PinnedCommit, item: git.TreeEntry, side: str = "historical"
+) -> git.GitInputError:
+    with pytest.raises(git.GitInputError) as error:
+        pinned.read_blobs([item])
+    assert error.value.side == side
+    assert error.value.commit == pinned.commit
+    assert error.value.path == item.path
+    return error.value
+
+
+def test_read_blobs_reports_deleted_loose_object_as_missing(tmp_path: Path) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha, side="before")
+    item = _batch_item(pinned, "text.txt")
+    assert item.oid is not None
+    # The control read succeeds before the object is deleted.
+    assert pinned.read_blobs([item]) == (b"text without trailing newline",)
+    (root / ".git" / "objects" / item.oid[:2] / item.oid[2:]).unlink()
+    raw = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=root,
+        input=f"{item.oid}\n".encode(),
+        capture_output=True,
+        check=False,
+    )
+    assert raw.returncode == 0
+    assert raw.stdout == f"{item.oid} missing\n".encode()
+
+    error = _assert_batch_failure(pinned, item, side="before")
+    assert "missing" in str(error)
+
+
+def test_read_blobs_refuses_lazy_fetch_of_promised_blob(tmp_path: Path) -> None:
+    clone, sha = _promisor_clone(tmp_path)
+    pinned = git.PinnedCommit.resolve(clone, sha, side="before")
+    (item,) = [entry for entry in pinned.full_listing() if entry.path == "promised.py"]
+    assert item.oid is not None
+    assert item.oid not in _local_object_oids(clone)
+
+    _assert_batch_failure(pinned, item, side="before")
+
+    assert item.oid not in _local_object_oids(clone)
+
+
+def test_read_blobs_rejects_tree_object(tmp_path: Path) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha)
+    error = _assert_batch_failure(pinned, _batch_item(pinned, "nested"))
+    assert "tree" in str(error)
+
+
+def test_read_blobs_rejects_truncated_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha)
+    item = _batch_item(pinned, "text.txt")
+
+    def truncated(root_arg: Path, arguments: tuple[str, ...], **kwargs: Any):
+        return subprocess.CompletedProcess(
+            ["git", *arguments], 0, f"{item.oid} blob 29\ntext witho".encode(), b""
+        )
+
+    monkeypatch.setattr(git, "run_git", truncated)
+    error = _assert_batch_failure(pinned, item)
+    assert "truncated" in str(error)
+
+
+def test_read_blobs_rejects_unavailable_probe_and_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha)
+    item = _batch_item(pinned, "text.txt")
+
+    monkeypatch.setattr(git, "run_git", lambda *args, **kwargs: None)
+    assert "unavailable" in str(_assert_batch_failure(pinned, item))
+
+    monkeypatch.setattr(
+        git,
+        "run_git",
+        lambda root_arg, arguments, **kwargs: subprocess.CompletedProcess(
+            ["git", *arguments], 128, b"", b"batch exploded\n"
+        ),
+    )
+    assert "batch exploded" in str(_assert_batch_failure(pinned, item))
+
+
+def test_run_git_without_input_does_not_write_stdin(tmp_path: Path) -> None:
+    root, _ = _repository(tmp_path)
+    plain = git.run_git(root, ("rev-parse", "HEAD"))
+    fed = git.run_git(root, ("cat-file", "--batch-check"), input=b"HEAD\n")
+    assert plain is not None and plain.returncode == 0
+    assert fed is not None and fed.stdout.split()[1:2] == ["commit"]
