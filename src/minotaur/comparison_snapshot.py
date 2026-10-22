@@ -508,10 +508,10 @@ class CaptureStage:
                 directories.append(entry)
             elif entry.path not in self._written:
                 pending.append(entry)
-        blobs = self.pin.read_blobs(pending)
         for entry in directories:
             self._make_directory(entry.path)
-        for entry, data in zip(pending, blobs, strict=True):
+
+        def write(entry: TreeEntry, data: bytes) -> None:
             target = self.root / entry.path
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -527,6 +527,8 @@ class CaptureStage:
                     error=error,
                 ) from error
             self._written.add(entry.path)
+
+        self.pin.stream_blobs(pending, write)
 
     def _make_directory(self, relative: str) -> None:
         try:
