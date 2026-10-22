@@ -6,6 +6,21 @@ pins a local revision once, materializes exact tree/blob bytes into a unique
 temporary directory, and records a manifest of that captured directory. The
 manifest is checked before the snapshot is consumed and again on cleanup; a
 mutation is an input error rather than a mixed or partial comparison.
+
+:func:`capture_pair` captures only the *comparison selection*, in two phases.
+Each side is first opened as a :class:`CaptureStage`; a caller-supplied plan
+stages the few files (configuration and discovery candidates) from which the
+selection is derived and returns a :class:`CaptureSelection`. The union of that
+selection and every path staged on either side is then included into both
+stages, which are sealed (manifest built) together. A path is selected when any
+selection entry admits it: an exact file, a directory captured as a directory
+only (plus the route ancestors of every entry), or a subtree. A pruned subtree
+omits what the analysis's own exclusion rule omits (``exclusions.is_excluded``
+below the subtree), while an unpruned subtree keeps everything. A link, gitlink
+or unsupported mode inside the selection is refused on a revision side; the
+working-tree side skips links silently and never enters ``.git``. Nothing
+outside the selection is listed for writing, read from the object store,
+walked or copied.
 """
 
 from __future__ import annotations
@@ -15,10 +30,14 @@ import os
 import shutil
 import stat
 import tempfile
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
+from typing import TypeVar
 
-from minotaur.git import GitInputError, PinnedCommit
+from minotaur.git import GitInputError, PinnedCommit, TreeEntry
+from minotaur.language_interpreter import exclusions
 
 
 class SnapshotError(ValueError):
@@ -141,66 +160,6 @@ def _manifest(root: Path) -> CaptureManifest:
     return CaptureManifest(tuple(sorted(entries, key=lambda entry: entry.path)))
 
 
-def _tree_files(pin: PinnedCommit) -> tuple[tuple[str, int], ...]:
-    """Preflight a pinned tree before creating any captured files.
-
-    Walking Git trees and reading blobs directly avoids ``git archive``
-    attributes such as ``export-ignore`` and ``export-subst``.  The preflight
-    also rejects links, gitlinks, and unsupported modes before materialization.
-    """
-    files: list[tuple[str, int]] = []
-
-    def visit(relative: str = "") -> None:
-        for entry in pin.entries(relative):
-            if entry.is_gitlink:
-                raise SnapshotError(
-                    side=pin.side,
-                    revision=pin.commit,
-                    commit=pin.commit,
-                    detail=f"unsafe entry {entry.path!r}: Gitlink is not a source directory",
-                )
-            if entry.is_link:
-                raise SnapshotError(
-                    side=pin.side,
-                    revision=pin.commit,
-                    commit=pin.commit,
-                    detail=f"unsafe entry {entry.path!r}: symbolic links are not captured",
-                )
-            if entry.kind == "tree":
-                visit(entry.path)
-            elif entry.is_regular_file:
-                files.append((entry.path, int(entry.mode, 8)))
-            else:
-                raise SnapshotError(
-                    side=pin.side,
-                    revision=pin.commit,
-                    commit=pin.commit,
-                    detail=f"unsafe entry {entry.path!r}: unsupported Git mode {entry.mode}",
-                )
-
-    visit()
-    return tuple(files)
-
-
-def _materialize_tree(pin: PinnedCommit, destination: Path, revision: str) -> None:
-    """Write exact pinned blob bytes into the temporary analysis root."""
-    for relative, mode in _tree_files(pin):
-        target = destination / relative
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(pin.read_blob(relative))
-            os.chmod(target, mode & 0o7777)
-        except OSError as error:
-            raise _capture_os_error(
-                side=pin.side,
-                revision=revision,
-                commit=pin.commit,
-                path=relative,
-                operation="could not materialize captured file",
-                error=error,
-            ) from error
-
-
 def _capture_os_error(
     *,
     side: str,
@@ -321,182 +280,386 @@ class RevisionSnapshot:
         self.close()
 
 
-def capture_revision(
-    worktree_root: Path,
-    revision: str,
-    *,
-    side: str = "historical",
-) -> RevisionSnapshot:
-    """Capture a locally available revision without changing Git state."""
-    try:
-        root = Path(worktree_root).resolve()
-    except OSError as error:
-        raise _capture_os_error(
-            side=side,
-            revision=revision,
-            commit=None,
-            path=worktree_root,
-            operation="could not resolve capture worktree",
-            error=error,
-        ) from error
-    pin = PinnedCommit.resolve(root, revision, side=side)
-    try:
-        temporary_directory = tempfile.TemporaryDirectory(
-            prefix="minotaur-revision-", ignore_cleanup_errors=True
-        )
-    except OSError as error:
-        raise _capture_os_error(
-            side=side,
-            revision=revision,
-            commit=pin.commit,
-            path=root,
-            operation="could not create temporary revision capture",
-            error=error,
-        ) from error
-    destination = Path(temporary_directory.name)
-    try:
-        _materialize_tree(pin, destination, revision)
-        manifest = _manifest(destination)
-    except SnapshotError:
-        temporary_directory.cleanup()
-        raise
-    except OSError as error:
-        temporary_directory.cleanup()
-        raise _capture_os_error(
-            side=side,
-            revision=revision,
-            commit=pin.commit,
-            path=destination,
-            operation="could not finalize revision capture",
-            error=error,
-        ) from error
-    except Exception:
-        temporary_directory.cleanup()
-        raise
-    return RevisionSnapshot(pin, revision, side, destination, manifest, temporary_directory)
+_ROOT = "."
+_T = TypeVar("_T")
 
 
-def capture_local_revision(
-    worktree_root: Path, revision: str, *, side: str = "historical"
-) -> RevisionSnapshot:
-    """Explicit alias for :func:`capture_revision` used by command owners."""
-    return capture_revision(worktree_root, revision, side=side)
+def _coordinate(value: str) -> str:
+    """Normalize a repository-relative POSIX coordinate; the root is ``"."``."""
+    parts = [part for part in value.split("/") if part not in {"", "."}]
+    if value.startswith("/") or ".." in parts:
+        raise ValueError(f"selection coordinate must be repository-relative: {value!r}")
+    return "/".join(parts) or _ROOT
 
 
-def capture_working_tree(worktree_root: Path, *, side: str = "after") -> RevisionSnapshot:
-    """Capture the current working tree, including ordinary untracked files.
+@dataclass(frozen=True, slots=True)
+class CaptureSelection:
+    """The repository paths a comparison captures.
 
-    The comparison analyzes this copy rather than the live checkout. Git
-    administrative entries are excluded, while links and special files are
-    omitted so a path cannot escape the captured side. Configured unsafe paths
-    are rejected by side-specific route validation before production. The
-    pinned ``HEAD`` is retained only as a stable identity for diagnostics; the
-    manifest guards the copied working-tree bytes during analysis.
+    ``files`` are captured exactly as listed, ``directories`` as directories
+    only, and ``trees`` map a subtree coordinate to its prune flag: a pruned
+    subtree omits what ``exclusions.is_excluded`` omits below it, an unpruned
+    one (``False``) keeps everything. The route ancestors of every coordinate
+    are captured as directories (or as the file or link found at that
+    position). The repository root is the coordinate ``"."``.
     """
-    try:
-        root = Path(worktree_root).resolve()
-    except OSError as error:
-        raise _capture_os_error(
-            side=side,
-            revision="WORKTREE",
-            commit=None,
-            path=worktree_root,
-            operation="could not resolve working-tree capture root",
-            error=error,
-        ) from error
-    pin = PinnedCommit.resolve(root, "HEAD", side=side)
-    try:
-        temporary_directory = tempfile.TemporaryDirectory(
-            prefix="minotaur-working-", ignore_cleanup_errors=True
+
+    files: Collection[str] = ()
+    directories: Collection[str] = ()
+    trees: Mapping[str, bool] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        files = frozenset(_coordinate(item) for item in self.files) - {_ROOT}
+        directories = frozenset(_coordinate(item) for item in self.directories)
+        trees: dict[str, bool] = {}
+        for item, prune in self.trees.items():
+            coordinate = _coordinate(item)
+            trees[coordinate] = trees.get(coordinate, True) and bool(prune)
+        object.__setattr__(self, "files", files)
+        object.__setattr__(self, "directories", directories)
+        object.__setattr__(self, "trees", MappingProxyType(trees))
+
+    def union(self, *others: CaptureSelection) -> CaptureSelection:
+        """Combine selections; an unpruned subtree wins over a pruned one."""
+        files: set[str] = set(self.files)
+        directories: set[str] = set(self.directories)
+        trees: dict[str, bool] = dict(self.trees)
+        for other in others:
+            files.update(other.files)
+            directories.update(other.directories)
+            for coordinate, prune in other.trees.items():
+                trees[coordinate] = trees.get(coordinate, True) and prune
+        return CaptureSelection(files, directories, trees)
+
+
+class _Scope:
+    """Answers which paths a selection admits and which directories to enter."""
+
+    def __init__(self, selection: CaptureSelection) -> None:
+        self._files = selection.files
+        self._directories = selection.directories
+        self._trees = dict(selection.trees)
+        self._admitted: dict[str, bool] = {}
+        # Directory -> names leading toward a selected coordinate.
+        self.route: dict[str, set[str]] = {}
+        for coordinate in (*self._files, *self._directories, *self._trees):
+            parent = _ROOT
+            for part in () if coordinate == _ROOT else coordinate.split("/"):
+                self.route.setdefault(parent, set()).add(part)
+                parent = part if parent == _ROOT else f"{parent}/{part}"
+
+    def in_tree(self, path: str) -> bool:
+        """Whether a selected subtree admits *path* (judged below its root)."""
+        cached = self._admitted.get(path)
+        if cached is not None:
+            return cached
+        result = False
+        for coordinate, prune in self._trees.items():
+            if coordinate == _ROOT:
+                below = path
+            elif path == coordinate:
+                below = ""
+            elif path.startswith(f"{coordinate}/"):
+                below = path[len(coordinate) + 1 :]
+            else:
+                continue
+            if not below or not prune or not exclusions.is_excluded(Path(below)):
+                result = True
+                break
+        self._admitted[path] = result
+        return result
+
+    def admits(self, path: str) -> bool:
+        return (
+            path in self._files
+            or path in self._directories
+            or path in self.route
+            or self.in_tree(path)
         )
-    except OSError as error:
-        raise _capture_os_error(
-            side=side,
-            revision="WORKTREE",
-            commit=pin.commit,
-            path=root,
-            operation="could not create temporary working-tree capture",
-            error=error,
-        ) from error
-    destination = Path(temporary_directory.name)
-    failing_path = root
-    try:
-        for current, directory_names, file_names in os.walk(
-            root, topdown=True, followlinks=False, onerror=_raise_walk_error
-        ):
-            current_path = Path(current)
-            retained_directories: list[str] = []
-            for name in sorted(directory_names):
-                if name == ".git":
-                    continue
-                source = current_path / name
-                failing_path = source
-                info = source.lstat()
-                if stat.S_ISLNK(info.st_mode):
-                    continue
-                if not stat.S_ISDIR(info.st_mode):
-                    continue
-                retained_directories.append(name)
-            directory_names[:] = retained_directories
-            relative_directory = current_path.relative_to(root)
-            (destination / relative_directory).mkdir(parents=True, exist_ok=True)
-            for name in sorted(file_names):
-                if name == ".git":
-                    continue
-                source = current_path / name
-                failing_path = source
-                info = source.lstat()
-                relative = source.relative_to(root)
-                if not stat.S_ISREG(info.st_mode):
-                    continue
-                target = destination / relative
+
+
+def _unsafe(entry: TreeEntry) -> str | None:
+    if entry.is_gitlink:
+        return f"unsafe entry {entry.path!r}: Gitlink is not a source directory"
+    if entry.is_link:
+        return f"unsafe entry {entry.path!r}: symbolic links are not captured"
+    if entry.kind != "tree" and not entry.is_regular_file:
+        return f"unsafe entry {entry.path!r}: unsupported Git mode {entry.mode}"
+    return None
+
+
+class CaptureStage:
+    """One side of a pair being captured into a private temporary directory.
+
+    A plan receives the stage to stage files (``include``) and to read them
+    from ``root``. ``include`` is write-once per path: bytes staged first are
+    the bytes sealed. Sealing and discarding belong to :func:`capture_pair`.
+    """
+
+    def __init__(
+        self,
+        worktree: Path,
+        pin: PinnedCommit,
+        revision: str,
+        *,
+        working: bool,
+    ) -> None:
+        self._worktree = worktree
+        self.pin = pin
+        self.revision = revision
+        self._working = working
+        self._listing: tuple[TreeEntry, ...] | None = None
+        self._written: set[str] = set()
+        self._requested: set[str] = set()
+        self._sealed = False
+        prefix = "minotaur-working-" if working else "minotaur-revision-"
+        try:
+            self._directory = tempfile.TemporaryDirectory(prefix=prefix, ignore_cleanup_errors=True)
+        except OSError as error:
+            raise _capture_os_error(
+                side=pin.side,
+                revision=revision,
+                commit=pin.commit,
+                path=worktree,
+                operation=(
+                    "could not create temporary working-tree capture"
+                    if working
+                    else "could not create temporary revision capture"
+                ),
+                error=error,
+            ) from error
+        self.root = Path(self._directory.name)
+
+    @property
+    def side(self) -> str:
+        return self.pin.side
+
+    @property
+    def requested(self) -> frozenset[str]:
+        """Every path passed to :meth:`include`, whether or not it exists."""
+        return frozenset(self._requested)
+
+    def include(self, paths: Iterable[str]) -> None:
+        """Stage *paths* as listed, together with their route ancestors.
+
+        Each route ancestor present on this side is staged as listed, as a
+        directory or as the entry found at that position, even when the path
+        below it is absent; an absent path itself stages nothing. On a
+        revision side the whole call reads its blobs with one batch.
+        """
+        if isinstance(paths, str):
+            raise TypeError("include takes a collection of paths, not one string")
+        coordinates = frozenset(_coordinate(item) for item in paths) - {_ROOT}
+        self._requested |= coordinates
+        self._stage(CaptureSelection(files=coordinates))
+
+    def discard(self) -> None:
+        """Remove the temporary directory without verification."""
+        self._directory.cleanup()
+
+    def seal(self) -> RevisionSnapshot:
+        """Build the manifest and return the captured snapshot."""
+        self._sealed = True
+        revision = "WORKTREE" if self._working else self.revision
+        try:
+            manifest = _manifest(self.root)
+        except SnapshotError:
+            raise
+        except OSError as error:
+            raise _capture_os_error(
+                side=self.pin.side,
+                revision=revision,
+                commit=self.pin.commit,
+                path=self.root,
+                operation=(
+                    "could not finalize working-tree capture"
+                    if self._working
+                    else "could not finalize revision capture"
+                ),
+                error=error,
+            ) from error
+        return RevisionSnapshot(
+            self.pin, revision, self.pin.side, self.root, manifest, self._directory
+        )
+
+    def _stage(self, selection: CaptureSelection) -> None:
+        if self._sealed:
+            raise RuntimeError("a sealed capture stage cannot include more paths")
+        scope = _Scope(selection)
+        if self._working:
+            self._stage_working(scope)
+        else:
+            self._stage_revision(scope)
+
+    def _stage_revision(self, scope: _Scope) -> None:
+        if self._listing is None:
+            self._listing = self.pin.full_listing()
+        directories: list[TreeEntry] = []
+        pending: list[TreeEntry] = []
+        for entry in self._listing:
+            if not scope.admits(entry.path):
+                continue
+            problem = _unsafe(entry)
+            if problem is not None:
+                raise SnapshotError(
+                    side=self.pin.side,
+                    revision=self.pin.commit,
+                    commit=self.pin.commit,
+                    detail=problem,
+                )
+            if entry.kind == "tree":
+                directories.append(entry)
+            elif entry.path not in self._written:
+                pending.append(entry)
+        for entry in directories:
+            self._make_directory(entry.path)
+
+        def write(entry: TreeEntry, data: bytes) -> None:
+            target = self.root / entry.path
+            try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, target)
-                os.chmod(target, stat.S_IMODE(info.st_mode))
-        manifest = _manifest(destination)
-    except SnapshotError:
-        temporary_directory.cleanup()
-        raise
-    except OSError as error:
-        temporary_directory.cleanup()
-        raise _capture_os_error(
-            side=side,
-            revision="WORKTREE",
-            commit=pin.commit,
-            path=failing_path,
-            operation="could not capture working-tree input",
-            error=error,
-        ) from error
-    except Exception:
-        temporary_directory.cleanup()
-        raise
-    return RevisionSnapshot(pin, "WORKTREE", side, destination, manifest, temporary_directory)
+                target.write_bytes(data)
+                os.chmod(target, int(entry.mode, 8) & 0o7777)
+            except OSError as error:
+                raise _capture_os_error(
+                    side=self.pin.side,
+                    revision=self.revision,
+                    commit=self.pin.commit,
+                    path=entry.path,
+                    operation="could not materialize captured file",
+                    error=error,
+                ) from error
+            self._written.add(entry.path)
+
+        self.pin.stream_blobs(pending, write)
+
+    def _make_directory(self, relative: str) -> None:
+        try:
+            (self.root / relative).mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise _capture_os_error(
+                side=self.pin.side,
+                revision=self.revision,
+                commit=self.pin.commit,
+                path=relative,
+                operation="could not materialize captured file",
+                error=error,
+            ) from error
+
+    def _stage_working(self, scope: _Scope) -> None:
+        """Walk only the selection of the live tree and copy admitted files."""
+        failing_path = self._worktree
+        try:
+            stack: list[str] = [_ROOT]
+            while stack:
+                relative = stack.pop()
+                directory = self._worktree if relative == _ROOT else self._worktree / relative
+                failing_path = directory
+                # A subtree lists its children; a route directory is entered
+                # only toward the coordinates below it, so siblings are never
+                # listed or opened.
+                if scope.in_tree(relative):
+                    names = sorted(os.listdir(directory))
+                else:
+                    names = sorted(scope.route.get(relative, ()))
+                descend: list[str] = []
+                for name in names:
+                    if name == ".git":
+                        continue
+                    child = name if relative == _ROOT else f"{relative}/{name}"
+                    if not scope.admits(child):
+                        continue
+                    source = directory / name
+                    # A failure to inspect an entry means its directory could
+                    # not be searched, so the directory is the location.
+                    failing_path = directory
+                    try:
+                        info = source.lstat()
+                    except FileNotFoundError:
+                        if scope.in_tree(relative):
+                            raise
+                        continue
+                    failing_path = source
+                    target = self.root / child
+                    if stat.S_ISDIR(info.st_mode):
+                        target.mkdir(parents=True, exist_ok=True)
+                        if child in scope.route or scope.in_tree(child):
+                            descend.append(child)
+                    elif stat.S_ISREG(info.st_mode) and child not in self._written:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(source, target)
+                        os.chmod(target, stat.S_IMODE(info.st_mode))
+                        self._written.add(child)
+                stack.extend(reversed(descend))
+        except OSError as error:
+            raise _capture_os_error(
+                side=self.pin.side,
+                revision="WORKTREE",
+                commit=self.pin.commit,
+                path=failing_path,
+                operation="could not capture working-tree input",
+                error=error,
+            ) from error
 
 
 def capture_pair(
     worktree_root: Path,
     before: str,
-    after: str,
-) -> tuple[RevisionSnapshot, RevisionSnapshot]:
-    """Capture both sides with independently pinned, side-attributed errors."""
-    first = capture_revision(worktree_root, before, side="before")
+    after: str | None,
+    *,
+    plan: Callable[[CaptureStage, CaptureStage], tuple[CaptureSelection, _T]],
+) -> tuple[RevisionSnapshot, RevisionSnapshot, _T]:
+    """Capture both sides of a comparison, scoped to the planned selection.
+
+    *before* is a revision; *after* is a revision, or ``None`` for the working
+    tree (whose ``HEAD`` is pinned for diagnostics). Both sides are pinned
+    first, then opened as stages and handed to *plan*, which stages the files
+    its selection is derived from and returns ``(selection, result)``. The
+    union of that selection and every path staged on either side is included
+    into both stages, which are sealed. Every temporary directory is removed on
+    any failure, and the plan's own exceptions propagate unchanged.
+    """
     try:
-        second = capture_revision(worktree_root, after, side="after")
-    except Exception:
-        first.close()
+        root = Path(worktree_root).resolve()
+    except OSError as error:
+        raise _capture_os_error(
+            side="before",
+            revision=before,
+            commit=None,
+            path=worktree_root,
+            operation="could not resolve capture worktree",
+            error=error,
+        ) from error
+    before_pin = PinnedCommit.resolve(root, before, side="before")
+    after_pin = PinnedCommit.resolve(root, "HEAD" if after is None else after, side="after")
+    stages: list[CaptureStage] = []
+    try:
+        first = CaptureStage(root, before_pin, before, working=False)
+        stages.append(first)
+        second = CaptureStage(
+            root, after_pin, "WORKTREE" if after is None else after, working=after is None
+        )
+        stages.append(second)
+        selection, result = plan(first, second)
+        union = selection.union(CaptureSelection(files=first.requested | second.requested))
+        first._stage(union)
+        second._stage(union)
+        captured = first.seal(), second.seal()
+    except BaseException:
+        for stage in stages:
+            stage.discard()
         raise
-    return first, second
+    return captured[0], captured[1], result
 
 
 __all__ = [
     "CaptureManifest",
+    "CaptureSelection",
+    "CaptureStage",
     "GitInputError",
     "ManifestEntry",
     "RevisionSnapshot",
     "SnapshotError",
     "SnapshotMutationError",
-    "capture_local_revision",
     "capture_pair",
-    "capture_revision",
-    "capture_working_tree",
 ]

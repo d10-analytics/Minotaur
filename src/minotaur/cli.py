@@ -14,17 +14,19 @@ from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, TextIO
 
 from minotaur import git, language_interpreter
 from minotaur.comparison import (
     _captured_analysis,
+    _comparison_plan,
     _current_config_route,
     _select_worktree,
     _validate_live_current_contract,
 )
-from minotaur.comparison_snapshot import capture_local_revision, capture_working_tree
+from minotaur.comparison_snapshot import capture_pair
 from minotaur.config import ConfigError, SqlSettings, find_config, resolve_config
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import (
@@ -1083,8 +1085,8 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
 def _acquire_systems_pair(query: argparse.Namespace) -> _SystemsPair:
     """Capture and analyze one zero- or two-revision source pair.
 
-    Both sides reuse the shared comparison owners: the capture layer
-    materializes immutable source trees and the captured-analysis owner parses
+    Both sides reuse the shared comparison owners: the capture layer copies only
+    the analyzed selection of both sides, and the captured-analysis owner parses
     each side's own configuration, selection, and system definitions.  Saved
     graphs and sidecars are never read, so a stale committed graph cannot
     change the source-derived baseline.
@@ -1110,26 +1112,16 @@ def _acquire_systems_pair(query: argparse.Namespace) -> _SystemsPair:
             worktree, _current_config_route(worktree, preserved_start, live_raw)
         )
 
-    if before_revision is None:
-        before = capture_local_revision(worktree, "HEAD", side="before")
-    else:
-        before = capture_local_revision(worktree, before_revision, side="before")
-    try:
-        if after_revision is None:
-            after = capture_working_tree(worktree, side="after")
-        else:
-            after = capture_local_revision(worktree, after_revision, side="after")
-    except BaseException:
-        before.close()
-        raise
-
+    plan = partial(
+        _comparison_plan, worktree, preserved_start, shared, before_override, after_override
+    )
+    before, after, (before_coordinate, after_coordinate) = capture_pair(
+        worktree,
+        "HEAD" if before_revision is None else before_revision,
+        after_revision,
+        plan=plan,
+    )
     with before, after:
-        after_start = after.root / preserved_start.relative_to(worktree)
-        discovered: str | None = None
-        if shared is None and (before_override is None or after_override is None):
-            discovered = _current_config_route(after.root, after_start, None).coordinate
-        before_coordinate = _require_config_coordinate(before_override or shared or discovered)
-        after_coordinate = _require_config_coordinate(after_override or shared or discovered)
         # The captured-analysis owner consumes the source producer but does not
         # retain its call-expression stream, so record each side's observations
         # at the same producer boundary. Call facts stay paired with the exact
@@ -1290,12 +1282,6 @@ def _side_config_coordinate(value: str | None, *, label: str) -> str | None:
     if value is None:
         return None
     return _repository_relative(value, label=label)
-
-
-def _require_config_coordinate(value: str | None) -> str:
-    if value is None:  # pragma: no cover - an override, shared path, or discovery supplies one.
-        raise ValueError("no configuration path could be determined for a comparison side")
-    return value
 
 
 def _live_config_argument(

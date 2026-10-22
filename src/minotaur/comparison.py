@@ -14,20 +14,23 @@ import stat
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Protocol
 
 from minotaur import config, git, system
 from minotaur.comparison_snapshot import (
+    CaptureSelection,
+    CaptureStage,
     RevisionSnapshot,
-    capture_local_revision,
-    capture_working_tree,
+    capture_pair,
 )
 from minotaur.config import SqlSettings, ValidatedConfig
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import LoadedGraph
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_model.validation import validate_document
+from minotaur.language_interpreter import exclusions
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
 from minotaur.language_interpreter.registry import default_registry
 from minotaur.language_interpreter.selection import SourceSelection
@@ -852,7 +855,7 @@ def _relabel_snapshot_error(
 
 
 def _captured_declaration_path(
-    snapshot: RevisionSnapshot, root: Path, base: Path, raw: str
+    worktree_root: Path, capture_root: Path, base: Path, raw: str
 ) -> Path:
     """Map declarations written for the live checkout into a captured root."""
     if not isinstance(raw, str):
@@ -861,10 +864,10 @@ def _captured_declaration_path(
         return base / raw
     candidate = Path(raw)
     try:
-        relative = candidate.relative_to(snapshot.pin.root.resolve())
+        relative = candidate.relative_to(worktree_root.resolve())
     except ValueError:
         return candidate
-    return root / relative
+    return capture_root / relative
 
 
 def _refuse_outside_config_folder(
@@ -922,17 +925,23 @@ def _captured_analysis(
         except Exception as error:
             raise _current_error(config_path, "invalid captured configuration", error) from error
 
-        root_path = _captured_declaration_path(snapshot, root, config_path.parent, raw_config.root)
+        root_path = _captured_declaration_path(
+            snapshot.pin.root, root, config_path.parent, raw_config.root
+        )
         root_route = _inspect_current_route(
             root, root_path, label="analysis root", allow_missing=False
         )
         if root_route.entry is None or not stat.S_ISDIR(root_route.entry.st_mode):
             raise _current_error(root_path, "analysis root is not an ordinary directory")
-        graph_path = _captured_declaration_path(snapshot, root, root_path, raw_config.graph)
+        graph_path = _captured_declaration_path(
+            snapshot.pin.root, root, root_path, raw_config.graph
+        )
         graph_route = _lexical_declaration(
             root, root_path, str(graph_path), label="configured graph"
         )
-        systems_path = _captured_declaration_path(snapshot, root, root_path, raw_config.systems_dir)
+        systems_path = _captured_declaration_path(
+            snapshot.pin.root, root, root_path, raw_config.systems_dir
+        )
         systems_route = _inspect_current_route(root, systems_path, label="systems root")
         _refuse_outside_config_folder(config_route, root_route, graph_route, systems_route)
 
@@ -942,7 +951,7 @@ def _captured_analysis(
         seen_existing: set[str] = set()
         root_parts = _coordinate_parts(root_route.coordinate)
         for raw_target in raw_config.targets:
-            target_path = _captured_declaration_path(snapshot, root, root_path, raw_target)
+            target_path = _captured_declaration_path(snapshot.pin.root, root, root_path, raw_target)
             target_route = _inspect_current_route(root, target_path, label="target")
             target_parts = _coordinate_parts(target_route.coordinate)
             if target_parts[: len(root_parts)] != root_parts:
@@ -1040,6 +1049,124 @@ def _captured_analysis(
         raise _relabel_snapshot_error(error, snapshot) from error.__cause__
 
 
+def _capture_selection(stage: CaptureStage, config_coordinate: str) -> CaptureSelection:
+    """Derive one side's capture selection from its staged config bytes.
+
+    The selection holds the config, the analysis root (as a directory only),
+    ``systems_dir`` (unpruned) and each target (pruned by the analysis's own
+    exclusion rule unless the target itself is excluded, judged relative to
+    the analysis root). An absent or non-regular config, or an unparseable
+    one, contributes only the config coordinate. A declaration that leaves
+    the capture or the analysis root stops the derivation and keeps what was
+    resolved before it, so analysis of the captured side reports that error
+    rather than a consequence of a missing root.
+    """
+    config_only = CaptureSelection(files=(config_coordinate,))
+    root = stage.root
+    config_path = root.joinpath(*_coordinate_parts(config_coordinate))
+    worktree_root = stage.pin.root
+    directories: set[str] = set()
+    trees: dict[str, bool] = {}
+
+    def resolve(base: Path, raw: str, label: str) -> tuple[_CurrentRoute, set[str]]:
+        path = _captured_declaration_path(worktree_root, root, base, raw)
+        route = _lexical_declaration(root, base, str(path), label=label)
+        # A ``..`` is walked physically by analysis, so every directory it
+        # passes through must be captured as well.
+        walked: list[str] = []
+        passed: set[str] = set()
+        for part in _relative_parts(root, route.path, label=label):
+            if part in {"", "."}:
+                continue
+            if part == "..":
+                walked.pop()
+            else:
+                walked.append(part)
+                passed.add("/".join(walked))
+        return route, passed
+
+    try:
+        if not stat.S_ISREG(os.lstat(config_path).st_mode):
+            return config_only
+        raw_config = config.parse_config_bytes(config_path.read_bytes(), source=config_path)
+    except Exception:
+        return config_only
+    try:
+        root_route, passed = resolve(config_path.parent, raw_config.root, "analysis root")
+        directories |= passed | {root_route.coordinate}
+        root_parts = _coordinate_parts(root_route.coordinate)
+        systems_route, passed = resolve(root_route.path, raw_config.systems_dir, "systems root")
+        directories |= passed
+        trees[systems_route.coordinate] = False
+        for raw_target in raw_config.targets:
+            target_route, passed = resolve(root_route.path, raw_target, "target")
+            target = target_route.coordinate
+            directories |= passed - {target}
+            if _coordinate_parts(target)[: len(root_parts)] != root_parts:
+                break
+            relative = _analysis_relative_coordinate(target, root_parts)
+            # An unpruned subtree wins over a pruned one at the same coordinate.
+            trees[target] = trees.get(target, True) and not exclusions.is_excluded(Path(relative))
+    except Exception:
+        pass
+    return CaptureSelection(files=(config_coordinate,), directories=directories, trees=trees)
+
+
+def _require_config_coordinate(value: str | None) -> str:
+    if value is None:  # pragma: no cover - an override, shared path, or discovery supplies one.
+        raise ValueError("no configuration path could be determined for a comparison side")
+    return value
+
+
+def _discovery_candidates(worktree: Path, preserved_start: Path) -> tuple[str, ...]:
+    """Name every ``.minotaur.toml`` the discovery walk can inspect."""
+    candidates: list[str] = []
+    current = preserved_start
+    while True:
+        candidates.append(
+            _route_coordinate((*current.relative_to(worktree).parts, ".minotaur.toml"))
+        )
+        if current == worktree or current.parent == current:
+            return tuple(candidates)
+        current = current.parent
+
+
+def _comparison_plan(
+    worktree: Path,
+    preserved_start: Path,
+    shared: str | None,
+    before_override: str | None,
+    after_override: str | None,
+    before_stage: CaptureStage,
+    after_stage: CaptureStage,
+) -> tuple[CaptureSelection, tuple[str, str]]:
+    """Plan one comparison capture: stage configs, fix coordinates, select.
+
+    Each side first stages its explicit config coordinate and, when a side has
+    none, the discovery candidates from the start directory to the worktree
+    root, all in one ``include`` call. The unchanged live-route discovery then
+    runs on the staged after root. The selection of each side comes from the
+    config bytes staged for it, so the bytes the selection was derived from
+    are the bytes analyzed. Returns the union selection and the
+    ``(before, after)`` config coordinates.
+    """
+    needs_discovery = shared is None and (before_override is None or after_override is None)
+    candidates = _discovery_candidates(worktree, preserved_start) if needs_discovery else ()
+    explicit = (before_override or shared, after_override or shared)
+    for stage, coordinate in ((before_stage, explicit[0]), (after_stage, explicit[1])):
+        stage.include((*([coordinate] if coordinate else []), *candidates))
+    discovered: str | None = None
+    if needs_discovery:
+        after_start = after_stage.root / preserved_start.relative_to(worktree)
+        discovered = _current_config_route(after_stage.root, after_start, None).coordinate
+    before_coordinate = _require_config_coordinate(explicit[0] or discovered)
+    after_coordinate = _require_config_coordinate(explicit[1] or discovered)
+    selection = _capture_selection(before_stage, before_coordinate).union(
+        _capture_selection(after_stage, after_coordinate)
+    )
+    return selection, (before_coordinate, after_coordinate)
+
+
 def _validate_live_current_contract(worktree: Path, selected_config: _CurrentRoute) -> None:
     """Reject unsafe current declarations before either side is analyzed."""
     try:
@@ -1087,27 +1214,25 @@ def prepare_comparison(
 ) -> PreparedComparison:
     """Analyze a complete old/new pair from isolated source captures.
 
-    The old side is a pinned ``HEAD`` tree and the new side is a read-only copy
-    of the working tree, so untracked and unstaged source participate without
-    mutating the checkout. Each side parses its own config and system
+    The old side is a pinned ``HEAD`` tree and the new side is a copy of the
+    working tree's analyzed selection, so untracked and unstaged source in it
+    participate without mutating the checkout. Each side parses its own config and system
     declarations and runs the same producer against its own root. Saved graph
     files and sidecars are intentionally not inputs to this operation.
     """
     worktree, preserved_start = _select_worktree(start)
     selected_config = _current_config_route(worktree, preserved_start, raw_config_path)
     _validate_live_current_contract(worktree, selected_config)
-    before = capture_local_revision(worktree, "HEAD", side="before")
-    try:
-        after = capture_working_tree(worktree, side="after")
-    except Exception:
-        before.close()
-        raise
+    plan = partial(
+        _comparison_plan, worktree, preserved_start, selected_config.coordinate, None, None
+    )
+    before, after, (before_coordinate, after_coordinate) = capture_pair(
+        worktree, "HEAD", None, plan=plan
+    )
     try:
         with before, after:
-            old = _captured_analysis(
-                before, selected_config.coordinate, producer, validate=validate
-            )
-            new = _captured_analysis(after, selected_config.coordinate, producer, validate=True)
+            old = _captured_analysis(before, before_coordinate, producer, validate=validate)
+            new = _captured_analysis(after, after_coordinate, producer, validate=True)
             historical = HistoricalInputs(
                 pin=before.pin,
                 config_coordinate=old.config_coordinate,

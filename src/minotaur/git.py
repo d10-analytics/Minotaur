@@ -5,10 +5,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Sequence
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 # Repository-local variables reported by `git rev-parse --local-env-vars`,
 # except GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT, which retain caller policy.
@@ -65,8 +66,20 @@ def run_git(
     arguments: Sequence[str],
     *,
     text: bool = True,
+    input: bytes | None = None,
+    consumer: Callable[[IO[bytes]], None] | None = None,
 ) -> subprocess.CompletedProcess[Any] | None:
-    """Run a Git probe, decoding text with filesystem encoding semantics."""
+    """Run a Git probe, decoding text with filesystem encoding semantics.
+
+    *input*, when given, is written to the probe's standard input as bytes.
+    *consumer*, when given, is called once with the probe's standard output
+    as a binary stream and reads it incrementally instead of the output being
+    captured; the result then carries ``stdout=None``. An exception raised by
+    the consumer stops the probe and propagates. A consumer that returns
+    without reading to the end of the stream also stops the probe.
+    """
+    if consumer is not None:
+        return _run_git_streaming(root, arguments, text, input, consumer)
     try:
         completed: subprocess.CompletedProcess[Any] = subprocess.run(
             ["git", *arguments],
@@ -74,12 +87,75 @@ def run_git(
             capture_output=True,
             check=False,
             text=False,
+            input=input,
             env=_probe_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if text:
         completed.stdout = os.fsdecode(completed.stdout)
+        completed.stderr = os.fsdecode(completed.stderr)
+    return completed
+
+
+def _run_git_streaming(
+    root: Path,
+    arguments: Sequence[str],
+    text: bool,
+    input: bytes | None,
+    consumer: Callable[[IO[bytes]], None],
+) -> subprocess.CompletedProcess[Any] | None:
+    """Run Git with standard input fed and standard error drained concurrently.
+
+    Feeding and draining run on helper threads so that neither a long request
+    nor a chatty failure can stall the child while the consumer reads output.
+    """
+    try:
+        process = subprocess.Popen(
+            ["git", *arguments],
+            cwd=root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=_probe_environment(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdin, stdout, stderr = process.stdin, process.stdout, process.stderr
+    errors: list[bytes] = []
+
+    def feed() -> None:
+        try:
+            with stdin:
+                stdin.write(input or b"")
+        except OSError:
+            pass  # The child stopped reading; its exit status reports why.
+
+    def drain() -> None:
+        with stderr:
+            errors.append(stderr.read())
+
+    helpers = [threading.Thread(target=feed), threading.Thread(target=drain)]
+    for helper in helpers:
+        helper.daemon = True
+        helper.start()
+    try:
+        consumer(stdout)
+    except BaseException:
+        process.kill()
+        raise
+    finally:
+        stdout.close()
+        for helper in helpers:
+            helper.join()
+        process.wait()
+    completed: subprocess.CompletedProcess[Any] = subprocess.CompletedProcess(
+        process.args, process.returncode, None, b"".join(errors)
+    )
+    if text:
         completed.stderr = os.fsdecode(completed.stderr)
     return completed
 
@@ -147,6 +223,9 @@ def _error_text(value: bytes | str | None) -> str:
     return value.strip() if value else "Git operation failed"
 
 
+# Longest accepted ``cat-file --batch`` header line (object id, type, size).
+_MAX_BATCH_HEADER = 4096
+
 _COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 
 
@@ -201,6 +280,8 @@ class TreeEntry:
     path: str
     mode: str
     kind: str
+    # Object id from a listing; informational, so it never affects equality.
+    oid: str | None = field(default=None, compare=False)
 
     @property
     def is_regular_file(self) -> bool:
@@ -282,6 +363,12 @@ class PinnedCommit:
         output = completed.stdout
         if not isinstance(output, bytes):
             raise self._error(display_path, "Git tree listing did not return bytes")
+        return self._parse_tree_records(output, display_path, relative)
+
+    def _parse_tree_records(
+        self, output: bytes, display_path: str, prefix: str
+    ) -> tuple[TreeEntry, ...]:
+        """Parse NUL-separated ``ls-tree`` records into sorted entries."""
         result: list[TreeEntry] = []
         for raw in output.split(b"\0"):
             if not raw:
@@ -295,12 +382,90 @@ class PinnedCommit:
             try:
                 mode = fields[0].decode("ascii")
                 kind = fields[1].decode("ascii")
+                oid = fields[2].decode("ascii")
             except UnicodeDecodeError:
                 raise self._error(display_path, "invalid Git tree entry") from None
             name = name_bytes.decode("utf-8", errors="surrogateescape")
-            path = f"{relative}/{name}" if relative else name
-            result.append(TreeEntry(path=path, mode=mode, kind=kind))
+            path = f"{prefix}/{name}" if prefix else name
+            result.append(TreeEntry(path=path, mode=mode, kind=kind, oid=oid))
         return tuple(sorted(result, key=lambda entry: entry.path))
+
+    def full_listing(self) -> tuple[TreeEntry, ...]:
+        """List every entry, trees included, with one recursive Git call."""
+        completed = run_git(self.root, ("ls-tree", "-r", "-t", "-z", self.commit), text=False)
+        if completed is None:
+            raise self._error(".", "Git tree listing probe was unavailable")
+        if completed.returncode != 0:
+            raise self._error(".", _error_text(completed.stderr))
+        output = completed.stdout
+        if not isinstance(output, bytes):
+            raise self._error(".", "Git tree listing did not return bytes")
+        return self._parse_tree_records(output, ".", "")
+
+    def stream_blobs(
+        self,
+        requested: Sequence[TreeEntry],
+        consume: Callable[[TreeEntry, bytes], None],
+    ) -> None:
+        """Hand the blob bytes of *requested* listing entries to *consume*.
+
+        One Git call serves the whole request. Each object is parsed and
+        delivered, in request order, before the next is read, so at most one
+        payload is resident; *consume* raising stops the read and leaves later
+        objects unread. A missing object, a non-blob object, or any framing
+        mismatch raises a side-attributed error naming the offending entry's
+        path; an empty request runs no process.
+        """
+        if not requested:
+            return
+        for item in requested:
+            if not item.oid:
+                raise self._error(item.path, "entry has no object id")
+        first = requested[0].path
+        shortfall: list[GitInputError] = []
+
+        def read(stream: IO[bytes]) -> None:
+            for item in requested:
+                assert item.oid is not None
+                header = stream.readline(_MAX_BATCH_HEADER)
+                if not header.endswith(b"\n"):
+                    shortfall.append(
+                        self._error(item.path, "Git blob read ended before this object")
+                    )
+                    return
+                fields = header[:-1].split(b" ")
+                if len(fields) == 2 and fields[1] == b"missing":
+                    raise self._error(item.path, f"object {item.oid} is missing")
+                if len(fields) != 3 or fields[0].decode("ascii", "replace") != item.oid:
+                    raise self._error(item.path, "invalid Git blob read header")
+                if fields[1] != b"blob":
+                    kind = fields[1].decode("ascii", "replace")
+                    raise self._error(item.path, f"object is a {kind}, not a blob")
+                if not fields[2].isdigit():
+                    raise self._error(item.path, "invalid Git blob read header")
+                size = int(fields[2])
+                payload = stream.read(size)
+                if len(payload) != size or stream.read(1) != b"\n":
+                    shortfall.append(self._error(item.path, "Git blob read payload was truncated"))
+                    return
+                consume(item, payload)
+                del payload
+            if stream.read(1):
+                raise self._error(first, "Git blob read returned unexpected extra output")
+
+        completed = run_git(
+            self.root,
+            ("cat-file", "--batch"),
+            text=False,
+            input="".join(f"{item.oid}\n" for item in requested).encode("ascii"),
+            consumer=read,
+        )
+        if completed is None:
+            raise self._error(first, "Git blob read probe was unavailable")
+        if completed.returncode != 0:
+            raise self._error(first, _error_text(completed.stderr))
+        if shortfall:
+            raise shortfall[0]
 
     def entry(self, relative: str) -> TreeEntry | None:
         """Find one pinned entry, distinguishing confirmed absence from failure."""

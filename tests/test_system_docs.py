@@ -399,6 +399,39 @@ def test_query_reference_documents_system_query_shared_option_behavior() -> None
     assert "`relationships` present only for `--details`" in text
 
 
+def test_query_reference_documents_system_comparison_capture_scope() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert (
+        "Each side captures only the comparison selection: the configuration file and, "
+        "when it is discovered rather than given, its `.minotaur.toml` discovery "
+        "candidates, the analysis root as a directory, the `systems_dir` subtree, and "
+        "the targets."
+    ) in text
+    assert (
+        "Inside the targets, hidden, cache and virtual-environment directories are "
+        "pruned as analysis prunes them, while untracked or Git-ignored files are "
+        "captured."
+    ) in text
+    assert (
+        "Content elsewhere, such as `.venv` or data directories, is neither read nor copied."
+    ) in text
+    assert (
+        "A committed symbolic link, gitlink or unsupported entry inside the selection "
+        "is refused with status `2`, while one elsewhere is ignored."
+    ) in text
+    assert (
+        "Links are handled differently on the two sides: inside targets and "
+        "`systems_dir` the working-tree side omits links instead of refusing them; "
+        "a link on a configured route is refused as described in "
+        "[project configuration](project-configuration.md#path-confinement)."
+    ) in text
+    assert (
+        'With the default `root`, setting `systems_dir = "."` makes the whole '
+        "configuration folder part of the selection, and `source_digest` covers "
+        "exactly the captured selection."
+    ) in text
+
+
 def test_query_reference_documents_system_coverage_and_exit_semantics() -> None:
     text = _collapsed(QUERY_REFERENCE)
     assert "Coverage distinguishes the saved selection, final graph file count" in text

@@ -469,6 +469,21 @@ identical, so a moved symbol is visible as a removal plus an addition. The
 command is read-only: it does not rewrite the committed graph, graph sidecar,
 configuration, or definitions.
 
+Each side captures only the comparison selection: the configuration file and,
+when it is discovered rather than given, its `.minotaur.toml` discovery
+candidates, the analysis root as a directory, the `systems_dir` subtree, and
+the targets. Inside the targets, hidden, cache and virtual-environment
+directories are pruned as analysis prunes them, while untracked or Git-ignored
+files are captured. Content elsewhere, such as `.venv` or data directories, is
+neither read nor copied. A committed symbolic link, gitlink or unsupported
+entry inside the selection is refused with status `2`, while one elsewhere is
+ignored. Links are handled differently on the two sides: inside targets and
+`systems_dir` the working-tree side omits links instead of refusing them; a
+link on a configured route is refused as described in
+[project configuration](project-configuration.md#path-confinement). With the
+default `root`, setting `systems_dir = "."` makes the whole configuration folder
+part of the selection, and `source_digest` covers exactly the captured selection.
+
 The compact output ends with the old/new coverage and selection lines. With
 `--details`, each changed row is followed by its `old`, `new`, `old evidence`,
 and `new evidence` values; an absent side is explicitly `unavailable`, while an
