@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import re
 import subprocess
@@ -602,7 +603,7 @@ def test_full_listing_is_one_recursive_call_with_exact_entries(
         assert item.oid == expected, item.path
 
 
-def test_read_blobs_uses_one_batch_call_and_returns_exact_bytes(
+def test_stream_blobs_uses_one_batch_call_and_returns_exact_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, sha = _listing_repository(tmp_path)
@@ -611,12 +612,12 @@ def test_read_blobs_uses_one_batch_call_and_returns_exact_bytes(
     items = [_batch_item(pinned, path) for path in paths]
     calls = _record_calls(monkeypatch)
 
-    blobs = pinned.read_blobs(items)
+    blobs = _collect(pinned, items)
 
     assert calls == [
         (("cat-file", "--batch"), "".join(f"{item.oid}\n" for item in items).encode("ascii"))
     ]
-    assert blobs == (b"\x00\x01\xffbinary\x00\n", b"", b"text without trailing newline", b"inner\n")
+    assert blobs == [b"\x00\x01\xffbinary\x00\n", b"", b"text without trailing newline", b"inner\n"]
     for item, blob in zip(items, blobs, strict=True):
         expected = subprocess.run(
             ["git", "cat-file", "blob", item.oid],
@@ -627,35 +628,56 @@ def test_read_blobs_uses_one_batch_call_and_returns_exact_bytes(
         assert blob == expected
 
 
-def test_read_blobs_empty_request_issues_no_call(
+def test_stream_blobs_empty_request_issues_no_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, sha = _listing_repository(tmp_path)
     pinned = git.PinnedCommit.resolve(root, sha)
     calls = _record_calls(monkeypatch)
 
-    assert pinned.read_blobs([]) == ()
+    assert _collect(pinned, []) == []
     assert calls == []
+
+
+def _collect(pinned: git.PinnedCommit, items: list[git.TreeEntry]) -> list[bytes]:
+    received: list[tuple[git.TreeEntry, bytes]] = []
+    pinned.stream_blobs(items, lambda item, data: received.append((item, data)))
+    assert [item for item, _ in received] == items
+    return [data for _, data in received]
+
+
+def _stream_double(output: bytes, returncode: int = 0, stderr: bytes = b""):
+    """A ``run_git`` double that replays *output* through the streaming consumer."""
+    streams: list[io.BytesIO] = []
+
+    def double(root_arg: Path, arguments: tuple[str, ...], **kwargs: Any):
+        stream = io.BytesIO(output)
+        streams.append(stream)
+        kwargs["consumer"](stream)
+        return subprocess.CompletedProcess(["git", *arguments], returncode, None, stderr)
+
+    double.streams = streams  # type: ignore[attr-defined]
+    return double
 
 
 def _assert_batch_failure(
     pinned: git.PinnedCommit, item: git.TreeEntry, side: str = "historical"
 ) -> git.GitInputError:
     with pytest.raises(git.GitInputError) as error:
-        pinned.read_blobs([item])
+        _collect(pinned, [item])
     assert error.value.side == side
     assert error.value.commit == pinned.commit
     assert error.value.path == item.path
     return error.value
 
 
-def test_read_blobs_reports_deleted_loose_object_as_missing(tmp_path: Path) -> None:
+def test_stream_blobs_reports_deleted_loose_object_as_missing(tmp_path: Path) -> None:
     root, sha = _listing_repository(tmp_path)
     pinned = git.PinnedCommit.resolve(root, sha, side="before")
     item = _batch_item(pinned, "text.txt")
     assert item.oid is not None
     # The control read succeeds before the object is deleted.
-    assert pinned.read_blobs([item]) == (b"text without trailing newline",)
+    assert _collect(pinned, [item]) == [b"text without trailing newline"]
     (root / ".git" / "objects" / item.oid[:2] / item.oid[2:]).unlink()
     raw = subprocess.run(
         ["git", "cat-file", "--batch"],
@@ -671,7 +693,7 @@ def test_read_blobs_reports_deleted_loose_object_as_missing(tmp_path: Path) -> N
     assert "missing" in str(error)
 
 
-def test_read_blobs_refuses_lazy_fetch_of_promised_blob(tmp_path: Path) -> None:
+def test_stream_blobs_refuses_lazy_fetch_of_promised_blob(tmp_path: Path) -> None:
     clone, sha = _promisor_clone(tmp_path)
     pinned = git.PinnedCommit.resolve(clone, sha, side="before")
     (item,) = [entry for entry in pinned.full_listing() if entry.path == "promised.py"]
@@ -683,31 +705,26 @@ def test_read_blobs_refuses_lazy_fetch_of_promised_blob(tmp_path: Path) -> None:
     assert item.oid not in _local_object_oids(clone)
 
 
-def test_read_blobs_rejects_tree_object(tmp_path: Path) -> None:
+def test_stream_blobs_rejects_tree_object(tmp_path: Path) -> None:
     root, sha = _listing_repository(tmp_path)
     pinned = git.PinnedCommit.resolve(root, sha)
     error = _assert_batch_failure(pinned, _batch_item(pinned, "nested"))
     assert "tree" in str(error)
 
 
-def test_read_blobs_rejects_truncated_payload(
+def test_stream_blobs_rejects_truncated_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, sha = _listing_repository(tmp_path)
     pinned = git.PinnedCommit.resolve(root, sha)
     item = _batch_item(pinned, "text.txt")
 
-    def truncated(root_arg: Path, arguments: tuple[str, ...], **kwargs: Any):
-        return subprocess.CompletedProcess(
-            ["git", *arguments], 0, f"{item.oid} blob 29\ntext witho".encode(), b""
-        )
-
-    monkeypatch.setattr(git, "run_git", truncated)
+    monkeypatch.setattr(git, "run_git", _stream_double(f"{item.oid} blob 29\ntext witho".encode()))
     error = _assert_batch_failure(pinned, item)
     assert "truncated" in str(error)
 
 
-def test_read_blobs_rejects_unavailable_probe_and_nonzero_exit(
+def test_stream_blobs_rejects_unavailable_probe_and_nonzero_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, sha = _listing_repository(tmp_path)
@@ -717,13 +734,7 @@ def test_read_blobs_rejects_unavailable_probe_and_nonzero_exit(
     monkeypatch.setattr(git, "run_git", lambda *args, **kwargs: None)
     assert "unavailable" in str(_assert_batch_failure(pinned, item))
 
-    monkeypatch.setattr(
-        git,
-        "run_git",
-        lambda root_arg, arguments, **kwargs: subprocess.CompletedProcess(
-            ["git", *arguments], 128, b"", b"batch exploded\n"
-        ),
-    )
+    monkeypatch.setattr(git, "run_git", _stream_double(b"", 128, b"batch exploded\n"))
     assert "batch exploded" in str(_assert_batch_failure(pinned, item))
 
 
@@ -783,7 +794,7 @@ def test_full_listing_failures_are_side_attributed(
     )
 
 
-def test_read_blobs_rejects_malformed_batch_output_and_oidless_entries(
+def test_stream_blobs_rejects_malformed_batch_output_and_oidless_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, sha = _listing_repository(tmp_path)
@@ -792,11 +803,7 @@ def test_read_blobs_rejects_malformed_batch_output_and_oidless_entries(
     oid = item.oid
 
     def feed(output: bytes) -> git.GitInputError:
-        monkeypatch.setattr(
-            git,
-            "run_git",
-            lambda *args, **kwargs: subprocess.CompletedProcess(["git"], 0, output, b""),
-        )
+        monkeypatch.setattr(git, "run_git", _stream_double(output))
         return _assert_batch_failure(pinned, item)
 
     other = "0" * len(oid or "")
@@ -808,8 +815,79 @@ def test_read_blobs_rejects_malformed_batch_output_and_oidless_entries(
     monkeypatch.setattr(git, "run_git", lambda *args, **kwargs: called.append(args))
     oidless = git.TreeEntry("text.txt", "100644", "blob")
     with pytest.raises(git.GitInputError) as error:
-        pinned.read_blobs([oidless])
+        _collect(pinned, [oidless])
     assert error.value.path == "text.txt"
     assert error.value.commit == pinned.commit
     assert "object id" in str(error.value)
+    assert called == []
+
+
+def test_stream_blobs_delivers_one_object_at_a_time_and_stops_unread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha)
+    items = [_batch_item(pinned, path) for path in ("text.txt", "binary.bin", "empty.txt")]
+    first = f"{items[0].oid} blob 29\ntext without trailing newline\n".encode()
+    rest = f"{items[1].oid} blob 9\n\x00\x01\xffbinary\x00\n\n".encode()
+    double = _stream_double(first + rest + f"{items[2].oid} blob 0\n\n".encode())
+    monkeypatch.setattr(git, "run_git", double)
+    delivered: list[bytes] = []
+
+    class Stop(Exception):
+        pass
+
+    def consume(item: git.TreeEntry, data: bytes) -> None:
+        delivered.append(data)
+        # The second object has not been touched while the first is held.
+        assert double.streams[0].tell() == len(first)
+        raise Stop
+
+    with pytest.raises(Stop):
+        pinned.stream_blobs(items, consume)
+    assert delivered == [b"text without trailing newline"]
+    assert double.streams[0].tell() == len(first)
+
+
+def test_stream_blobs_stops_real_process_when_consumer_raises(tmp_path: Path) -> None:
+    root, sha = _listing_repository(tmp_path)
+    pinned = git.PinnedCommit.resolve(root, sha)
+    items = [_batch_item(pinned, path) for path in ("text.txt", "binary.bin", "empty.txt")]
+    seen: list[str] = []
+
+    def consume(item: git.TreeEntry, data: bytes) -> None:
+        seen.append(item.path)
+        raise RuntimeError("stop after one")
+
+    with pytest.raises(RuntimeError, match="stop after one"):
+        pinned.stream_blobs(items, consume)
+    assert seen == ["text.txt"]
+
+
+def test_run_git_consumer_streams_stdout_and_feeds_input(tmp_path: Path) -> None:
+    root, _ = _repository(tmp_path)
+    chunks: list[bytes] = []
+
+    completed = git.run_git(
+        root,
+        ("cat-file", "--batch-check"),
+        input=b"HEAD\n",
+        consumer=lambda stream: chunks.append(stream.read()),
+    )
+
+    assert completed is not None
+    assert completed.returncode == 0
+    assert completed.stdout is None
+    assert b"".join(chunks).split()[1:2] == [b"commit"]
+
+
+def test_run_git_consumer_reports_unavailable_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(git.subprocess, "Popen", refuse)
+    called: list[object] = []
+    assert git.run_git(tmp_path, ("--version",), consumer=called.append) is None
     assert called == []

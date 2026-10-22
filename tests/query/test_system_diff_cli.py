@@ -3181,7 +3181,7 @@ class _GitRecorder:
         self._active = False
         self._side: str | None = None
         original_run = git.run_git
-        original_blobs = PinnedCommit.read_blobs
+        original_blobs = PinnedCommit.stream_blobs
         original_listing = PinnedCommit.full_listing
         original_resolve = git.resolve_commit
         original_pair = cli.capture_pair
@@ -3192,10 +3192,10 @@ class _GitRecorder:
                 recorder.calls.append((recorder._side, tuple(arguments)))  # type: ignore[call-overload]
             return original_run(root, arguments, **kwargs)  # type: ignore[arg-type]
 
-        def read_blobs(pin: PinnedCommit, requested: object) -> object:
+        def stream_blobs(pin: PinnedCommit, requested: object, consume: object) -> object:
             previous, recorder._side = recorder._side, pin.side
             try:
-                return original_blobs(pin, requested)  # type: ignore[arg-type]
+                return original_blobs(pin, requested, consume)  # type: ignore[arg-type]
             finally:
                 recorder._side = previous
 
@@ -3230,7 +3230,7 @@ class _GitRecorder:
 
         monkeypatch.setattr(git, "run_git", run_git)
         monkeypatch.setattr(git, "resolve_commit", resolve_commit)
-        monkeypatch.setattr(PinnedCommit, "read_blobs", read_blobs)
+        monkeypatch.setattr(PinnedCommit, "stream_blobs", stream_blobs)
         monkeypatch.setattr(PinnedCommit, "full_listing", full_listing)
         monkeypatch.setattr(cli, "capture_pair", capture_pair)
 

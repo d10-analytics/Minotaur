@@ -136,13 +136,11 @@ class _Recorder:
         self.calls: list[tuple[tuple[str, ...], bytes | None]] = []
         original = git_module.run_git
 
-        def recording(
-            root: Path, arguments: Any, *, text: bool = True, input: bytes | None = None
-        ) -> Any:
-            self.calls.append((tuple(arguments), input))
+        def recording(root: Path, arguments: Any, **kwargs: Any) -> Any:
+            self.calls.append((tuple(arguments), kwargs.get("input")))
             if hook is not None:
                 hook(tuple(arguments))
-            return original(root, arguments, text=text, input=input)
+            return original(root, arguments, **kwargs)
 
         monkeypatch.setattr(git_module, "run_git", recording)
 
@@ -1212,3 +1210,32 @@ def test_entry_inspection_failure_is_reported_at_the_directory_that_cannot_be_se
     # may name the entry that could not be inspected.
     assert f"input at {directory.resolve()!r}: " in str(error.value)
     assert _leftovers(temp_root) == []
+
+
+@pytest.mark.parametrize(("count", "size"), [(16, 4 << 20), (4, 8 << 20)])
+def test_revision_capture_memory_stays_near_one_selected_file(
+    tmp_path: Path, count: int, size: int
+) -> None:
+    import tracemalloc
+
+    root = _init(tmp_path / "repo")
+    for index in range(count):
+        label = f"file {index}\n".encode()
+        (root / f"big{index:02}.bin").write_bytes((label * (size // len(label) + 1))[:size])
+    commit = _commit(root, "large selection")
+
+    tracemalloc.start()
+    try:
+        first, second, _ = capture_pair(root, commit, commit, plan=_plan(ALL))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    try:
+        assert len(_manifest_paths(first)) == count
+        assert first.path("big00.bin").stat().st_size == size
+        assert second.path(f"big{count - 1:02}.bin").stat().st_size == size
+    finally:
+        first.close()
+        second.close()
+
+    assert peak < 4 * size
