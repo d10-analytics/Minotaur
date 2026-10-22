@@ -440,9 +440,12 @@ class CaptureStage:
         return frozenset(self._requested)
 
     def include(self, paths: Iterable[str]) -> None:
-        """Stage *paths* as listed; a missing path stages nothing.
+        """Stage *paths* as listed, together with their route ancestors.
 
-        On a revision side the whole call reads its blobs with one batch.
+        Each route ancestor present on this side is staged as listed, as a
+        directory or as the entry found at that position, even when the path
+        below it is absent; an absent path itself stages nothing. On a
+        revision side the whole call reads its blobs with one batch.
         """
         if isinstance(paths, str):
             raise TypeError("include takes a collection of paths, not one string")
