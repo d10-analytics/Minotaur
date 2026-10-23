@@ -458,9 +458,10 @@ def _relabel_snapshot_error(
         and public_path == error.path
     ):
         return error
-    return _current_error(
-        public_path,
-        error.detail,
+    return CurrentInputError(
+        path=public_path,
+        detail=error.detail,
+        cause=error.cause_type,
         diagnostics=error.diagnostics,
         side=snapshot.side,
         revision=snapshot.revision,
@@ -534,9 +535,11 @@ def _captured_analysis(
         if config_route.entry is None:
             raise _current_error(config_path, "required config is absent")
         try:
-            raw_config = config.parse_config_bytes(config_path.read_bytes(), source=config_path)
+            raw_config = config.parse_config_bytes(
+                config_path.read_bytes(), source=config_coordinate
+            )
         except Exception as error:
-            raise _current_error(config_path, "invalid captured configuration", error) from error
+            raise _current_error(config_path, str(error), error) from error
 
         root_path = _captured_declaration_path(
             snapshot.pin.root, root, config_path.parent, raw_config.root
@@ -787,9 +790,7 @@ def _validate_live_current_contract(worktree: Path, selected_config: _CurrentRou
             selected_config.path.read_bytes(), source=selected_config.path
         )
     except Exception as error:
-        raise _current_error(
-            selected_config.path, "invalid current configuration", error
-        ) from error
+        raise _current_error(selected_config.path, str(error), error) from error
     root_path = _declaration_path(worktree, selected_config.path.parent, current_config.root)
     root_route = _inspect_current_route(
         worktree, root_path, label="analysis root", allow_missing=False
