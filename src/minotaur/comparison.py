@@ -441,6 +441,7 @@ class _CapturedAnalysis:
     systems: tuple[system.System, ...]
     selection: tuple[str, ...]
     graph: LoadedGraph
+    call_expressions: tuple[CallExpressionObservation, ...]
     diagnostics: tuple[Diagnostic, ...] = ()
 
 
@@ -654,6 +655,7 @@ def _captured_analysis(
             systems=systems,
             selection=selection,
             graph=graph,
+            call_expressions=tuple(produced.call_expressions),
             diagnostics=diagnostics,
         )
     except CurrentInputError as error:
@@ -838,7 +840,7 @@ def _repository_relative(value: str, *, label: str) -> str:
     return "/".join(parts)
 
 
-def _shared_config_coordinate(worktree: Path, start: Path, raw: Path | None) -> str | None:
+def _shared_config_coordinate(worktree: Path, start: Path, raw: Path | str | None) -> str | None:
     """Convert the shared config spelling into a repository-relative coordinate.
 
     A relative shared path keeps its existing working-directory meaning. An
@@ -848,7 +850,11 @@ def _shared_config_coordinate(worktree: Path, start: Path, raw: Path | None) -> 
     """
     if raw is None:
         return None
-    candidate = raw if raw.is_absolute() else start / raw
+    if not str(raw).strip():
+        raise ValueError("--config requires a non-empty file path")
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = start / candidate
     try:
         candidate = candidate.relative_to(worktree)
     except ValueError as error:
@@ -915,38 +921,12 @@ def _definition_files(analysis: _CapturedAnalysis) -> tuple[str, ...]:
     return tuple(sorted(coordinates))
 
 
-def _observing_producer(
-    producer: SelectionProducer, sink: list[CallExpressionObservation]
-) -> SelectionProducer:
-    """Wrap *producer* so the call expressions it returns are kept for one side."""
-    parameters = inspect.signature(producer).parameters
-    accepts_sql = "sql_settings" in parameters or any(
-        item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
-    )
-
-    def _record(
-        root: Path,
-        targets: tuple[Path, ...],
-        metadata_targets: tuple[Path, ...] | None = None,
-        sql_settings: SqlSettings | None = None,
-    ) -> tuple[Workspace, SourceSelection, AnalysisResult]:
-        if accepts_sql:
-            produced = producer(root, targets, metadata_targets, sql_settings=sql_settings)
-        else:
-            produced = producer(root, targets, metadata_targets)
-        sink.extend(produced[2].call_expressions)
-        return produced
-
-    return _record
-
-
 def _side_record(
     analysis: _CapturedAnalysis,
     *,
     kind: str,
     requested_revision: str | None,
     commit: str | None,
-    observations: Sequence[CallExpressionObservation],
     systems: tuple[system.System, ...],
 ) -> ComparisonSide:
     document_paths = {node.path for node in analysis.graph.document.nodes if node.path}
@@ -966,13 +946,13 @@ def _side_record(
         manifest=analysis.snapshot.manifest,
         definition_files=_definition_files(analysis),
         source_bytes=capture_source_bytes(_captured_side_root(analysis), sorted(document_paths)),
-        call_observations=tuple(observations),
+        call_observations=analysis.call_expressions,
     )
 
 
 def prepare_comparison(
     start: Path,
-    raw_config_path: Path | None,
+    raw_config_path: Path | str | None,
     producer: SelectionProducer,
     validate: bool = False,
     before: str | None = None,
@@ -1004,7 +984,13 @@ def prepare_comparison(
     worktree, preserved_start = _select_worktree(start)
     shared = _shared_config_coordinate(worktree, preserved_start, raw_config_path)
     if after is None:
-        live_raw = worktree / after_config if after_config is not None else raw_config_path
+        live_raw = (
+            worktree / after_config
+            if after_config is not None
+            else None
+            if raw_config_path is None
+            else Path(raw_config_path)
+        )
         _validate_live_current_contract(
             worktree, _current_config_route(worktree, preserved_start, live_raw)
         )
@@ -1013,19 +999,17 @@ def prepare_comparison(
     before_capture, after_capture, (before_coordinate, after_coordinate) = capture_pair(
         worktree, before_requested, after, plan=plan
     )
-    old_observations: list[CallExpressionObservation] = []
-    new_observations: list[CallExpressionObservation] = []
     with before_capture, after_capture:
         old = _captured_analysis(
             before_capture,
             before_coordinate,
-            _observing_producer(producer, old_observations),
+            producer,
             validate=validate,
         )
         new = _captured_analysis(
             after_capture,
             after_coordinate,
-            _observing_producer(producer, new_observations),
+            producer,
             validate=True,
         )
         _require_pair_targets_materialized(old, new)
@@ -1036,7 +1020,6 @@ def prepare_comparison(
             kind="commit",
             requested_revision=before_requested,
             commit=old.snapshot.commit,
-            observations=old_observations,
             systems=old_systems,
         )
         new_side = _side_record(
@@ -1044,7 +1027,6 @@ def prepare_comparison(
             kind="working-tree" if after is None else "commit",
             requested_revision=after,
             commit=None if after is None else new.snapshot.commit,
-            observations=new_observations,
             systems=new_systems,
         )
         return (

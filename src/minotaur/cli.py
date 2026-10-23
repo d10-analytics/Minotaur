@@ -989,6 +989,16 @@ class _HtmlOutputPlan:
     resolved_parent_identity: tuple[int, int]
 
 
+def _acquisition_producer(
+    root: Path,
+    targets: tuple[Path, ...],
+    metadata_targets: tuple[Path, ...] | None = None,
+    sql_settings: SqlSettings | None = None,
+) -> tuple[Workspace, SourceSelection, AnalysisResult]:
+    """Hand the acquisition entry point the producer resolved at call time."""
+    return _produce_selection(root, targets, metadata_targets, sql_settings=sql_settings)
+
+
 def _run_systems_diff(query: argparse.Namespace) -> int:
     """Acquire, compare, and publish one configured source pair.
 
@@ -1008,13 +1018,10 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
         raise ValueError("--force requires --html")
 
     plan = _preflight_html_output(html_path, force=force) if html_path is not None else None
-    raw_config = getattr(query, "config", None)
-    if raw_config is not None and not raw_config.strip():
-        raise ValueError("--config requires a non-empty file path")
     worktree, before, after, old_snapshot, new_snapshot = prepare_comparison(
         Path.cwd(),
-        None if raw_config is None else Path(raw_config),
-        _produce_selection,
+        getattr(query, "config", None),
+        _acquisition_producer,
         bool(getattr(query, "validate", False)),
         before=before_revision,
         after=after_revision,
