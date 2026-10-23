@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import os
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from minotaur.cli import _produce_selection
 from minotaur.comparison import CurrentInputError, prepare_comparison, validate_saved_selection
 from minotaur.comparison_snapshot import SnapshotMutationError
 from minotaur.graph_model.loading import graph_digest
+from minotaur.graph_model.serialization import serialize
 from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 
@@ -148,10 +151,12 @@ def test_prepare_comparison_ignores_committed_graph_and_sidecar(tmp_path: Path) 
     _write(root, "graph.json.sha256", "not a digest\n")
     _commit(root, "corrupt saved graph and sidecar")
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    assert prepared.old_snapshot.document.nodes
-    assert prepared.new_snapshot.document.nodes
+    assert old_snapshot.document.nodes
+    assert new_snapshot.document.nodes
 
 
 def test_prepare_comparison_publishes_both_snapshots_from_real_repository(
@@ -159,19 +164,20 @@ def test_prepare_comparison_publishes_both_snapshots_from_real_repository(
 ) -> None:
     root, sha, _ = _repository(tmp_path)
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    assert prepared.historical.commit == sha
-    assert prepared.current.config_coordinate == ".minotaur.toml"
-    assert prepared.current.normalized_root == "."
-    assert prepared.current.normalized_targets == ("app.py",)
-    assert prepared.current.selection == ("app.py",)
-    assert prepared.old_snapshot.document is prepared.historical.graph.document
-    assert prepared.new_snapshot.document.nodes
-    assert prepared.new_snapshot.document.extensions["minotaur"]["selection"] == ("app.py",)
-    assert not hasattr(prepared.current, "graph_bytes")
+    assert before.commit == sha
+    assert after.config_coordinate == ".minotaur.toml"
+    assert after.normalized_root == "."
+    assert after.normalized_targets == ("app.py",)
+    assert after.selection == ("app.py",)
+    assert old_snapshot.document.nodes
+    assert new_snapshot.document.nodes
+    assert new_snapshot.document.extensions["minotaur"]["selection"] == ("app.py",)
     with pytest.raises(FrozenInstanceError):
-        prepared.current.selection = ("other.py",)  # type: ignore[misc]
+        after.selection = ("other.py",)  # type: ignore[misc]
 
 
 def test_prepare_comparison_preserves_each_captured_sql_pattern(
@@ -208,9 +214,11 @@ def test_prepare_comparison_preserves_each_captured_sql_pattern(
         return original(document, settings)
 
     monkeypatch.setattr(sql_interpreter, "analyze_view_warnings", observe)
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    assert prepared.new_snapshot.document.nodes
+    assert new_snapshot.document.nodes
     assert [settings.migration_patterns for settings in observed] == [
         ("migrations/**/*.sql",),
         ("migrations/*.sql",),
@@ -275,11 +283,11 @@ def test_prepare_comparison_uses_raw_worktree_for_nested_start_and_discovery(
     nested = root / "nested" / "work"
     nested.mkdir(parents=True)
 
-    prepared = prepare_comparison(nested, None, _produce_selection)
+    worktree, _, after, _, _ = prepare_comparison(nested, None, _produce_selection)
 
-    assert prepared.historical.worktree_root == root
-    assert prepared.current.config_coordinate == ".minotaur.toml"
-    assert prepared.current.normalized_root == "."
+    assert worktree == root
+    assert after.config_coordinate == ".minotaur.toml"
+    assert after.normalized_root == "."
 
 
 def test_prepare_comparison_rejects_nested_repository_crossed_by_dotdot_routes(
@@ -310,6 +318,7 @@ def test_prepare_comparison_preserves_terminal_dotdot_route_coordinate(
 ) -> None:
     root, _, _ = _repository(tmp_path)
     (root / "a/b").mkdir(parents=True)
+    _write(root, "a/app.py", "def app():\n    return 2\n")
     _write(
         root,
         ".minotaur.toml",
@@ -318,9 +327,11 @@ def test_prepare_comparison_preserves_terminal_dotdot_route_coordinate(
         'systems_dir = "docs/systems"\n',
     )
 
-    prepared = prepare_comparison(root, None, _produce_selection)
-    assert prepared.historical.normalized_root == "."
-    assert prepared.current.normalized_root == "a"
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
+    assert before.normalized_root == "."
+    assert after.normalized_root == "a"
 
 
 def test_prepare_comparison_rejects_unsupported_regular_target_before_producer(
@@ -363,15 +374,15 @@ def test_prepare_comparison_all_deleted_targets_keep_complete_metadata(
         observed.append((targets, metadata_targets))
         return _produce_selection(workspace_root, targets, metadata_targets)
 
-    prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
     assert len(observed) == 2
     assert observed[0][0]
     assert observed[0][0] == observed[0][1]
     assert observed[1][0] == ()
     assert observed[1][1]
-    assert prepared.current.selection == ("app.py", "other.py")
-    assert prepared.new_snapshot.document.nodes == ()
+    assert after.selection == ("app.py", "other.py")
+    assert new_snapshot.document.nodes == ()
 
 
 def test_prepare_comparison_rejects_malformed_selection_without_diagnostics(
@@ -550,22 +561,22 @@ def test_prepare_comparison_retains_every_captured_config_coordinate_after_live_
         return _produce_selection(workspace_root, targets, metadata_targets)
 
     monkeypatch.setattr(config, "parse_config_bytes", parse_once)
-    prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
     # Live validation, both staged-config reads in the plan, then both analyses.
     assert calls == 5
-    assert prepared.current.config_coordinate == ".minotaur.toml"
-    assert prepared.current.config.root == "changed-root"
-    assert prepared.current.config.graph == "changed-graph.json"
-    assert prepared.current.config.systems_dir == "changed-systems"
-    assert prepared.current.config.targets == ("changed.py",)
-    assert prepared.current.normalized_root == "changed-root"
-    assert prepared.current.normalized_graph == "changed-root/changed-graph.json"
-    assert prepared.current.normalized_systems_dir == "changed-root/changed-systems"
-    assert prepared.current.normalized_targets == ("changed-root/changed.py",)
+    assert after.config_coordinate == ".minotaur.toml"
+    assert after.config.root == "changed-root"
+    assert after.config.graph == "changed-graph.json"
+    assert after.config.systems_dir == "changed-systems"
+    assert after.config.targets == ("changed.py",)
+    assert after.normalized_root == "changed-root"
+    assert after.normalized_graph == "changed-root/changed-graph.json"
+    assert after.normalized_systems_dir == "changed-root/changed-systems"
+    assert after.normalized_targets == ("changed-root/changed.py",)
     assert len(observed) == 2
     assert observed[0][0] != observed[1][0]
-    assert prepared.new_snapshot.document.nodes
+    assert new_snapshot.document.nodes
 
 
 @pytest.mark.parametrize("systems_value", ["missing-systems", "systems-file"])
@@ -583,9 +594,11 @@ def test_prepare_comparison_treats_missing_or_nondirectory_systems_root_as_empty
         f'systems_dir = "{systems_value}"\n',
     )
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    assert prepared.current.systems == ()
+    assert after.systems == ()
 
 
 def test_prepare_comparison_rejects_linked_current_system_definition(
@@ -670,23 +683,27 @@ def test_prepare_comparison_accepts_ordinary_directory_definition_as_empty(
     definition.unlink()
     definition.mkdir()
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    assert prepared.current.systems == ()
+    assert after.systems == ()
 
 
-def test_prepare_comparison_rejects_current_root_and_target_mismatch_before_producer(
+def test_prepare_comparison_accepts_a_changed_current_target_set(
     tmp_path: Path,
 ) -> None:
     root, _, _ = _repository(tmp_path)
     _write(root, "other.py", "def other():\n    return 2\n")
     _set_config(root, targets=["other.py"])
-    prepared = prepare_comparison(root, None, _produce_selection)
-    assert prepared.historical.normalized_targets == ("app.py",)
-    assert prepared.current.normalized_targets == ("other.py",)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
+    assert before.normalized_targets == ("app.py",)
+    assert after.normalized_targets == ("other.py",)
 
 
-def test_prepare_comparison_rejects_current_root_mismatch_before_producer(
+def test_prepare_comparison_accepts_a_changed_current_analysis_root(
     tmp_path: Path,
 ) -> None:
     root, _, _ = _repository(tmp_path)
@@ -700,9 +717,11 @@ def test_prepare_comparison_rejects_current_root_mismatch_before_producer(
         'graph = "graph.json"\ntargets = ["app.py"]\n'
         'systems_dir = "docs/systems"\n',
     )
-    prepared = prepare_comparison(root, None, _produce_selection)
-    assert prepared.historical.normalized_root == "."
-    assert prepared.current.normalized_root == "alternate"
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
+    assert before.normalized_root == "."
+    assert after.normalized_root == "alternate"
 
 
 def test_prepare_comparison_does_not_inspect_or_read_unused_current_graph(
@@ -737,10 +756,12 @@ def test_prepare_comparison_does_not_inspect_or_read_unused_current_graph(
 
     monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    assert prepared.current.graph_coordinate == "graph-link.json"
-    assert prepared.new_snapshot.document.nodes
+    assert after.normalized_graph == "graph-link.json"
+    assert new_snapshot.document.nodes
 
 
 def test_prepare_comparison_rejects_current_graph_escape_before_producer(
@@ -824,12 +845,14 @@ def test_prepare_comparison_allows_declarations_inside_the_config_folder(
     )
     _commit(root, "confined sub config")
 
-    prepared = prepare_comparison(root / "sub", None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root / "sub", None, _produce_selection
+    )
 
-    assert prepared.current.normalized_root == "sub"
-    assert prepared.current.normalized_graph == "sub/graph.json"
-    assert prepared.current.normalized_systems_dir == "sub/docs/systems"
-    assert prepared.new_snapshot.document.nodes
+    assert after.normalized_root == "sub"
+    assert after.normalized_graph == "sub/graph.json"
+    assert after.normalized_systems_dir == "sub/docs/systems"
+    assert new_snapshot.document.nodes
 
 
 def test_prepare_comparison_preserves_current_parse_cause_and_path(
@@ -846,18 +869,23 @@ def test_prepare_comparison_preserves_current_parse_cause_and_path(
     assert isinstance(error.value.__cause__, config.ConfigError)
 
 
-def test_prepare_comparison_rejects_unproven_untracked_deleted_target(
-    tmp_path: Path,
+def test_prepare_comparison_rejects_a_target_absent_on_both_sides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, _, _ = _repository(tmp_path)
     _set_config(root, targets=["untracked.py"])
-    _set_selection(root, ["untracked.py"])
     _commit(root, "configure absent target")
     untracked = _write(root, "untracked.py", "def later():\n    return 3\n")
     untracked.unlink()
-    prepared = prepare_comparison(root, None, _produce_selection)
-    assert prepared.current.selection == ("untracked.py",)
-    assert prepared.new_snapshot.document.nodes == ()
+    captures = _redirect_captures(tmp_path, monkeypatch)
+    calls: list[object] = []
+
+    with pytest.raises(ValueError) as error:
+        prepare_comparison(root, None, _spy_producer(calls))
+
+    assert str(error.value) == "configured target is absent on both comparison sides: untracked.py"
+    assert len(calls) == 2
+    assert list(captures.iterdir()) == []
 
 
 def test_prepare_comparison_ignores_old_saved_selection(
@@ -866,9 +894,11 @@ def test_prepare_comparison_ignores_old_saved_selection(
     root, _, _ = _repository(tmp_path)
     _set_selection(root, ["other.py"])
     _commit(root, "corrupt saved selection")
-    prepared = prepare_comparison(root, None, _produce_selection)
-    assert prepared.old_snapshot.document.nodes
-    assert prepared.new_snapshot.document.nodes
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
+    assert old_snapshot.document.nodes
+    assert new_snapshot.document.nodes
 
 
 def test_prepare_comparison_passes_existing_targets_and_full_metadata_to_producer(
@@ -885,9 +915,9 @@ def test_prepare_comparison_passes_existing_targets_and_full_metadata_to_produce
         observed.append((workspace_root, targets, metadata_targets))
         return _produce_selection(workspace_root, targets, metadata_targets)
 
-    prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
-    assert prepared.current.selection == ("app.py",)
+    assert after.selection == ("app.py",)
     assert len(observed) == 2
     assert observed[0][0] != root
     assert observed[1][0] != root
@@ -912,14 +942,14 @@ def test_prepare_comparison_proves_deleted_current_target_from_head_pin(
         observed.append((targets, metadata_targets))
         return _produce_selection(workspace_root, targets, metadata_targets)
 
-    prepared = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
-    assert prepared.current.selection == ("app.py",)
+    assert after.selection == ("app.py",)
     assert len(observed) == 2
     assert observed[0][0]
     assert observed[1][0] == ()
     assert observed[1][1]
-    assert prepared.new_snapshot.document.nodes == ()
+    assert new_snapshot.document.nodes == ()
 
 
 def test_prepare_comparison_reports_complete_source_diagnostics_before_metadata(
@@ -1065,11 +1095,13 @@ def test_prepare_comparison_captures_current_config_once_before_live_edit(
         return parsed
 
     monkeypatch.setattr(config, "parse_config_bytes", parse_once)
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
     assert calls == 5
-    assert prepared.current.normalized_targets == ("changed.py",)
-    assert prepared.current.config.targets == ("changed.py",)
+    assert after.normalized_targets == ("changed.py",)
+    assert after.config.targets == ("changed.py",)
 
 
 def test_prepare_comparison_keeps_pinned_history_when_head_moves_during_acquisition(
@@ -1088,11 +1120,13 @@ def test_prepare_comparison_keeps_pinned_history_when_head_moves_during_acquisit
         return original_listing(pinned)
 
     monkeypatch.setattr(git.PinnedCommit, "full_listing", move_head_once)
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
     assert moved
-    assert prepared.historical.commit == old_sha
-    assert prepared.historical.graph_bytes != old_graph
+    assert before.commit == old_sha
+    assert serialize(old_snapshot.document) != old_graph
     assert _run(root, "rev-parse", "HEAD") != old_sha
 
 
@@ -1151,19 +1185,21 @@ def test_prepare_comparison_analyzes_head_and_worktree_from_separate_roots_with_
         'systems_dir = "systems"\n',
     )
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    old_paths = {node.path for node in prepared.old_snapshot.document.nodes if node.path}
-    new_paths = {node.path for node in prepared.new_snapshot.document.nodes if node.path}
+    old_paths = {node.path for node in old_snapshot.document.nodes if node.path}
+    new_paths = {node.path for node in new_snapshot.document.nodes if node.path}
     assert "old.py" in old_paths
     assert "old.py" not in new_paths
     assert "new.py" not in old_paths
     assert "new.py" in new_paths
-    assert prepared.historical.normalized_root == "."
-    assert prepared.current.normalized_root == "src"
-    assert prepared.historical.definitions[0].name == "core"
-    assert prepared.current.definitions[0].name == "current"
-    assert all(str(root) not in str(node) for node in prepared.new_snapshot.document.nodes)
+    assert before.normalized_root == "."
+    assert after.normalized_root == "src"
+    assert before.systems[0].name == "core"
+    assert after.systems[0].name == "current"
+    assert all(str(root) not in str(node) for node in new_snapshot.document.nodes)
 
 
 def test_prepare_comparison_ignores_stale_saved_graph_bytes(tmp_path: Path) -> None:
@@ -1171,11 +1207,13 @@ def test_prepare_comparison_ignores_stale_saved_graph_bytes(tmp_path: Path) -> N
     (root / "graph.json").write_bytes(b"this is not a graph\n")
     (root / "graph.json.sha256").write_text("not-a-digest\n", encoding="ascii")
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    assert prepared.old_snapshot.document.nodes
-    assert prepared.new_snapshot.document.nodes
-    assert prepared.historical.graph_bytes != b"this is not a graph\n"
+    assert old_snapshot.document.nodes
+    assert new_snapshot.document.nodes
+    assert serialize(old_snapshot.document) != b"this is not a graph\n"
 
 
 def test_prepare_comparison_maps_absolute_declarations_into_each_capture(
@@ -1192,11 +1230,13 @@ def test_prepare_comparison_maps_absolute_declarations_into_each_capture(
         f"systems_dir = {json.dumps(str(root / 'docs/systems'))}\n",
     )
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    assert prepared.historical.normalized_root == "."
-    assert prepared.current.normalized_root == "."
-    assert prepared.new_snapshot.document.nodes
+    assert before.normalized_root == "."
+    assert after.normalized_root == "."
+    assert new_snapshot.document.nodes
 
 
 def test_prepare_comparison_rejects_diagnostics_before_analyzing_other_side(
@@ -1296,14 +1336,16 @@ def test_prepare_comparison_analyzes_the_config_bytes_the_selection_was_derived_
 
     monkeypatch.setattr(config, "parse_config_bytes", parse_staged)
     _, sealed = _spy_capture_pair(monkeypatch)
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
     assert live["rewrites"] == 1
     assert sources[0] == root / ".minotaur.toml"
     assert root not in sources[1].parents
     assert (root / ".minotaur.toml").read_bytes() != original_bytes
-    assert prepared.current.normalized_targets == ("app.py",)
-    assert prepared.current.config.targets == ("app.py",)
+    assert after.normalized_targets == ("app.py",)
+    assert after.config.targets == ("app.py",)
     assert sealed[0][2] == original_bytes
     assert "other.py" not in sealed[0][1]
 
@@ -1423,14 +1465,16 @@ def test_prepare_comparison_selects_from_an_explicit_config_off_the_discovery_ch
     _commit(root, "add an explicit alternative config")
     sealed = _sealed_paths(monkeypatch)
 
-    prepared = prepare_comparison(root, Path("alt.toml"), _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, Path("alt.toml"), _produce_selection
+    )
 
     # The explicitly selected config, not the discoverable .minotaur.toml,
     # decides both sides' coordinates and both sides' selections.
-    assert prepared.historical.config_coordinate == "alt.toml"
-    assert prepared.current.config_coordinate == "alt.toml"
-    assert prepared.historical.normalized_targets == ("other.py",)
-    assert prepared.current.normalized_targets == ("other.py",)
+    assert before.config_coordinate == "alt.toml"
+    assert after.config_coordinate == "alt.toml"
+    assert before.normalized_targets == ("other.py",)
+    assert after.normalized_targets == ("other.py",)
     assert sealed == [({"alt.toml", "other.py"}, {"alt.toml", "other.py"})]
 
 
@@ -1446,12 +1490,14 @@ def test_prepare_comparison_captures_hidden_system_folders_of_an_unpruned_system
     _commit(root, "add a hidden system folder")
     sealed = _sealed_paths(monkeypatch)
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
     # Analysis scans every child of systems_dir, hidden ones included, so the
     # capture must not prune that subtree by the source exclusion rule.
-    assert {item.name for item in prepared.historical.systems} == {"core", "staged"}
-    assert {item.name for item in prepared.current.systems} == {"core", "staged"}
+    assert {item.name for item in before.systems} == {"core", "staged"}
+    assert {item.name for item in after.systems} == {"core", "staged"}
     before, after = sealed[0]
     assert "docs/systems/.staged/system.toml" in before
     assert "docs/systems/.staged/system.toml" in after
@@ -1528,9 +1574,199 @@ def test_prepare_comparison_keeps_hidden_systems_when_a_target_is_the_systems_di
     _commit(root, "systems directory that is also a target")
     sealed = _sealed_paths(monkeypatch)
 
-    prepared = prepare_comparison(root, None, _produce_selection)
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection
+    )
 
-    assert {item.name for item in prepared.historical.systems} == {"core", "staged"}
-    assert {item.name for item in prepared.current.systems} == {"core", "staged"}
+    assert {item.name for item in before.systems} == {"core", "staged"}
+    assert {item.name for item in after.systems} == {"core", "staged"}
     assert "src/.staged/system.toml" in sealed[0][0]
     assert "src/.staged/system.toml" in sealed[0][1]
+
+
+def _redirect_captures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Send every capture directory to an empty folder the test can inspect."""
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(captures))
+    return captures
+
+
+def _spy_producer(calls: list[object]):  # type: ignore[no-untyped-def]
+    """Wrap the real producer and keep the call expressions each side returned."""
+
+    def producer(root, targets, metadata_targets=None, sql_settings=None):  # type: ignore[no-untyped-def]
+        produced = _produce_selection(root, targets, metadata_targets, sql_settings=sql_settings)
+        calls.append(produced[2].call_expressions)
+        return produced
+
+    return producer
+
+
+def _strings(value: object, seen: set[int] | None = None) -> list[str]:
+    """Collect every ``str`` and ``Path`` reachable from *value*."""
+    seen = set() if seen is None else seen
+    if id(value) in seen:
+        return []
+    seen.add(id(value))
+    if isinstance(value, (str, Path)):
+        return [str(value)]
+    if isinstance(value, Mapping):
+        return [text for item in (*value.keys(), *value.values()) for text in _strings(item, seen)]
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return [text for item in value for text in _strings(item, seen)]
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return [
+            text
+            for field in dataclasses.fields(value)
+            for text in _strings(getattr(value, field.name), seen)
+        ]
+    return []
+
+
+def _call_repository(tmp_path: Path) -> tuple[Path, str]:
+    """A repository whose HEAD and working-tree ``app.py`` differ and make calls."""
+    root, sha, _ = _repository(tmp_path)
+    _write(root, "app.py", "def helper():\n    return 1\n\ndef app():\n    return helper()\n")
+    _commit(root, "make a call")
+    sha = _run(root, "rev-parse", "HEAD")
+    _write(
+        root,
+        "app.py",
+        "def helper():\n    return 1\n\ndef app():\n    return helper() + helper()\n",
+    )
+    return root, sha
+
+
+def test_prepare_comparison_working_tree_form_returns_symmetric_plain_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, sha = _call_repository(tmp_path)
+    captures = _redirect_captures(tmp_path, monkeypatch)
+    calls: list[object] = []
+
+    worktree, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _spy_producer(calls)
+    )
+
+    assert worktree == root
+    assert type(before) is type(after)
+    assert (before.kind, before.requested_revision, before.commit) == ("commit", "HEAD", sha)
+    assert (after.kind, after.requested_revision, after.commit) == ("working-tree", None, None)
+    with pytest.raises(FrozenInstanceError):
+        before.kind = "working-tree"  # type: ignore[misc]
+    assert before.definition_files == after.definition_files == ("docs/systems/core/system.toml",)
+    assert calls[0] and calls[1] and calls[0] != calls[1]
+    assert before.call_observations == calls[0]
+    assert after.call_observations == calls[1]
+    assert before.source_bytes["app.py"] == _run(root, "show", "HEAD:app.py").encode() + b"\n"
+    assert after.source_bytes["app.py"] == (root / "app.py").read_bytes()
+    for record, snapshot in ((before, old_snapshot), (after, new_snapshot)):
+        assert all(item.definition_directory is None for item in record.systems)
+        assert len(snapshot.systems) == len(record.systems) > 0
+        assert all(
+            held is sanitized
+            for held, sanitized in zip(snapshot.systems, record.systems, strict=True)
+        )
+        assert not any(str(captures) in text for text in _strings(record))
+    assert list(captures.iterdir()) == []
+
+
+def test_prepare_comparison_revision_pair_form_records_both_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, first = _call_repository(tmp_path)
+    _commit(root, "second")
+    second = _run(root, "rev-parse", "HEAD")
+    captures = _redirect_captures(tmp_path, monkeypatch)
+    calls: list[object] = []
+
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _spy_producer(calls), before=first[:12], after="HEAD"
+    )
+
+    assert (before.kind, before.requested_revision, before.commit) == ("commit", first[:12], first)
+    assert (after.kind, after.requested_revision, after.commit) == ("commit", "HEAD", second)
+    assert before.source_bytes["app.py"] != after.source_bytes["app.py"]
+    assert before.call_observations == calls[0]
+    assert after.call_observations == calls[1]
+    assert not any(str(captures) in text for text in _strings((before, after)))
+    assert list(captures.iterdir()) == []
+
+
+def test_prepare_comparison_revision_pair_compares_without_a_live_config(
+    tmp_path: Path,
+) -> None:
+    root, first = _call_repository(tmp_path)
+    _commit(root, "second")
+    (root / ".minotaur.toml").unlink()
+
+    with pytest.raises(CurrentInputError, match="no config was found within the selected worktree"):
+        prepare_comparison(root, None, _produce_selection)
+
+    _, before, after, _, _ = prepare_comparison(
+        root, None, _produce_selection, before=first, after="HEAD"
+    )
+
+    assert before.config_coordinate == after.config_coordinate == ".minotaur.toml"
+
+
+def test_prepare_comparison_revision_pair_uses_each_sides_committed_config(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(root, "a.toml", (root / ".minotaur.toml").read_text(encoding="utf-8"))
+    _commit(root, "first config")
+    first = _run(root, "rev-parse", "HEAD")
+    _write(root, "other.py", "def other():\n    return 2\n")
+    _write(
+        root,
+        "b.toml",
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["other.py"]\nsystems_dir = "docs/systems"\n',
+    )
+    _commit(root, "second config")
+
+    _, before, after, _, _ = prepare_comparison(
+        root,
+        None,
+        _produce_selection,
+        before=first,
+        after="HEAD",
+        before_config="a.toml",
+        after_config="b.toml",
+    )
+
+    assert (before.config_coordinate, before.normalized_targets) == ("a.toml", ("app.py",))
+    assert (after.config_coordinate, after.normalized_targets) == ("b.toml", ("other.py",))
+
+
+def test_prepare_comparison_revision_pair_compares_a_target_deleted_at_the_after_revision(
+    tmp_path: Path,
+) -> None:
+    root, first = _call_repository(tmp_path)
+    _run(root, "rm", "--quiet", "-f", "app.py")
+    _run(root, "commit", "--quiet", "-m", "delete the target")
+
+    _, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        root, None, _produce_selection, before=first, after="HEAD"
+    )
+
+    assert before.normalized_targets == after.normalized_targets == ("app.py",)
+    assert old_snapshot.document.nodes
+    assert new_snapshot.document.nodes == ()
+
+
+@pytest.mark.parametrize("named", ["before", "after"])
+def test_prepare_comparison_rejects_a_single_revision_before_any_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named: str
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    captures = _redirect_captures(tmp_path, monkeypatch)
+    calls: list[object] = []
+
+    with pytest.raises(ValueError, match="either zero or exactly two revisions"):
+        prepare_comparison(root, None, _spy_producer(calls), **{named: "HEAD"})  # type: ignore[arg-type]
+
+    assert calls == []
+    assert list(captures.iterdir()) == []

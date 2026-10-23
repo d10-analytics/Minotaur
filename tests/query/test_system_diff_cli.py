@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from minotaur import cli
+from minotaur import cli, comparison
 from minotaur.graph_model.evidence import Evidence, Rule
 from minotaur.graph_model.loading import graph_digest, stamp_path
 from minotaur.graph_model.provenance import NodeClass, Provenance
@@ -1171,9 +1171,39 @@ def test_systems_target_absent_on_both_sides_is_an_error(
     assert cli.main(["query", "diff", "--systems"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "absent on both comparison sides" in captured.err
-    assert "missing.py" in captured.err
+    assert captured.err == (
+        "minotaur: error: configured target is absent on both comparison sides: missing.py\n"
+    )
     _assert_state(root, before)
+
+
+def test_systems_absent_target_is_rejected_before_any_side_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_sql_repo(tmp_path)
+    monkeypatch.chdir(root)
+    (root / "src" / "schema.sql").write_text(
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["src", "untracked.sql"]\n[minotaur.sql]\nview_depth_threshold = 1\n',
+        encoding="utf-8",
+    )
+
+    status = cli.main(["query", "diff", "--systems", "--json"])
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "minotaur: error: configured target is absent on both comparison sides: untracked.sql\n"
+    )
+    assert "view-depth-warning" not in captured.err
 
 
 def _file_target_repo(tmp_path: Path) -> Path:
@@ -1953,7 +1983,7 @@ def test_systems_html_dangling_link_is_refused_before_acquisition(
     def unexpected_acquisition(*args: object, **kwargs: object) -> None:
         raise AssertionError("acquisition must not run for an invalid output parent")
 
-    monkeypatch.setattr(cli, "_acquire_systems_pair", unexpected_acquisition)
+    monkeypatch.setattr(cli, "prepare_comparison", unexpected_acquisition)
     capsys.readouterr()
     assert cli.main(["query", "diff", "--systems", "--html", str(link)]) == 2
     captured = capsys.readouterr()
@@ -1977,14 +2007,14 @@ def test_systems_html_link_target_directory_replaced_during_comparison_is_refuse
     old_parent = tmp_path / "B.old"
     link = given_parent / "report.html"
     link.symlink_to(resolved_parent / "report.html")
-    original_acquire = cli._acquire_systems_pair
+    original_acquire = cli.prepare_comparison
 
     def replace_parent(*args: object, **kwargs: object) -> object:
         resolved_parent.rename(old_parent)
         resolved_parent.mkdir()
         return original_acquire(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(cli, "_acquire_systems_pair", replace_parent)
+    monkeypatch.setattr(cli, "prepare_comparison", replace_parent)
     capsys.readouterr()
     assert cli.main(["query", "diff", "--systems", "--html", str(link)]) == 2
     captured = capsys.readouterr()
@@ -2010,13 +2040,13 @@ def test_systems_html_link_target_directory_removed_during_comparison_preserves_
     (resolved_parent / "report.html").write_bytes(b"previous report")
     link = given_parent / "report.html"
     link.symlink_to(resolved_parent / "report.html")
-    original_acquire = cli._acquire_systems_pair
+    original_acquire = cli.prepare_comparison
 
     def remove_parent(*args: object, **kwargs: object) -> object:
         resolved_parent.rename(old_parent)
         return original_acquire(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(cli, "_acquire_systems_pair", remove_parent)
+    monkeypatch.setattr(cli, "prepare_comparison", remove_parent)
     capsys.readouterr()
     assert cli.main(["query", "diff", "--systems", "--html", str(link), "--force"]) == 2
     captured = capsys.readouterr()
@@ -2043,14 +2073,14 @@ def test_systems_html_intermediate_directory_link_retargeted_during_comparison_i
     directory_link = tmp_path / "out"
     directory_link.symlink_to(before, target_is_directory=True)
     report = directory_link / "report.html"
-    original_acquire = cli._acquire_systems_pair
+    original_acquire = cli.prepare_comparison
 
     def retarget_parent(*args: object, **kwargs: object) -> object:
         directory_link.unlink()
         directory_link.symlink_to(after, target_is_directory=True)
         return original_acquire(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(cli, "_acquire_systems_pair", retarget_parent)
+    monkeypatch.setattr(cli, "prepare_comparison", retarget_parent)
     capsys.readouterr()
     assert cli.main(["query", "diff", "--systems", "--html", str(report)]) == 2
     captured = capsys.readouterr()
@@ -2491,16 +2521,16 @@ def test_capture_present_admits_only_regular_files_and_directories(tmp_path: Pat
     (root / "link").symlink_to("file.py")
     (root / "dirlink").symlink_to("package")
 
-    assert cli._capture_present(root, "file.py") is True
-    assert cli._capture_present(root, "package") is True
-    assert cli._capture_present(root, ".") is True
-    assert cli._capture_present(root, "missing.py") is False
-    assert cli._capture_present(root, "link") is False
-    assert cli._capture_present(root, "dirlink") is False
+    assert comparison._capture_present(root, "file.py") is True
+    assert comparison._capture_present(root, "package") is True
+    assert comparison._capture_present(root, ".") is True
+    assert comparison._capture_present(root, "missing.py") is False
+    assert comparison._capture_present(root, "link") is False
+    assert comparison._capture_present(root, "dirlink") is False
 
     if hasattr(os, "mkfifo"):
         os.mkfifo(root / "pipe")
-        assert cli._capture_present(root, "pipe") is False
+        assert comparison._capture_present(root, "pipe") is False
 
 
 _ACCESSOR_LIB = """class Box:
@@ -3184,7 +3214,7 @@ class _GitRecorder:
         original_blobs = PinnedCommit.stream_blobs
         original_listing = PinnedCommit.full_listing
         original_resolve = git.resolve_commit
-        original_pair = cli.capture_pair
+        original_pair = comparison.capture_pair
         recorder = self
 
         def run_git(root: Path, arguments: object, **kwargs: object) -> object:
@@ -3232,7 +3262,7 @@ class _GitRecorder:
         monkeypatch.setattr(git, "resolve_commit", resolve_commit)
         monkeypatch.setattr(PinnedCommit, "stream_blobs", stream_blobs)
         monkeypatch.setattr(PinnedCommit, "full_listing", full_listing)
-        monkeypatch.setattr(cli, "capture_pair", capture_pair)
+        monkeypatch.setattr(comparison, "capture_pair", capture_pair)
 
     def subcommands(self, side: str | None) -> list[str]:
         return [arguments[0] for owner, arguments in self.calls if owner == side]
@@ -3628,3 +3658,175 @@ def test_systems_before_and_shared_config_options_select_the_captured_configurat
     assert payload["comparison"]["before"]["config_path"] == "alt.toml"
     expected_after_path = "alt.toml" if option == "--config" else ".minotaur.toml"
     assert payload["comparison"]["after"]["config_path"] == expected_after_path
+
+
+_ACQUISITION_FORMS: tuple[tuple[str, tuple[str, ...], dict[str, object]], ...] = (
+    ("working-tree", (), {}),
+    ("revisions", ("v1", "v2"), {"before": "v1", "after": "v2"}),
+    (
+        "side-configs",
+        ("--before-config", "a.toml", "--after-config", "./b.toml"),
+        {"before_config": "a.toml", "after_config": "b.toml"},
+    ),
+    (
+        "side-configs-with-revisions",
+        ("v1", "v2", "--before-config", "a.toml", "--after-config", "sub/../b.toml"),
+        {"before": "v1", "after": "v2", "before_config": "a.toml", "after_config": "b.toml"},
+    ),
+    ("config", ("--config", ".minotaur.toml"), {"raw_config_path": Path(".minotaur.toml")}),
+    ("json", ("--json",), {}),
+    ("details", ("--details",), {}),
+    ("system", ("--system", "App"), {}),
+    ("validate", ("--validate",), {"validate": True}),
+    ("html", ("--html", "{html}"), {}),
+)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        pytest.param(arguments, expected, id=name)
+        for name, arguments, expected in _ACQUISITION_FORMS
+    ],
+)
+def test_systems_diff_forms_acquire_through_prepare_comparison(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: tuple[str, ...],
+    expected: dict[str, object],
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    received: list[dict[str, object]] = []
+
+    def stub(
+        start: Path,
+        raw_config_path: Path | None,
+        producer: object,
+        validate: bool = False,
+        before: str | None = None,
+        after: str | None = None,
+        before_config: str | None = None,
+        after_config: str | None = None,
+    ) -> object:
+        received.append(
+            {
+                "raw_config_path": raw_config_path,
+                "validate": validate,
+                "before": before,
+                "after": after,
+                "before_config": before_config,
+                "after_config": after_config,
+            }
+        )
+        raise ValueError("acquisition stub")
+
+    monkeypatch.setattr(cli, "prepare_comparison", stub)
+    html = tmp_path / "fresh-report.html"
+    argv = [argument.format(html=html) for argument in arguments]
+
+    assert cli.main(["query", "diff", "--systems", *argv]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "minotaur: error: acquisition stub\n"
+    defaults: dict[str, object] = {
+        "raw_config_path": None,
+        "validate": False,
+        "before": None,
+        "after": None,
+        "before_config": None,
+        "after_config": None,
+    }
+    assert received == [{**defaults, **expected}]
+    assert not html.exists()
+
+
+def test_systems_diff_cli_imports_no_acquisition_internals() -> None:
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+    assert "_acquire_systems_pair" not in source
+    for name in (
+        "_captured_analysis",
+        "_comparison_plan",
+        "_current_config_route",
+        "_select_worktree",
+        "_validate_live_current_contract",
+        "capture_pair",
+    ):
+        assert not hasattr(cli, name)
+
+
+def test_systems_force_refuses_a_root_level_definition_in_a_revision_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path)
+    (root / "app").mkdir()
+    (root / "app" / "api.py").write_text("def receive():\n    return 1\n", encoding="utf-8")
+    (root / "core").mkdir()
+    definition = root / "core" / "system.toml"
+    definition.write_text(
+        'schema_version = 1\nname = "core"\nfiles = ["app/api.py"]\n', encoding="utf-8"
+    )
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app"]\nsystems_dir = "."\n',
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    monkeypatch.chdir(root)
+    original = definition.read_bytes()
+
+    status = cli.main(
+        ["query", "diff", "--systems", "HEAD", "HEAD", "--html", str(definition), "--force"]
+    )
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == (
+        f"minotaur: error: output path is also a comparison input: {definition.resolve()}\n"
+    )
+    assert definition.read_bytes() == original
+
+
+def test_systems_force_refuses_the_graph_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    sidecar = root / "graph.json.sha256"
+    original = sidecar.read_bytes()
+    capsys.readouterr()
+
+    status = cli.main(["query", "diff", "--systems", "--html", str(sidecar), "--force"])
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == (
+        f"minotaur: error: output path is also a comparison input: {sidecar.resolve()}\n"
+    )
+    assert sidecar.read_bytes() == original
+
+
+def test_systems_refuses_a_new_report_inside_the_systems_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    report = root / "docs" / "systems" / "report.html"
+    capsys.readouterr()
+
+    status = cli.main(["query", "diff", "--systems", "--html", str(report)])
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == (
+        f"minotaur: error: output path is inside a protected comparison input: {report.resolve()}\n"
+    )
+    assert not report.exists()
