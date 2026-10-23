@@ -24,6 +24,9 @@ through composition rather than a direct static edge.
   dispatch.
 - `query-and-system-reporting` points to `source-presentation` for source
   excerpts and presentation payloads.
+- `project-acquisition` points to `source-presentation` for the immutable
+  captured-bytes reader that comparison acquisition calls before its captures
+  are released.
 - `source-presentation` points to `analysis-platform` for the shared Python
   source-encoding policy.
 - `source-presentation` points to `graph-contract` for the canonical graph

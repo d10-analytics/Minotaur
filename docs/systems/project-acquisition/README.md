@@ -28,6 +28,8 @@ through composition rather than a direct static edge.
   production contracts.
 - `project-acquisition` points to `query-and-system-reporting` for comparison
   and reporting consumers.
+- `project-acquisition` points to `source-presentation` for the immutable
+  captured source bytes a comparison returns.
 
 These directions describe the selected proof universe, not required runtime
 dependencies or architectural policy.
