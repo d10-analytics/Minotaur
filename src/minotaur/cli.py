@@ -7,26 +7,17 @@ import hashlib
 import io
 import json
 import os
-import stat
 import sys
 import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
-from functools import partial
 from pathlib import Path
 from typing import Any, TextIO
 
 from minotaur import git, language_interpreter
-from minotaur.comparison import (
-    _captured_analysis,
-    _comparison_plan,
-    _current_config_route,
-    _select_worktree,
-    _validate_live_current_contract,
-)
-from minotaur.comparison_snapshot import capture_pair
+from minotaur.comparison import ComparisonSide, _repository_relative, prepare_comparison
 from minotaur.config import ConfigError, SqlSettings, find_config, resolve_config
 from minotaur.graph_model.document import GraphDocument, SourceControl
 from minotaur.graph_model.loading import (
@@ -82,7 +73,6 @@ from minotaur.query.render import (
     render_systems_json,
     render_systems_text,
 )
-from minotaur.source import capture_source_bytes
 from minotaur.system import System, absent_files, load_systems, resolve_system
 
 _CONFIG_CONSUMING_COMMANDS = frozenset({"analyze", "visualize"})
@@ -987,23 +977,6 @@ _LARGE_ARTIFACT_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
-class _SystemsPair:
-    """One acquired source pair plus the evidence needed to publish it."""
-
-    old_snapshot: Any
-    new_snapshot: Any
-    before_sources: Mapping[str, bytes]
-    after_sources: Mapping[str, bytes]
-    old_call_observations: tuple[Any, ...]
-    new_call_observations: tuple[Any, ...]
-    old_revision: str | None
-    new_revision: str | None
-    comparison_context: Mapping[str, object]
-    protected_files: frozenset[Path]
-    protected_directories: frozenset[Path]
-
-
-@dataclass(frozen=True, slots=True)
 class _HtmlOutputPlan:
     """The identity captured when a comparison report destination was accepted."""
 
@@ -1035,14 +1008,41 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
         raise ValueError("--force requires --html")
 
     plan = _preflight_html_output(html_path, force=force) if html_path is not None else None
-    pair = _acquire_systems_pair(query)
+    raw_config = getattr(query, "config", None)
+    if raw_config is not None and not raw_config.strip():
+        raise ValueError("--config requires a non-empty file path")
+    worktree, before, after, old_snapshot, new_snapshot = prepare_comparison(
+        Path.cwd(),
+        None if raw_config is None else Path(raw_config),
+        _produce_selection,
+        bool(getattr(query, "validate", False)),
+        before=before_revision,
+        after=after_revision,
+        before_config=_side_config_coordinate(
+            getattr(query, "before_config", None), label="--before-config"
+        ),
+        after_config=_side_config_coordinate(
+            getattr(query, "after_config", None), label="--after-config"
+        ),
+    )
+    for diagnostic in (*before.diagnostics, *after.diagnostics):
+        if diagnostic.is_warning:
+            print(_format_diagnostic(diagnostic), file=sys.stderr)
+    protected_files, protected_directories = _protected_comparison_paths(
+        worktree, (before, after), (old_snapshot, new_snapshot)
+    )
+    comparison_context = {
+        "schema_version": 1,
+        "before": _side_context_record(before),
+        "after": _side_context_record(after),
+    }
     complete = system_diff_query.compare_systems(
-        pair.old_snapshot,
-        pair.new_snapshot,
-        old_call_observations=pair.old_call_observations,
-        new_call_observations=pair.new_call_observations,
-        old_revision=pair.old_revision,
-        new_revision=pair.new_revision,
+        old_snapshot,
+        new_snapshot,
+        old_call_observations=before.call_observations,
+        new_call_observations=after.call_observations,
+        old_revision=_side_revision_label(before),
+        new_revision=_side_revision_label(after),
     )
     requested_system = getattr(query, "system", None)
     selected = system_diff_view.filter_system_diff(complete, requested_system)
@@ -1050,17 +1050,17 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
     content: bytes | None = None
     if plan is not None:
         presentation = build_comparison_presentation(
-            complete, {"before": pair.before_sources, "after": pair.after_sources}
+            complete, {"before": before.source_bytes, "after": after.source_bytes}
         )
         comparison_payload = presentation.get("comparison")
         if isinstance(comparison_payload, dict):
-            comparison_payload.update(pair.comparison_context)
+            comparison_payload.update(comparison_context)
             comparison_payload["selected_system"] = requested_system
         content = render_html(presentation)
 
     if query.json:
         context = complete.to_dict()
-        context.update(pair.comparison_context)
+        context.update(comparison_context)
         context["selected_system"] = requested_system
         payload = selected.to_dict()
         payload["comparison"] = context
@@ -1073,8 +1073,8 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
         _publish_comparison_html(
             plan,
             content,
-            protected_files=pair.protected_files,
-            protected_directories=pair.protected_directories,
+            protected_files=protected_files,
+            protected_directories=protected_directories,
         )
     _write_stdout(output)
     if content is not None and len(content) > _LARGE_ARTIFACT_BYTES:
@@ -1082,147 +1082,16 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
     return selected.exit_code
 
 
-def _acquire_systems_pair(query: argparse.Namespace) -> _SystemsPair:
-    """Capture and analyze one zero- or two-revision source pair.
-
-    Both sides reuse the shared comparison owners: the capture layer copies only
-    the analyzed selection of both sides, and the captured-analysis owner parses
-    each side's own configuration, selection, and system definitions.  Saved
-    graphs and sidecars are never read, so a stale committed graph cannot
-    change the source-derived baseline.
-    """
-    before_revision: str | None = getattr(query, "old", None)
-    after_revision: str | None = getattr(query, "new", None)
-    validate = bool(getattr(query, "validate", False))
-    worktree, preserved_start = _select_worktree(Path.cwd())
-    shared = _shared_config_coordinate(worktree, preserved_start, getattr(query, "config", None))
-    before_override = _side_config_coordinate(
-        getattr(query, "before_config", None), label="--before-config"
-    )
-    after_override = _side_config_coordinate(
-        getattr(query, "after_config", None), label="--after-config"
-    )
-
-    if after_revision is None:
-        # The working-tree side validates its live route before any capture, so
-        # an unsafe live declaration is a current input error rather than a
-        # capture-side absence.
-        live_raw = _live_config_argument(query, worktree, after_override)
-        _validate_live_current_contract(
-            worktree, _current_config_route(worktree, preserved_start, live_raw)
-        )
-
-    plan = partial(
-        _comparison_plan, worktree, preserved_start, shared, before_override, after_override
-    )
-    before, after, (before_coordinate, after_coordinate) = capture_pair(
-        worktree,
-        "HEAD" if before_revision is None else before_revision,
-        after_revision,
-        plan=plan,
-    )
-    with before, after:
-        # The captured-analysis owner consumes the source producer but does not
-        # retain its call-expression stream, so record each side's observations
-        # at the same producer boundary. Call facts stay paired with the exact
-        # captured bytes that produced them.
-        old_observations: list[Any] = []
-        new_observations: list[Any] = []
-
-        def _producer_for(
-            sink: list[Any],
-        ) -> Callable[..., tuple[Workspace, SourceSelection, AnalysisResult]]:
-            def _record(
-                root: Path,
-                targets: tuple[Path, ...],
-                metadata_targets: tuple[Path, ...] | None = None,
-                sql_settings: SqlSettings | None = None,
-            ) -> tuple[Workspace, SourceSelection, AnalysisResult]:
-                workspace, selection, result = _produce_selection(
-                    root,
-                    targets,
-                    metadata_targets,
-                    sql_settings=sql_settings,
-                )
-                sink.extend(result.call_expressions)
-                return workspace, selection, result
-
-            return _record
-
-        old = _captured_analysis(
-            before, before_coordinate, _producer_for(old_observations), validate=validate
-        )
-        new = _captured_analysis(
-            after, after_coordinate, _producer_for(new_observations), validate=True
-        )
-        for diagnostic in (*old.diagnostics, *new.diagnostics):
-            if diagnostic.is_warning:
-                print(_format_diagnostic(diagnostic), file=sys.stderr)
-        _require_pair_targets_materialized(old, new)
-        before_sources = capture_source_bytes(
-            _captured_side_root(old), _document_paths(old.graph.document)
-        )
-        after_sources = capture_source_bytes(
-            _captured_side_root(new), _document_paths(new.graph.document)
-        )
-        protected_files, protected_directories = _protected_comparison_paths(
-            worktree, (old, new), (before_coordinate, after_coordinate)
-        )
-        comparison_context = {
-            "schema_version": 1,
-            "before": _side_context_record(
-                kind="commit",
-                requested_revision="HEAD" if before_revision is None else before_revision,
-                commit=old.snapshot.commit,
-                config_path=before_coordinate,
-                analysis=old,
-            ),
-            "after": _side_context_record(
-                kind="working-tree" if after_revision is None else "commit",
-                requested_revision=after_revision,
-                commit=None if after_revision is None else new.snapshot.commit,
-                config_path=after_coordinate,
-                analysis=new,
-            ),
-        }
-        return _SystemsPair(
-            old_snapshot=system_query.ReportingSnapshot.prepare(old.graph.document, old.systems),
-            new_snapshot=system_query.ReportingSnapshot.prepare(new.graph.document, new.systems),
-            before_sources=before_sources,
-            after_sources=after_sources,
-            old_call_observations=tuple(old_observations),
-            new_call_observations=tuple(new_observations),
-            old_revision=_revision_label(
-                "HEAD" if before_revision is None else before_revision, old.snapshot.commit
-            ),
-            new_revision=(
-                "Working tree at report generation"
-                if after_revision is None
-                else _revision_label(after_revision, new.snapshot.commit)
-            ),
-            comparison_context=comparison_context,
-            protected_files=protected_files,
-            protected_directories=protected_directories,
-        )
-
-
-def _side_context_record(
-    *,
-    kind: str,
-    requested_revision: str | None,
-    commit: str | None,
-    config_path: str,
-    analysis: Any,
-) -> dict[str, object]:
+def _side_context_record(side: ComparisonSide) -> dict[str, object]:
     """Build one schema-versioned captured-side record for the comparison object."""
     return {
-        "kind": kind,
-        "requested_revision": requested_revision,
-        "commit": commit,
-        "config_path": config_path,
-        "root": analysis.normalized_root,
-        "targets": list(analysis.normalized_targets),
-        "source_digest": _capture_digest(analysis.snapshot.manifest),
+        "kind": side.kind,
+        "requested_revision": side.requested_revision,
+        "commit": side.commit,
+        "config_path": side.config_coordinate,
+        "root": side.normalized_root,
+        "targets": list(side.normalized_targets),
+        "source_digest": _capture_digest(side.manifest),
     }
 
 
@@ -1235,117 +1104,23 @@ def _capture_digest(manifest: Any) -> str:
     return digest.hexdigest()
 
 
-def _repository_relative(value: str, *, label: str) -> str:
-    """Normalize a repository-relative path declaration without touching disk."""
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{label} requires a non-empty path")
-    if value.startswith("/"):
-        raise ValueError(f"{label} must be a repository-relative path: {value}")
-    parts: list[str] = []
-    for component in value.split("/"):
-        if component in {"", "."}:
-            continue
-        if component == "..":
-            if not parts:
-                raise ValueError(f"{label} escapes the repository: {value}")
-            parts.pop()
-        else:
-            parts.append(component)
-    if not parts:
-        raise ValueError(f"{label} requires a non-empty path")
-    return "/".join(parts)
-
-
-def _shared_config_coordinate(worktree: Path, start: Path, raw: str | None) -> str | None:
-    """Convert the shared config spelling into a repository-relative coordinate.
-
-    A relative shared path keeps its existing working-directory meaning. An
-    absolute shared path is accepted only when it is lexically inside the
-    invoking repository; both are converted without resolving through the
-    current tree.
-    """
-    if raw is None:
-        return None
-    if not raw.strip():
-        raise ValueError("--config requires a non-empty file path")
-    candidate = Path(raw)
-    if not candidate.is_absolute():
-        candidate = start / candidate
-    try:
-        candidate = candidate.relative_to(worktree)
-    except ValueError as error:
-        raise ValueError(f"--config path is outside the invoking repository: {raw}") from error
-    return _repository_relative(candidate.as_posix(), label="--config")
-
-
 def _side_config_coordinate(value: str | None, *, label: str) -> str | None:
     if value is None:
         return None
     return _repository_relative(value, label=label)
 
 
-def _live_config_argument(
-    query: argparse.Namespace, worktree: Path, after_override: str | None
-) -> Path | None:
-    """Resolve the live working-tree config argument for the After side."""
-    if after_override is not None:
-        return worktree / after_override
-    raw = getattr(query, "config", None)
-    return Path(raw) if raw is not None else None
-
-
 def _revision_label(requested: str, commit: str) -> str:
     return f"{requested} · {commit[:_SYSTEMS_SHORT_ID_LENGTH]}"
 
 
-def _document_paths(document: GraphDocument) -> tuple[str, ...]:
-    return tuple(sorted({node.path for node in document.nodes if node.path}))
-
-
-def _captured_side_root(analysis: Any) -> Path:
-    """Resolve one captured side's configured analysis root below its snapshot."""
-    parts = tuple(part for part in analysis.normalized_root.split("/") if part not in {"", "."})
-    root = Path(analysis.snapshot.root)
-    return root.joinpath(*parts) if parts else root
-
-
-def _capture_present(root: Path, coordinate: str) -> bool:
-    """Return whether a regular file or directory exists in one capture.
-
-    A declared target may be absent on one side only when the opposite captured
-    tree still holds a regular source file or directory at that coordinate. A
-    symlink, FIFO, socket, device, or other special entry does not establish
-    that the missing side is a deletion, so it is not admitted here.
-    """
-    parts = tuple(part for part in coordinate.split("/") if part not in {"", "."})
-    candidate = root.joinpath(*parts) if parts else root
-    try:
-        info = os.lstat(candidate)
-    except OSError:
-        return False
-    return stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
-
-
-def _require_pair_targets_materialized(old: Any, new: Any) -> None:
-    """Reject a declared target that is absent on both captured sides.
-
-    A target declared by one side may legitimately name a coordinate that
-    exists only on the opposite captured tree, so a deletion or addition stays
-    representable.  Only a coordinate absent from both trees is unresolvable.
-    """
-    before_root = old.snapshot.root
-    after_root = new.snapshot.root
-    declared = set(old.normalized_targets) | set(new.normalized_targets)
-    absent = sorted(
-        coordinate
-        for coordinate in declared
-        if not _capture_present(before_root, coordinate)
-        and not _capture_present(after_root, coordinate)
-    )
-    if absent:
-        raise ValueError(
-            "configured target is absent on both comparison sides: " + ", ".join(absent)
-        )
+def _side_revision_label(side: ComparisonSide) -> str:
+    """Label one acquired side for the comparison output."""
+    if side.kind == "working-tree":
+        return "Working tree at report generation"
+    if side.requested_revision is None or side.commit is None:
+        raise ValueError("a commit side names its requested revision and resolved commit")
+    return _revision_label(side.requested_revision, side.commit)
 
 
 def _live_path(worktree: Path, coordinate: str) -> Path:
@@ -1377,35 +1152,27 @@ def _git_metadata_directories(worktree: Path) -> set[Path]:
 
 
 def _protected_comparison_paths(
-    worktree: Path, analyses: Sequence[Any], coordinates: Sequence[str]
+    worktree: Path,
+    sides: Sequence[ComparisonSide],
+    snapshots: Sequence[system_query.ReportingSnapshot],
 ) -> tuple[frozenset[Path], frozenset[Path]]:
     """Collect the live input paths that a report destination must not alias."""
     files: set[Path] = set()
     directories: set[Path] = set()
-    for coordinate in coordinates:
-        if coordinate:
-            files.add(_live_path(worktree, coordinate))
-    for analysis in analyses:
-        files.add(_live_path(worktree, analysis.config_coordinate))
-        graph = _live_path(worktree, analysis.normalized_graph)
+    for side, snapshot in zip(sides, snapshots, strict=True):
+        files.add(_live_path(worktree, side.config_coordinate))
+        graph = _live_path(worktree, side.normalized_graph)
         files.add(graph)
         files.add(graph.with_name(graph.name + ".sha256"))
-        root = _live_path(worktree, analysis.normalized_root)
-        for node in analysis.graph.document.nodes:
+        root = _live_path(worktree, side.normalized_root)
+        for node in snapshot.document.nodes:
             if node.path:
                 files.add((root / node.path).resolve())
-        systems = _live_path(worktree, analysis.normalized_systems_dir)
+        systems = _live_path(worktree, side.normalized_systems_dir)
         if systems != worktree.resolve():
             directories.add(systems)
-        for declared in analysis.systems:
-            definition = declared.definition_directory
-            if definition is None:
-                continue
-            try:
-                relative = Path(definition).relative_to(analysis.snapshot.root)
-            except ValueError:  # pragma: no cover - loader provenance stays in capture.
-                continue
-            files.add((worktree / relative).resolve())
+        for definition in side.definition_files:
+            files.add(_live_path(worktree, definition))
     directories.update(_git_metadata_directories(worktree))
     return frozenset(files), frozenset(directories)
 

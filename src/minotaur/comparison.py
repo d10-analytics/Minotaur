@@ -1,10 +1,11 @@
-"""Acquire complete historical and current inputs for a no-write comparison.
+"""Acquire both sides of a no-write comparison from isolated source captures.
 
-Both sides are captured from their own revision or work tree and analyzed from
-source; no committed graph or sidecar is read. Current routes are anchored and
-inspected before source production; shared loaders validate definitions on both
-sides. Only a comparable, fully validated pair is published to reporting
-consumers.
+``prepare_comparison`` is the one acquisition entry point. Both sides are
+captured from their own revision or work tree and analyzed from source; no
+committed graph or sidecar is read. The working-tree form anchors and inspects
+the live route before source production; shared loaders validate definitions
+on both sides. Only a comparable, fully validated pair is returned to
+reporting consumers, as plain-value side records and prepared snapshots.
 """
 
 from __future__ import annotations
@@ -14,13 +15,14 @@ import os
 import stat
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Protocol
 
 from minotaur import config, git, system
 from minotaur.comparison_snapshot import (
+    CaptureManifest,
     CaptureSelection,
     CaptureStage,
     RevisionSnapshot,
@@ -32,11 +34,13 @@ from minotaur.graph_model.loading import LoadedGraph
 from minotaur.graph_model.serialization import serialize
 from minotaur.graph_model.validation import validate_document
 from minotaur.language_interpreter import exclusions
+from minotaur.language_interpreter.call_expressions import CallExpressionObservation
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic
 from minotaur.language_interpreter.registry import default_registry
 from minotaur.language_interpreter.selection import SourceSelection
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.system import ReportingSnapshot
+from minotaur.source import capture_source_bytes
 
 
 class CurrentInputError(ValueError):
@@ -73,106 +77,9 @@ class SelectionProducer(Protocol):
         root: Path,
         targets: tuple[Path, ...],
         metadata_targets: tuple[Path, ...] | None = None,
+        *,
         sql_settings: SqlSettings | None = None,
     ) -> tuple[Workspace, SourceSelection, AnalysisResult]: ...
-
-
-@dataclass(frozen=True, slots=True)
-class HistoricalInputs:
-    """All immutable observations needed to compare one historical snapshot."""
-
-    pin: git.PinnedCommit
-    config_coordinate: str
-    config: ValidatedConfig
-    normalized_root: str
-    normalized_graph: str
-    normalized_systems_dir: str
-    normalized_targets: tuple[str, ...]
-    graph: LoadedGraph
-    graph_bytes: bytes
-    sidecar: bytes
-    systems: tuple[system.System, ...]
-    selection: tuple[str, ...]
-    diagnostics: tuple[Diagnostic, ...] = ()
-
-    @property
-    def pinned(self) -> git.PinnedCommit:
-        """Return the one pinned handle retained for later deletion proof."""
-        return self.pin
-
-    @property
-    def worktree_root(self) -> Path:
-        """Return the lexical worktree root of the retained pin."""
-        return self.pin.root
-
-    @property
-    def commit(self) -> str:
-        """Return the immutable commit SHA used by every observation."""
-        return self.pin.commit
-
-    @property
-    def normalized_config_coordinate(self) -> str:
-        """Return the caller-selected repository-relative config coordinate."""
-        return self.config_coordinate
-
-    @property
-    def historical_config(self) -> ValidatedConfig:
-        """Alias for the raw historical declarations."""
-        return self.config
-
-    @property
-    def analysis_root(self) -> str:
-        """Return the normalized historical analysis-root coordinate."""
-        return self.normalized_root
-
-    @property
-    def graph_coordinate(self) -> str:
-        """Return the normalized historical graph coordinate."""
-        return self.normalized_graph
-
-    @property
-    def systems_coordinate(self) -> str:
-        """Return the normalized historical systems coordinate."""
-        return self.normalized_systems_dir
-
-    @property
-    def target_coordinates(self) -> tuple[str, ...]:
-        """Return normalized historical target coordinates."""
-        return self.normalized_targets
-
-    @property
-    def saved_selection(self) -> tuple[str, ...]:
-        """Return the strict normalized selection saved in the graph."""
-        return self.selection
-
-    @property
-    def graph_content(self) -> bytes:
-        """Return the exact historical graph bytes."""
-        return self.graph_bytes
-
-    @property
-    def sidecar_bytes(self) -> bytes:
-        """Return the exact historical graph sidecar bytes."""
-        return self.sidecar
-
-    @property
-    def targets(self) -> tuple[str, ...]:
-        """Return the normalized historical target set."""
-        return self.normalized_targets
-
-    @property
-    def loaded_graph(self) -> LoadedGraph:
-        """Return the canonical graph loaded from the pinned bytes."""
-        return self.graph
-
-    @property
-    def definitions(self) -> tuple[system.System, ...]:
-        """Return the complete validated historical system set."""
-        return self.systems
-
-    def entry(self, relative: str) -> git.TreeEntry | None:
-        """Look up one repository-relative entry on this result's pin."""
-        return self.pin.entry(relative)
 
 
 def _tree_coordinate(parts: Sequence[str]) -> str:
@@ -245,9 +152,18 @@ def validate_saved_selection(
 
 
 @dataclass(frozen=True, slots=True)
-class CurrentInputs:
-    """All immutable observations acquired from the current work tree."""
+class ComparisonSide:
+    """Plain-value observations of one analyzed comparison side.
 
+    Nothing here names a path under a capture directory: the record outlives
+    the captures it was read from. ``definition_files`` are the
+    worktree-relative coordinates of every loaded ``system.toml``, and each
+    system's ``definition_directory`` is ``None``.
+    """
+
+    kind: str
+    requested_revision: str | None
+    commit: str | None
     config_coordinate: str
     config: ValidatedConfig
     normalized_root: str
@@ -256,45 +172,11 @@ class CurrentInputs:
     normalized_targets: tuple[str, ...]
     systems: tuple[system.System, ...]
     selection: tuple[str, ...]
-    diagnostics: tuple[Diagnostic, ...] = ()
-
-    @property
-    def current_config(self) -> ValidatedConfig:
-        return self.config
-
-    @property
-    def analysis_root(self) -> str:
-        return self.normalized_root
-
-    @property
-    def graph_coordinate(self) -> str:
-        return self.normalized_graph
-
-    @property
-    def systems_coordinate(self) -> str:
-        return self.normalized_systems_dir
-
-    @property
-    def target_coordinates(self) -> tuple[str, ...]:
-        return self.normalized_targets
-
-    @property
-    def definitions(self) -> tuple[system.System, ...]:
-        return self.systems
-
-    @property
-    def saved_selection(self) -> tuple[str, ...]:
-        return self.selection
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedComparison:
-    """The fully validated historical/current pair and reporting snapshots."""
-
-    historical: HistoricalInputs
-    current: CurrentInputs
-    old_snapshot: ReportingSnapshot
-    new_snapshot: ReportingSnapshot
+    diagnostics: tuple[Diagnostic, ...]
+    manifest: CaptureManifest
+    definition_files: tuple[str, ...]
+    source_bytes: Mapping[str, bytes]
+    call_observations: tuple[CallExpressionObservation, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,7 +441,6 @@ class _CapturedAnalysis:
     systems: tuple[system.System, ...]
     selection: tuple[str, ...]
     graph: LoadedGraph
-    graph_bytes: bytes
     diagnostics: tuple[Diagnostic, ...] = ()
 
 
@@ -773,7 +654,6 @@ def _captured_analysis(
             systems=systems,
             selection=selection,
             graph=graph,
-            graph_bytes=graph_bytes,
             diagnostics=diagnostics,
         )
     except CurrentInputError as error:
@@ -937,64 +817,243 @@ def _validate_live_current_contract(worktree: Path, selected_config: _CurrentRou
             raise _current_error(target_path, "target is not an ordinary file or directory")
 
 
+def _repository_relative(value: str, *, label: str) -> str:
+    """Normalize a repository-relative path declaration without touching disk."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} requires a non-empty path")
+    if value.startswith("/"):
+        raise ValueError(f"{label} must be a repository-relative path: {value}")
+    parts: list[str] = []
+    for component in value.split("/"):
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            if not parts:
+                raise ValueError(f"{label} escapes the repository: {value}")
+            parts.pop()
+        else:
+            parts.append(component)
+    if not parts:
+        raise ValueError(f"{label} requires a non-empty path")
+    return "/".join(parts)
+
+
+def _shared_config_coordinate(worktree: Path, start: Path, raw: Path | None) -> str | None:
+    """Convert the shared config spelling into a repository-relative coordinate.
+
+    A relative shared path keeps its existing working-directory meaning. An
+    absolute shared path is accepted only when it is lexically inside the
+    invoking repository; both are converted without resolving through the
+    current tree.
+    """
+    if raw is None:
+        return None
+    candidate = raw if raw.is_absolute() else start / raw
+    try:
+        candidate = candidate.relative_to(worktree)
+    except ValueError as error:
+        raise ValueError(f"--config path is outside the invoking repository: {raw}") from error
+    return _repository_relative(candidate.as_posix(), label="--config")
+
+
+def _capture_present(root: Path, coordinate: str) -> bool:
+    """Return whether a regular file or directory exists in one capture.
+
+    A declared target may be absent on one side only when the opposite captured
+    tree still holds a regular source file or directory at that coordinate. A
+    symlink, FIFO, socket, device, or other special entry does not establish
+    that the missing side is a deletion, so it is not admitted here.
+    """
+    parts = _coordinate_parts(coordinate)
+    candidate = root.joinpath(*parts) if parts else root
+    try:
+        info = os.lstat(candidate)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
+
+
+def _require_pair_targets_materialized(old: _CapturedAnalysis, new: _CapturedAnalysis) -> None:
+    """Reject a declared target that is absent on both captured sides.
+
+    A target declared by one side may legitimately name a coordinate that
+    exists only on the opposite captured tree, so a deletion or addition stays
+    representable.  Only a coordinate absent from both trees is unresolvable.
+    """
+    declared = set(old.normalized_targets) | set(new.normalized_targets)
+    absent = sorted(
+        coordinate
+        for coordinate in declared
+        if not _capture_present(old.snapshot.root, coordinate)
+        and not _capture_present(new.snapshot.root, coordinate)
+    )
+    if absent:
+        raise ValueError(
+            "configured target is absent on both comparison sides: " + ", ".join(absent)
+        )
+
+
+def _captured_side_root(analysis: _CapturedAnalysis) -> Path:
+    """Resolve one captured side's configured analysis root below its snapshot."""
+    parts = _coordinate_parts(analysis.normalized_root)
+    root = Path(analysis.snapshot.root)
+    return root.joinpath(*parts) if parts else root
+
+
+def _definition_files(analysis: _CapturedAnalysis) -> tuple[str, ...]:
+    """Name each loaded ``system.toml`` by its worktree-relative coordinate."""
+    coordinates: set[str] = set()
+    for declared in analysis.systems:
+        directory = declared.definition_directory
+        if directory is None:
+            continue
+        try:
+            relative = Path(directory).relative_to(analysis.snapshot.root)
+        except ValueError:  # pragma: no cover - loader provenance stays in the capture.
+            continue
+        coordinates.add(_tree_coordinate((*relative.parts, "system.toml")))
+    return tuple(sorted(coordinates))
+
+
+def _observing_producer(
+    producer: SelectionProducer, sink: list[CallExpressionObservation]
+) -> SelectionProducer:
+    """Wrap *producer* so the call expressions it returns are kept for one side."""
+    parameters = inspect.signature(producer).parameters
+    accepts_sql = "sql_settings" in parameters or any(
+        item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+    )
+
+    def _record(
+        root: Path,
+        targets: tuple[Path, ...],
+        metadata_targets: tuple[Path, ...] | None = None,
+        sql_settings: SqlSettings | None = None,
+    ) -> tuple[Workspace, SourceSelection, AnalysisResult]:
+        if accepts_sql:
+            produced = producer(root, targets, metadata_targets, sql_settings=sql_settings)
+        else:
+            produced = producer(root, targets, metadata_targets)
+        sink.extend(produced[2].call_expressions)
+        return produced
+
+    return _record
+
+
+def _side_record(
+    analysis: _CapturedAnalysis,
+    *,
+    kind: str,
+    requested_revision: str | None,
+    commit: str | None,
+    observations: Sequence[CallExpressionObservation],
+    systems: tuple[system.System, ...],
+) -> ComparisonSide:
+    document_paths = {node.path for node in analysis.graph.document.nodes if node.path}
+    return ComparisonSide(
+        kind=kind,
+        requested_revision=requested_revision,
+        commit=commit,
+        config_coordinate=analysis.config_coordinate,
+        config=analysis.config,
+        normalized_root=analysis.normalized_root,
+        normalized_graph=analysis.normalized_graph,
+        normalized_systems_dir=analysis.normalized_systems_dir,
+        normalized_targets=analysis.normalized_targets,
+        systems=systems,
+        selection=analysis.selection,
+        diagnostics=analysis.diagnostics,
+        manifest=analysis.snapshot.manifest,
+        definition_files=_definition_files(analysis),
+        source_bytes=capture_source_bytes(_captured_side_root(analysis), sorted(document_paths)),
+        call_observations=tuple(observations),
+    )
+
+
 def prepare_comparison(
     start: Path,
     raw_config_path: Path | None,
     producer: SelectionProducer,
     validate: bool = False,
-) -> PreparedComparison:
-    """Analyze a complete old/new pair from isolated source captures.
+    before: str | None = None,
+    after: str | None = None,
+    before_config: str | None = None,
+    after_config: str | None = None,
+) -> tuple[Path, ComparisonSide, ComparisonSide, ReportingSnapshot, ReportingSnapshot]:
+    """Analyze a complete before/after pair from isolated source captures.
 
-    The old side is a pinned ``HEAD`` tree and the new side is a copy of the
-    working tree's analyzed selection, so untracked and unstaged source in it
-    participate without mutating the checkout. Each side parses its own config and system
-    declarations and runs the same producer against its own root. Saved graph
-    files and sidecars are intentionally not inputs to this operation.
+    Without revisions the before side is a pinned ``HEAD`` tree and the after
+    side is a copy of the working tree's analyzed selection, so untracked and
+    unstaged source participates without mutating the checkout; the live
+    config route is validated first. With ``before`` and ``after`` both sides
+    are pinned revisions and no live config is inspected. Naming exactly one
+    revision raises ``ValueError`` before any capture. ``before_config`` and
+    ``after_config`` are repository-relative coordinates; ``raw_config_path``
+    is the caller's ``--config`` spelling, converted once the worktree is
+    known. Without an explicit config the capture plan discovers one on the
+    staged after side.
+
+    Each side parses its own config and system declarations and runs the same
+    producer against its own root. A configured target absent on both sides is
+    rejected before return. Saved graphs and sidecars are not inputs. Returns
+    the worktree root, both side records, and both reporting snapshots; no
+    returned value names a capture directory.
     """
+    if (before is None) != (after is None):
+        raise ValueError("a comparison requires either zero or exactly two revisions")
     worktree, preserved_start = _select_worktree(start)
-    selected_config = _current_config_route(worktree, preserved_start, raw_config_path)
-    _validate_live_current_contract(worktree, selected_config)
-    plan = partial(
-        _comparison_plan, worktree, preserved_start, selected_config.coordinate, None, None
+    shared = _shared_config_coordinate(worktree, preserved_start, raw_config_path)
+    if after is None:
+        live_raw = worktree / after_config if after_config is not None else raw_config_path
+        _validate_live_current_contract(
+            worktree, _current_config_route(worktree, preserved_start, live_raw)
+        )
+    plan = partial(_comparison_plan, worktree, preserved_start, shared, before_config, after_config)
+    before_requested = "HEAD" if before is None else before
+    before_capture, after_capture, (before_coordinate, after_coordinate) = capture_pair(
+        worktree, before_requested, after, plan=plan
     )
-    before, after, (before_coordinate, after_coordinate) = capture_pair(
-        worktree, "HEAD", None, plan=plan
-    )
-    try:
-        with before, after:
-            old = _captured_analysis(before, before_coordinate, producer, validate=validate)
-            new = _captured_analysis(after, after_coordinate, producer, validate=True)
-            historical = HistoricalInputs(
-                pin=before.pin,
-                config_coordinate=old.config_coordinate,
-                config=old.config,
-                normalized_root=old.normalized_root,
-                normalized_graph=old.normalized_graph,
-                normalized_systems_dir=old.normalized_systems_dir,
-                normalized_targets=old.normalized_targets,
-                graph=old.graph,
-                graph_bytes=old.graph_bytes,
-                sidecar=(loading.graph_digest(old.graph_bytes) + "\n").encode("ascii"),
-                systems=old.systems,
-                selection=old.selection,
-                diagnostics=old.diagnostics,
-            )
-            current = CurrentInputs(
-                config_coordinate=new.config_coordinate,
-                config=new.config,
-                normalized_root=new.normalized_root,
-                normalized_graph=new.normalized_graph,
-                normalized_systems_dir=new.normalized_systems_dir,
-                normalized_targets=new.normalized_targets,
-                systems=new.systems,
-                selection=new.selection,
-                diagnostics=new.diagnostics,
-            )
-            old_reporting = ReportingSnapshot.prepare(old.graph.document, old.systems)
-            new_reporting = ReportingSnapshot.prepare(new.graph.document, new.systems)
-            return PreparedComparison(historical, current, old_reporting, new_reporting)
-    except CurrentInputError:
-        raise
+    old_observations: list[CallExpressionObservation] = []
+    new_observations: list[CallExpressionObservation] = []
+    with before_capture, after_capture:
+        old = _captured_analysis(
+            before_capture,
+            before_coordinate,
+            _observing_producer(producer, old_observations),
+            validate=validate,
+        )
+        new = _captured_analysis(
+            after_capture,
+            after_coordinate,
+            _observing_producer(producer, new_observations),
+            validate=True,
+        )
+        _require_pair_targets_materialized(old, new)
+        old_systems = tuple(replace(item, definition_directory=None) for item in old.systems)
+        new_systems = tuple(replace(item, definition_directory=None) for item in new.systems)
+        old_side = _side_record(
+            old,
+            kind="commit",
+            requested_revision=before_requested,
+            commit=old.snapshot.commit,
+            observations=old_observations,
+            systems=old_systems,
+        )
+        new_side = _side_record(
+            new,
+            kind="working-tree" if after is None else "commit",
+            requested_revision=after,
+            commit=None if after is None else new.snapshot.commit,
+            observations=new_observations,
+            systems=new_systems,
+        )
+        return (
+            worktree,
+            old_side,
+            new_side,
+            ReportingSnapshot.prepare(old.graph.document, old_systems),
+            ReportingSnapshot.prepare(new.graph.document, new_systems),
+        )
 
 
 def _declaration_path(root: Path, base: Path, raw: str) -> Path:
