@@ -867,6 +867,33 @@ def test_prepare_comparison_preserves_current_parse_cause_and_path(
     assert error.value.path == str(config_path)
     assert error.value.cause_type == "ConfigError"
     assert isinstance(error.value.__cause__, config.ConfigError)
+    assert error.value.detail == str(error.value.__cause__)
+
+
+def test_prepare_comparison_keeps_the_config_error_detail_on_the_captured_side(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nroot = "."\ngraph = "graph.json"\ntargets = ["app.py"]\n',
+        encoding="utf-8",
+    )
+    _commit(root, "bad committed config")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["app.py"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, _produce_selection)
+
+    assert error.value.side == "before"
+    assert error.value.revision == "HEAD"
+    assert error.value.path == ".minotaur.toml"
+    assert error.value.detail == "missing required field: schema_version (in .minotaur.toml)"
+    assert error.value.cause_type == "ConfigError"
+    assert isinstance(error.value.__cause__, config.ConfigError)
+    assert error.value.detail == str(error.value.__cause__)
 
 
 def test_prepare_comparison_rejects_a_target_absent_on_both_sides(

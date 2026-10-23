@@ -3458,7 +3458,15 @@ def _commit_config(root: Path, text: str) -> None:
 @pytest.mark.parametrize(
     ("committed", "message"),
     (
-        ("not valid [[[\n", "at '.minotaur.toml': invalid captured configuration"),
+        (
+            '[minotaur]\nroot = "."\ngraph = "graph.json"\ntargets = ["app"]\n',
+            "at '.minotaur.toml' (ConfigError): "
+            "missing required field: schema_version (in .minotaur.toml)",
+        ),
+        (
+            "x = 1\n",
+            "at '.minotaur.toml' (ConfigError): missing [minotaur] section in .minotaur.toml",
+        ),
         (
             '[minotaur]\nschema_version = 1\nroot = "../.."\ngraph = "graph.json"\n'
             'targets = ["app"]\n',
@@ -3483,6 +3491,87 @@ def test_systems_working_tree_form_attributes_a_bad_head_config_without_temporar
     assert status == 2
     assert out == ""
     assert err == f"minotaur: error: before input revision 'HEAD' {message}\n"
+    assert str(temporary) not in err
+    assert _leftovers(temporary) == []
+
+
+_NO_SCHEMA = '[minotaur]\nroot = "."\ngraph = "graph.json"\ntargets = ["app", "consumer.py"]\n'
+_NO_SCHEMA_MESSAGE = "missing required field: schema_version (in .minotaur.toml)"
+
+
+def _commit_config_at(root: Path, text: str, message: str) -> str:
+    (root / ".minotaur.toml").write_text(text, encoding="utf-8")
+    _commit_all(root, message)
+    return _head_sha(root)
+
+
+def test_systems_two_revision_form_reports_the_underlying_config_error_for_a_bad_before_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    good = (root / ".minotaur.toml").read_text(encoding="utf-8")
+    before = _commit_config_at(root, _NO_SCHEMA, "bad before")
+    after = _commit_config_at(root, good, "good after")
+    temporary = _capture_tempdirs(tmp_path, monkeypatch)
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, before, after)
+
+    assert status == 2
+    assert out == ""
+    assert err == (
+        f"minotaur: error: before input revision '{before}' at '.minotaur.toml' "
+        f"(ConfigError): {_NO_SCHEMA_MESSAGE}\n"
+    )
+    assert str(temporary) not in err
+    assert _leftovers(temporary) == []
+
+
+def test_systems_two_revision_form_reports_the_underlying_config_error_for_a_bad_after_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    good = (root / ".minotaur.toml").read_text(encoding="utf-8")
+    before = _commit_config_at(root, good, "good before")
+    after = _commit_config_at(root, _NO_SCHEMA, "bad after")
+    temporary = _capture_tempdirs(tmp_path, monkeypatch)
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, before, after)
+
+    assert status == 2
+    assert out == ""
+    assert err == (
+        f"minotaur: error: after input revision '{after}' at '.minotaur.toml' "
+        f"(ConfigError): {_NO_SCHEMA_MESSAGE}\n"
+    )
+    assert str(temporary) not in err
+    assert _leftovers(temporary) == []
+
+
+def test_systems_working_tree_form_reports_the_analyze_message_for_a_bad_live_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    _commit_all(root, "baseline")
+    (root / ".minotaur.toml").write_text(_NO_SCHEMA, encoding="utf-8")
+    temporary = _capture_tempdirs(tmp_path, monkeypatch)
+    monkeypatch.chdir(root)
+
+    assert cli.main(["analyze"]) == 2
+    analyze_err = capsys.readouterr().err
+    prefix = "minotaur: error: "
+    assert analyze_err.startswith(prefix) and analyze_err.endswith("\n")
+    message = analyze_err[len(prefix) : -1]
+    assert message  # measured, not hard-coded
+
+    status, out, err = _diff(capsys)
+
+    assert status == 2
+    assert out == ""
+    assert err == (
+        f"minotaur: error: current input at '{root / '.minotaur.toml'}' (ConfigError): {message}\n"
+    )
     assert str(temporary) not in err
     assert _leftovers(temporary) == []
 
