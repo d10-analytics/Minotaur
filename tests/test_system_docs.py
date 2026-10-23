@@ -12,6 +12,7 @@ shipped-v1 phrase returns to the purpose page.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -969,9 +970,20 @@ def test_contributing_pins_the_comparison_capture_route_and_its_proving_test() -
         "it captures each side's analyzed selection and analyzes that side's own "
         "configuration, source, and system definitions without a saved graph or sidecar"
     ) in text
+    assert (
+        "For system comparisons, follow `prepare_comparison` in "
+        "[comparison.py](../../src/minotaur/comparison.py): it captures each side's "
+        "analyzed selection and analyzes that side's own configuration, source, and "
+        "system definitions without a saved graph or sidecar, then prepares reporting "
+        "snapshots. `minotaur query diff --systems` runs it"
+    ) in text
     assert "`minotaur query diff --systems` runs it" in text
     assert "obtains the graph committed" not in text
     name = "test_systems_diff_forms_acquire_through_prepare_comparison"
     assert (f"`{name}` in `tests/query/test_system_diff_cli.py` proves the call") in text
     proving = (ROOT / "tests/query/test_system_diff_cli.py").read_text(encoding="utf-8")
-    assert re.search(rf"^def {name}\(", proving, re.MULTILINE)
+    module = ast.parse(proving)
+    assert any(
+        isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == name
+        for node in module.body
+    )
