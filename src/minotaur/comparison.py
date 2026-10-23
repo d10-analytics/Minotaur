@@ -538,8 +538,10 @@ def _captured_analysis(
             raw_config = config.parse_config_bytes(
                 config_path.read_bytes(), source=config_coordinate
             )
-        except Exception as error:
+        except config.ConfigError as error:
             raise _current_error(config_path, str(error), error) from error
+        except Exception as error:
+            raise _current_error(config_path, "invalid captured configuration", error) from error
 
         root_path = _captured_declaration_path(
             snapshot.pin.root, root, config_path.parent, raw_config.root
