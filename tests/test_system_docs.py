@@ -961,3 +961,17 @@ def test_contributing_describes_the_entry_as_removing_the_working_directory() ->
         "which removes the working directory from the import path and then invokes "
         "the same CLI as the installed command" in text
     )
+
+
+def test_contributing_pins_the_comparison_capture_route_and_its_proving_test() -> None:
+    text = _collapsed(CONTRIBUTING)
+    assert (
+        "it captures each side's analyzed selection and analyzes that side's own "
+        "configuration, source, and system definitions without a saved graph or sidecar"
+    ) in text
+    assert "`minotaur query diff --systems` runs it" in text
+    assert "obtains the graph committed" not in text
+    name = "test_systems_diff_forms_acquire_through_prepare_comparison"
+    assert (f"`{name}` in `tests/query/test_system_diff_cli.py` proves the call") in text
+    proving = (ROOT / "tests/query/test_system_diff_cli.py").read_text(encoding="utf-8")
+    assert re.search(rf"^def {name}\(", proving, re.MULTILINE)
