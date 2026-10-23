@@ -3673,7 +3673,7 @@ _ACQUISITION_FORMS: tuple[tuple[str, tuple[str, ...], dict[str, object]], ...] =
         ("v1", "v2", "--before-config", "a.toml", "--after-config", "sub/../b.toml"),
         {"before": "v1", "after": "v2", "before_config": "a.toml", "after_config": "b.toml"},
     ),
-    ("config", ("--config", ".minotaur.toml"), {"raw_config_path": Path(".minotaur.toml")}),
+    ("config", ("--config", ".minotaur.toml"), {"raw_config_path": ".minotaur.toml"}),
     ("json", ("--json",), {}),
     ("details", ("--details",), {}),
     ("system", ("--system", "App"), {}),
@@ -3830,3 +3830,31 @@ def test_systems_refuses_a_new_report_inside_the_systems_directory(
         f"minotaur: error: output path is inside a protected comparison input: {report.resolve()}\n"
     )
     assert not report.exists()
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (
+            "/elsewhere//x.toml/",
+            "--config path is outside the invoking repository: /elsewhere//x.toml/",
+        ),
+        ("", "--config requires a non-empty file path"),
+    ],
+)
+def test_systems_invalid_config_spelling_is_reported_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raw: str,
+    message: str,
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+
+    assert cli.main(["query", "diff", "--systems", "--config", raw]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"minotaur: error: {message}\n"
