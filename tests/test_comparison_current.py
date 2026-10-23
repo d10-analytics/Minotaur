@@ -5,27 +5,153 @@ from __future__ import annotations
 import functools
 import json
 import os
+import subprocess
 import tempfile
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
-from test_comparison_history import (
-    _commit,
-    _repository,
-    _run,
-    _set_config,
-    _set_selection,
-    _working_snapshot,
-    _write,
-)
 
 from minotaur import cli, comparison, config, git
 from minotaur.cli import _produce_selection
-from minotaur.comparison import CurrentInputError, prepare_comparison
+from minotaur.comparison import CurrentInputError, prepare_comparison, validate_saved_selection
 from minotaur.comparison_snapshot import SnapshotMutationError
+from minotaur.graph_model.loading import graph_digest
 from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
+
+
+def _run(root: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments], cwd=root, capture_output=True, check=True, text=True
+    )
+    return result.stdout.strip()
+
+
+def _write(root: Path, relative: str, content: str | bytes) -> Path:
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, bytes):
+        target.write_bytes(content)
+    else:
+        target.write_text(content, encoding="utf-8")
+    return target
+
+
+def _commit(root: Path, message: str) -> None:
+    _run(root, "add", "-A")
+    _run(root, "commit", "--quiet", "-m", message)
+
+
+def _set_config(root: Path, *, targets: list[str], root_value: str = ".") -> None:
+    _write(
+        root,
+        ".minotaur.toml",
+        "[minotaur]\n"
+        "schema_version = 1\n"
+        f"root = {json.dumps(root_value)}\n"
+        'graph = "graph.json"\n'
+        f"targets = {json.dumps(targets)}\n"
+        'systems_dir = "docs/systems"\n',
+    )
+
+
+def _set_selection(root: Path, selection: object) -> None:
+    graph_path = root / "graph.json"
+    document = json.loads(graph_path.read_text(encoding="utf-8"))
+    document["extensions"] = {"minotaur": {"selection": selection}}
+    graph = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    graph_path.write_bytes(graph)
+    _write(root, "graph.json.sha256", (graph_digest(graph) + "\n").encode("ascii"))
+
+
+def _working_snapshot(root: Path) -> tuple[dict[Path, bytes], str, str, str]:
+    files = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    }
+    return (
+        files,
+        _run(root, "ls-files", "--stage"),
+        _run(root, "status", "--porcelain=v1"),
+        _run(root, "diff", "--cached", "--binary"),
+    )
+
+
+def _repository(tmp_path: Path, selection: object = ["app.py"]) -> tuple[Path, str, bytes]:
+    root = tmp_path / "repo"
+    root.mkdir(parents=True)
+    _run(root, "init", "--quiet")
+    _run(root, "config", "user.email", "tests@example.invalid")
+    _run(root, "config", "user.name", "Minotaur tests")
+    _write(
+        root,
+        ".minotaur.toml",
+        "[minotaur]\n"
+        "schema_version = 1\n"
+        'root = "."\n'
+        'graph = "graph.json"\n'
+        'targets = ["app.py"]\n'
+        'systems_dir = "docs/systems"\n',
+    )
+    _write(root, "app.py", "def app():\n    return 1\n")
+    _write(
+        root,
+        "docs/systems/core/system.toml",
+        'schema_version = 1\nname = "core"\nfiles = ["app.py"]\n',
+    )
+    fixture = Path(__file__).parent / "../examples/synthetic-graphs/small-workflow.json"
+    document = json.loads(fixture.read_text(encoding="utf-8"))
+    document["extensions"] = {"minotaur": {"selection": selection}}
+    graph = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    _write(root, "graph.json", graph)
+    _write(root, "graph.json.sha256", (graph_digest(graph) + "\n").encode("ascii"))
+    _run(root, "add", ".")
+    commit = _run(root, "commit", "--quiet", "-m", "historical snapshot")
+    sha = _run(root, "rev-parse", "HEAD")
+    assert commit == ""
+    return root, sha, graph
+
+
+def test_strict_selection_is_order_and_duplicate_neutral() -> None:
+    assert validate_saved_selection(["app.py", "./app.py", "app.py"], {"app.py"}) == ("app.py",)
+    assert validate_saved_selection(["."], {"."}) == (".",)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (None, "saved graph selection is missing or not a list/tuple"),
+        ("app.py", "saved graph selection is missing or not a list/tuple"),
+        ([], "saved graph selection must not be empty"),
+        (["app.py", 3], "saved graph selection members must all be strings"),
+        (["app.py", 7], "saved graph selection members must all be strings"),
+        ([""], "selection members must be non-empty relative paths"),
+        (["/app.py"], "selection members must be non-empty relative paths"),
+        (["../app.py"], "selection member escapes the repository root"),
+        (
+            ["other.py"],
+            "saved graph selection does not match historical targets: ['other.py'] != ['app.py']",
+        ),
+    ],
+)
+def test_validate_saved_selection_rejects_malformed_values(raw: object, message: str) -> None:
+    with pytest.raises(ValueError) as error:
+        validate_saved_selection(raw, {"app.py"})
+    assert str(error.value) == message
+
+
+def test_prepare_comparison_ignores_committed_graph_and_sidecar(tmp_path: Path) -> None:
+    root, _, _ = _repository(tmp_path)
+    _write(root, "graph.json", "this is not a graph\n")
+    _write(root, "graph.json.sha256", "not a digest\n")
+    _commit(root, "corrupt saved graph and sidecar")
+
+    prepared = prepare_comparison(root, None, _produce_selection)
+
+    assert prepared.old_snapshot.document.nodes
+    assert prepared.new_snapshot.document.nodes
 
 
 def test_prepare_comparison_publishes_both_snapshots_from_real_repository(
@@ -734,7 +860,7 @@ def test_prepare_comparison_rejects_unproven_untracked_deleted_target(
     assert prepared.new_snapshot.document.nodes == ()
 
 
-def test_prepare_comparison_rejects_old_saved_selection_before_producer(
+def test_prepare_comparison_ignores_old_saved_selection(
     tmp_path: Path,
 ) -> None:
     root, _, _ = _repository(tmp_path)
