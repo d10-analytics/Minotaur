@@ -1797,3 +1797,29 @@ def test_prepare_comparison_rejects_a_single_revision_before_any_capture(
 
     assert calls == []
     assert list(captures.iterdir()) == []
+
+
+def test_prepare_comparison_keeps_a_non_config_read_failure_free_of_capture_paths(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _repository(tmp_path)
+    config_file = root / ".minotaur.toml"
+    good = config_file.read_bytes()
+    config_file.unlink()
+    config_file.mkdir()
+    _write(config_file, "placeholder.txt", "x\n")
+    _commit(root, "directory config")
+    (config_file / "placeholder.txt").unlink()
+    config_file.rmdir()
+    config_file.write_bytes(good)
+
+    with pytest.raises(CurrentInputError) as error:
+        prepare_comparison(root, None, _produce_selection)
+
+    assert error.value.side == "before"
+    assert error.value.path == ".minotaur.toml"
+    assert error.value.detail == "invalid captured configuration"
+    assert error.value.cause_type == "IsADirectoryError"
+    assert isinstance(error.value.__cause__, IsADirectoryError)
+    assert str(tmp_path) not in str(error.value)
+    assert tempfile.gettempdir() not in str(error.value)

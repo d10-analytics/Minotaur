@@ -3549,6 +3549,45 @@ def test_systems_two_revision_form_reports_the_underlying_config_error_for_a_bad
     assert _leftovers(temporary) == []
 
 
+def test_systems_two_revision_form_keeps_a_non_config_read_failure_free_of_capture_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A config coordinate that is a directory on one side must not leak the capture path."""
+    root = _configured_repo(tmp_path)
+    (root / ".minotaur.toml").unlink()
+    nested = root / "sub" / ".minotaur.toml"
+    nested.mkdir(parents=True)
+    (nested / "placeholder.txt").write_text("x\n", encoding="utf-8")
+    before = _commit_config_at_path(root, "directory config")
+    for item in nested.iterdir():
+        item.unlink()
+    nested.rmdir()
+    nested.write_text(
+        '[minotaur]\nschema_version = 1\nroot = ".."\ngraph = "graph.json"\n'
+        'targets = ["app", "consumer.py"]\n',
+        encoding="utf-8",
+    )
+    after = _commit_config_at_path(root, "file config")
+    temporary = _capture_tempdirs(tmp_path, monkeypatch)
+    monkeypatch.chdir(root / "sub")
+
+    status, out, err = _diff(capsys, before, after)
+
+    assert status == 2
+    assert out == ""
+    assert err == (
+        f"minotaur: error: before input revision '{before}' at 'sub/.minotaur.toml' "
+        "(IsADirectoryError): invalid captured configuration\n"
+    )
+    assert str(temporary) not in err
+    assert _leftovers(temporary) == []
+
+
+def _commit_config_at_path(root: Path, message: str) -> str:
+    _commit_all(root, message)
+    return _head_sha(root)
+
+
 def test_systems_working_tree_form_reports_the_analyze_message_for_a_bad_live_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
