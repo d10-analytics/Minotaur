@@ -835,3 +835,19 @@ def test_null_inside_extension_values_stays_legal_on_both_paths() -> None:
     sidecar = graph_digest(content).encode()
     load_graph_blob(content, sidecar)
     load_graph_blob(content, validate=True)
+
+
+def test_public_schema_path_matches_packaged_schema() -> None:
+    public = ROOT / "schemas/minotaur-graph/v1.json"
+    packaged = ROOT / "src/minotaur/graph_model/schemas/v1.json"
+    link_target = "../../src/minotaur/graph_model/schemas/v1.json"
+    packaged_bytes = packaged.read_bytes()
+
+    if public.is_symlink():
+        assert public.resolve() == packaged.resolve()
+    elif public.read_bytes() == link_target.encode("ascii"):
+        pytest.skip(
+            "schemas/minotaur-graph/v1.json is checked out as the symlink's target "
+            "text (unmaterialized link, core.symlinks=false)"
+        )
+    assert public.read_bytes() == packaged_bytes

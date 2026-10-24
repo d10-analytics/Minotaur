@@ -7,9 +7,39 @@ These files are inlined into generated artifacts; no browser network request is 
 | `cytoscape-3.34.0.min.js` | https://www.npmjs.com/package/cytoscape | 3.34.0 | MIT | `9c2a3bf2592e0b14a1f7bec07c03a54f16dedf32af9cd0af155c716aa6c87bc3` |
 | `cytoscape-dagre-4.0.0.js` | https://www.npmjs.com/package/cytoscape-dagre | 4.0.0 (bundles Dagre v3) | MIT | `91f342cc2705aa9cad6a26f468d9ee5faa9e057d9172c3f9e732548fc61c660d` |
 
-Both upstream packages are MIT licensed. Cytoscape's complete notice is retained in
-its source header. Cytoscape-Dagre's package metadata declares MIT; the following is
-the retained MIT license text for its distributed copy:
+## Components of the shipped cytoscape-dagre file
+
+`cytoscape-dagre-4.0.0.js` is byte-for-byte the published cytoscape-dagre 4.0.0
+`dist/cytoscape-dagre.js`; it is unmodified, and its upstream banner version
+(recorded below) differs from the package version. It inlines two further
+libraries. Each component below pairs its name and version with the upstream
+copyright line from that package's `LICENSE`.
+
+### cytoscape-dagre
+
+- Version: 4.0.0
+- Upstream banner version: 3.0.0
+- License: MIT
+- Copyright: Copyright (c) 2016-2018, 2020, 2022, 2026, The Cytoscape Consortium.
+
+### dagre
+
+- Version: 3.0.0
+- License: MIT
+- Copyright: Copyright (c) 2012-2014 Chris Pettitt
+
+### graphlib
+
+- Version: 4.0.1
+- License: MIT
+- Copyright: Copyright (c) 2012-2014 Chris Pettitt
+
+## License text
+
+Cytoscape and each component listed above are MIT licensed upstream. Cytoscape's
+complete notice is retained in its source header. The MIT permission notice below
+is retained for the shipped cytoscape-dagre file and applies to every copyright
+line recorded above:
 
 > Permission is hereby granted, free of charge, to any person obtaining a copy of
 > this software and associated documentation files (the "Software"), to deal in

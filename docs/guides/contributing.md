@@ -24,6 +24,11 @@ focused browser check, the `visualizer` extra installs Playwright and
 itself does not require Playwright or a running browser. Complete browser and
 system-dependency verification remains on GitHub-hosted runners.
 
+To build the distribution locally, install `build` and run the plain
+`python -m build`. It builds the source archive first and then the wheel from
+that archive, so a stale local `build/` directory cannot enter the wheel; do not
+use `--wheel` alone or `pip wheel .`, which build from the working tree.
+
 The first test command is a focused local feedback loop. Keep local verification
 scoped to the behavior being changed; the complete verification groups run on
 GitHub-hosted runners rather than on developer machines.
@@ -37,10 +42,10 @@ ruff format --check .
 mypy
 ```
 
-The optional pre-commit hooks use the same Ruff version and may rewrite files;
-they are a convenience, not verification evidence. Record focused-test failures
-and their cause instead of assuming a small passing test means the hosted checks
-passed.
+The optional pre-commit hooks and the `dev` extra both pin Ruff 0.17.2 exactly,
+and the hooks may rewrite files; they are a convenience, not verification
+evidence. Record focused-test failures and their cause instead of assuming a
+small passing test means the hosted checks passed.
 
 Feature-branch pushes and pull requests run the quick hosted group: Ruff, mypy,
 source-package installation, and ordinary tests excluding the equivalence
@@ -57,13 +62,16 @@ The remaining jobs pin Python 3.11 explicitly.
 
 Pushes to `main`, merge-queue commits, and manually dispatched feature-branch
 runs execute the full hosted group. Full verification includes the equivalence
-harness, the performance gate, installation and resource checks from the built
-wheel, and the Chromium tests. The equivalence harness and real-browser tests
-stay on the full route and off pull requests. Run the full group manually before
-merge when a change affects language interpretation, graph or query output,
-schemas or serialization, visualizer assets or behavior, packaging or
-dependencies, CI routing, or several subsystems whose behavior cannot be
-isolated confidently.
+harness, the performance gate, the package checks, and the Chromium tests. The
+package checks build the source archive and the wheel, check both artifacts
+against the tracked files and the README metadata, install the wheel and the
+source archive in clean environments and check the installed CLI, schema, and
+visualizer assets, and build at the declared setuptools floor. The equivalence
+harness and real-browser tests stay on the full route and off pull requests. Run
+the full group manually before merge when a change affects language
+interpretation, graph or query output, schemas or serialization, visualizer
+assets or behavior, packaging or dependencies, CI routing, or several subsystems
+whose behavior cannot be isolated confidently.
 
 A successful hosted run may be reused while its commit and verification inputs
 remain unchanged. When full verification is deferred to the `main` push, record

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,7 @@ name = "minotaur"
 version = "0.1.0.dev0"
 description = "Evidence-backed software architecture maps from source code and graph data."
 license = "MIT"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "jsonschema>=4.20",
@@ -22,7 +23,7 @@ dev = [
     "pytest-cov>=5.0",
     "pytest-rerunfailures>=16.7",
     "mypy>=1.10",
-    "ruff>=0.16.3",
+    "ruff==0.17.2",
 ]
 visualizer = [
     "playwright>=1.50",
