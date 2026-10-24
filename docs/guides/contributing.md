@@ -24,6 +24,11 @@ focused browser check, the `visualizer` extra installs Playwright and
 itself does not require Playwright or a running browser. Complete browser and
 system-dependency verification remains on GitHub-hosted runners.
 
+To build the distribution locally, install `build` and run the plain
+`python -m build`. It builds the source archive first and then the wheel from
+that archive, so a stale local `build/` directory cannot enter the wheel; do not
+use `--wheel` alone or `pip wheel .`, which build from the working tree.
+
 The first test command is a focused local feedback loop. Keep local verification
 scoped to the behavior being changed; the complete verification groups run on
 GitHub-hosted runners rather than on developer machines.
