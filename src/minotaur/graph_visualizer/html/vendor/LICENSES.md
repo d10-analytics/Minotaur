@@ -19,23 +19,27 @@ copyright line from that package's `LICENSE`.
 
 - Version: 4.0.0
 - Upstream banner version: 3.0.0
+- License: MIT
 - Copyright: Copyright (c) 2016-2018, 2020, 2022, 2026, The Cytoscape Consortium.
 
 ### dagre
 
 - Version: 3.0.0
+- License: MIT
 - Copyright: Copyright (c) 2012-2014 Chris Pettitt
 
 ### graphlib
 
 - Version: 4.0.1
+- License: MIT
 - Copyright: Copyright (c) 2012-2014 Chris Pettitt
 
 ## License text
 
-Both upstream packages are MIT licensed. Cytoscape's complete notice is retained in
-its source header. Cytoscape-Dagre's package metadata declares MIT; the following is
-the retained MIT license text for its distributed copy:
+Cytoscape and each component listed above are MIT licensed upstream. Cytoscape's
+complete notice is retained in its source header. The MIT permission notice below
+is retained for the shipped cytoscape-dagre file and applies to every copyright
+line recorded above:
 
 > Permission is hereby granted, free of charge, to any person obtaining a copy of
 > this software and associated documentation files (the "Software"), to deal in

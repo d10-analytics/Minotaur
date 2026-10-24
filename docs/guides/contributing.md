@@ -62,13 +62,16 @@ The remaining jobs pin Python 3.11 explicitly.
 
 Pushes to `main`, merge-queue commits, and manually dispatched feature-branch
 runs execute the full hosted group. Full verification includes the equivalence
-harness, the performance gate, installation and resource checks from the built
-wheel, and the Chromium tests. The equivalence harness and real-browser tests
-stay on the full route and off pull requests. Run the full group manually before
-merge when a change affects language interpretation, graph or query output,
-schemas or serialization, visualizer assets or behavior, packaging or
-dependencies, CI routing, or several subsystems whose behavior cannot be
-isolated confidently.
+harness, the performance gate, the package checks, and the Chromium tests. The
+package checks build the source archive and the wheel, check both artifacts
+against the tracked files and the README metadata, install the wheel and the
+source archive in clean environments and check the installed CLI, schema, and
+visualizer assets, and build at the declared setuptools floor. The equivalence
+harness and real-browser tests stay on the full route and off pull requests. Run
+the full group manually before merge when a change affects language
+interpretation, graph or query output, schemas or serialization, visualizer
+assets or behavior, packaging or dependencies, CI routing, or several subsystems
+whose behavior cannot be isolated confidently.
 
 A successful hosted run may be reused while its commit and verification inputs
 remain unchanged. When full verification is deferred to the `main` push, record
