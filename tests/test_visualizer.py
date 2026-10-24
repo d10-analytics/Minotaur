@@ -317,6 +317,9 @@ def test_vendor_attribution_record_matches_the_vendored_files() -> None:
         assert components[name]["Version"] == version
         assert components[name]["Copyright"] == copyright_line
 
+    for name, fields in components.items():
+        assert fields.get("License") == "MIT", name
+
     banner = components["cytoscape-dagre"]["Upstream banner version"]
     assert banner == lines[1].rsplit(" ", 1)[1] == "3.0.0"
 

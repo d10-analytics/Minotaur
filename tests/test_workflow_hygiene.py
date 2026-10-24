@@ -29,6 +29,7 @@ _FLOOR_RE = re.compile(r"^setuptools==(\d+(?:\.\d+)*)$")
 _FORBIDDEN_BUILD_TOKENS = frozenset({"--wheel", "-w", "--sdist", "-s"})
 _EXACT_VERSION_RE = re.compile(r"^\d+(?:\.\d+)+$")
 _PIP_WHEEL_RE = re.compile(r"\bpip3?\s+wheel\b")
+_FOLDED_SCALAR_RE = re.compile(r":\s*>[-+]?\s*$")
 
 
 def _read_workflows() -> dict[str, str]:
@@ -45,10 +46,21 @@ def _code_lines(text: str) -> list[tuple[int, str]]:
 
 
 def _logical_lines(text: str) -> list[tuple[int, str]]:
-    """Return (first line number, command) pairs with backslash continuations joined."""
+    """Return (first line number, command) pairs with continuations and folded scalars joined."""
     joined: list[tuple[int, str]] = []
     pending: tuple[int, str] | None = None
+    folded: tuple[int, str, int] | None = None
     for number, line in _code_lines(text):
+        if folded is not None:
+            indent = len(line) - len(line.lstrip())
+            if not line.strip() or indent > folded[2]:
+                folded = (folded[0], (folded[1] + " " + line.strip()).strip(), folded[2])
+                continue
+            joined.append((folded[0], folded[1]))
+            folded = None
+        if _FOLDED_SCALAR_RE.search(line):
+            folded = (number, line.rstrip(), len(line) - len(line.lstrip()))
+            continue
         if pending is not None:
             number, line = pending[0], pending[1] + " " + line.strip()
             pending = None
@@ -58,6 +70,8 @@ def _logical_lines(text: str) -> list[tuple[int, str]]:
             joined.append((number, line))
     if pending is not None:
         joined.append(pending)
+    if folded is not None:
+        joined.append((folded[0], folded[1]))
     return joined
 
 
@@ -164,8 +178,11 @@ def build_form_violations(texts: dict[str, str]) -> list[str]:
 
 
 def release_permission_violations(release_text: str) -> list[str]:
-    """`release.yml` declares a top-level permissions block with only `contents: read`."""
+    """`release.yml` has one top-level `contents: read` block and no job-level permissions."""
     lines = _code_lines(release_text)
+    job_level = [number for number, line in lines if re.match(r"^\s+permissions:", line)]
+    if job_level:
+        return [f"release.yml:{job_level[0]}: job-level permissions override the read-only token"]
     starts = [
         index for index, (_, line) in enumerate(lines) if re.match(r"^permissions:\s*$", line)
     ]
@@ -196,7 +213,31 @@ def floor_parity_violations(ci_text: str, pyproject_text: str) -> list[str]:
                 pinned.append(match.group(1))
     if pinned != declared:
         return [f"floor step pins setuptools {pinned}, pyproject declares {declared}"]
-    return []
+    interpreters = set()
+    for _, line in _logical_lines(ci_text):
+        tokens = _tokens(line)
+        for index in range(1, len(tokens) - 2):
+            if tokens[index : index + 2] == ["-m", "pip"] and any(
+                _FLOOR_RE.match(requirement) for requirement in _pip_install_requirements(line)
+            ):
+                interpreters.add(tokens[index - 1])
+    if len(interpreters) != 1:
+        return [f"floor step installs setuptools through {sorted(interpreters)}, expected 1"]
+    violations = []
+    builds = 0
+    for number, line in _logical_lines(ci_text):
+        tokens = _tokens(line)
+        for index in range(1, len(tokens) - 1):
+            if tokens[index : index + 2] == ["-m", "build"] and tokens[index - 1] in interpreters:
+                builds += 1
+                if "--no-isolation" not in tokens[index + 2 :]:
+                    violations.append(
+                        f"ci.yml:{number}: floor build does not use --no-isolation, so it"
+                        " would build with the newest setuptools"
+                    )
+    if not builds:
+        violations.append("floor step's interpreter has no -m build call")
+    return violations
 
 
 def guide_violations(guide_text: str) -> list[str]:
@@ -296,6 +337,17 @@ def test_contributing_guide_build_guidance() -> None:
     assert guide_violations(GUIDE_PATH.read_text()) == []
 
 
+def test_contributing_guide_describes_full_package_verification() -> None:
+    prose = re.sub(r"\s+", " ", GUIDE_PATH.read_text())
+    for claim in (
+        "build the source archive and the wheel",
+        "check both artifacts against the tracked files and the README metadata",
+        "install the wheel and the source archive in clean environments",
+        "build at the declared setuptools floor",
+    ):
+        assert claim in prose, claim
+
+
 def _replace_once(text: str, old: str, new: str) -> str:
     assert text.count(old) >= 1, old
     return text.replace(old, new, 1)
@@ -364,6 +416,18 @@ def test_uses_rule_rejects_broken_pins(name: str, old: str, new: str) -> None:
             'python3 -m pip install "build==1.6.1"',
             "python3 -m pip install \\\n            build",
         ),
+        (
+            "ci.yml",
+            'run: |\n          python3 -m pip install "build==1.6.1"\n          python3 -m build\n',
+            "run: >-\n          python3 -m pip install\n          build\n",
+        ),
+        (
+            "release.yml",
+            "pip install build==1.6.1\n          python3 -m build",
+            "pip install build==1.6.1\n          python3 -m build\n"
+            "      - name: Unpinned\n        run: >\n          python3 -m pip install\n"
+            "          build\n",
+        ),
     ],
     ids=[
         "ci-floating",
@@ -372,6 +436,8 @@ def test_uses_rule_rejects_broken_pins(name: str, old: str, new: str) -> None:
         "unequal",
         "pip3-unpinned",
         "continued-unpinned",
+        "folded-unpinned-replaces-pinned",
+        "folded-unpinned-beside-pinned",
     ],
 )
 def test_build_install_rule_rejects_unpinned_or_unequal(name: str, old: str, new: str) -> None:
@@ -389,8 +455,18 @@ def test_build_install_rule_rejects_unpinned_or_unequal(name: str, old: str, new
         ("ci.yml", "python3 -m build\n", "python3 -m build -w\n"),
         ("ci.yml", "python3 -m build\n", "python3 -m build --sdist\n"),
         ("ci.yml", "python3 -m build\n", "pip wheel .\n"),
+        (
+            "ci.yml",
+            "python3 -m build\n",
+            "python3 -m build\n      - run: >-\n          python3 -m build\n          --wheel\n",
+        ),
+        (
+            "release.yml",
+            "python3 -m build",
+            "python3 -m build\n      - run: >\n          python3 -m build\n          -s",
+        ),
     ],
-    ids=["wheel", "short-s", "short-w", "sdist", "pip-wheel"],
+    ids=["wheel", "short-s", "short-w", "sdist", "pip-wheel", "folded-wheel", "folded-short-s"],
 )
 def test_build_form_rule_rejects_single_artifact_builds(name: str, old: str, new: str) -> None:
     texts = _read_workflows()
@@ -409,8 +485,12 @@ def test_build_form_rule_accepts_no_isolation_and_outdir() -> None:
         ("permissions:\n  contents: read\n\n", ""),
         ("  contents: read\n", "  contents: write\n"),
         ("  contents: read\n", "  contents: read\n  id-token: write\n"),
+        (
+            "    runs-on: ubuntu-latest\n",
+            "    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n",
+        ),
     ],
-    ids=["removed", "write", "widened"],
+    ids=["removed", "write", "widened", "job-level-write"],
 )
 def test_permission_rule_rejects_missing_or_widened_block(old: str, new: str) -> None:
     release = _replace_once(_read_workflows()["release.yml"], old, new)
@@ -420,6 +500,15 @@ def test_permission_rule_rejects_missing_or_widened_block(old: str, new: str) ->
 def test_floor_rule_rejects_unequal_pin() -> None:
     ci = _replace_once(_read_workflows()["ci.yml"], "setuptools==77.0.1", "setuptools==77.0.2")
     assert floor_parity_violations(ci, PYPROJECT_PATH.read_text())
+
+
+def test_floor_rule_rejects_isolated_floor_build() -> None:
+    ci = _replace_once(
+        _read_workflows()["ci.yml"], "-m build --no-isolation --outdir", "-m build --outdir"
+    )
+    assert any(
+        "--no-isolation" in v for v in floor_parity_violations(ci, PYPROJECT_PATH.read_text())
+    )
 
 
 def test_floor_rule_rejects_raised_declaration_alone() -> None:
