@@ -29,7 +29,7 @@ _FLOOR_RE = re.compile(r"^setuptools==(\d+(?:\.\d+)*)$")
 _FORBIDDEN_BUILD_TOKENS = frozenset({"--wheel", "-w", "--sdist", "-s"})
 _EXACT_VERSION_RE = re.compile(r"^\d+(?:\.\d+)+$")
 _PIP_WHEEL_RE = re.compile(r"\bpip3?\s+wheel\b")
-_FOLDED_SCALAR_RE = re.compile(r":\s*>[-+]?\s*$")
+_FOLDED_SCALAR_RE = re.compile(r":\s*>(?:[-+]?[1-9]?|[1-9][-+])(?:\s+#.*|\s*)$")
 
 
 def _read_workflows() -> dict[str, str]:
@@ -353,6 +353,8 @@ def _replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
+_FOLDED_HEADERS = (">- # c", "> #c", ">2", ">-2", ">2-")
+
 _CHECKOUT_PIN = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0"
 
 
@@ -428,6 +430,15 @@ def test_uses_rule_rejects_broken_pins(name: str, old: str, new: str) -> None:
             "      - name: Unpinned\n        run: >\n          python3 -m pip install\n"
             "          build\n",
         ),
+        *[
+            (
+                "release.yml",
+                "python3 -m build",
+                f"python3 -m build\n      - run: {header}\n          python3 -m pip install\n"
+                "          build",
+            )
+            for header in _FOLDED_HEADERS
+        ],
     ],
     ids=[
         "ci-floating",
@@ -438,6 +449,7 @@ def test_uses_rule_rejects_broken_pins(name: str, old: str, new: str) -> None:
         "continued-unpinned",
         "folded-unpinned-replaces-pinned",
         "folded-unpinned-beside-pinned",
+        *[f"folded-header-{header}-unpinned" for header in _FOLDED_HEADERS],
     ],
 )
 def test_build_install_rule_rejects_unpinned_or_unequal(name: str, old: str, new: str) -> None:
@@ -465,8 +477,18 @@ def test_build_install_rule_rejects_unpinned_or_unequal(name: str, old: str, new
             "python3 -m build",
             "python3 -m build\n      - run: >\n          python3 -m build\n          -s",
         ),
+        *[
+            (
+                "release.yml",
+                "python3 -m build",
+                f"python3 -m build\n      - run: {header}\n          python3 -m build\n"
+                "          --wheel",
+            )
+            for header in _FOLDED_HEADERS
+        ],
     ],
-    ids=["wheel", "short-s", "short-w", "sdist", "pip-wheel", "folded-wheel", "folded-short-s"],
+    ids=["wheel", "short-s", "short-w", "sdist", "pip-wheel", "folded-wheel", "folded-short-s"]
+    + [f"folded-header-{header}-wheel" for header in _FOLDED_HEADERS],
 )
 def test_build_form_rule_rejects_single_artifact_builds(name: str, old: str, new: str) -> None:
     texts = _read_workflows()
