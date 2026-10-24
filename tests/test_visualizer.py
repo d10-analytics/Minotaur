@@ -264,6 +264,63 @@ def test_vendored_asset_checksums_match_the_recorded_release() -> None:
     )
 
 
+def _record_components(record: str) -> dict[str, dict[str, str]]:
+    """Parse the per-component ``### name`` entries into their ``Key: value`` fields."""
+    components: dict[str, dict[str, str]] = {}
+    for section in record.split("\n### ")[1:]:
+        name, _, body = section.partition("\n")
+        fields: dict[str, str] = {}
+        for line in body.splitlines():
+            if line.startswith("## "):
+                break
+            if line.startswith("- ") and ": " in line:
+                key, _, value = line[2:].partition(": ")
+                fields[key] = value
+        assert name.strip() not in components, f"duplicate component entry {name.strip()}"
+        components[name.strip()] = fields
+    return components
+
+
+def test_vendor_attribution_record_matches_the_vendored_files() -> None:
+    record = VENDOR.joinpath("LICENSES.md").read_text(encoding="utf-8")
+
+    rows: dict[str, str] = {}
+    for line in record.splitlines():
+        if line.startswith("| `"):
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            file_name = cells[0].strip("`")
+            assert file_name not in rows, f"duplicate table row for {file_name}"
+            rows[file_name] = cells[-1].strip("`")
+    files = {path.name for path in VENDOR.iterdir() if path.name != "LICENSES.md"}
+    assert set(rows) == files
+    for name, digest in rows.items():
+        assert sha256(VENDOR.joinpath(name).read_bytes()).hexdigest() == digest
+
+    bundle = VENDOR.joinpath("cytoscape-dagre-4.0.0.js").read_text(encoding="utf-8")
+    lines = bundle.splitlines()
+    assert lines[1] == " * cytoscape-dagre 3.0.0"
+    assert 'var pn="4.0.1"' in bundle
+    assert 'var U="3.0.0"' in bundle
+
+    components = _record_components(record)
+    assert set(components) == {"cytoscape-dagre", "dagre", "graphlib"}
+    chris = "Copyright (c) 2012-2014 Chris Pettitt"
+    expected = {
+        "cytoscape-dagre": (
+            "4.0.0",
+            "Copyright (c) 2016-2018, 2020, 2022, 2026, The Cytoscape Consortium.",
+        ),
+        "dagre": ("3.0.0", chris),
+        "graphlib": ("4.0.1", chris),
+    }
+    for name, (version, copyright_line) in expected.items():
+        assert components[name]["Version"] == version
+        assert components[name]["Copyright"] == copyright_line
+
+    banner = components["cytoscape-dagre"]["Upstream banner version"]
+    assert banner == lines[1].rsplit(" ", 1)[1] == "3.0.0"
+
+
 def test_presentation_preserves_all_provenance_records_on_one_relationship() -> None:
     path = ROOT / "examples/synthetic-graphs/provenance-demo.json"
     raw = json.loads(path.read_text(encoding="utf-8"))
