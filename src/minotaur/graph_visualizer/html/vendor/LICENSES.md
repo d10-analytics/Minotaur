@@ -10,9 +10,10 @@ These files are inlined into generated artifacts; no browser network request is 
 ## Components of the shipped cytoscape-dagre file
 
 `cytoscape-dagre-4.0.0.js` is byte-for-byte the published cytoscape-dagre 4.0.0
-`dist/cytoscape-dagre.js`; it is unmodified, and its upstream banner version (recorded below) differs from
-the package version. It inlines two further libraries. Each component below pairs its name and version with the upstream copyright line
-from that package's `LICENSE`.
+`dist/cytoscape-dagre.js`; it is unmodified, and its upstream banner version
+(recorded below) differs from the package version. It inlines two further
+libraries. Each component below pairs its name and version with the upstream
+copyright line from that package's `LICENSE`.
 
 ### cytoscape-dagre
 
