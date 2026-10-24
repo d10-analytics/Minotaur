@@ -151,9 +151,13 @@ source; it does not call either function.
    source embedding is handled separately from language interpretation.
 
 For system comparisons, follow `prepare_comparison` in
-[comparison.py](../../src/minotaur/comparison.py): it obtains the graph committed
-at `HEAD` and a current graph produced in memory, then prepares reporting
-snapshots. [system_diff.py](../../src/minotaur/query/system_diff.py) compares
+[comparison.py](../../src/minotaur/comparison.py): it captures each side's
+analyzed selection and analyzes that side's own configuration, source, and
+system definitions without a saved graph or sidecar, then prepares reporting
+snapshots. `minotaur query diff --systems` runs it, and
+`test_systems_diff_forms_acquire_through_prepare_comparison` in
+`tests/query/test_system_diff_cli.py` proves the call.
+[system_diff.py](../../src/minotaur/query/system_diff.py) compares
 system reports; [system_diff_view.py](../../src/minotaur/query/system_diff_view.py)
 filters and renders that result. Run the
 [system comparison example](../../examples/system-walkthrough/comparison.md)
