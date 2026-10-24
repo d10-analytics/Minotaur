@@ -234,7 +234,8 @@ def ruff_pin_violations(pre_commit_text: str, pyproject_text: str, guide_text: s
                 match = re.match(r"^\s*rev:\s*v(\S+)\s*$", following)
                 if match:
                     revs.append(match.group(1))
-    pins = re.findall(r'"ruff([^"]*)"', pyproject_text)
+    dev_extra = re.search(r"^dev\s*=\s*\[(.*?)^\]", pyproject_text, re.MULTILINE | re.DOTALL)
+    pins = re.findall(r'"ruff([^"]*)"', dev_extra.group(1)) if dev_extra else []
     sentences = re.findall(
         r"pre-commit hooks and the `dev` extra both pin Ruff (\S+) exactly",
         re.sub(r"\s+", " ", guide_text),
@@ -245,7 +246,7 @@ def ruff_pin_violations(pre_commit_text: str, pyproject_text: str, guide_text: s
             f".pre-commit-config.yaml has {len(revs)} ruff-pre-commit revs, expected 1"
         )
     if len(pins) != 1:
-        violations.append(f"pyproject.toml has {len(pins)} ruff requirements, expected 1")
+        violations.append(f"pyproject.toml dev extra has {len(pins)} ruff requirements, expected 1")
     if len(sentences) != 1:
         violations.append(f"contributing guide has {len(sentences)} Ruff pin sentences, expected 1")
     if violations:
@@ -461,6 +462,11 @@ def test_ruff_pins_are_exact_equal_and_named_in_the_guide() -> None:
         ("pre-commit", "rev: v0.17.2", "rev: v0.17"),
         ("guide", "pin Ruff 0.17.2 exactly", "pin Ruff 0.16.5 exactly"),
         ("guide", "both pin Ruff 0.17.2 exactly", "use the same Ruff version"),
+        (
+            "pyproject",
+            '    "ruff==0.17.2",\n]\nvisualizer = [\n',
+            ']\nvisualizer = [\n    "ruff==0.17.2",\n',
+        ),
     ],
     ids=[
         "hook-moved-alone",
@@ -469,6 +475,7 @@ def test_ruff_pins_are_exact_equal_and_named_in_the_guide() -> None:
         "hook-not-exact",
         "sentence-names-another-version",
         "sentence-removed",
+        "pin-moved-out-of-dev-extra",
     ],
 )
 def test_ruff_pin_rule_rejects_divergence(target: str, old: str, new: str) -> None:
