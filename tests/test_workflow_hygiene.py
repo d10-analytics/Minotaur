@@ -18,6 +18,7 @@ WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 WORKFLOW_NAMES = ("ci.yml", "release.yml", "pages.yml")
 GUIDE_PATH = REPO_ROOT / "docs" / "guides" / "contributing.md"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
+PRE_COMMIT_PATH = REPO_ROOT / ".pre-commit-config.yaml"
 
 _USES_KEY_RE = re.compile(r"^\s*(?:-\s+)?uses:")
 _USES_RE = re.compile(r"^\s*(?:-\s+)?uses:\s*(\S+)(?:\s+#\s*(\S.*?))?\s*$")
@@ -26,6 +27,7 @@ _VERSION_COMMENT_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 _EXACT_BUILD_RE = re.compile(r"^build==(\d+(?:\.\d+)*)$")
 _FLOOR_RE = re.compile(r"^setuptools==(\d+(?:\.\d+)*)$")
 _FORBIDDEN_BUILD_TOKENS = frozenset({"--wheel", "-w", "--sdist", "-s"})
+_EXACT_VERSION_RE = re.compile(r"^\d+(?:\.\d+)+$")
 _PIP_WHEEL_RE = re.compile(r"\bpip3?\s+wheel\b")
 
 
@@ -220,6 +222,48 @@ def guide_violations(guide_text: str) -> list[str]:
     return violations
 
 
+def ruff_pin_violations(pre_commit_text: str, pyproject_text: str, guide_text: str) -> list[str]:
+    """The hook `rev`, the `dev` extra pin, and the guide sentence name one exact Ruff version."""
+    revs = []
+    lines = _code_lines(pre_commit_text)
+    for index, (_, line) in enumerate(lines):
+        if re.search(r"repo:\s*\S*ruff-pre-commit\b", line):
+            for _, following in lines[index + 1 :]:
+                if re.match(r"^\s*-\s+repo:", following):
+                    break
+                match = re.match(r"^\s*rev:\s*v(\S+)\s*$", following)
+                if match:
+                    revs.append(match.group(1))
+    dev_extra = re.search(r"^dev\s*=\s*\[(.*?)^\]", pyproject_text, re.MULTILINE | re.DOTALL)
+    pins = re.findall(r'"ruff([^"]*)"', dev_extra.group(1)) if dev_extra else []
+    sentences = re.findall(
+        r"pre-commit hooks and the `dev` extra both pin Ruff (\S+) exactly",
+        re.sub(r"\s+", " ", guide_text),
+    )
+    violations = []
+    if len(revs) != 1:
+        violations.append(
+            f".pre-commit-config.yaml has {len(revs)} ruff-pre-commit revs, expected 1"
+        )
+    if len(pins) != 1:
+        violations.append(f"pyproject.toml dev extra has {len(pins)} ruff requirements, expected 1")
+    if len(sentences) != 1:
+        violations.append(f"contributing guide has {len(sentences)} Ruff pin sentences, expected 1")
+    if violations:
+        return violations
+    dev = pins[0][2:] if pins[0].startswith("==") else None
+    if dev is None:
+        return [f"dev extra Ruff requirement 'ruff{pins[0]}' is not an exact == pin"]
+    for label, version in (("hook rev", revs[0]), ("dev extra pin", dev), ("guide", sentences[0])):
+        if not _EXACT_VERSION_RE.match(version):
+            violations.append(f"{label} '{version}' is not an exact version")
+    if not violations and not revs[0] == dev == sentences[0]:
+        violations.append(
+            f"Ruff versions differ: hook {revs[0]}, dev extra {dev}, guide {sentences[0]}"
+        )
+    return violations
+
+
 def test_uses_refs_are_sha_pinned_with_version_comment() -> None:
     assert uses_violations(_read_workflows()) == []
 
@@ -398,3 +442,47 @@ def test_guide_rule_rejects_missing_archive_sentence() -> None:
 def test_guide_rule_rejects_missing_build_command() -> None:
     guide = _replace_once(GUIDE_PATH.read_text(), "`python -m build`", "`make dist`")
     assert guide_violations(guide)
+
+
+def test_ruff_pins_are_exact_equal_and_named_in_the_guide() -> None:
+    assert (
+        ruff_pin_violations(
+            PRE_COMMIT_PATH.read_text(), PYPROJECT_PATH.read_text(), GUIDE_PATH.read_text()
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "old", "new"),
+    [
+        ("pre-commit", "rev: v0.17.2", "rev: v0.17.3"),
+        ("pyproject", '"ruff==0.17.2"', '"ruff==0.17.3"'),
+        ("pyproject", '"ruff==0.17.2"', '"ruff>=0.17.2"'),
+        ("pre-commit", "rev: v0.17.2", "rev: v0.17"),
+        ("guide", "pin Ruff 0.17.2 exactly", "pin Ruff 0.16.5 exactly"),
+        ("guide", "both pin Ruff 0.17.2 exactly", "use the same Ruff version"),
+        (
+            "pyproject",
+            '    "ruff==0.17.2",\n]\nvisualizer = [\n',
+            ']\nvisualizer = [\n    "ruff==0.17.2",\n',
+        ),
+    ],
+    ids=[
+        "hook-moved-alone",
+        "dev-moved-alone",
+        "dev-returned-to-range",
+        "hook-not-exact",
+        "sentence-names-another-version",
+        "sentence-removed",
+        "pin-moved-out-of-dev-extra",
+    ],
+)
+def test_ruff_pin_rule_rejects_divergence(target: str, old: str, new: str) -> None:
+    texts = {
+        "pre-commit": PRE_COMMIT_PATH.read_text(),
+        "pyproject": PYPROJECT_PATH.read_text(),
+        "guide": GUIDE_PATH.read_text(),
+    }
+    texts[target] = _replace_once(texts[target], old, new)
+    assert ruff_pin_violations(texts["pre-commit"], texts["pyproject"], texts["guide"])

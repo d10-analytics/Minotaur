@@ -42,10 +42,10 @@ ruff format --check .
 mypy
 ```
 
-The optional pre-commit hooks use the same Ruff version and may rewrite files;
-they are a convenience, not verification evidence. Record focused-test failures
-and their cause instead of assuming a small passing test means the hosted checks
-passed.
+The optional pre-commit hooks and the `dev` extra both pin Ruff 0.17.2 exactly,
+and the hooks may rewrite files; they are a convenience, not verification
+evidence. Record focused-test failures and their cause instead of assuming a
+small passing test means the hosted checks passed.
 
 Feature-branch pushes and pull requests run the quick hosted group: Ruff, mypy,
 source-package installation, and ordinary tests excluding the equivalence

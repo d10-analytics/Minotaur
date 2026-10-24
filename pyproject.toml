@@ -23,7 +23,7 @@ dev = [
     "pytest-cov>=5.0",
     "pytest-rerunfailures>=16.7",
     "mypy>=1.10",
-    "ruff>=0.16.3",
+    "ruff==0.17.2",
 ]
 visualizer = [
     "playwright>=1.50",
