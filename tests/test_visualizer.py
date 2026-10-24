@@ -276,6 +276,7 @@ def _record_components(record: str) -> dict[str, dict[str, str]]:
             if line.startswith("- ") and ": " in line:
                 key, _, value = line[2:].partition(": ")
                 fields[key] = value
+        assert name.strip() not in components, f"duplicate component entry {name.strip()}"
         components[name.strip()] = fields
     return components
 
@@ -287,7 +288,9 @@ def test_vendor_attribution_record_matches_the_vendored_files() -> None:
     for line in record.splitlines():
         if line.startswith("| `"):
             cells = [cell.strip() for cell in line.strip("|").split("|")]
-            rows[cells[0].strip("`")] = cells[-1].strip("`")
+            file_name = cells[0].strip("`")
+            assert file_name not in rows, f"duplicate table row for {file_name}"
+            rows[file_name] = cells[-1].strip("`")
     files = {path.name for path in VENDOR.iterdir() if path.name != "LICENSES.md"}
     assert set(rows) == files
     for name, digest in rows.items():
@@ -315,7 +318,7 @@ def test_vendor_attribution_record_matches_the_vendored_files() -> None:
         assert components[name]["Copyright"] == copyright_line
 
     banner = components["cytoscape-dagre"]["Upstream banner version"]
-    assert banner.split()[0] == lines[1].rsplit(" ", 1)[1] == "3.0.0"
+    assert banner == lines[1].rsplit(" ", 1)[1] == "3.0.0"
 
 
 def test_presentation_preserves_all_provenance_records_on_one_relationship() -> None:
