@@ -795,25 +795,27 @@ def _assert_rows_iff_exit_one(result: SystemDiffResult, text: str) -> None:
     assert ("no system differences" in text.splitlines()) is (result.exit_code == 0)
 
 
-def _site(line: int) -> Location:
-    return Location("a.py", Range(Position(line, 0), Position(line, 4)))
+def _site(line: int, path: str = "a.py") -> Location:
+    return Location(path, Range(Position(line, 0), Position(line, 4)))
 
 
-def _observation(line: int, fingerprint: str | None) -> CallExpressionObservation:
+def _observation(
+    line: int, fingerprint: str | None, path: str = "a.py"
+) -> CallExpressionObservation:
     return CallExpressionObservation(
         "python",
-        _site(line),
-        Location("a.py", Range(Position(line, 0), Position(line, 9))),
+        _site(line, path),
+        Location(path, Range(Position(line, 0), Position(line, 9))),
         fingerprint,
     )
 
 
-def _site_call(source, target, line: int) -> Relationship:
+def _site_call(source, target, line: int, path: str = "a.py") -> Relationship:
     return Relationship(
         source.id,
         target.id,
         "calls",
-        (Evidence(Provenance.STATIC_ANALYSIS, locations=(_site(line),)),),
+        (Evidence(Provenance.STATIC_ANALYSIS, locations=(_site(line, path),)),),
     )
 
 
@@ -1113,38 +1115,19 @@ def test_exact_grammar_fixtures_print_rows_exactly_when_they_exit_one() -> None:
 def _two_system_unavailable_result() -> SystemDiffResult:
     """Two matched calls with a missing fingerprint, one inside A and one inside B."""
 
-    def site(path: str) -> Location:
-        return Location(path, Range(Position(2, 0), Position(2, 4)))
-
-    def call(source, target, path: str) -> Relationship:
-        return Relationship(
-            source.id,
-            target.id,
-            "calls",
-            (Evidence(Provenance.STATIC_ANALYSIS, locations=(site(path),)),),
-        )
-
-    def observation(path: str, fingerprint: str | None) -> CallExpressionObservation:
-        return CallExpressionObservation(
-            "python",
-            site(path),
-            Location(path, Range(Position(2, 0), Position(2, 9))),
-            fingerprint,
-        )
-
     a_caller, a_callee = _symbol("a_caller", "a.py"), _symbol("a_callee", "a.py", line=5)
     b_caller, b_callee = _symbol("b_caller", "b.py"), _symbol("b_callee", "b.py", line=5)
     systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
     snapshot = _snapshot(
         (a_caller, a_callee, b_caller, b_callee),
-        (call(a_caller, a_callee, "a.py"), call(b_caller, b_callee, "b.py")),
+        (_site_call(a_caller, a_callee, 2, "a.py"), _site_call(b_caller, b_callee, 2, "b.py")),
         systems,
     )
     return compare_systems(
         snapshot,
         snapshot,
-        old_call_observations=(observation("a.py", None), observation("b.py", None)),
-        new_call_observations=(observation("a.py", "x"), observation("b.py", "x")),
+        old_call_observations=(_observation(2, None, "a.py"), _observation(2, None, "b.py")),
+        new_call_observations=(_observation(2, "x", "a.py"), _observation(2, "x", "b.py")),
     )
 
 
