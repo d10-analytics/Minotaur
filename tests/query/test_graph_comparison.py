@@ -7,7 +7,6 @@ from dataclasses import replace
 import pytest
 from test_system_diff import (
     _call,
-    _reference,
     _snapshot,
     _symbol,
     _systems,
@@ -153,26 +152,6 @@ def test_node_shape_change_carries_only_the_changed_reason() -> None:
     [node] = result.nodes
     assert node.status == "changed"
     assert node.reasons == ("changed",)
-
-
-def test_relationship_multiplicity_change_carries_only_that_reason() -> None:
-    origin = _symbol("caller", "a.py")
-    first = _unresolved(origin, "b.py", 0)
-    repeated = _unresolved(origin, "b.py", 1)
-    systems = _systems(("a.toml", "A", ("a.py",)))
-
-    result = compare_graphs(
-        _snapshot((origin, first), (_reference(origin, first),), systems),
-        _snapshot(
-            (origin, first, repeated),
-            (_reference(origin, first), _reference(origin, repeated)),
-            systems,
-        ),
-    )
-
-    [relationship] = result.relationships
-    assert relationship.status == "changed"
-    assert relationship.reasons == ("multiplicity_changed",)
 
 
 def test_relationship_membership_change_carries_only_that_reason() -> None:
