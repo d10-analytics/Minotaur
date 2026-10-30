@@ -595,7 +595,7 @@ src/package/api.py:39-45
 If the file's current bytes differ from the analyzed hash, output starts with
 `[file changed since analysis]`; the excerpt still comes from the current
 source so an agent can inspect the edit without confusing it with analyzed
-evidence. A pre-extension graph reports `[file hash unavailable]`. JSON has one
+evidence. A pre-extension graph reports `[file hash unavailable]`. A site file that exists but cannot be read exits `2` with `site path is unreadable: <reason>`, in text and `--json` forms. JSON has one
 result with `path`, `lines`, `stale`, and `hash_available`; each line contains
 `line`, `target`, and `text`.
 
