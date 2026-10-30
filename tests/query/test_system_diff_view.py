@@ -1013,3 +1013,24 @@ def test_details_collect_each_record_of_a_several_record_group() -> None:
     evidence = block["new evidence"]
     assert isinstance(evidence, list)
     assert [item["producer"]["name"] for item in evidence] == ["first", "second"]
+
+
+def test_exact_grammar_fixtures_print_rows_exactly_when_they_exit_one() -> None:
+    legacy = _symbol("legacy", "legacy.py")
+    removed_system = compare_systems(
+        _snapshot((legacy,), (), _systems(("legacy.toml", "Legacy", ("legacy.py",)))),
+        _snapshot((), (), ()),
+    )
+    complete = _ab_addition()
+    for result, names in (
+        (_checkout_notifications_result(), None),
+        (complete, None),
+        (filter_system_diff(complete, "A"), complete),
+        (_ab_removal(), None),
+        (removed_system, None),
+        (_ab_changed_rows(), None),
+        (_membership_endpoint_result(), None),
+    ):
+        rendered = render_text(result, complete=names)
+        assert result.exit_code == 1
+        _assert_rows_iff_exit_one(result, rendered)
