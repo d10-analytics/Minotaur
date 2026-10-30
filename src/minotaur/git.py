@@ -31,9 +31,11 @@ _REPOSITORY_LOCAL_ENVIRONMENT = (
 
 
 # Messages (under the forced C locale) meaning discovery found no repository
-# or no work tree. "not a git repository: <path>" is excluded: it names a
+# or no work tree. The named-repository failures are excluded: they name a
 # repository Git was directed to but could not open, such as the missing
-# gitdir behind a linked worktree's gitfile.
+# gitdir behind a linked worktree's gitfile. Git up to 2.55 words that as
+# "not a git repository: <path>", Git 2.56 and later as "gitfile does not
+# point to a valid repository: <path>".
 _OUTSIDE_WORK_TREE = re.compile(
     r"not a git repository \(or any (?:of the parent directories|parent up to mount point)"
     r"|must be run in a work tree"
