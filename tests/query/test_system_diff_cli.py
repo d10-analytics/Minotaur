@@ -4162,7 +4162,6 @@ def test_overlapping_current_definitions_report_the_loader_sentence(
 ) -> None:
     root = _configured_repo(tmp_path)
     monkeypatch.chdir(root)
-    assert cli.main(["analyze"]) == 0
     _git(root, "add", ".")
     _git(root, "commit", "-qm", "baseline")
     _overlapping_definition(root)
@@ -4184,7 +4183,6 @@ def test_overlapping_saved_definitions_name_worktree_relative_paths(
 ) -> None:
     root = _configured_repo(tmp_path)
     monkeypatch.chdir(root)
-    assert cli.main(["analyze"]) == 0
     _overlapping_definition(root)
     _git(root, "add", ".")
     _git(root, "commit", "-qm", "overlap")
