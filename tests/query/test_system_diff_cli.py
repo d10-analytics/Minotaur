@@ -4268,3 +4268,120 @@ def test_overlapping_saved_definitions_name_worktree_relative_paths(
     assert str(root) not in captured.err
     assert str(tmp_path) not in captured.err
     assert "minotaur-revision-" not in captured.err
+
+
+def _declaration_repo(tmp_path: Path, baseline: str) -> Path:
+    root = _repo(tmp_path)
+    (root / "app").mkdir()
+    (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "app" / "m.py").write_text(baseline, encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["app"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "app"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "App"\nfiles = ["app/m.py"]\n', encoding="utf-8"
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    return root
+
+
+def _internal_rows(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith(("node ", "relationship "))]
+
+
+def _node_ids(payload: dict[str, object]) -> list[tuple[str, object]]:
+    return sorted(
+        (str(entry["status"]), entry["id"])
+        for entry in payload["nodes"]  # type: ignore[attr-defined]
+        if entry["status"] != "unchanged"
+    )
+
+
+_GETTER_ONLY = "class C:\n    @property\n    def x(self):\n        return 1\n"
+_GETTER_SETTER_DELETER = (
+    _GETTER_ONLY + "\n    @x.setter\n    def x(self, v):\n        pass\n"
+    "\n    @x.deleter\n    def x(self):\n        pass\n"
+)
+_OVERLOAD_BASELINE = (
+    "from typing import overload\n\n\nclass C:\n    @overload\n"
+    "    def f(self, a: int) -> int: ...\n\n    def f(self, a):\n        return a\n"
+)
+_OVERLOAD_WITH_SECOND_STUB = (
+    "from typing import overload\n\n\nclass C:\n    @overload\n"
+    "    def f(self, a: int) -> int: ...\n\n    @overload\n"
+    "    def f(self, a: str) -> str: ...\n\n    def f(self, a):\n        return a\n"
+)
+
+
+def test_systems_diff_prints_added_property_accessors_with_distinct_role_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _declaration_repo(tmp_path, _GETTER_ONLY)
+    monkeypatch.chdir(root)
+    (root / "app" / "m.py").write_text(_GETTER_SETTER_DELETER, encoding="utf-8")
+
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    text = capsys.readouterr().out
+    assert cli.main(["query", "diff", "--systems", "--system", "App"]) == 1
+    filtered = capsys.readouterr().out
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    rows = _internal_rows(text)
+    assert rows == [
+        "node added: app.m.C.x (app/m.py, method, deleter)",
+        "node added: app.m.C.x (app/m.py, method, setter)",
+        "relationship added: app.m.C -> app.m.C.x (deleter) (contains)",
+        "relationship added: app.m.C -> app.m.C.x (deleter) (references)",
+        "relationship added: app.m.C -> app.m.C.x (setter) (contains)",
+        "relationship added: app.m.C -> app.m.C.x (setter) (references)",
+    ]
+    assert len(set(rows)) == len(rows)
+    assert _internal_rows(filtered) == rows
+    added = [e for e in payload["nodes"] if e["status"] == "added"]
+    assert len({entry["id"] for entry in added}) == 2
+    assert len(_node_ids(payload)) == 2
+
+
+def test_systems_diff_prints_overload_stubs_by_declaration_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _declaration_repo(tmp_path, _OVERLOAD_BASELINE)
+    monkeypatch.chdir(root)
+    (root / "app" / "m.py").write_text(_OVERLOAD_WITH_SECOND_STUB, encoding="utf-8")
+
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    text = capsys.readouterr().out
+    assert cli.main(["query", "diff", "--systems", "--system", "App"]) == 1
+    filtered = capsys.readouterr().out
+
+    rows = _internal_rows(text)
+    assert "node added: app.m.C.f:9 (app/m.py, method)" in rows
+    assert "relationship added: app.m.C -> app.m.C.f:9 (contains)" in rows
+    assert "relationship added: app.m.C -> app.m.C.f:9 (references)" in rows
+    assert not any(
+        "app.m.C.f (" in row or "C.f ->" in row or "-> app.m.C.f (" in row for row in rows
+    )
+    assert len(set(rows)) == len(rows)
+    assert _internal_rows(filtered) == rows
+
+
+def test_systems_diff_keeps_unique_node_names_free_of_role_and_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _declaration_repo(tmp_path, "class C:\n    def a(self):\n        return 1\n")
+    monkeypatch.chdir(root)
+    (root / "app" / "m.py").write_text(
+        "class C:\n    def a(self):\n        return 1\n\n    def b(self):\n        return 2\n",
+        encoding="utf-8",
+    )
+
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    assert _internal_rows(capsys.readouterr().out) == [
+        "node added: app.m.C.b (app/m.py, method)",
+        "relationship added: app.m.C -> app.m.C.b (contains)",
+    ]
