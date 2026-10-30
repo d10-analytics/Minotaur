@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -3986,3 +3987,178 @@ def test_systems_invalid_config_spelling_is_reported_exactly(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == f"minotaur: error: {message}\n"
+
+
+_WALKTHROUGH = Path(__file__).resolve().parents[2] / "examples" / "system-walkthrough"
+_ROW_PREFIXES = ("node ", "relationship ", "call ")
+_FEE_ROW = "relationship added: shop.orders._fee -> shop.billing.charge (calls)"
+
+
+def _walkthrough_repo(tmp_path: Path) -> Path:
+    """The shop walkthrough tree and definitions with two private helpers added."""
+    root = _repo(tmp_path)
+    for name in ("shop", "docs"):
+        shutil.copytree(_WALKTHROUGH / name, root / name)
+    shutil.copy(_WALKTHROUGH / ".minotaur.toml", root / ".minotaur.toml")
+    _commit_all(root, "baseline")
+    with (root / "shop" / "orders.py").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n\ndef _fee(order):\n    return charge(order)\n\n\ndef _settle(order):\n"
+            "    return _fee(order)\n"
+        )
+    return root
+
+
+def _difference_rows(output: str) -> list[str]:
+    return [line for line in output.splitlines() if line.startswith(_ROW_PREFIXES)]
+
+
+def _evidence_json(output: str, row: str, label: str) -> object:
+    lines = output.splitlines()
+    index = lines.index(row)
+    for line in lines[index + 1 : index + 5]:
+        if line.startswith(f"{label}: "):
+            value = line[len(label) + 2 :]
+            return value if value == "unavailable" else json.loads(value)
+    raise AssertionError(f"{label} missing after {row}")
+
+
+@pytest.mark.parametrize("details", (False, True))
+def test_systems_diff_prints_every_whole_graph_row_and_exits_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    details: bool,
+) -> None:
+    root = _walkthrough_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    status, out, err = _diff(capsys, *(("--details",) if details else ()))
+
+    assert (status, err) == (1, "")
+    assert _difference_rows(out) == [
+        "node added: shop.orders._fee (shop/orders.py, function)",
+        "node added: shop.orders._settle (shop/orders.py, function)",
+        "relationship added: shop.orders -> shop.orders._fee (contains)",
+        "relationship added: shop.orders -> shop.orders._settle (contains)",
+        _FEE_ROW,
+        "relationship added: shop.orders._settle -> shop.orders._fee (calls)",
+        "call added: shop.orders._fee -> shop.billing.charge",
+        "call added: shop.orders._settle -> shop.orders._fee",
+    ]
+    assert "no system differences" not in out
+    assert "node:comparison:" not in out
+    # The relationship's status word is its change status, not its edge kind.
+    assert "relationship calls:" not in out
+    assert out.index("boundary added:") < out.index("node added:") < out.index("old coverage:")
+
+
+def test_systems_diff_details_print_stored_evidence_per_row_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _walkthrough_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    status, out, _ = _diff(capsys, "--details")
+
+    assert status == 1
+    relationship = _evidence_json(out, _FEE_ROW, "new evidence")
+    assert isinstance(relationship, list) and len(relationship) == 1
+    assert relationship[0]["provenance"] == "static-analysis"
+    assert relationship[0]["locations"][0]["path"] == "shop/orders.py"
+    assert _evidence_json(out, _FEE_ROW, "old evidence") == "unavailable"
+    call = _evidence_json(
+        out, "call added: shop.orders._fee -> shop.billing.charge", "new evidence"
+    )
+    assert call == [relationship[0]["locations"][0]]
+    node_row = "node added: shop.orders._fee (shop/orders.py, function)"
+    assert _evidence_json(out, node_row, "new evidence") == "unavailable"
+    boundary = "boundary added: orders.shop.orders._fee -> billing.shop.billing.charge (calls)"
+    assert isinstance(_evidence_json(out, boundary, "new evidence"), list)
+
+
+def test_systems_diff_system_filter_keeps_names_rows_and_selected_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _walkthrough_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    _, unfiltered, _ = _diff(capsys)
+    status, billing, _ = _diff(capsys, "--system", "billing")
+
+    assert status == 1
+    # The crossing relationship's source node is outside billing's selection;
+    # its readable name still resolves, byte-identically to the unfiltered row.
+    assert _difference_rows(billing) == [
+        _FEE_ROW,
+        "call added: shop.orders._fee -> shop.billing.charge",
+    ]
+    assert set(_difference_rows(billing)) < set(_difference_rows(unfiltered))
+    assert "node added:" not in billing
+    assert "node:comparison:" not in billing
+    for row in _difference_rows(billing):
+        assert unfiltered.splitlines().count(row) == 1
+
+
+def test_systems_diff_system_filter_with_no_involvement_is_empty_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    (root / "other.py").write_text("def other():\n    return 1\n", encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app", "consumer.py", "other.py"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "other"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "Other"\nfiles = ["other.py"]\n', encoding="utf-8"
+    )
+    _commit_all(root, "baseline")
+    (root / "app" / "api.py").write_text(
+        "def receive():\n    return 1\n\ndef send():\n    return 2\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(root)
+
+    unfiltered_status, unfiltered, _ = _diff(capsys)
+    status, out, _ = _diff(capsys, "--system", "Other")
+
+    assert unfiltered_status == 1
+    assert _difference_rows(unfiltered)
+    assert status == 0
+    assert out.startswith("no system differences\n")
+    assert _difference_rows(out) == []
+    assert not any(
+        line.startswith(("system ", "surface ", "boundary ")) for line in out.splitlines()
+    )
+
+
+def test_systems_diff_without_declared_systems_prints_rows_and_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path)
+    (root / "mod.py").write_text("def helper():\n    return 1\n\ndef main():\n    return 0\n")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["mod.py"]\n',
+        encoding="utf-8",
+    )
+    _commit_all(root, "baseline")
+    monkeypatch.chdir(root)
+
+    unchanged_status, unchanged, _ = _diff(capsys)
+    assert unchanged_status == 0
+    assert unchanged.startswith("no system differences\n")
+    assert _difference_rows(unchanged) == []
+
+    (root / "mod.py").write_text(
+        "def helper():\n    return 1\n\ndef main():\n    return helper()\n", encoding="utf-8"
+    )
+    status, out, _ = _diff(capsys)
+
+    assert status == 1
+    assert "no system differences" not in out
+    assert _difference_rows(out) == [
+        "relationship added: mod.main -> mod.helper (calls)",
+        "call added: mod.main -> mod.helper",
+    ]

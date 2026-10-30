@@ -7,6 +7,7 @@ import json
 from dataclasses import replace
 
 import pytest
+from test_comparison_parity import build_side
 from test_system_diff import _call, _reference, _snapshot, _symbol, _systems, _upstream
 
 from minotaur.graph_model.evidence import Evidence, Producer
@@ -15,6 +16,7 @@ from minotaur.graph_model.provenance import Provenance
 from minotaur.graph_model.relationship import Relationship
 from minotaur.language_interpreter.call_expressions import CallExpressionObservation
 from minotaur.query import system_diff as system_diff_module
+from minotaur.query.call_diff import CallLimitation
 from minotaur.query.render import dump_json
 from minotaur.query.system import ReportingSnapshot
 from minotaur.query.system_diff import SystemChange, SystemDiffResult, compare_systems
@@ -304,6 +306,8 @@ def test_added_categories_and_system_use_exact_compact_grammar_and_order() -> No
             "consumer added: Notifications <- payments.py",
             "dependency added: Payments -> Notifications",
             "boundary added: Payments.send_receipt -> Notifications.email_receipt (calls)",
+            "node added: email_receipt (notifications.py, function)",
+            "relationship added: send_receipt -> email_receipt (calls)",
         ],
     )
     _assert_exact_compact(
@@ -313,6 +317,7 @@ def test_added_categories_and_system_use_exact_compact_grammar_and_order() -> No
             "consumer added: B <- a.py",
             "dependency added: A -> B",
             "boundary added: A.send -> B.receive (calls)",
+            "relationship added: send -> receive (calls)",
         ],
     )
 
@@ -326,6 +331,7 @@ def test_removed_and_changed_rows_and_system_use_exact_compact_grammar() -> None
             "consumer removed: B <- a.py",
             "dependency removed: A -> B",
             "boundary removed: A.send -> B.receive (calls)",
+            "relationship removed: send -> receive (calls)",
         ],
     )
 
@@ -337,6 +343,7 @@ def test_removed_and_changed_rows_and_system_use_exact_compact_grammar() -> None
         [
             "system removed: Legacy",
             "membership changed: legacy.py — Legacy -> unassigned",
+            "node removed: legacy (legacy.py, function)",
         ],
     )
 
@@ -348,6 +355,8 @@ def test_removed_and_changed_rows_and_system_use_exact_compact_grammar() -> None
             "dependency changed: A -> B",
             "boundary added: A.send -> B.receive (references)",
             "boundary removed: A.send -> B.receive (calls)",
+            "relationship added: send -> receive (references)",
+            "relationship removed: send -> receive (calls)",
         ],
     )
 
@@ -476,7 +485,11 @@ def test_boundary_membership_and_endpoint_lines_and_details_are_exact_and_adjace
         "boundary endpoint: no_system.send -> A.new_receive (calls)",
         "boundary membership: no_system.send -> A.new_receive (calls)",
     ]
-    _assert_exact_compact(result, expected_lines)
+    internal_lines = [
+        "node changed: new_receive (b.py, function) [changed, membership_changed]",
+        "relationship changed: send -> new_receive (calls) [membership_changed]",
+    ]
+    _assert_exact_compact(result, expected_lines + internal_lines)
 
     lines = render_text(result, details=True).splitlines()
     for changed_line in expected_lines:
@@ -679,3 +692,324 @@ def test_literal_names_render_once_by_field_semantics(name):
     assert result.exit_code == 1
     detailed = render_text(result, details=True)
     assert all(line in detailed.splitlines() for line in expected.splitlines())
+
+
+_ROW_PREFIXES = (
+    "system ",
+    "membership ",
+    "surface ",
+    "consumer ",
+    "dependency ",
+    "boundary ",
+    "node ",
+    "relationship ",
+    "call ",
+)
+_LIMITATION_LINE = (
+    "limitation old: call-expression-unavailable: "
+    "structural call expression was unavailable for one or more observations"
+)
+
+
+def _rows(text: str, prefixes: tuple[str, ...] = _ROW_PREFIXES) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith(prefixes)]
+
+
+def _assert_rows_iff_exit_one(result: SystemDiffResult, text: str) -> None:
+    """A difference row is printed exactly when the exit status is 1."""
+    assert bool(_rows(text)) is (result.exit_code == 1)
+    assert ("no system differences" in text.splitlines()) is (result.exit_code == 0)
+
+
+def _site(line: int) -> Location:
+    return Location("a.py", Range(Position(line, 0), Position(line, 4)))
+
+
+def _observation(line: int, fingerprint: str | None) -> CallExpressionObservation:
+    return CallExpressionObservation(
+        "python",
+        _site(line),
+        Location("a.py", Range(Position(line, 0), Position(line, 9))),
+        fingerprint,
+    )
+
+
+def _site_call(source, target, line: int) -> Relationship:
+    return Relationship(
+        source.id,
+        target.id,
+        "calls",
+        (Evidence(Provenance.STATIC_ANALYSIS, locations=(_site(line),)),),
+    )
+
+
+def _mixed_result() -> SystemDiffResult:
+    """A new node, a new relationship, an added call and a changed call on an
+    unchanged relationship."""
+    caller = _symbol("caller", "a.py")
+    callee = _symbol("callee", "b.py")
+    fresh = _symbol("fresh", "a.py", line=5)
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    kept = _site_call(caller, callee, 2)
+    old = _snapshot((caller, callee), (kept,), systems)
+    new = _snapshot((caller, callee, fresh), (kept, _site_call(caller, fresh, 3)), systems)
+    return compare_systems(
+        old,
+        new,
+        old_call_observations=(_observation(2, "one"),),
+        new_call_observations=(_observation(2, "two"), _observation(3, "x")),
+    )
+
+
+def _unavailable_only_result() -> SystemDiffResult:
+    caller = _symbol("caller", "a.py")
+    callee = _symbol("callee", "b.py")
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    snapshot = _snapshot((caller, callee), (_site_call(caller, callee, 2),), systems)
+    return compare_systems(
+        snapshot,
+        snapshot,
+        old_call_observations=(_observation(2, None),),
+        new_call_observations=(_observation(2, "x"),),
+    )
+
+
+def test_unavailable_call_is_not_a_difference_and_keeps_its_limitation() -> None:
+    result = _unavailable_only_result()
+    assert [item.status for item in result.call_changes] == ["unavailable"]
+
+    assert result.differences == ()
+    assert result.changed is False
+    assert result.exit_code == 0
+    text = render_text(result)
+    assert text.splitlines()[:2] == ["no system differences", _LIMITATION_LINE]
+    assert _rows(text) == []
+    assert "call unavailable" not in render_text(result, details=True)
+    _assert_rows_iff_exit_one(result, text)
+
+
+def test_limitation_line_is_rendered_exactly_before_the_context() -> None:
+    result = SystemDiffResult(
+        limitations=(
+            CallLimitation(
+                "old",
+                "relationship:x",
+                "call-expression-unavailable",
+                "structural call expression was unavailable for one or more observations",
+            ),
+        )
+    )
+    text = render_text(result)
+    assert text.splitlines()[:2] == ["no system differences", _LIMITATION_LINE]
+    assert text == f"no system differences\n{_LIMITATION_LINE}\n" + render_context_text(result)
+
+
+def test_changed_status_agrees_with_the_difference_rule_for_every_call_status() -> None:
+    for status, expected in (
+        ("added", True),
+        ("removed", True),
+        ("changed", True),
+        ("unchanged", False),
+        ("unavailable", False),
+    ):
+        result = SystemDiffResult(
+            call_changes=(system_diff_module.CallChange("relationship:x", status, ("r",)),)
+        )
+        assert result.changed is expected
+        assert bool(result.differences) is expected
+        assert result.exit_code == int(expected)
+
+
+def test_printed_internal_rows_correspond_one_to_one_to_internal_differences() -> None:
+    result = _mixed_result()
+    internal = [
+        change
+        for change in result.differences
+        if change.domain in {"graph-node", "graph-relationship", "call"}
+    ]
+    assert [change.domain for change in internal] == [
+        "graph-node",
+        "graph-relationship",
+        "call",
+        "call",
+    ]
+    for details in (False, True):
+        text = render_text(result, details=details)
+        printed = _rows(text, ("node ", "relationship ", "call "))
+        group_of = {"node": 0, "relationship": 1, "call": 2}
+        domain_prefix = {"graph-node": "node", "graph-relationship": "relationship", "call": "call"}
+        printed_pairs = [(line.split(" ")[0], line.split(" ")[1].rstrip(":")) for line in printed]
+        entry_pairs = [(domain_prefix[change.domain], change.kind) for change in internal]
+        # Same group order; within a group the same entries (rows sort by
+        # status and text while `differences` keeps comparison order).
+        assert [group_of[prefix] for prefix, _ in printed_pairs] == [
+            group_of[prefix] for prefix, _ in entry_pairs
+        ]
+        assert sorted(printed_pairs) == sorted(entry_pairs)
+        assert printed == [
+            "node added: fresh (a.py, function)",
+            "relationship added: caller -> fresh (calls)",
+            "call added: caller -> fresh",
+            "call changed: caller -> callee [expression_changed]",
+        ]
+        assert "no system differences" not in text
+        _assert_rows_iff_exit_one(result, text)
+
+
+def test_changed_call_on_unchanged_relationship_prints_the_call_reasons() -> None:
+    result = _mixed_result()
+    kept = next(item for item in result.call_changes if item.status == "changed")
+    assert [item.status for item in result.relationships if item.id == kept.relationship_id] == [
+        "unchanged"
+    ]
+    text = render_text(result)
+    assert "call changed: caller -> callee [expression_changed]\n" in text
+    assert not any(
+        line.startswith("relationship") and "callee" in line for line in text.splitlines()
+    )
+
+
+def test_changed_relationship_reasons_come_from_its_own_group_not_the_call_entry() -> None:
+    old, old_calls = build_side(False)
+    new, new_calls = build_side(True)
+    result = compare_systems(
+        old, new, old_call_observations=old_calls, new_call_observations=new_calls
+    )
+    relationship = next(
+        item for item in result.relationships if item.reasons == ("membership_changed",)
+    )
+    assert relationship.status == "changed"
+    shadow = [item for item in result.call_changes if item.relationship_id == relationship.id]
+    assert [(item.status, item.reasons) for item in shadow] == [("unchanged", ())]
+
+    row = "relationship changed: A -> moved (calls) [membership_changed]"
+    assert row in render_text(result).splitlines()
+    assert row in render_text(result, details=True).splitlines()
+
+
+def test_call_without_a_graph_relationship_prints_its_one_based_callee_location() -> None:
+    caller = _symbol("caller", "a.py")
+    systems = _systems(("a.toml", "A", ("a.py",)))
+    snapshot = _snapshot((caller,), (), systems)
+    added = compare_systems(snapshot, snapshot, new_call_observations=(_observation(2, "x"),))
+    removed = compare_systems(snapshot, snapshot, old_call_observations=(_observation(6, "x"),))
+
+    assert added.call_changes[0].relationship_id.startswith("relationship:call-site:")
+    assert _rows(render_text(added)) == ["call added: a.py:3"]
+    assert _rows(render_text(removed)) == ["call removed: a.py:7"]
+    _assert_rows_iff_exit_one(added, render_text(added))
+    _assert_rows_iff_exit_one(removed, render_text(removed))
+
+
+def test_selected_view_resolves_names_from_the_complete_result_only() -> None:
+    complete = _ab_addition()
+    selected = filter_system_diff(complete, "A")
+    assert all(item.id for item in complete.nodes)
+    assert len(selected.nodes) < len(complete.nodes)
+
+    row = "relationship added: send -> receive (calls)"
+    assert _rows(render_text(complete), ("relationship ",)) == [row]
+    assert _rows(render_text(selected, complete=complete), ("relationship ",)) == [row]
+    unresolved = _rows(render_text(selected), ("relationship ",))
+    assert unresolved != [row]
+    assert "node:comparison:" in unresolved[0]
+
+
+def test_complete_result_never_changes_rows_status_or_empty_state() -> None:
+    systems = _systems(
+        ("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)), ("c.toml", "C", ("c.py",))
+    )
+    source = _symbol("send", "a.py")
+    target = _symbol("receive", "b.py")
+    complete = compare_systems(
+        _snapshot((source, target), (), systems),
+        _snapshot((source, target), (_call(source, target),), systems),
+    )
+    selected = filter_system_diff(complete, "C")
+
+    assert complete.exit_code == 1
+    assert _rows(render_text(complete))
+    text = render_text(selected, complete=complete)
+    assert text.startswith("no system differences\n")
+    assert _rows(text) == []
+    assert selected.exit_code == 0
+    _assert_rows_iff_exit_one(selected, text)
+    _assert_rows_iff_exit_one(complete, render_text(complete))
+
+
+def test_internal_rows_sort_by_status_then_text_while_existing_groups_keep_order() -> None:
+    old, old_calls = build_side(False)
+    new, new_calls = build_side(True)
+    result = compare_systems(
+        old, new, old_call_observations=old_calls, new_call_observations=new_calls
+    )
+    rows = _rows(render_text(result), ("relationship ",))
+    assert rows == sorted(rows, key=lambda line: (line.split(" ", 2)[1], line))
+    assert rows[0].startswith("relationship added:")
+    assert rows[-1].startswith("relationship removed:")
+    dependency = [
+        line for line in render_text(result).splitlines() if line.startswith("dependency changed:")
+    ]
+    assert dependency == ["dependency changed: A -> external", "dependency changed: A -> B"]
+
+
+def test_details_project_stored_evidence_for_each_row_class() -> None:
+    text = render_text(_mixed_result(), details=True)
+
+    node = _detail_block(text, "node added: fresh (a.py, function)")
+    assert node["old evidence"] == "unavailable"
+    assert node["new evidence"] == "unavailable"
+    assert node["new"]["node"]["label"] == "fresh"  # type: ignore[index]
+
+    relationship = _detail_block(text, "relationship added: caller -> fresh (calls)")
+    assert relationship["old evidence"] == "unavailable"
+    evidence = relationship["new evidence"]
+    assert isinstance(evidence, list) and len(evidence) == 1
+    assert evidence[0]["provenance"] == "static-analysis"
+    assert evidence[0]["locations"] == [_site(3).to_dict()]
+
+    added_call = _detail_block(text, "call added: caller -> fresh")
+    assert added_call["old evidence"] == "unavailable"
+    assert added_call["new evidence"] == [_site(3).to_dict()]
+    changed_call = _detail_block(text, "call changed: caller -> callee [expression_changed]")
+    assert changed_call["old evidence"] == [_site(2).to_dict()]
+    assert changed_call["new evidence"] == [_site(2).to_dict()]
+
+
+def test_details_collect_each_record_of_a_several_record_group() -> None:
+    # A several-record group is stored as a tuple of relationship payloads.
+    def record(name: str) -> dict[str, object]:
+        return {
+            "kind": "calls",
+            "source": "node:s",
+            "target": "node:t",
+            "evidence": [{"provenance": "static-analysis", "producer": {"name": name}}],
+        }
+
+    def node(identifier: str, label: str) -> system_diff_module.GraphNodeChange:
+        return system_diff_module.GraphNodeChange(
+            identifier,
+            "unchanged",
+            after={"node": {"label": label, "node_class": "symbol"}, "system": None},
+        )
+
+    result = SystemDiffResult(
+        nodes=(node("node:s", "send"), node("node:t", "receive")),
+        relationships=(
+            system_diff_module.GraphRelationshipChange(
+                "relationship:r",
+                "node:s",
+                "node:t",
+                "calls",
+                "added",
+                ("added",),
+                after=(record("first"), record("second")),
+            ),
+        ),
+    )
+    block = _detail_block(
+        render_text(result, details=True), "relationship added: send -> receive (calls)"
+    )
+    evidence = block["new evidence"]
+    assert isinstance(evidence, list)
+    assert [item["producer"]["name"] for item in evidence] == ["first", "second"]
