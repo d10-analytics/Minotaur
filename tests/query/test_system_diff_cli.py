@@ -692,7 +692,7 @@ def test_invalid_unselected_current_definition_fails_before_filtering(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "other/system.toml" in captured.err
-    assert "invalid current system definitions" in captured.err
+    assert "Invalid value" in captured.err
     _assert_state(root, before)
 
 
@@ -4146,3 +4146,61 @@ def test_systems_diff_without_declared_systems_prints_rows_and_exits_one(
         "relationship added: mod.main -> mod.helper (calls)",
         "call added: mod.main -> mod.helper",
     ]
+
+
+def _overlapping_definition(root: Path) -> None:
+    """Add a second definition that lists a file the first one already lists."""
+    definition = root / "docs" / "systems" / "twin"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "Twin"\nfiles = ["app/api.py"]\n', encoding="utf-8"
+    )
+
+
+def test_overlapping_current_definitions_report_the_loader_sentence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    _overlapping_definition(root)
+
+    assert cli.main(["query", "surface", "App"]) == 2
+    surface = capsys.readouterr().err.removeprefix("minotaur: error: ").strip()
+    assert surface.startswith("file listed in two systems: app/api.py (declared in ")
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert surface in captured.err
+    assert "app/system.toml" in captured.err
+    assert "twin/system.toml" in captured.err
+
+
+def test_overlapping_saved_definitions_name_worktree_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    assert cli.main(["analyze"]) == 0
+    _overlapping_definition(root)
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "overlap")
+    first = _head_sha(root)
+    shutil.rmtree(root / "docs" / "systems" / "twin")
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "repaired")
+    second = _head_sha(root)
+
+    assert cli.main(["query", "diff", "--systems", first, second]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        "file listed in two systems: app/api.py "
+        "(declared in docs/systems/app/system.toml and docs/systems/twin/system.toml)"
+    ) in captured.err
+    assert str(root) not in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "minotaur-revision-" not in captured.err
