@@ -91,9 +91,10 @@ $ minotaur query diff --systems
 The report names the two sides as `HEAD · <short commit>` and
 `Working tree at report generation`. The working-tree side has no commit
 identity, and the report never invents one. The complete change set is the
-membership and boundary rows followed by the whole-graph `node`,
-`relationship` and `call` rows, which name what changed by its label, source
-file and kind:
+membership, surface, consumer, dependency and boundary rows followed by the
+whole-graph rows. A `node` row names the label, source file and kind; a
+`relationship` row names both endpoint labels and the edge kind; a `call` row
+names the caller and callee:
 
 ```text
 membership changed: shop/order_ops.py — unassigned -> orders

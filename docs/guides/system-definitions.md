@@ -308,8 +308,10 @@ The source-change command exits `1`; an identical comparison exits `0`. A
 successful comparison that also writes a requested `--html` report still exits
 `1`. `--details` adds `old`, `new`, `old evidence`, and `new evidence` after
 each changed row. The old side is `unavailable` when the relationship did not
-exist there; the new side contains the recorded endpoint and evidence
-projection. `--json` preserves the same typed categories, the resolved
+exist there. For boundary and relationship rows the new side contains the
+recorded endpoint and evidence projection, a call row shows its callee
+locations, and a node row has no stored evidence, so its evidence values are
+`unavailable`. `--json` preserves the same typed categories, the resolved
 before/after identities, status-neutral coverage, and old/new selection context
 in deterministic JSON.
 

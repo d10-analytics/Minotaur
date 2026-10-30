@@ -467,12 +467,14 @@ edge changes and call-site additions, removals, and expression changes.
 Internal changes are included even when the system boundaries remain
 identical, so a moved symbol is visible as a removal plus an addition. The
 text output prints these internal changes by default, after the boundary rows,
-as `node`, `relationship` and `call` rows that name the label, source file and
-kind (or both endpoint labels and the edge kind, or caller and callee). A
-`changed` internal row ends with its stored reasons in brackets, for example
+as `node`, `relationship` and `call` rows. A `node` row gives the label,
+source file and kind; a `relationship` row gives both endpoint labels and the
+edge kind; a `call` row gives caller and callee, and shows the callee location
+when the call has no graph relationship. A `changed` internal row ends with its
+stored reasons in brackets, for example
 `node changed: outside (outside.py, module) [membership_changed]`; added and
-removed rows carry none. The command is read-only: it does not rewrite the committed graph, graph sidecar,
-configuration, or definitions.
+removed rows carry none. The command is read-only: it does not rewrite the
+committed graph, graph sidecar, configuration, or definitions.
 
 Each side captures only the comparison selection: the configuration file and,
 when it is discovered rather than given, its `.minotaur.toml` discovery
@@ -492,7 +494,9 @@ part of the selection, and `source_digest` covers exactly the captured selection
 The compact output ends with the old/new coverage and selection lines. With
 `--details`, each changed row is followed by its `old`, `new`, `old evidence`,
 and `new evidence` values; an absent side is explicitly `unavailable`, while an
-observed side includes the stored relationship and source evidence. JSON
+observed side includes the stored relationship and source evidence for boundary
+and relationship rows and the callee locations for call rows. A node row has no
+stored evidence, so its evidence values are `unavailable`. JSON
 contains the same typed categories plus the resolved before/after identities
 with deterministic key ordering. `--html` writes a self-contained offline
 report and still prints the summary; the saved report is static and does not
