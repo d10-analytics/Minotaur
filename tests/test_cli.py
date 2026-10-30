@@ -2341,7 +2341,7 @@ def test_help_survives_git_probe_failure_in_orphaned_worktree(
     failure = _run_in(linked, *command)
     assert failure.returncode == 2
     assert "minotaur: error:" in failure.stderr
-    assert ".git" in failure.stderr
+    assert "not a git repository (or any" not in failure.stderr
     result = _run_in(linked, *command, "--help")
     assert result.returncode == 0
     assert result.stderr == ""
@@ -3714,7 +3714,7 @@ def test_analyze_in_orphaned_linked_worktree_stops_before_writing(tmp_path: Path
 
     assert result.returncode == 2, result.stderr
     assert "minotaur: error:" in result.stderr
-    assert ".git" in result.stderr
+    assert "not a git repository (or any" not in result.stderr
     assert not output.exists()
     assert not stamp_path(output).exists()
     assert not parent_graph.exists()

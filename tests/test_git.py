@@ -485,13 +485,14 @@ def _orphaned_linked_worktree(tmp_path: Path) -> Path:
 
 def test_work_tree_root_rejects_orphaned_linked_worktree(tmp_path: Path) -> None:
     linked = _orphaned_linked_worktree(tmp_path)
-    # Git words the unopenable-gitfile failure differently across versions
-    # ("not a git repository: <path>", "gitfile does not point to a valid
-    # repository: <path>"), but both name the missing .git directory; raising
-    # at all (rather than returning None) is what separates it from discovery
-    # finding no repository.
-    with pytest.raises(git.GitProbeError, match=r"\.git"):
+    # Git words the unopenable-gitfile failure differently across versions, and
+    # the named location may be a path or "(null)". Whatever the wording, it is
+    # the named-repository form: it must raise, and must not be one of the
+    # discovery-exhausted forms that mean "outside any repository".
+    with pytest.raises(git.GitProbeError) as raised:
         git.work_tree_root(linked)
+    assert "not a git repository (or any" not in str(raised.value)
+    assert "must be run in a work tree" not in str(raised.value)
 
 
 def test_work_tree_root_returns_none_outside_any_repository(

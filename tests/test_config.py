@@ -1815,5 +1815,7 @@ def test_discovery_stops_in_orphaned_linked_worktree(tmp_path: Path) -> None:
     assert _git(main, "worktree", "add", "-q", str(linked)).returncode == 0
     main.rename(tmp_path / "moved")
 
-    with pytest.raises(ConfigError, match=r"^Git work-tree discovery failed: .*\.git"):
+    with pytest.raises(ConfigError) as raised:
         find_config(linked)
+    assert str(raised.value).startswith("Git work-tree discovery failed: ")
+    assert "not a git repository (or any" not in str(raised.value)

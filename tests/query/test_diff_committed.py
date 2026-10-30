@@ -646,7 +646,7 @@ def test_committed_diff_in_orphaned_linked_worktree_exits_two(
     assert result.returncode == 2, result.stderr
     assert result.stdout == ""
     assert "minotaur: error:" in result.stderr
-    assert ".git" in result.stderr
+    assert "not a git repository (or any" not in result.stderr
     assert (graph.read_bytes(), stamp_path(graph).read_bytes()) == before
 
 
