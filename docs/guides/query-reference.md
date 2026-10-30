@@ -470,8 +470,14 @@ text output prints these internal changes by default, after the boundary rows,
 as `node`, `relationship` and `call` rows. A `node` row gives the label,
 source file and kind; a `relationship` row gives both endpoint labels and the
 edge kind; a `call` row gives caller and callee, and shows the callee location
-when the call has no graph relationship. A `changed` internal row ends with its
-stored reasons in brackets, for example
+when the call has no graph relationship. Declarations that share a label,
+source file and kind, such as a property's getter, setter and deleter, are
+named with their declaration role, as in
+`node added: m.C.x (m.py, method, setter)` and the endpoint `m.C.x (setter)`.
+When roles do not tell them apart, as for `@overload` stubs and their
+implementation, each is named with its 1-based declaration line, such as
+`m.f:5`. A name that no other node shares keeps its plain form. A `changed`
+internal row ends with its stored reasons in brackets, for example
 `node changed: outside (outside.py, module) [membership_changed]`; added and
 removed rows carry none. The command is read-only: it does not rewrite the
 committed graph, graph sidecar, configuration, or definitions.
@@ -510,7 +516,10 @@ revision that cannot be acquired or interpreted, an invalid configuration, and
 an ambiguous semantic identity are errors with attributed diagnostics, status
 `2`, and empty standard output even if the requested filter names an unrelated
 system. Missing call-expression evidence on a side is a limitation notice, not
-a detected change. The comparison reports accepted source facts only; it does
+a detected change. A `--system NAME` view keeps only the limitation notices
+for the call changes it retains, in the text and in the top-level JSON
+`limitations`; JSON `comparison.limitations` and the `--html` report keep
+every notice. The comparison reports accepted source facts only; it does
 not infer renames, causality, edit timing, or intent.
 
 Two symbols with the same file, label, and symbol kind share a semantic

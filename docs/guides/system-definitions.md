@@ -286,7 +286,13 @@ output never reports differences it does not show. Each internal row names what
 changed by its readable label and source file: a `node` row gives the label,
 file and kind, a `relationship` row gives both endpoint labels and the edge
 kind, and a `call` row gives caller and callee (with the callee location when
-no graph relationship exists). A `changed` internal row ends with its stored
+no graph relationship exists). Declarations that share a label, file and kind,
+such as a property's getter, setter and deleter, are named with their
+declaration role, for example `node added: m.C.x (m.py, method, setter)` and
+the endpoint `m.C.x (setter)`. When roles do not tell them apart, as for
+`@overload` stubs and their implementation, each is named with its 1-based
+declaration line, such as `m.f:5`. A name that no other node shares keeps its
+plain form. A `changed` internal row ends with its stored
 reasons in brackets, such as `[membership_changed]`; added and removed rows
 carry none because the reason repeats the status. For example, adding `send` to
 `app/api.py` and calling it from `consumer.py` produces these rows (followed by
@@ -320,7 +326,10 @@ definitions are loaded before filtering. A revision that cannot be acquired or
 interpreted, or a semantically ambiguous identity, exits `2`, prints an
 attributed diagnostic to standard error, and prints no report, even when an
 unrelated `--system` filter was requested. Missing call-expression evidence is a
-limitation notice, not a detected change. The comparison reports observed
+limitation notice, not a detected change. A `--system` view keeps only the
+limitation notices for the call changes it retains, in the text and in the
+top-level JSON `limitations`; JSON `comparison.limitations` and the `--html`
+report keep every notice. The comparison reports observed
 source facts and membership; it does not infer renames, edit timing, causality,
 or intent.
 
