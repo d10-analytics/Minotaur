@@ -281,14 +281,27 @@ the configuration, or system definitions. A source-only edit produces a
 `surface`, `consumer`, `dependency`, or `boundary` row without touching the
 saved graph; a changed definition produces a `membership` row. Internal graph
 and call-expression changes are included even when the system boundaries stay
-identical. For example, adding `send` to `app/api.py` and calling it from
-`consumer.py` produces these compact rows (followed by the four context lines):
+identical, and they are printed by default after the boundary rows, so the
+output never reports differences it does not show. Each internal row names what
+changed by its readable label and source file: a `node` row gives the label,
+file and kind, a `relationship` row gives both endpoint labels and the edge
+kind, and a `call` row gives caller and callee (with the callee location when
+no graph relationship exists). A `changed` internal row ends with its stored
+reasons in brackets, such as `[membership_changed]`; added and removed rows
+carry none because the reason repeats the status. For example, adding `send` to
+`app/api.py` and calling it from `consumer.py` produces these rows (followed by
+the four context lines):
 
 ```text
 surface added: App app/api.py.app.api.send
 consumer changed: App <- consumer.py
 boundary added: no_system.consumer -> App.app.api.send (imports)
 boundary added: no_system.consumer.consume -> App.app.api.send (calls)
+node added: app.api.send (app/api.py, function)
+relationship added: app.api -> app.api.send (contains)
+relationship added: consumer -> app.api.send (imports)
+relationship added: consumer.consume -> app.api.send (calls)
+call added: consumer.consume -> app.api.send
 ```
 
 The source-change command exits `1`; an identical comparison exits `0`. A

@@ -466,7 +466,12 @@ dependencies, and boundary relationships, and also internal graph-node and
 edge changes and call-site additions, removals, and expression changes.
 Internal changes are included even when the system boundaries remain
 identical, so a moved symbol is visible as a removal plus an addition. The
-command is read-only: it does not rewrite the committed graph, graph sidecar,
+text output prints these internal changes by default, after the boundary rows,
+as `node`, `relationship` and `call` rows that name the label, source file and
+kind (or both endpoint labels and the edge kind, or caller and callee). A
+`changed` internal row ends with its stored reasons in brackets, for example
+`node changed: outside (outside.py, module) [membership_changed]`; added and
+removed rows carry none. The command is read-only: it does not rewrite the committed graph, graph sidecar,
 configuration, or definitions.
 
 Each side captures only the comparison selection: the configuration file and,
