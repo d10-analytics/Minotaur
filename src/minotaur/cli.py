@@ -1074,7 +1074,7 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
         payload["selected_system"] = requested_system
         output = dump_json(payload)
     else:
-        output = system_diff_view.render_text(selected, details=query.details)
+        output = system_diff_view.render_text(selected, details=query.details, complete=complete)
 
     if plan is not None and content is not None:
         _publish_comparison_html(

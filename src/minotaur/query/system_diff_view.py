@@ -10,6 +10,7 @@ from __future__ import annotations
 import difflib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 from minotaur.query.render import dump_json
@@ -97,36 +98,45 @@ def render_context_text(result: SystemDiffResult) -> str:
     return "".join(lines)
 
 
-def render_text(result: SystemDiffResult, *, details: bool = False) -> str:
-    """Render structural changes followed by stored coverage and selection."""
+def render_text(
+    result: SystemDiffResult,
+    *,
+    details: bool = False,
+    complete: SystemDiffResult | None = None,
+) -> str:
+    """Render every difference of ``result`` followed by stored context.
+
+    Rows, limitation lines, the empty-state sentence and the caller's exit
+    status all come from ``result``.  ``complete`` (default ``result``) only
+    supplies a private index of readable names, built once per call, so a
+    selected view names the same nodes as the complete comparison.
+    """
+    differences = result.differences
+    names = _NameIndex.build(result if complete is None else complete)
+    reasons = _ReasonIndex.build(result)
     lines = [
+        _change_lines("systems", change, details=details)
+        for change in differences
+        if change.domain == "systems"
+    ]
+    lines.extend(
         _change_lines(label, change, details=details)
         for field_name, label in _CHANGE_GROUPS
         for change in _ordered(getattr(result, field_name))
-    ]
-    if result.added_systems:
-        lines[0:0] = [
-            _change_lines(
-                "systems",
-                SystemChange(
-                    "systems", "added", (name,), new={"name": name}, involved_systems=(name,)
-                ),
-                details=details,
-            )
-            for name in result.added_systems
-        ]
-    if result.removed_systems:
-        offset = len(result.added_systems)
-        lines[offset:offset] = [
-            _change_lines(
-                "systems",
-                SystemChange(
-                    "systems", "removed", (name,), old={"name": name}, involved_systems=(name,)
-                ),
-                details=details,
-            )
-            for name in result.removed_systems
-        ]
+    )
+    for domain in ("graph-node", "graph-relationship", "call"):
+        rows = sorted(
+            (
+                (_change_status(change), text, change.key, change)
+                for change in differences
+                if change.domain == domain
+                for text in (_internal_row(domain, change, names, reasons),)
+            ),
+            key=lambda row: row[:3],
+        )
+        lines.extend(
+            text + (_render_details(change) if details else "") for _, text, _, change in rows
+        )
     if not lines:
         lines.append("no system differences\n")
     if result.limitations:
@@ -225,20 +235,152 @@ def _change_line(label: str, change: SystemChange) -> str:
             f"boundary {kind}: {_safe_atom(source)} -> {_safe_atom(target)} "
             f"({_safe_atom(relation)})\n"
         )
-    if label == "graph-node":
-        return f"node {kind}: {_safe_atom(_key_part(change, 0))}\n"
-    if label == "graph-relationship":
-        return f"relationship {kind}: {_safe_atom(_key_part(change, 0))}\n"
-    if label == "call":
-        return f"call {kind}: {_safe_atom(_key_part(change, 0))}\n"
     raise AssertionError(f"unsupported change label: {label}")
 
 
+@dataclass(frozen=True, slots=True)
+class _NameIndex:
+    """Readable names resolved from one complete result, built once per render."""
+
+    nodes: Mapping[str, tuple[object, object]]
+    relationships: Mapping[str, tuple[str, str, str]]
+
+    @classmethod
+    def build(cls, complete: SystemDiffResult) -> _NameIndex:
+        return cls(
+            nodes={item.id: (_first(item.before), _first(item.after)) for item in complete.nodes},
+            relationships={
+                item.id: (item.source, item.target, item.kind) for item in complete.relationships
+            },
+        )
+
+    def node_record(self, node_id: str, status: str) -> Mapping[str, object] | None:
+        """Return the new side (old side for a removed row), else the other one."""
+        before, after = self.nodes.get(node_id, (None, None))
+        order = (before, after) if status == "removed" else (after, before)
+        for side in order:
+            record = _mapping(_mapping_value(side, "node") or side)
+            if record:
+                return record
+        return None
+
+    def label(self, node_id: str, status: str) -> str:
+        record = self.node_record(node_id, status)
+        label = record.get("label") if record else None
+        return str(label) if label is not None else node_id
+
+
+@dataclass(frozen=True, slots=True)
+class _ReasonIndex:
+    """Stored reasons of the selected result, one lookup per owning group."""
+
+    nodes: Mapping[str, tuple[str, ...]]
+    relationships: Mapping[str, tuple[str, ...]]
+    calls: Mapping[str, tuple[str, ...]]
+
+    @classmethod
+    def build(cls, result: SystemDiffResult) -> _ReasonIndex:
+        return cls(
+            nodes={item.id: item.reasons for item in result.nodes},
+            relationships={item.id: item.reasons for item in result.relationships},
+            calls={item.relationship_id: item.reasons for item in result.call_changes},
+        )
+
+
+def _first(payload: object) -> object:
+    """Read the first record of a several-record group."""
+    if isinstance(payload, (tuple, list)):
+        return payload[0] if payload else None
+    return payload
+
+
+def _internal_row(
+    domain: str, change: SystemChange, names: _NameIndex, reasons: _ReasonIndex
+) -> str:
+    """Render one node, relationship or call difference with readable names."""
+    status = _change_status(change)
+    identifier = _key_part(change, 0)
+    if domain == "graph-node":
+        prefix, group = "node", reasons.nodes
+        record = names.node_record(identifier, status)
+        if record is None:
+            text = _safe_atom(identifier)
+        else:
+            location = _mapping(record.get("location"))
+            path = record.get("path") or location.get("path")
+            kind = record.get("symbol_kind") or record.get("node_class")
+            where = ", ".join(_safe_atom(item) for item in (path, kind) if item)
+            text = _safe_atom(record.get("label", identifier))
+            if where:
+                text += f" ({where})"
+    elif domain == "graph-relationship":
+        prefix, group = "relationship", reasons.relationships
+        endpoints = names.relationships.get(identifier)
+        if endpoints is None:
+            text = _safe_atom(identifier)
+        else:
+            source, target, kind = endpoints
+            text = (
+                f"{_safe_atom(names.label(source, status))} -> "
+                f"{_safe_atom(names.label(target, status))} ({_safe_atom(kind)})"
+            )
+    else:
+        prefix, group = "call", reasons.calls
+        endpoints = names.relationships.get(identifier)
+        if endpoints is not None:
+            text = (
+                f"{_safe_atom(names.label(endpoints[0], status))} -> "
+                f"{_safe_atom(names.label(endpoints[1], status))}"
+            )
+        else:
+            text = _callee_location(change, status) or _safe_atom(identifier)
+    line = f"{prefix} {_safe_atom(status)}: {text}"
+    if status == "changed":
+        stored = group.get(identifier, ())
+        if stored:
+            line += f" [{', '.join(_safe_atom(item) for item in stored)}]"
+    return line + "\n"
+
+
+def _callee_location(change: SystemChange, status: str) -> str | None:
+    """Name a call without a graph relationship by its 1-based callee location."""
+    side = _change_before(change) if status == "removed" else _change_after(change)
+    callee = _mapping(_mapping_value(_first(side), "callee"))
+    path = callee.get("path")
+    start = _mapping(_mapping(callee.get("range")).get("start"))
+    line = start.get("line")
+    if path is None or not isinstance(line, int):
+        return None
+    return f"{_safe_atom(path)}:{line + 1}"
+
+
 def _side_evidence(value: object) -> object:
-    evidence = _mapping_value(value, "relationships")
-    if evidence is None:
-        return "unavailable"
-    return evidence
+    """Project the stored evidence of one change side, or ``unavailable``.
+
+    Report and boundary payloads carry ``relationships``; relationship payloads
+    carry ``evidence``; call payloads carry callee locations; a several-record
+    group is a tuple whose records contribute in order.
+    """
+    if isinstance(value, (tuple, list)):
+        collected: list[object] = []
+        for record in value:
+            found = _record_evidence(record)
+            if isinstance(found, (tuple, list)):
+                collected.extend(found)
+            elif found is not None:
+                collected.append(found)
+        return tuple(collected) if collected else "unavailable"
+    found = _record_evidence(value)
+    return "unavailable" if found is None else found
+
+
+def _record_evidence(value: object) -> object | None:
+    for key in ("relationships", "evidence"):
+        evidence = _mapping_value(value, key)
+        if evidence is not None:
+            return evidence
+    callee = _mapping_value(value, "callee")
+    return None if callee is None else (callee,)
 
 
 def _change_before(change: object) -> object:
@@ -310,10 +452,9 @@ def _key_part(change: SystemChange, index: int) -> str:
 
 
 def _change_status(change: object) -> str:
-    value = getattr(change, "kind", None)
-    if isinstance(value, str):
-        return value
-    value = getattr(change, "status", "changed")
+    value = getattr(change, "status", None)
+    if not isinstance(value, str):
+        value = getattr(change, "kind", "changed")
     return str(value)
 
 

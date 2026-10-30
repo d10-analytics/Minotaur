@@ -8,7 +8,7 @@ without rebuilding structural rules or losing row evidence.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, cast
@@ -221,18 +221,7 @@ class SystemDiffResult:
 
     @property
     def changed(self) -> bool:
-        return bool(
-            self.added_systems
-            or self.removed_systems
-            or self.membership_changes
-            or self.surface_changes
-            or self.consumer_changes
-            or self.dependency_changes
-            or self.boundary_changes
-            or any(item.status != "unchanged" for item in self.nodes)
-            or any(item.status != "unchanged" for item in self.relationships)
-            or any(item.status in {"added", "removed", "changed"} for item in self.call_changes)
-        )
+        return any(True for _ in self._iter_differences())
 
     @property
     def has_changes(self) -> bool:
@@ -244,16 +233,21 @@ class SystemDiffResult:
 
     @property
     def differences(self) -> tuple[SystemChange, ...]:
-        result = [
-            SystemChange("systems", "added", (name,), new={"name": name}, involved_systems=(name,))
-            for name in self.added_systems
-        ]
-        result.extend(
-            SystemChange(
+        """Every difference, in group order: the one rule behind ``changed``.
+
+        An ``unavailable`` call entry is a limitation notice, not a difference.
+        """
+        return tuple(self._iter_differences())
+
+    def _iter_differences(self) -> Iterator[SystemChange]:
+        for name in self.added_systems:
+            yield SystemChange(
+                "systems", "added", (name,), new={"name": name}, involved_systems=(name,)
+            )
+        for name in self.removed_systems:
+            yield SystemChange(
                 "systems", "removed", (name,), old={"name": name}, involved_systems=(name,)
             )
-            for name in self.removed_systems
-        )
         for changes in (
             self.membership_changes,
             self.surface_changes,
@@ -261,44 +255,37 @@ class SystemDiffResult:
             self.dependency_changes,
             self.boundary_changes,
         ):
-            result.extend(changes)
-        result.extend(
-            SystemChange(
-                "graph-node",
-                item.status,
-                (item.id,),
-                item.before,
-                item.after,
-                item.involved_systems,
-            )
-            for item in self.nodes
-            if item.status != "unchanged"
-        )
-        result.extend(
-            SystemChange(
-                "graph-relationship",
-                item.status,
-                (item.id,),
-                item.before,
-                item.after,
-                item.involved_systems,
-            )
-            for item in self.relationships
-            if item.status != "unchanged"
-        )
-        result.extend(
-            SystemChange(
-                "call",
-                item.status,
-                (item.relationship_id,),
-                item.before,
-                item.after,
-                item.involved_systems,
-            )
-            for item in self.call_changes
-            if item.status != "unchanged"
-        )
-        return tuple(result)
+            yield from changes
+        for node in self.nodes:
+            if node.status != "unchanged":
+                yield SystemChange(
+                    "graph-node",
+                    node.status,
+                    (node.id,),
+                    node.before,
+                    node.after,
+                    node.involved_systems,
+                )
+        for relationship in self.relationships:
+            if relationship.status != "unchanged":
+                yield SystemChange(
+                    "graph-relationship",
+                    relationship.status,
+                    (relationship.id,),
+                    relationship.before,
+                    relationship.after,
+                    relationship.involved_systems,
+                )
+        for call in self.call_changes:
+            if call.status in {"added", "removed", "changed"}:
+                yield SystemChange(
+                    "call",
+                    call.status,
+                    (call.relationship_id,),
+                    call.before,
+                    call.after,
+                    call.involved_systems,
+                )
 
     def to_dict(self) -> dict[str, object]:
         return {
