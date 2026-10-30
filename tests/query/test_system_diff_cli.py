@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -346,6 +347,72 @@ def test_systems_composes_real_acquisition_comparison_and_rendering_without_writ
     assert graph.read_bytes() == before[0]
     assert sidecar.read_bytes() == before[1]
     _assert_state(root, before_state)
+
+
+def _sentinel_named_repo(tmp_path: Path) -> Path:
+    """Systems named like the text sentinels, committed, then changed in the tree."""
+    root = _repo(tmp_path)
+    for relative, text in {
+        "a/__init__.py": "",
+        "a/api.py": "def receive():\n    return 1\n",
+        "b/__init__.py": "",
+        "b/caller.py": "def send():\n    return 1\n",
+        "u/__init__.py": "",
+        "u/z.py": "def z():\n    return 1\n",
+        ".minotaur.toml": (
+            '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+            'targets = ["a", "b", "u"]\n'
+        ),
+    }.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+
+    def declare(folder: str, name: str, file: str) -> None:
+        definition = root / "docs" / "systems" / folder
+        definition.mkdir(parents=True)
+        (definition / "system.toml").write_text(
+            f'schema_version = 1\nname = {json.dumps(name)}\nfiles = ["{file}"]\n',
+            encoding="utf-8",
+        )
+
+    declare("one", "no_system", "a/api.py")
+    declare("two", "external", "b/caller.py")
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / "b" / "caller.py").write_text(
+        "from a.api import receive\n\ndef send():\n    return receive()\n", encoding="utf-8"
+    )
+    declare("three", "unassigned", "u/z.py")
+    return root
+
+
+def test_systems_diff_quotes_sentinel_named_systems_and_keeps_json_categories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _sentinel_named_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    rows = capsys.readouterr().out.splitlines()
+    assert 'membership changed: u/z.py — unassigned -> "unassigned"' in rows
+    assert 'dependency added: external -> "no_system"' in rows
+    assert 'boundary added: "external".b.caller.send -> "no_system".a.api.receive (calls)' in rows
+    assert "surface added: no_system a/api.py.a.api.receive" in rows
+    assert "consumer added: no_system <- b/caller.py" in rows
+
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    membership = payload["membership_changes"][0]
+    assert (membership["old"]["system"], membership["new"]["system"]) == (None, "unassigned")
+    dependency = payload["dependency_changes"][0]
+    assert dependency["key"] == ["external", "system: no_system"]
+    assert dependency["new"]["record"]["category"] == "system: no_system"
+    calls = [
+        change["new"] for change in payload["boundary_changes"] if change["new"]["kind"] == "calls"
+    ]
+    assert [(item["source_category"], item["target_category"]) for item in calls] == [
+        ("system: external", "system: no_system")
+    ]
 
 
 def test_system_filter_unknown_name_is_error_before_output(
@@ -691,7 +758,7 @@ def test_invalid_unselected_current_definition_fails_before_filtering(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "other/system.toml" in captured.err
-    assert "invalid current system definitions" in captured.err
+    assert "Invalid value" in captured.err
     _assert_state(root, before)
 
 
@@ -3986,3 +4053,335 @@ def test_systems_invalid_config_spelling_is_reported_exactly(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == f"minotaur: error: {message}\n"
+
+
+_WALKTHROUGH = Path(__file__).resolve().parents[2] / "examples" / "system-walkthrough"
+_ROW_PREFIXES = ("node ", "relationship ", "call ")
+_FEE_ROW = "relationship added: shop.orders._fee -> shop.billing.charge (calls)"
+
+
+def _walkthrough_repo(tmp_path: Path) -> Path:
+    """The shop walkthrough tree and definitions with two private helpers added."""
+    root = _repo(tmp_path)
+    for name in ("shop", "docs"):
+        shutil.copytree(_WALKTHROUGH / name, root / name)
+    shutil.copy(_WALKTHROUGH / ".minotaur.toml", root / ".minotaur.toml")
+    _commit_all(root, "baseline")
+    with (root / "shop" / "orders.py").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n\ndef _fee(order):\n    return charge(order)\n\n\ndef _settle(order):\n"
+            "    return _fee(order)\n"
+        )
+    return root
+
+
+def _difference_rows(output: str) -> list[str]:
+    return [line for line in output.splitlines() if line.startswith(_ROW_PREFIXES)]
+
+
+def _evidence_json(output: str, row: str, label: str) -> object:
+    lines = output.splitlines()
+    index = lines.index(row)
+    for line in lines[index + 1 : index + 5]:
+        if line.startswith(f"{label}: "):
+            value = line[len(label) + 2 :]
+            return value if value == "unavailable" else json.loads(value)
+    raise AssertionError(f"{label} missing after {row}")
+
+
+def test_systems_diff_walkthrough_rows_evidence_and_system_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _walkthrough_repo(tmp_path)
+    monkeypatch.chdir(root)
+    call_row = "call added: shop.orders._fee -> shop.billing.charge"
+
+    default_status, default, default_err = _diff(capsys)
+    details_status, details, details_err = _diff(capsys, "--details")
+    billing_status, billing, _ = _diff(capsys, "--system", "billing")
+
+    # Every row prints by default and with --details, and the status is 1.
+    for status, out, err in (
+        (default_status, default, default_err),
+        (details_status, details, details_err),
+    ):
+        assert (status, err) == (1, "")
+        assert _difference_rows(out) == [
+            "node added: shop.orders._fee (shop/orders.py, function)",
+            "node added: shop.orders._settle (shop/orders.py, function)",
+            "relationship added: shop.orders -> shop.orders._fee (contains)",
+            "relationship added: shop.orders -> shop.orders._settle (contains)",
+            _FEE_ROW,
+            "relationship added: shop.orders._settle -> shop.orders._fee (calls)",
+            call_row,
+            "call added: shop.orders._settle -> shop.orders._fee",
+        ]
+        assert "no system differences" not in out
+        assert "node:comparison:" not in out
+        # The status word is the change status, not the edge kind.
+        assert "relationship calls:" not in out
+        assert out.index("boundary added:") < out.index("node added:") < out.index("old coverage:")
+
+    # --details prints stored evidence for each row class.
+    relationship = _evidence_json(details, _FEE_ROW, "new evidence")
+    assert isinstance(relationship, list) and len(relationship) == 1
+    assert relationship[0]["provenance"] == "static-analysis"
+    assert relationship[0]["locations"][0]["path"] == "shop/orders.py"
+    assert _evidence_json(details, _FEE_ROW, "old evidence") == "unavailable"
+    assert _evidence_json(details, call_row, "new evidence") == [relationship[0]["locations"][0]]
+    node_row = "node added: shop.orders._fee (shop/orders.py, function)"
+    assert _evidence_json(details, node_row, "new evidence") == "unavailable"
+    boundary = "boundary added: orders.shop.orders._fee -> billing.shop.billing.charge (calls)"
+    assert isinstance(_evidence_json(details, boundary, "new evidence"), list)
+
+    # --system billing: the crossing relationship's source node is outside the
+    # selection, yet its readable name resolves, byte-identically to the
+    # unfiltered row; rows only the unfiltered run has are absent.
+    assert billing_status == 1
+    assert _difference_rows(billing) == [_FEE_ROW, call_row]
+    assert set(_difference_rows(billing)) < set(_difference_rows(default))
+    assert "node added:" not in billing
+    assert "node:comparison:" not in billing
+    for row in _difference_rows(billing):
+        assert default.splitlines().count(row) == 1
+
+
+def test_systems_diff_system_filter_with_no_involvement_is_empty_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    (root / "other.py").write_text("def other():\n    return 1\n", encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["app", "consumer.py", "other.py"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "other"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "Other"\nfiles = ["other.py"]\n', encoding="utf-8"
+    )
+    _commit_all(root, "baseline")
+    (root / "app" / "api.py").write_text(
+        "def receive():\n    return 1\n\ndef send():\n    return 2\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(root)
+
+    unfiltered_status, unfiltered, _ = _diff(capsys)
+    status, out, _ = _diff(capsys, "--system", "Other")
+
+    assert unfiltered_status == 1
+    assert _difference_rows(unfiltered)
+    assert status == 0
+    assert out.startswith("no system differences\n")
+    assert _difference_rows(out) == []
+    assert not any(
+        line.startswith(("system ", "surface ", "boundary ")) for line in out.splitlines()
+    )
+
+
+def test_systems_diff_without_declared_systems_prints_rows_and_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path)
+    (root / "mod.py").write_text("def helper():\n    return 1\n\ndef main():\n    return 0\n")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["mod.py"]\n',
+        encoding="utf-8",
+    )
+    _commit_all(root, "baseline")
+    monkeypatch.chdir(root)
+
+    unchanged_status, unchanged, _ = _diff(capsys)
+    assert unchanged_status == 0
+    assert unchanged.startswith("no system differences\n")
+    assert _difference_rows(unchanged) == []
+
+    (root / "mod.py").write_text(
+        "def helper():\n    return 1\n\ndef main():\n    return helper()\n"
+        "\ndef extra():\n    return 2\n",
+        encoding="utf-8",
+    )
+    status, out, _ = _diff(capsys)
+
+    assert status == 1
+    assert "no system differences" not in out
+    assert _difference_rows(out) == [
+        "node added: mod.extra (mod.py, function)",
+        "relationship added: mod -> mod.extra (contains)",
+        "relationship added: mod.main -> mod.helper (calls)",
+        "call added: mod.main -> mod.helper",
+    ]
+
+
+def _overlapping_definition(root: Path) -> None:
+    """Add a second definition that lists a file the first one already lists."""
+    definition = root / "docs" / "systems" / "twin"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "Twin"\nfiles = ["app/api.py"]\n', encoding="utf-8"
+    )
+
+
+def test_overlapping_current_definitions_report_the_loader_sentence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    _overlapping_definition(root)
+
+    assert cli.main(["query", "surface", "App"]) == 2
+    surface = capsys.readouterr().err.removeprefix("minotaur: error: ").strip()
+    assert surface.startswith("file listed in two systems: app/api.py (declared in ")
+
+    assert cli.main(["query", "diff", "--systems"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert surface in captured.err
+    assert "app/system.toml" in captured.err
+    assert "twin/system.toml" in captured.err
+
+
+def test_overlapping_saved_definitions_name_worktree_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _configured_repo(tmp_path)
+    monkeypatch.chdir(root)
+    _overlapping_definition(root)
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "overlap")
+    first = _head_sha(root)
+    shutil.rmtree(root / "docs" / "systems" / "twin")
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "repaired")
+    second = _head_sha(root)
+
+    assert cli.main(["query", "diff", "--systems", first, second]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        "file listed in two systems: app/api.py "
+        "(declared in docs/systems/app/system.toml and docs/systems/twin/system.toml)"
+    ) in captured.err
+    assert str(root) not in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "minotaur-revision-" not in captured.err
+
+
+def _declaration_repo(tmp_path: Path, baseline: str) -> Path:
+    root = _repo(tmp_path)
+    (root / "app").mkdir()
+    (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "app" / "m.py").write_text(baseline, encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["app"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "app"
+    definition.mkdir(parents=True)
+    (definition / "system.toml").write_text(
+        'schema_version = 1\nname = "App"\nfiles = ["app/m.py"]\n', encoding="utf-8"
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    return root
+
+
+def _internal_rows(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith(("node ", "relationship "))]
+
+
+def _node_ids(payload: dict[str, object]) -> list[tuple[str, object]]:
+    return sorted(
+        (str(entry["status"]), entry["id"])
+        for entry in payload["nodes"]  # type: ignore[attr-defined]
+        if entry["status"] != "unchanged"
+    )
+
+
+_GETTER_ONLY = "class C:\n    @property\n    def x(self):\n        return 1\n"
+_GETTER_SETTER_DELETER = (
+    _GETTER_ONLY + "\n    @x.setter\n    def x(self, v):\n        pass\n"
+    "\n    @x.deleter\n    def x(self):\n        pass\n"
+)
+_OVERLOAD_BASELINE = (
+    "from typing import overload\n\n\nclass C:\n    @overload\n"
+    "    def f(self, a: int) -> int: ...\n\n    def f(self, a):\n        return a\n"
+)
+_OVERLOAD_WITH_SECOND_STUB = (
+    "from typing import overload\n\n\nclass C:\n    @overload\n"
+    "    def f(self, a: int) -> int: ...\n\n    @overload\n"
+    "    def f(self, a: str) -> str: ...\n\n    def f(self, a):\n        return a\n"
+)
+
+
+def test_systems_diff_prints_added_property_accessors_with_distinct_role_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _declaration_repo(tmp_path, _GETTER_ONLY)
+    monkeypatch.chdir(root)
+    (root / "app" / "m.py").write_text(_GETTER_SETTER_DELETER, encoding="utf-8")
+
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    text = capsys.readouterr().out
+    assert cli.main(["query", "diff", "--systems", "--system", "App"]) == 1
+    filtered = capsys.readouterr().out
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    rows = _internal_rows(text)
+    assert rows == [
+        "node added: app.m.C.x (app/m.py, method, deleter)",
+        "node added: app.m.C.x (app/m.py, method, setter)",
+        "relationship added: app.m.C -> app.m.C.x (deleter) (contains)",
+        "relationship added: app.m.C -> app.m.C.x (deleter) (references)",
+        "relationship added: app.m.C -> app.m.C.x (setter) (contains)",
+        "relationship added: app.m.C -> app.m.C.x (setter) (references)",
+    ]
+    assert len(set(rows)) == len(rows)
+    assert _internal_rows(filtered) == rows
+    added = [e for e in payload["nodes"] if e["status"] == "added"]
+    assert len({entry["id"] for entry in added}) == 2
+    assert len(_node_ids(payload)) == 2
+
+
+def test_systems_diff_prints_overload_stubs_by_declaration_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _declaration_repo(tmp_path, _OVERLOAD_BASELINE)
+    monkeypatch.chdir(root)
+    (root / "app" / "m.py").write_text(_OVERLOAD_WITH_SECOND_STUB, encoding="utf-8")
+
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    text = capsys.readouterr().out
+    assert cli.main(["query", "diff", "--systems", "--system", "App"]) == 1
+    filtered = capsys.readouterr().out
+
+    rows = _internal_rows(text)
+    assert "node added: app.m.C.f:9 (app/m.py, method)" in rows
+    assert "relationship added: app.m.C -> app.m.C.f:9 (contains)" in rows
+    assert "relationship added: app.m.C -> app.m.C.f:9 (references)" in rows
+    assert not any(
+        "app.m.C.f (" in row or "C.f ->" in row or "-> app.m.C.f (" in row for row in rows
+    )
+    assert len(set(rows)) == len(rows)
+    assert _internal_rows(filtered) == rows
+
+
+def test_systems_diff_keeps_unique_node_names_free_of_role_and_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _declaration_repo(tmp_path, "class C:\n    def a(self):\n        return 1\n")
+    monkeypatch.chdir(root)
+    (root / "app" / "m.py").write_text(
+        "class C:\n    def a(self):\n        return 1\n\n    def b(self):\n        return 2\n",
+        encoding="utf-8",
+    )
+
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    assert _internal_rows(capsys.readouterr().out) == [
+        "node added: app.m.C.b (app/m.py, method)",
+        "relationship added: app.m.C -> app.m.C.b (contains)",
+    ]

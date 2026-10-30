@@ -638,6 +638,33 @@ def test_query_reference_documents_systems_html_and_historical_revisions() -> No
     assert "Missing call-expression evidence on a side is a limitation notice" in text
 
 
+def test_comparison_guides_document_same_name_disambiguation() -> None:
+    for guide in (QUERY_REFERENCE, QUERY_GUIDE):
+        text = _collapsed(guide)
+        assert (
+            "such as a property's getter, setter and deleter, are named with their declaration role"
+            in text
+        )
+        assert (
+            "`node added: m.C.x (m.py, method, setter)` and the endpoint `m.C.x (setter)`" in text
+        )
+        assert (
+            "When roles do not tell them apart, as for `@overload` stubs and their implementation, "
+            "each is named with its 1-based declaration line, such as `m.f:5`."
+        ) in text
+        assert "A name that no other node shares keeps its plain form." in text
+
+
+def test_comparison_guides_document_selected_view_limitation_notices() -> None:
+    for guide in (QUERY_REFERENCE, QUERY_GUIDE):
+        text = _collapsed(guide)
+        assert (
+            "view keeps only the limitation notices for the call changes it retains, in the text "
+            "and in the top-level JSON `limitations`; JSON `comparison.limitations` and the "
+            "`--html` report keep every notice."
+        ) in text
+
+
 def test_customize_html_documents_comparison_controls_and_limits() -> None:
     text = _collapsed(CUSTOMIZE)
     assert "minotaur query diff --systems BEFORE AFTER --html comparison.html" in text

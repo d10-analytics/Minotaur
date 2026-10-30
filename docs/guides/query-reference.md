@@ -466,8 +466,21 @@ dependencies, and boundary relationships, and also internal graph-node and
 edge changes and call-site additions, removals, and expression changes.
 Internal changes are included even when the system boundaries remain
 identical, so a moved symbol is visible as a removal plus an addition. The
-command is read-only: it does not rewrite the committed graph, graph sidecar,
-configuration, or definitions.
+text output prints these internal changes by default, after the boundary rows,
+as `node`, `relationship` and `call` rows. A `node` row gives the label,
+source file and kind; a `relationship` row gives both endpoint labels and the
+edge kind; a `call` row gives caller and callee, and shows the callee location
+when the call has no graph relationship. Declarations that share a label,
+source file and kind, such as a property's getter, setter and deleter, are
+named with their declaration role, as in
+`node added: m.C.x (m.py, method, setter)` and the endpoint `m.C.x (setter)`.
+When roles do not tell them apart, as for `@overload` stubs and their
+implementation, each is named with its 1-based declaration line, such as
+`m.f:5`. A name that no other node shares keeps its plain form. A `changed`
+internal row ends with its stored reasons in brackets, for example
+`node changed: outside (outside.py, module) [membership_changed]`; added and
+removed rows carry none. The command is read-only: it does not rewrite the
+committed graph, graph sidecar, configuration, or definitions.
 
 Each side captures only the comparison selection: the configuration file and,
 when it is discovered rather than given, its `.minotaur.toml` discovery
@@ -487,7 +500,9 @@ part of the selection, and `source_digest` covers exactly the captured selection
 The compact output ends with the old/new coverage and selection lines. With
 `--details`, each changed row is followed by its `old`, `new`, `old evidence`,
 and `new evidence` values; an absent side is explicitly `unavailable`, while an
-observed side includes the stored relationship and source evidence. JSON
+observed side includes the stored relationship and source evidence for boundary
+and relationship rows and the callee locations for call rows. A node row has no
+stored evidence, so its evidence values are `unavailable`. JSON
 contains the same typed categories plus the resolved before/after identities
 with deterministic key ordering. `--html` writes a self-contained offline
 report and still prints the summary; the saved report is static and does not
@@ -501,7 +516,10 @@ revision that cannot be acquired or interpreted, an invalid configuration, and
 an ambiguous semantic identity are errors with attributed diagnostics, status
 `2`, and empty standard output even if the requested filter names an unrelated
 system. Missing call-expression evidence on a side is a limitation notice, not
-a detected change. The comparison reports accepted source facts only; it does
+a detected change. A `--system NAME` view keeps only the limitation notices
+for the call changes it retains, in the text and in the top-level JSON
+`limitations`; JSON `comparison.limitations` and the `--html` report keep
+every notice. The comparison reports accepted source facts only; it does
 not infer renames, causality, edit timing, or intent.
 
 Two symbols with the same file, label, and symbol kind share a semantic

@@ -10,8 +10,10 @@ from __future__ import annotations
 import difflib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
+from minotaur.query.call_diff import CallChange
 from minotaur.query.render import dump_json
 from minotaur.query.system_diff import SystemChange, SystemDiffResult
 from minotaur.system import UnknownSystem
@@ -34,7 +36,8 @@ def filter_system_diff(
 
     ``complete_result`` remains the caller-retained complete value.  Passing
     ``None`` copies every category, while a name retains every change whose stored
-    ``involved_systems`` contains it.  A later selection must therefore call
+    ``involved_systems`` contains it and every limitation about a retained call
+    change.  A later selection must therefore call
     this function with that same complete value; cumulative narrowing is not
     the default because it would hide a change involving the newly selected
     system.  An explicit intersection need is the point at which this policy
@@ -49,7 +52,7 @@ def filter_system_diff(
     if system_name is not None and system_name not in names:
         raise UnknownSystem(system_name, difflib.get_close_matches(system_name, names, n=5))
 
-    def retain(change: SystemChange) -> bool:
+    def retain(change: SystemChange | CallChange) -> bool:
         return system_name is None or system_name in change.involved_systems
 
     kwargs: dict[str, object] = {
@@ -80,7 +83,14 @@ def filter_system_diff(
         kwargs[field_name] = tuple(
             change for change in getattr(complete_result, field_name) if retain(change)
         )
-    kwargs["limitations"] = tuple(complete_result.limitations)
+    retained_calls = {
+        change.relationship_id for change in complete_result.call_changes if retain(change)
+    }
+    kwargs["limitations"] = tuple(
+        item
+        for item in complete_result.limitations
+        if system_name is None or item.relationship_id in retained_calls
+    )
     return SystemDiffResult(**cast(Any, kwargs))
 
 
@@ -97,36 +107,45 @@ def render_context_text(result: SystemDiffResult) -> str:
     return "".join(lines)
 
 
-def render_text(result: SystemDiffResult, *, details: bool = False) -> str:
-    """Render structural changes followed by stored coverage and selection."""
+def render_text(
+    result: SystemDiffResult,
+    *,
+    details: bool = False,
+    complete: SystemDiffResult | None = None,
+) -> str:
+    """Render every difference of ``result`` followed by stored context.
+
+    Rows, limitation lines, the empty-state sentence and the caller's exit
+    status all come from ``result``.  ``complete`` (default ``result``) only
+    supplies a private index of readable names, built once per call, so a
+    selected view names the same nodes as the complete comparison.
+    """
+    differences = result.differences
+    names = _NameIndex.build(result if complete is None else complete)
+    reasons = _ReasonIndex.build(result)
     lines = [
+        _change_lines("systems", change, details=details)
+        for change in differences
+        if change.domain == "systems"
+    ]
+    lines.extend(
         _change_lines(label, change, details=details)
         for field_name, label in _CHANGE_GROUPS
         for change in _ordered(getattr(result, field_name))
-    ]
-    if result.added_systems:
-        lines[0:0] = [
-            _change_lines(
-                "systems",
-                SystemChange(
-                    "systems", "added", (name,), new={"name": name}, involved_systems=(name,)
-                ),
-                details=details,
-            )
-            for name in result.added_systems
-        ]
-    if result.removed_systems:
-        offset = len(result.added_systems)
-        lines[offset:offset] = [
-            _change_lines(
-                "systems",
-                SystemChange(
-                    "systems", "removed", (name,), old={"name": name}, involved_systems=(name,)
-                ),
-                details=details,
-            )
-            for name in result.removed_systems
-        ]
+    )
+    for domain in ("graph-node", "graph-relationship", "call"):
+        rows = sorted(
+            (
+                (_change_status(change), text, change.key, change)
+                for change in differences
+                if change.domain == domain
+                for text in (_internal_row(domain, change, names, reasons),)
+            ),
+            key=lambda row: row[:3],
+        )
+        lines.extend(
+            text + (_render_details(change) if details else "") for _, text, _, change in rows
+        )
     if not lines:
         lines.append("no system differences\n")
     if result.limitations:
@@ -225,20 +244,251 @@ def _change_line(label: str, change: SystemChange) -> str:
             f"boundary {kind}: {_safe_atom(source)} -> {_safe_atom(target)} "
             f"({_safe_atom(relation)})\n"
         )
-    if label == "graph-node":
-        return f"node {kind}: {_safe_atom(_key_part(change, 0))}\n"
-    if label == "graph-relationship":
-        return f"relationship {kind}: {_safe_atom(_key_part(change, 0))}\n"
-    if label == "call":
-        return f"call {kind}: {_safe_atom(_key_part(change, 0))}\n"
     raise AssertionError(f"unsupported change label: {label}")
 
 
+_NodeNameKey = tuple[str, str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _Disambiguator:
+    """How one node of a colliding name is told apart from the others."""
+
+    role: str | None = None
+    line: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _NameIndex:
+    """Readable names resolved from one complete result, built once per render.
+
+    ``collisions`` holds, for each node of a (label, path, kind) name that more
+    than one node of the complete result shares, whether the name is told apart
+    by declaration role (every node of it has a distinct one) rather than by
+    1-based declaration line.  Unique names have no entry.
+    """
+
+    nodes: Mapping[str, tuple[object, object]]
+    relationships: Mapping[str, tuple[str, str, str]]
+    collisions: Mapping[tuple[str, _NodeNameKey], bool]
+
+    @classmethod
+    def build(cls, complete: SystemDiffResult) -> _NameIndex:
+        nodes = {item.id: (_first(item.before), _first(item.after)) for item in complete.nodes}
+        return cls(
+            nodes=nodes,
+            relationships={
+                item.id: (item.source, item.target, item.kind) for item in complete.relationships
+            },
+            collisions=_collisions(nodes),
+        )
+
+    def node_record(self, node_id: str, status: str) -> Mapping[str, object] | None:
+        """Return the new side (old side for a removed row), else the other one."""
+        before, after = self.nodes.get(node_id, (None, None))
+        order = (before, after) if status == "removed" else (after, before)
+        for side in order:
+            record = _mapping(_mapping_value(side, "node") or side)
+            if record:
+                return record
+        return None
+
+    def disambiguator(
+        self, node_id: str, record: Mapping[str, object] | None
+    ) -> _Disambiguator | None:
+        """Return how a node of a shared name is told apart, else ``None``."""
+        if record is None:
+            return None
+        key = _name_key(record)
+        by_role = None if key is None else self.collisions.get((node_id, key))
+        if by_role is None:
+            return None
+        if by_role:
+            return _Disambiguator(role=_declaration_role(record))
+        return _Disambiguator(line=_declaration_line(record))
+
+    def label(self, node_id: str, status: str) -> str:
+        """Name a node as a relationship or call endpoint."""
+        record = self.node_record(node_id, status)
+        label = record.get("label") if record else None
+        if label is None:
+            return _safe_atom(node_id)
+        marker = self.disambiguator(node_id, record)
+        if marker is None:
+            return _safe_atom(label)
+        if marker.role is not None:
+            return f"{_safe_atom(label)} ({_safe_atom(marker.role)})"
+        if marker.line is not None:
+            return f"{_safe_atom(label)}:{marker.line}"
+        return _safe_atom(node_id)
+
+
+def _name_key(record: Mapping[str, object]) -> _NodeNameKey | None:
+    """Return the (label, resolved path, kind) a node row prints, if it has a label."""
+    label = record.get("label")
+    if label is None:
+        return None
+    location = _mapping(record.get("location"))
+    path = record.get("path") or location.get("path")
+    kind = record.get("symbol_kind") or record.get("node_class")
+    return (str(label), str(path or ""), str(kind or ""))
+
+
+def _declaration_role(record: Mapping[str, object]) -> str | None:
+    extensions = _mapping(record.get("extensions"))
+    for namespace in sorted(extensions):
+        role = _mapping(extensions[namespace]).get("declaration_role")
+        if isinstance(role, str) and role:
+            return role
+    return None
+
+
+def _declaration_line(record: Mapping[str, object]) -> int | None:
+    start = _mapping(_mapping(_mapping(record.get("location")).get("range")).get("start"))
+    line = start.get("line")
+    return line + 1 if isinstance(line, int) and not isinstance(line, bool) else None
+
+
+def _collisions(
+    nodes: Mapping[str, tuple[object, object]],
+) -> dict[tuple[str, _NodeNameKey], bool]:
+    """Find every shared node name, counting unchanged entries and both sides.
+
+    A node that exists on one side only still collides with a same-named node
+    on the other.  The value is ``True`` when the name is told apart by role.
+    """
+    groups: dict[_NodeNameKey, dict[str, str | None]] = {}
+    for node_id, sides in nodes.items():
+        for side in sides:
+            record = _mapping(_mapping_value(side, "node") or side)
+            key = _name_key(record) if record else None
+            if key is not None:
+                groups.setdefault(key, {}).setdefault(node_id, _declaration_role(record))
+    result: dict[tuple[str, _NodeNameKey], bool] = {}
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        roles = list(members.values())
+        by_role = None not in roles and len(set(roles)) == len(roles)
+        for node_id in members:
+            result[(node_id, key)] = by_role
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class _ReasonIndex:
+    """Stored reasons of the selected result, one lookup per owning group."""
+
+    nodes: Mapping[str, tuple[str, ...]]
+    relationships: Mapping[str, tuple[str, ...]]
+    calls: Mapping[str, tuple[str, ...]]
+
+    @classmethod
+    def build(cls, result: SystemDiffResult) -> _ReasonIndex:
+        return cls(
+            nodes={item.id: item.reasons for item in result.nodes},
+            relationships={item.id: item.reasons for item in result.relationships},
+            calls={item.relationship_id: item.reasons for item in result.call_changes},
+        )
+
+
+def _first(payload: object) -> object:
+    """Read the first record of a several-record group."""
+    if isinstance(payload, (tuple, list)):
+        return payload[0] if payload else None
+    return payload
+
+
+def _internal_row(
+    domain: str, change: SystemChange, names: _NameIndex, reasons: _ReasonIndex
+) -> str:
+    """Render one node, relationship or call difference with readable names."""
+    status = _change_status(change)
+    identifier = _key_part(change, 0)
+    if domain == "graph-node":
+        prefix, group = "node", reasons.nodes
+        record = names.node_record(identifier, status)
+        marker = names.disambiguator(identifier, record)
+        if record is None or (marker is not None and marker.role is None and marker.line is None):
+            text = _safe_atom(identifier)
+        else:
+            location = _mapping(record.get("location"))
+            path = record.get("path") or location.get("path")
+            kind = record.get("symbol_kind") or record.get("node_class")
+            parts = [path, kind]
+            text = _safe_atom(record.get("label", identifier))
+            if marker is not None and marker.role is not None:
+                parts.append(marker.role)
+            elif marker is not None:
+                text += f":{marker.line}"
+            where = ", ".join(_safe_atom(item) for item in parts if item)
+            if where:
+                text += f" ({where})"
+    elif domain == "graph-relationship":
+        prefix, group = "relationship", reasons.relationships
+        endpoints = names.relationships.get(identifier)
+        if endpoints is None:
+            text = _safe_atom(identifier)
+        else:
+            source, target, kind = endpoints
+            text = (
+                f"{names.label(source, status)} -> "
+                f"{names.label(target, status)} ({_safe_atom(kind)})"
+            )
+    else:
+        prefix, group = "call", reasons.calls
+        endpoints = names.relationships.get(identifier)
+        if endpoints is not None:
+            text = f"{names.label(endpoints[0], status)} -> {names.label(endpoints[1], status)}"
+        else:
+            text = _callee_location(change, status) or _safe_atom(identifier)
+    line = f"{prefix} {_safe_atom(status)}: {text}"
+    if status == "changed":
+        stored = group.get(identifier, ())
+        if stored:
+            line += f" [{', '.join(_safe_atom(item) for item in stored)}]"
+    return line + "\n"
+
+
+def _callee_location(change: SystemChange, status: str) -> str | None:
+    """Name a call without a graph relationship by its 1-based callee location."""
+    side = _change_before(change) if status == "removed" else _change_after(change)
+    callee = _mapping(_mapping_value(_first(side), "callee"))
+    path = callee.get("path")
+    start = _mapping(_mapping(callee.get("range")).get("start"))
+    line = start.get("line")
+    if path is None or not isinstance(line, int):
+        return None
+    return f"{_safe_atom(path)}:{line + 1}"
+
+
 def _side_evidence(value: object) -> object:
-    evidence = _mapping_value(value, "relationships")
-    if evidence is None:
-        return "unavailable"
-    return evidence
+    """Project the stored evidence of one change side, or ``unavailable``.
+
+    Report and boundary payloads carry ``relationships``; relationship payloads
+    carry ``evidence``; call payloads carry callee locations; a several-record
+    group is a tuple whose records contribute in order.
+    """
+    if isinstance(value, (tuple, list)):
+        collected: list[object] = []
+        for record in value:
+            found = _record_evidence(record)
+            if isinstance(found, (tuple, list)):
+                collected.extend(found)
+            elif found is not None:
+                collected.append(found)
+        return tuple(collected) if collected else "unavailable"
+    found = _record_evidence(value)
+    return "unavailable" if found is None else found
+
+
+def _record_evidence(value: object) -> object | None:
+    for key in ("relationships", "evidence"):
+        evidence = _mapping_value(value, key)
+        if evidence is not None:
+            return evidence
+    callee = _mapping_value(value, "callee")
+    return None if callee is None else (callee,)
 
 
 def _change_before(change: object) -> object:
@@ -255,8 +505,26 @@ def _detail_value(value: object) -> str:
     return dump_json(_thaw(value)).rstrip(chr(10))
 
 
+_SENTINEL_LABELS = frozenset({"no_system", "external", "unassigned"})
+
+
+def _literal_system_name(name: str) -> str:
+    """Render a declared system name where a sentinel label could also appear.
+
+    A name equal to a sentinel, or beginning with a quote, is JSON-quoted so it
+    cannot read as the sentinel or as the quoted form of another name; every
+    other name keeps its plain form.
+    """
+    if name in _SENTINEL_LABELS or name.startswith('"'):
+        return json.dumps(name, ensure_ascii=True)
+    return name
+
+
 def _display_category(value: object) -> str:
-    return str(value).removeprefix("system: ")
+    text = str(value)
+    if text.startswith("system: "):
+        return _literal_system_name(text.removeprefix("system: "))
+    return text
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -277,7 +545,7 @@ def _mapping_side(value: object) -> str:
     side = _mapping_value(value, "system")
     if side is None:
         return "unassigned"
-    return str(side)
+    return _literal_system_name(str(side))
 
 
 def _record_category(value: object) -> str | None:
@@ -293,7 +561,7 @@ def _record_category(value: object) -> str | None:
 
 def _endpoint_display(payload: Mapping[str, object], endpoint_key: str, category_key: str) -> str:
     endpoint = _mapping(payload.get(endpoint_key))
-    category = str(payload.get(category_key, "unknown")).removeprefix("system: ")
+    category = _display_category(payload.get(category_key, "unknown"))
     label = endpoint.get("label")
     if label is None:
         label = endpoint.get("path")
@@ -310,10 +578,9 @@ def _key_part(change: SystemChange, index: int) -> str:
 
 
 def _change_status(change: object) -> str:
-    value = getattr(change, "kind", None)
-    if isinstance(value, str):
-        return value
-    value = getattr(change, "status", "changed")
+    value = getattr(change, "status", None)
+    if not isinstance(value, str):
+        value = getattr(change, "kind", "changed")
     return str(value)
 
 

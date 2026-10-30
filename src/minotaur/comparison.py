@@ -424,7 +424,7 @@ def _current_systems(root: Path, route: _CurrentRoute) -> tuple[system.System, .
         path = next(
             (str(source) for source in definitions if str(source) in str(error)), str(route.path)
         )
-        raise _current_error(path, "invalid current system definitions", error) from error
+        raise _current_error(path, str(error), error) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,7 +460,7 @@ def _relabel_snapshot_error(
         return error
     return CurrentInputError(
         path=public_path,
-        detail=error.detail,
+        detail=error.detail.replace(f"{snapshot.root}{os.sep}", ""),
         cause=error.cause_type,
         diagnostics=error.diagnostics,
         side=snapshot.side,

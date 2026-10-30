@@ -90,7 +90,11 @@ $ minotaur query diff --systems
 
 The report names the two sides as `HEAD · <short commit>` and
 `Working tree at report generation`. The working-tree side has no commit
-identity, and the report never invents one. The complete change set is:
+identity, and the report never invents one. The complete change set is the
+membership, surface, consumer, dependency and boundary rows followed by the
+whole-graph rows. A `node` row names the label, source file and kind; a
+`relationship` row names both endpoint labels and the edge kind; a `call` row
+names the caller and callee:
 
 ```text
 membership changed: shop/order_ops.py — unassigned -> orders
@@ -112,6 +116,40 @@ boundary removed: no_system.shop.checkout.checkout -> billing.shop.billing.charg
 boundary removed: no_system.shop.checkout.checkout -> orders.shop.orders.create_order (calls)
 boundary removed: orders.shop.orders -> billing.shop.billing.charge (imports)
 boundary removed: orders.shop.orders.complete_order -> billing.shop.billing.charge (calls)
+node added: shop.billing.refund (shop/billing.py, function)
+node added: shop.order_ops (shop/order_ops.py, module)
+node added: shop.order_ops.complete_order (shop/order_ops.py, function)
+node added: shop.orders.cancel_order (shop/orders.py, function)
+node added: shop/order_ops.py (shop/order_ops.py, file)
+node removed: shop.checkout (shop/checkout.py, module)
+node removed: shop.checkout.checkout (shop/checkout.py, function)
+node removed: shop.orders.complete_order (shop/orders.py, function)
+node removed: shop/checkout.py (shop/checkout.py, file)
+relationship added: shop.billing -> shop.billing.refund (contains)
+relationship added: shop.billing.refund -> shop.ledger.record (calls)
+relationship added: shop.order_ops -> shop.billing.charge (imports)
+relationship added: shop.order_ops -> shop.order_ops.complete_order (contains)
+relationship added: shop.order_ops.complete_order -> shop.billing.charge (calls)
+relationship added: shop.orders -> shop.billing.refund (imports)
+relationship added: shop.orders -> shop.orders.cancel_order (contains)
+relationship added: shop.orders.cancel_order -> shop.billing.refund (calls)
+relationship added: shop/order_ops.py -> shop.order_ops (contains)
+relationship removed: shop.checkout -> shop.billing.charge (imports)
+relationship removed: shop.checkout -> shop.checkout.checkout (contains)
+relationship removed: shop.checkout -> shop.orders.create_order (imports)
+relationship removed: shop.checkout.checkout -> shop.billing.charge (calls)
+relationship removed: shop.checkout.checkout -> shop.orders.create_order (calls)
+relationship removed: shop.orders -> shop.billing.charge (imports)
+relationship removed: shop.orders -> shop.orders.complete_order (contains)
+relationship removed: shop.orders.complete_order -> shop.billing.charge (calls)
+relationship removed: shop/checkout.py -> shop.checkout (contains)
+call added: shop.billing.refund -> shop.ledger.record
+call added: shop.order_ops.complete_order -> shop.billing.charge
+call added: shop.orders.cancel_order -> shop.billing.refund
+call changed: shop.billing.charge -> shop.ledger.record [expression_changed]
+call removed: shop.checkout.checkout -> shop.billing.charge
+call removed: shop.checkout.checkout -> shop.orders.create_order
+call removed: shop.orders.complete_order -> shop.billing.charge
 ```
 
 Write the same comparison as an offline report:
@@ -135,7 +173,7 @@ $ minotaur query diff --systems v1.0 v2.0
 ```
 
 Its standard output is byte-for-byte the same as the working-tree report above —
-the same 19 change rows followed by the old and new coverage and selection
+the same 53 change rows followed by the old and new coverage and selection
 lines — because the same source difference is analyzed on both sides. The
 command line prints no revision header.
 

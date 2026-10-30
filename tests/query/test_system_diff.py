@@ -361,10 +361,9 @@ def test_repeated_unresolved_occurrence_count_is_a_deterministic_multiset_change
 
     repeated_result = compare_systems(old, same)
     assert repeated_result.changed
-    assert any(
-        item.status == "changed" and "multiplicity_changed" in item.reasons
-        for item in repeated_result.relationships
-    )
+    assert [(item.status, item.reasons) for item in repeated_result.relationships] == [
+        ("changed", ("multiplicity_changed",))
+    ]
     endpoint = compare_systems(old, distinct).boundary_changes
     assert len(endpoint) == 1
     assert endpoint[0].kind == "endpoint"

@@ -281,22 +281,43 @@ the configuration, or system definitions. A source-only edit produces a
 `surface`, `consumer`, `dependency`, or `boundary` row without touching the
 saved graph; a changed definition produces a `membership` row. Internal graph
 and call-expression changes are included even when the system boundaries stay
-identical. For example, adding `send` to `app/api.py` and calling it from
-`consumer.py` produces these compact rows (followed by the four context lines):
+identical, and they are printed by default after the boundary rows, so the
+output never reports differences it does not show. Each internal row names what
+changed by its readable label and source file: a `node` row gives the label,
+file and kind, a `relationship` row gives both endpoint labels and the edge
+kind, and a `call` row gives caller and callee (with the callee location when
+no graph relationship exists). Declarations that share a label, file and kind,
+such as a property's getter, setter and deleter, are named with their
+declaration role, for example `node added: m.C.x (m.py, method, setter)` and
+the endpoint `m.C.x (setter)`. When roles do not tell them apart, as for
+`@overload` stubs and their implementation, each is named with its 1-based
+declaration line, such as `m.f:5`. A name that no other node shares keeps its
+plain form. A `changed` internal row ends with its stored
+reasons in brackets, such as `[membership_changed]`; added and removed rows
+carry none because the reason repeats the status. For example, adding `send` to
+`app/api.py` and calling it from `consumer.py` produces these rows (followed by
+the four context lines):
 
 ```text
 surface added: App app/api.py.app.api.send
 consumer changed: App <- consumer.py
 boundary added: no_system.consumer -> App.app.api.send (imports)
 boundary added: no_system.consumer.consume -> App.app.api.send (calls)
+node added: app.api.send (app/api.py, function)
+relationship added: app.api -> app.api.send (contains)
+relationship added: consumer -> app.api.send (imports)
+relationship added: consumer.consume -> app.api.send (calls)
+call added: consumer.consume -> app.api.send
 ```
 
 The source-change command exits `1`; an identical comparison exits `0`. A
 successful comparison that also writes a requested `--html` report still exits
 `1`. `--details` adds `old`, `new`, `old evidence`, and `new evidence` after
 each changed row. The old side is `unavailable` when the relationship did not
-exist there; the new side contains the recorded endpoint and evidence
-projection. `--json` preserves the same typed categories, the resolved
+exist there. For boundary and relationship rows the new side contains the
+recorded endpoint and evidence projection, a call row shows its callee
+locations, and a node row has no stored evidence, so its evidence values are
+`unavailable`. `--json` preserves the same typed categories, the resolved
 before/after identities, status-neutral coverage, and old/new selection context
 in deterministic JSON.
 
@@ -305,7 +326,10 @@ definitions are loaded before filtering. A revision that cannot be acquired or
 interpreted, or a semantically ambiguous identity, exits `2`, prints an
 attributed diagnostic to standard error, and prints no report, even when an
 unrelated `--system` filter was requested. Missing call-expression evidence is a
-limitation notice, not a detected change. The comparison reports observed
+limitation notice, not a detected change. A `--system` view keeps only the
+limitation notices for the call changes it retains, in the text and in the
+top-level JSON `limitations`; JSON `comparison.limitations` and the `--html`
+report keep every notice. The comparison reports observed
 source facts and membership; it does not infer renames, edit timing, causality,
 or intent.
 
