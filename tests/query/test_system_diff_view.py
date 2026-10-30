@@ -637,10 +637,27 @@ def test_canonical_dumper_receives_exact_to_dict_and_status_stays_typed(monkeypa
     assert result.exit_code == exit_code
 
 
-@pytest.mark.parametrize("name", ("system: A", "system: system: A", "external", "no_system"))
+_SENTINELS = ("no_system", "external", "unassigned")
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "system: A",
+        "system: system: A",
+        "external",
+        "no_system",
+        "unassigned",
+        '"no_system"',
+        '"a b',
+        "Ordinary",
+    ),
+)
 def test_literal_names_render_once_by_field_semantics(name):
     def atom(value):
         return json.dumps(value) if " " in value else value
+
+    shown = json.dumps(name, ensure_ascii=True) if name in _SENTINELS or name[0] == '"' else name
 
     category = f"system: {name}"
     result = SystemDiffResult(
@@ -681,17 +698,74 @@ def test_literal_names_render_once_by_field_semantics(name):
         ),
     )
     expected = (
-        f"membership changed: absent.py — unassigned -> {atom(name)}\n"
+        f"membership changed: absent.py — unassigned -> {atom(shown)}\n"
         f"surface added: {atom(name)} a.py.entry\n"
         f"consumer added: {atom(name)} <- a.py\n"
-        f"dependency added: {atom(name)} -> {atom(name)}\n"
-        f"boundary added: {atom(name + '.source')} -> {atom(name + '.target')} (calls)\n"
+        f"dependency added: {atom(name)} -> {atom(shown)}\n"
+        f"boundary added: {atom(shown + '.source')} -> {atom(shown + '.target')} (calls)\n"
     )
     assert render_text(result) == expected + render_context_text(result)
     assert json.loads(render_json(result))["membership_changes"][0]["new"]["system"] == name
     assert result.exit_code == 1
     detailed = render_text(result, details=True)
     assert all(line in detailed.splitlines() for line in expected.splitlines())
+
+
+def test_sentinel_named_systems_differ_from_the_sentinels_they_collide_with():
+    """A declared name prints quoted; the real sentinel and ordinary names stay plain."""
+
+    def rows(source, target, old_owner, new_owner):
+        result = SystemDiffResult(
+            membership_changes=(
+                SystemChange(
+                    "membership",
+                    "changed",
+                    ("f.py",),
+                    {"file": "f.py", "system": old_owner},
+                    {"file": "f.py", "system": new_owner},
+                ),
+            ),
+            dependency_changes=(
+                SystemChange("system-deps", "added", ("A", target), new={"category": target}),
+            ),
+            boundary_changes=(
+                SystemChange(
+                    "boundary",
+                    "added",
+                    ("opaque",),
+                    new={
+                        "source_category": source,
+                        "target_category": target,
+                        "kind": "calls",
+                        "source_endpoint": {"label": "s"},
+                        "target_endpoint": {"label": "t"},
+                    },
+                ),
+            ),
+        )
+        return render_text(result).splitlines()[:3]
+
+    declared = rows("system: external", "system: no_system", None, "unassigned")
+    assert declared == [
+        'membership changed: f.py — unassigned -> "unassigned"',
+        'dependency added: A -> "no_system"',
+        'boundary added: "external".s -> "no_system".t (calls)',
+    ]
+    sentinel = rows("external", "no_system", "Owner", None)
+    assert sentinel == [
+        "membership changed: f.py — Owner -> unassigned",
+        "dependency added: A -> no_system",
+        "boundary added: external.s -> no_system.t (calls)",
+    ]
+    quoted = rows('system: "no_system"', 'system: "no_system"', None, '"no_system"')
+    assert quoted[1] == 'dependency added: A -> "\\"no_system\\""'
+    assert quoted[1] != declared[1]
+    ordinary = rows("system: A", "system: B", "A", "B")
+    assert ordinary == [
+        "membership changed: f.py — A -> B",
+        "dependency added: A -> B",
+        "boundary added: A.s -> B.t (calls)",
+    ]
 
 
 _ROW_PREFIXES = (

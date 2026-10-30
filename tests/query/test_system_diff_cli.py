@@ -349,6 +349,72 @@ def test_systems_composes_real_acquisition_comparison_and_rendering_without_writ
     _assert_state(root, before_state)
 
 
+def _sentinel_named_repo(tmp_path: Path) -> Path:
+    """Systems named like the text sentinels, committed, then changed in the tree."""
+    root = _repo(tmp_path)
+    for relative, text in {
+        "a/__init__.py": "",
+        "a/api.py": "def receive():\n    return 1\n",
+        "b/__init__.py": "",
+        "b/caller.py": "def send():\n    return 1\n",
+        "u/__init__.py": "",
+        "u/z.py": "def z():\n    return 1\n",
+        ".minotaur.toml": (
+            '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+            'targets = ["a", "b", "u"]\n'
+        ),
+    }.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+
+    def declare(folder: str, name: str, file: str) -> None:
+        definition = root / "docs" / "systems" / folder
+        definition.mkdir(parents=True)
+        (definition / "system.toml").write_text(
+            f'schema_version = 1\nname = {json.dumps(name)}\nfiles = ["{file}"]\n',
+            encoding="utf-8",
+        )
+
+    declare("one", "no_system", "a/api.py")
+    declare("two", "external", "b/caller.py")
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    (root / "b" / "caller.py").write_text(
+        "from a.api import receive\n\ndef send():\n    return receive()\n", encoding="utf-8"
+    )
+    declare("three", "unassigned", "u/z.py")
+    return root
+
+
+def test_systems_diff_quotes_sentinel_named_systems_and_keeps_json_categories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _sentinel_named_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    rows = capsys.readouterr().out.splitlines()
+    assert 'membership changed: u/z.py — unassigned -> "unassigned"' in rows
+    assert 'dependency added: external -> "no_system"' in rows
+    assert 'boundary added: "external".b.caller.send -> "no_system".a.api.receive (calls)' in rows
+    assert "surface added: no_system a/api.py.a.api.receive" in rows
+    assert "consumer added: no_system <- b/caller.py" in rows
+
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    membership = payload["membership_changes"][0]
+    assert (membership["old"]["system"], membership["new"]["system"]) == (None, "unassigned")
+    dependency = payload["dependency_changes"][0]
+    assert dependency["key"] == ["external", "system: no_system"]
+    assert dependency["new"]["record"]["category"] == "system: no_system"
+    calls = [
+        change["new"] for change in payload["boundary_changes"] if change["new"]["kind"] == "calls"
+    ]
+    assert [(item["source_category"], item["target_category"]) for item in calls] == [
+        ("system: external", "system: no_system")
+    ]
+
+
 def test_system_filter_unknown_name_is_error_before_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
