@@ -95,7 +95,12 @@ def impact(
                 boundary=True,
             )
         )
-    return tuple(sorted(records, key=lambda record: (record.boundary, record.depth, record.symbol)))
+    return tuple(
+        sorted(
+            records,
+            key=lambda record: (record.boundary, record.depth, record.symbol, record.kind),
+        )
+    )
 
 
 def render_text(records: Sequence[ImpactRecord]) -> str:
