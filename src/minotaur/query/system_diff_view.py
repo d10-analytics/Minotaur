@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
+from minotaur.query.call_diff import CallChange
 from minotaur.query.render import dump_json
 from minotaur.query.system_diff import SystemChange, SystemDiffResult
 from minotaur.system import UnknownSystem
@@ -51,7 +52,7 @@ def filter_system_diff(
     if system_name is not None and system_name not in names:
         raise UnknownSystem(system_name, difflib.get_close_matches(system_name, names, n=5))
 
-    def retain(change: SystemChange) -> bool:
+    def retain(change: SystemChange | CallChange) -> bool:
         return system_name is None or system_name in change.involved_systems
 
     kwargs: dict[str, object] = {
