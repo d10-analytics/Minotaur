@@ -4023,81 +4023,61 @@ def _evidence_json(output: str, row: str, label: str) -> object:
     raise AssertionError(f"{label} missing after {row}")
 
 
-@pytest.mark.parametrize("details", (False, True))
-def test_systems_diff_prints_every_whole_graph_row_and_exits_one(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    details: bool,
-) -> None:
-    root = _walkthrough_repo(tmp_path)
-    monkeypatch.chdir(root)
-
-    status, out, err = _diff(capsys, *(("--details",) if details else ()))
-
-    assert (status, err) == (1, "")
-    assert _difference_rows(out) == [
-        "node added: shop.orders._fee (shop/orders.py, function)",
-        "node added: shop.orders._settle (shop/orders.py, function)",
-        "relationship added: shop.orders -> shop.orders._fee (contains)",
-        "relationship added: shop.orders -> shop.orders._settle (contains)",
-        _FEE_ROW,
-        "relationship added: shop.orders._settle -> shop.orders._fee (calls)",
-        "call added: shop.orders._fee -> shop.billing.charge",
-        "call added: shop.orders._settle -> shop.orders._fee",
-    ]
-    assert "no system differences" not in out
-    assert "node:comparison:" not in out
-    # The relationship's status word is its change status, not its edge kind.
-    assert "relationship calls:" not in out
-    assert out.index("boundary added:") < out.index("node added:") < out.index("old coverage:")
-
-
-def test_systems_diff_details_print_stored_evidence_per_row_class(
+def test_systems_diff_walkthrough_rows_evidence_and_system_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = _walkthrough_repo(tmp_path)
     monkeypatch.chdir(root)
+    call_row = "call added: shop.orders._fee -> shop.billing.charge"
 
-    status, out, _ = _diff(capsys, "--details")
+    default_status, default, default_err = _diff(capsys)
+    details_status, details, details_err = _diff(capsys, "--details")
+    billing_status, billing, _ = _diff(capsys, "--system", "billing")
 
-    assert status == 1
-    relationship = _evidence_json(out, _FEE_ROW, "new evidence")
+    # Every row prints by default and with --details, and the status is 1.
+    for status, out, err in (
+        (default_status, default, default_err),
+        (details_status, details, details_err),
+    ):
+        assert (status, err) == (1, "")
+        assert _difference_rows(out) == [
+            "node added: shop.orders._fee (shop/orders.py, function)",
+            "node added: shop.orders._settle (shop/orders.py, function)",
+            "relationship added: shop.orders -> shop.orders._fee (contains)",
+            "relationship added: shop.orders -> shop.orders._settle (contains)",
+            _FEE_ROW,
+            "relationship added: shop.orders._settle -> shop.orders._fee (calls)",
+            call_row,
+            "call added: shop.orders._settle -> shop.orders._fee",
+        ]
+        assert "no system differences" not in out
+        assert "node:comparison:" not in out
+        # The status word is the change status, not the edge kind.
+        assert "relationship calls:" not in out
+        assert out.index("boundary added:") < out.index("node added:") < out.index("old coverage:")
+
+    # --details prints stored evidence for each row class.
+    relationship = _evidence_json(details, _FEE_ROW, "new evidence")
     assert isinstance(relationship, list) and len(relationship) == 1
     assert relationship[0]["provenance"] == "static-analysis"
     assert relationship[0]["locations"][0]["path"] == "shop/orders.py"
-    assert _evidence_json(out, _FEE_ROW, "old evidence") == "unavailable"
-    call = _evidence_json(
-        out, "call added: shop.orders._fee -> shop.billing.charge", "new evidence"
-    )
-    assert call == [relationship[0]["locations"][0]]
+    assert _evidence_json(details, _FEE_ROW, "old evidence") == "unavailable"
+    assert _evidence_json(details, call_row, "new evidence") == [relationship[0]["locations"][0]]
     node_row = "node added: shop.orders._fee (shop/orders.py, function)"
-    assert _evidence_json(out, node_row, "new evidence") == "unavailable"
+    assert _evidence_json(details, node_row, "new evidence") == "unavailable"
     boundary = "boundary added: orders.shop.orders._fee -> billing.shop.billing.charge (calls)"
-    assert isinstance(_evidence_json(out, boundary, "new evidence"), list)
+    assert isinstance(_evidence_json(details, boundary, "new evidence"), list)
 
-
-def test_systems_diff_system_filter_keeps_names_rows_and_selected_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    root = _walkthrough_repo(tmp_path)
-    monkeypatch.chdir(root)
-
-    _, unfiltered, _ = _diff(capsys)
-    status, billing, _ = _diff(capsys, "--system", "billing")
-
-    assert status == 1
-    # The crossing relationship's source node is outside billing's selection;
-    # its readable name still resolves, byte-identically to the unfiltered row.
-    assert _difference_rows(billing) == [
-        _FEE_ROW,
-        "call added: shop.orders._fee -> shop.billing.charge",
-    ]
-    assert set(_difference_rows(billing)) < set(_difference_rows(unfiltered))
+    # --system billing: the crossing relationship's source node is outside the
+    # selection, yet its readable name resolves, byte-identically to the
+    # unfiltered row; rows only the unfiltered run has are absent.
+    assert billing_status == 1
+    assert _difference_rows(billing) == [_FEE_ROW, call_row]
+    assert set(_difference_rows(billing)) < set(_difference_rows(default))
     assert "node added:" not in billing
     assert "node:comparison:" not in billing
     for row in _difference_rows(billing):
-        assert unfiltered.splitlines().count(row) == 1
+        assert default.splitlines().count(row) == 1
 
 
 def test_systems_diff_system_filter_with_no_involvement_is_empty_and_exits_zero(
@@ -4152,13 +4132,17 @@ def test_systems_diff_without_declared_systems_prints_rows_and_exits_one(
     assert _difference_rows(unchanged) == []
 
     (root / "mod.py").write_text(
-        "def helper():\n    return 1\n\ndef main():\n    return helper()\n", encoding="utf-8"
+        "def helper():\n    return 1\n\ndef main():\n    return helper()\n"
+        "\ndef extra():\n    return 2\n",
+        encoding="utf-8",
     )
     status, out, _ = _diff(capsys)
 
     assert status == 1
     assert "no system differences" not in out
     assert _difference_rows(out) == [
+        "node added: mod.extra (mod.py, function)",
+        "relationship added: mod -> mod.extra (contains)",
         "relationship added: mod.main -> mod.helper (calls)",
         "call added: mod.main -> mod.helper",
     ]
