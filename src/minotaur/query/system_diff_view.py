@@ -397,8 +397,26 @@ def _detail_value(value: object) -> str:
     return dump_json(_thaw(value)).rstrip(chr(10))
 
 
+_SENTINEL_LABELS = frozenset({"no_system", "external", "unassigned"})
+
+
+def _literal_system_name(name: str) -> str:
+    """Render a declared system name where a sentinel label could also appear.
+
+    A name equal to a sentinel, or beginning with a quote, is JSON-quoted so it
+    cannot read as the sentinel or as the quoted form of another name; every
+    other name keeps its plain form.
+    """
+    if name in _SENTINEL_LABELS or name.startswith('"'):
+        return json.dumps(name, ensure_ascii=True)
+    return name
+
+
 def _display_category(value: object) -> str:
-    return str(value).removeprefix("system: ")
+    text = str(value)
+    if text.startswith("system: "):
+        return _literal_system_name(text.removeprefix("system: "))
+    return text
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -419,7 +437,7 @@ def _mapping_side(value: object) -> str:
     side = _mapping_value(value, "system")
     if side is None:
         return "unassigned"
-    return str(side)
+    return _literal_system_name(str(side))
 
 
 def _record_category(value: object) -> str | None:
@@ -435,7 +453,7 @@ def _record_category(value: object) -> str | None:
 
 def _endpoint_display(payload: Mapping[str, object], endpoint_key: str, category_key: str) -> str:
     endpoint = _mapping(payload.get(endpoint_key))
-    category = str(payload.get(category_key, "unknown")).removeprefix("system: ")
+    category = _display_category(payload.get(category_key, "unknown"))
     label = endpoint.get("label")
     if label is None:
         label = endpoint.get("path")
