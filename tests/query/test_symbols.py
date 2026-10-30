@@ -100,6 +100,27 @@ def test_definitions_marks_duplicate_bare_names(tmp_path: Path, capsys: object) 
     assert "two.py:1  two.parse  function [duplicate-name]" in captured.out
 
 
+def test_definitions_orders_equal_location_ties_by_kind_across_refresh(
+    tmp_path: Path, capsys: object
+) -> None:
+    source = "CREATE TABLE X (a int); CREATE VIEW X AS SELECT 1;\n"
+    _write(tmp_path, "s.sql", source)
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    capsys.readouterr()  # type: ignore[attr-defined]
+    _write(tmp_path, "s.sql", source + "\n")
+    expected = "s.sql:1  X  sql:table [duplicate-name]\ns.sql:1  X  sql:view [duplicate-name]\n"
+
+    for refreshing in (True, False):
+        status = cli.main(
+            ["query", "definitions", "X", "--graph", str(graph), "--root", str(tmp_path)]
+        )
+        captured = capsys.readouterr()  # type: ignore[attr-defined]
+        assert status == 0, captured.err
+        assert ("minotaur: refreshing graph (1 drifted paths)" in captured.err) is refreshing
+        assert captured.out == expected
+
+
 def test_unknown_callers_name_suggests_labels_and_lonely_is_success(
     tmp_path: Path, capsys: object
 ) -> None:

@@ -255,3 +255,51 @@ def test_sql_saved_names_survive_source_changes_without_refresh(
     )
     assert [(record["symbol"], record["text_mention"]) for record in records] == [(label, False)]
     assert _query_json(graph, root, capsys, "--no-refresh", "--exclude", old_name) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "arguments", "expected"),
+    [
+        (
+            "CREATE TABLE a.b (x int); CREATE TABLE [a.b] (y int);\n",
+            ("--text-fallback",),
+            "s.sql:1  a.b  sql:table\ns.sql:1  a.b  sql:table [text-mention]\n",
+        ),
+        (
+            "CREATE TABLE X (a int); CREATE VIEW X AS SELECT 1;\n",
+            (),
+            "s.sql:1  X  sql:table\ns.sql:1  X  sql:view\n",
+        ),
+    ],
+    ids=["text-mention-tie", "kind-tie"],
+)
+def test_unreferenced_orders_equal_location_ties_across_refresh(
+    tmp_path: Path,
+    capsys: object,
+    source: str,
+    arguments: tuple[str, ...],
+    expected: str,
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "s.sql", source)
+    graph = tmp_path / "graph.json"
+    _analyze(root, graph)
+    capsys.readouterr()  # type: ignore[attr-defined]
+    _write(root, "s.sql", source + "\n")
+
+    for refreshing in (True, False):
+        status = cli.main(
+            [
+                "query",
+                "unreferenced",
+                *arguments,
+                "--graph",
+                str(graph),
+                "--root",
+                str(root),
+            ]
+        )
+        captured = capsys.readouterr()  # type: ignore[attr-defined]
+        assert status == 0, captured.err
+        assert ("minotaur: refreshing graph (1 drifted paths)" in captured.err) is refreshing
+        assert captured.out == expected
