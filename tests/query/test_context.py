@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -325,3 +326,31 @@ def test_context_rejects_sites_that_left_the_source_root(
     source.mkdir()
     assert cli.main(site) == 2
     assert "site path is not a file: app.py" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_context_reports_an_unreadable_site_file_as_an_exit_2_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], json_output: bool
+) -> None:
+    """A file that exists but cannot be read is an input error, not a marker."""
+    if os.geteuid() == 0:
+        pytest.skip("permission bits are not enforced for the root user")
+    root = tmp_path / "source"
+    source = _write(root, "app.py", "value = 1\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+    capsys.readouterr()
+    argv = ["query", "context", "--graph", str(graph), "--root", str(root), "--site", "app.py:1"]
+    if json_output:
+        argv.append("--json")
+
+    source.chmod(0o000)
+    try:
+        exit_code = cli.main(argv)
+    finally:
+        source.chmod(0o644)
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err.startswith("minotaur: error: site path is unreadable: ")
