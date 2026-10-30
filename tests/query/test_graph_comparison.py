@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from test_system_diff import _call, _snapshot, _symbol, _systems
+from test_system_diff import (
+    _call,
+    _snapshot,
+    _symbol,
+    _systems,
+    _unresolved,
+    _upstream,
+)
 
 from minotaur.graph_model.evidence import Evidence
 from minotaur.graph_model.provenance import Provenance
@@ -117,3 +124,48 @@ def test_per_side_membership_and_eligibility_do_not_collapse_to_the_union() -> N
     # invented A-internal relationship on the After side.
     assert eligibility["internal_systems"] == ["A"]
     assert eligibility["boundary_systems"] == ["B"]
+
+
+def test_node_multiplicity_change_carries_the_exact_reason_tuple() -> None:
+    """A repeated occurrence also changes the grouped shape, so both reasons appear (sorted)."""
+    origin = _symbol("caller", "a.py")
+    first = _unresolved(origin, "b.py", 0)
+    repeated = _unresolved(origin, "b.py", 1)
+    systems = _systems(("a.toml", "A", ("a.py",)))
+
+    result = compare_graphs(
+        _snapshot((origin, first), (), systems),
+        _snapshot((origin, first, repeated), (), systems),
+    )
+
+    [node] = [item for item in result.nodes if item.status == "changed"]
+    assert node.reasons == ("changed", "multiplicity_changed")
+
+
+def test_node_shape_change_carries_only_the_changed_reason() -> None:
+    old = _upstream("before")
+    new = _upstream("after")
+    systems = _systems(("a.toml", "A", ("a.py",)))
+
+    result = compare_graphs(_snapshot((old,), (), systems), _snapshot((new,), (), systems))
+
+    [node] = result.nodes
+    assert node.status == "changed"
+    assert node.reasons == ("changed",)
+
+
+def test_relationship_membership_change_carries_only_that_reason() -> None:
+    shared = _symbol("shared", "a.py")
+    moved = _symbol("moved", "b.py")
+    relation = _call(shared, moved)
+    old_systems = _systems(("a.toml", "A", ("a.py", "b.py")))
+    new_systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+
+    result = compare_graphs(
+        _snapshot((shared, moved), (relation,), old_systems),
+        _snapshot((shared, moved), (relation,), new_systems),
+    )
+
+    [relationship] = result.relationships
+    assert relationship.status == "changed"
+    assert relationship.reasons == ("membership_changed",)
