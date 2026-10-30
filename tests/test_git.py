@@ -485,10 +485,12 @@ def _orphaned_linked_worktree(tmp_path: Path) -> Path:
 
 def test_work_tree_root_rejects_orphaned_linked_worktree(tmp_path: Path) -> None:
     linked = _orphaned_linked_worktree(tmp_path)
-    # Git names the unopenable gitdir in its own version-dependent way (a path,
-    # or "(null)"), so only the colon form that marks a named repository is
-    # stable; the "(or any ...)" forms mean discovery found no repository.
-    with pytest.raises(git.GitProbeError, match=r"not a git repository:(?! \(or )"):
+    # Git words the unopenable-gitfile failure differently across versions
+    # ("not a git repository: <path>", "gitfile does not point to a valid
+    # repository: <path>"), but both name the missing .git directory; raising
+    # at all (rather than returning None) is what separates it from discovery
+    # finding no repository.
+    with pytest.raises(git.GitProbeError, match=r"\.git"):
         git.work_tree_root(linked)
 
 
@@ -524,20 +526,27 @@ def test_work_tree_root_treats_only_no_repository_forms_as_outside_git(
 
 
 @pytest.mark.parametrize(
-    ("stderr", "named"),
+    ("stderr", "expected"),
     [
-        (b"fatal: not a git repository: /gone/.git/worktrees/linked\n", "/gone"),
-        (b"fatal: not a git repository: (null)\n", "(null)"),
+        (
+            b"fatal: not a git repository: /gone/.git/worktrees/linked\n",
+            "not a git repository: /gone",
+        ),
+        (b"fatal: not a git repository: (null)\n", "not a git repository: (null)"),
+        (
+            b"fatal: gitfile does not point to a valid repository: /gone/.git/worktrees/linked\n",
+            "gitfile does not point to a valid repository: /gone/.git/worktrees/linked",
+        ),
     ],
 )
 def test_work_tree_root_raises_for_named_missing_git_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: bytes, named: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: bytes, expected: str
 ) -> None:
     def failed(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(command, 128, stdout=b"", stderr=stderr)
 
     monkeypatch.setattr(git.subprocess, "run", failed)
-    with pytest.raises(git.GitProbeError, match=re.escape(f"not a git repository: {named}")):
+    with pytest.raises(git.GitProbeError, match=re.escape(expected)):
         git.work_tree_root(tmp_path)
 
 
