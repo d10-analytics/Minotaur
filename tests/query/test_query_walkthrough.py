@@ -226,6 +226,13 @@ def test_public_systems_source_change_walkthrough_has_exact_status_evidence_and_
     ]
     offset = len(rows)
     assert lines[:offset] == rows
+    guide = (ROOT / "docs/guides/system-definitions.md").read_text(encoding="utf-8")
+    guide_blocks = [
+        block
+        for block in re.findall(r"```text\n(.*?)```", guide, re.DOTALL)
+        if "surface added: App" in block
+    ]
+    assert guide_blocks == ["\n".join(rows) + "\n"], "the guide must show the real App rows"
     assert len(lines) == offset + 4
     expected_coverage = {
         "declared_files": {

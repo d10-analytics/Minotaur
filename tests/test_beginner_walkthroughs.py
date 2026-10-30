@@ -190,6 +190,8 @@ def test_system_example_reports_changes_without_comparison_writes(
     # identities live in the saved report, not on the command line.
     historical = diffs[4][2].splitlines()[1:-1]
     row_count = len(changes.splitlines())
+    prose = " ".join((ROOT / "examples/system-walkthrough/comparison.md").read_text().split())
+    assert f"the same {row_count} change rows followed by" in prose
     assert "\n".join(historical[:row_count]) + "\n" == changes
     assert historical[row_count].startswith("old coverage: ")
     assert historical[row_count + 1].startswith("new coverage: ")
