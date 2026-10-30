@@ -247,20 +247,40 @@ def _change_line(label: str, change: SystemChange) -> str:
     raise AssertionError(f"unsupported change label: {label}")
 
 
+_NodeNameKey = tuple[str, str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _Disambiguator:
+    """How one node of a colliding name is told apart from the others."""
+
+    role: str | None = None
+    line: int | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _NameIndex:
-    """Readable names resolved from one complete result, built once per render."""
+    """Readable names resolved from one complete result, built once per render.
+
+    ``collisions`` holds, for each node of a (label, path, kind) name that more
+    than one node of the complete result shares, whether the name is told apart
+    by declaration role (every node of it has a distinct one) rather than by
+    1-based declaration line.  Unique names have no entry.
+    """
 
     nodes: Mapping[str, tuple[object, object]]
     relationships: Mapping[str, tuple[str, str, str]]
+    collisions: Mapping[tuple[str, _NodeNameKey], bool]
 
     @classmethod
     def build(cls, complete: SystemDiffResult) -> _NameIndex:
+        nodes = {item.id: (_first(item.before), _first(item.after)) for item in complete.nodes}
         return cls(
-            nodes={item.id: (_first(item.before), _first(item.after)) for item in complete.nodes},
+            nodes=nodes,
             relationships={
                 item.id: (item.source, item.target, item.kind) for item in complete.relationships
             },
+            collisions=_collisions(nodes),
         )
 
     def node_record(self, node_id: str, status: str) -> Mapping[str, object] | None:
@@ -273,10 +293,86 @@ class _NameIndex:
                 return record
         return None
 
+    def disambiguator(
+        self, node_id: str, record: Mapping[str, object] | None
+    ) -> _Disambiguator | None:
+        """Return how a node of a shared name is told apart, else ``None``."""
+        if record is None:
+            return None
+        key = _name_key(record)
+        by_role = None if key is None else self.collisions.get((node_id, key))
+        if by_role is None:
+            return None
+        if by_role:
+            return _Disambiguator(role=_declaration_role(record))
+        return _Disambiguator(line=_declaration_line(record))
+
     def label(self, node_id: str, status: str) -> str:
+        """Name a node as a relationship or call endpoint."""
         record = self.node_record(node_id, status)
         label = record.get("label") if record else None
-        return str(label) if label is not None else node_id
+        if label is None:
+            return _safe_atom(node_id)
+        marker = self.disambiguator(node_id, record)
+        if marker is None:
+            return _safe_atom(label)
+        if marker.role is not None:
+            return f"{_safe_atom(label)} ({_safe_atom(marker.role)})"
+        if marker.line is not None:
+            return f"{_safe_atom(label)}:{marker.line}"
+        return _safe_atom(node_id)
+
+
+def _name_key(record: Mapping[str, object]) -> _NodeNameKey | None:
+    """Return the (label, resolved path, kind) a node row prints, if it has a label."""
+    label = record.get("label")
+    if label is None:
+        return None
+    location = _mapping(record.get("location"))
+    path = record.get("path") or location.get("path")
+    kind = record.get("symbol_kind") or record.get("node_class")
+    return (str(label), str(path or ""), str(kind or ""))
+
+
+def _declaration_role(record: Mapping[str, object]) -> str | None:
+    extensions = _mapping(record.get("extensions"))
+    for namespace in sorted(extensions):
+        role = _mapping(extensions[namespace]).get("declaration_role")
+        if isinstance(role, str) and role:
+            return role
+    return None
+
+
+def _declaration_line(record: Mapping[str, object]) -> int | None:
+    start = _mapping(_mapping(_mapping(record.get("location")).get("range")).get("start"))
+    line = start.get("line")
+    return line + 1 if isinstance(line, int) and not isinstance(line, bool) else None
+
+
+def _collisions(
+    nodes: Mapping[str, tuple[object, object]],
+) -> dict[tuple[str, _NodeNameKey], bool]:
+    """Find every shared node name, counting unchanged entries and both sides.
+
+    A node that exists on one side only still collides with a same-named node
+    on the other.  The value is ``True`` when the name is told apart by role.
+    """
+    groups: dict[_NodeNameKey, dict[str, str | None]] = {}
+    for node_id, sides in nodes.items():
+        for side in sides:
+            record = _mapping(_mapping_value(side, "node") or side)
+            key = _name_key(record) if record else None
+            if key is not None:
+                groups.setdefault(key, {}).setdefault(node_id, _declaration_role(record))
+    result: dict[tuple[str, _NodeNameKey], bool] = {}
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        roles = list(members.values())
+        by_role = None not in roles and len(set(roles)) == len(roles)
+        for node_id in members:
+            result[(node_id, key)] = by_role
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,14 +408,20 @@ def _internal_row(
     if domain == "graph-node":
         prefix, group = "node", reasons.nodes
         record = names.node_record(identifier, status)
-        if record is None:
+        marker = names.disambiguator(identifier, record)
+        if record is None or (marker is not None and marker.role is None and marker.line is None):
             text = _safe_atom(identifier)
         else:
             location = _mapping(record.get("location"))
             path = record.get("path") or location.get("path")
             kind = record.get("symbol_kind") or record.get("node_class")
-            where = ", ".join(_safe_atom(item) for item in (path, kind) if item)
+            parts = [path, kind]
             text = _safe_atom(record.get("label", identifier))
+            if marker is not None and marker.role is not None:
+                parts.append(marker.role)
+            elif marker is not None:
+                text += f":{marker.line}"
+            where = ", ".join(_safe_atom(item) for item in parts if item)
             if where:
                 text += f" ({where})"
     elif domain == "graph-relationship":
@@ -330,17 +432,14 @@ def _internal_row(
         else:
             source, target, kind = endpoints
             text = (
-                f"{_safe_atom(names.label(source, status))} -> "
-                f"{_safe_atom(names.label(target, status))} ({_safe_atom(kind)})"
+                f"{names.label(source, status)} -> "
+                f"{names.label(target, status)} ({_safe_atom(kind)})"
             )
     else:
         prefix, group = "call", reasons.calls
         endpoints = names.relationships.get(identifier)
         if endpoints is not None:
-            text = (
-                f"{_safe_atom(names.label(endpoints[0], status))} -> "
-                f"{_safe_atom(names.label(endpoints[1], status))}"
-            )
+            text = f"{names.label(endpoints[0], status)} -> {names.label(endpoints[1], status)}"
         else:
             text = _callee_location(change, status) or _safe_atom(identifier)
     line = f"{prefix} {_safe_atom(status)}: {text}"
