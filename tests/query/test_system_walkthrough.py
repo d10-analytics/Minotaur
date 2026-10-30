@@ -462,8 +462,17 @@ def test_public_systems_membership_change_keeps_graph_bytes_identical(
     assert status == 1
     assert captured.err == ""
     lines = captured.out.splitlines()
-    assert lines[0] == "membership changed: outside.py — unassigned -> A"
-    assert len(lines) == 5
+    rows = [
+        "membership changed: outside.py — unassigned -> A",
+        "node changed: outside (outside.py, module) [membership_changed]",
+        "node changed: outside.outside (outside.py, function) [membership_changed]",
+        "node changed: outside.py (outside.py, file) [membership_changed]",
+        "relationship changed: outside -> outside.outside (contains) [membership_changed]",
+        "relationship changed: outside.py -> outside (contains) [membership_changed]",
+    ]
+    offset = len(rows)
+    assert lines[:offset] == rows
+    assert len(lines) == offset + 4
     expected_old_coverage = {
         "declared_files": {
             "absent": 0,
@@ -507,9 +516,9 @@ def test_public_systems_membership_change_keeps_graph_bytes_identical(
             "scope": "final_graph_file_node_derived_paths",
         },
     }
-    assert json.loads(lines[1].removeprefix("old coverage: ")) == expected_old_coverage
-    assert json.loads(lines[2].removeprefix("new coverage: ")) == expected_new_coverage
-    assert lines[3:] == [
+    assert json.loads(lines[offset].removeprefix("old coverage: ")) == expected_old_coverage
+    assert json.loads(lines[offset + 1].removeprefix("new coverage: ")) == expected_new_coverage
+    assert lines[offset + 2 :] == [
         'old selection: {"status":"recorded","targets":["a.py","b.py","outside.py"]}',
         'new selection: {"status":"recorded","targets":["a.py","b.py","outside.py"]}',
     ]
@@ -603,7 +612,11 @@ def test_public_systems_outside_consumer_is_visible_from_both_involved_systems(
         "dependency added: B -> A",
         "boundary added: B.b -> A.a.receive (imports)",
         "boundary added: B.b.consume -> A.a.receive (calls)",
+        "relationship added: b -> a.receive (imports)",
+        "relationship added: b.consume -> a.receive (calls)",
+        "call added: b.consume -> a.receive",
     ]
+    offset = len(expected_lines)
     expected_coverage = {
         "declared_files": {
             "absent": 0,
@@ -625,10 +638,12 @@ def test_public_systems_outside_consumer_is_visible_from_both_involved_systems(
         },
     }
     output_lines_a = output_a.out.splitlines()
-    assert output_lines_a[:5] == expected_lines
-    assert json.loads(output_lines_a[5].removeprefix("old coverage: ")) == expected_coverage
-    assert json.loads(output_lines_a[6].removeprefix("new coverage: ")) == expected_coverage
-    assert output_lines_a[7:] == [
+    assert output_lines_a[:offset] == expected_lines
+    assert json.loads(output_lines_a[offset].removeprefix("old coverage: ")) == expected_coverage
+    assert (
+        json.loads(output_lines_a[offset + 1].removeprefix("new coverage: ")) == expected_coverage
+    )
+    assert output_lines_a[offset + 2 :] == [
         'old selection: {"status":"recorded","targets":["a.py","b.py"]}',
         'new selection: {"status":"recorded","targets":["a.py","b.py"]}',
     ]
@@ -647,7 +662,7 @@ def test_public_systems_outside_consumer_is_visible_from_both_involved_systems(
     for line in details.out.splitlines():
         if line.startswith("new evidence: "):
             record = json.loads(line.removeprefix("new evidence: "))
-            if any(item["kind"] == "calls" for item in record):
+            if any(item.get("kind") == "calls" for item in record):
                 call_evidence.extend(record)
     call_record = next(item for item in call_evidence if item["kind"] == "calls")
     assert call_record["source"]["path"] == {"status": "recorded", "value": "b.py"}

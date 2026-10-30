@@ -189,11 +189,12 @@ def test_system_example_reports_changes_without_comparison_writes(
     # output, and that output carries no revision-identity header at all: the
     # identities live in the saved report, not on the command line.
     historical = diffs[4][2].splitlines()[1:-1]
-    assert "\n".join(historical[:19]) + "\n" == changes
-    assert historical[19].startswith("old coverage: ")
-    assert historical[20].startswith("new coverage: ")
-    assert historical[21] == 'old selection: {"status":"recorded","targets":["shop"]}'
-    assert historical[22] == 'new selection: {"status":"recorded","targets":["shop"]}'
+    row_count = len(changes.splitlines())
+    assert "\n".join(historical[:row_count]) + "\n" == changes
+    assert historical[row_count].startswith("old coverage: ")
+    assert historical[row_count + 1].startswith("new coverage: ")
+    assert historical[row_count + 2] == 'old selection: {"status":"recorded","targets":["shop"]}'
+    assert historical[row_count + 3] == 'new selection: {"status":"recorded","targets":["shop"]}'
     for token in ("Before:", "After:", "134b138", "a2b78dd"):
         assert token not in diffs[4][2]
     assert historical == diffs[1][2].splitlines()[1:-1]

@@ -213,13 +213,20 @@ def test_public_systems_source_change_walkthrough_has_exact_status_evidence_and_
     assert status == 1
     assert captured.err == ""
     lines = captured.out.splitlines()
-    assert lines[:4] == [
+    rows = [
         "surface added: App app/api.py.app.api.send",
         "consumer changed: App <- consumer.py",
         "boundary added: no_system.consumer -> App.app.api.send (imports)",
         "boundary added: no_system.consumer.consume -> App.app.api.send (calls)",
+        "node added: app.api.send (app/api.py, function)",
+        "relationship added: app.api -> app.api.send (contains)",
+        "relationship added: consumer -> app.api.send (imports)",
+        "relationship added: consumer.consume -> app.api.send (calls)",
+        "call added: consumer.consume -> app.api.send",
     ]
-    assert len(lines) == 8
+    offset = len(rows)
+    assert lines[:offset] == rows
+    assert len(lines) == offset + 4
     expected_coverage = {
         "declared_files": {
             "absent": 0,
@@ -240,9 +247,9 @@ def test_public_systems_source_change_walkthrough_has_exact_status_evidence_and_
             "scope": "final_graph_file_node_derived_paths",
         },
     }
-    assert json.loads(lines[4].removeprefix("old coverage: ")) == expected_coverage
-    assert json.loads(lines[5].removeprefix("new coverage: ")) == expected_coverage
-    assert lines[6:] == [
+    assert json.loads(lines[offset].removeprefix("old coverage: ")) == expected_coverage
+    assert json.loads(lines[offset + 1].removeprefix("new coverage: ")) == expected_coverage
+    assert lines[offset + 2 :] == [
         'old selection: {"status":"recorded","targets":["app","consumer.py"]}',
         'new selection: {"status":"recorded","targets":["app","consumer.py"]}',
     ]
