@@ -197,6 +197,36 @@ def test_unreferenced_no_refresh_uses_deleted_graph_path_without_text_reads(
     assert graph.read_bytes() == before
 
 
+def test_unreferenced_no_refresh_suppresses_text_fallback_for_edited_present_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "a.py"
+    _write(tmp_path, "a.py", "def orphan():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    source.write_text('def orphan():\n    pass\nmessage = "orphan"\n', encoding="utf-8")
+    capsys.readouterr()
+
+    status = cli.main(
+        [
+            "query",
+            "unreferenced",
+            "a.py",
+            "--text-fallback",
+            "--no-refresh",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0, captured.err
+    assert captured.out == "a.py:1  a.orphan  function\n"
+    assert "minotaur: stale: a.py" in captured.err
+
+
 def test_unreferenced_no_refresh_uses_graph_path_when_source_is_unreadable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
