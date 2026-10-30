@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from test_system_queries import _query_subprocess
 
 from minotaur import cli
 
@@ -432,3 +433,35 @@ def test_lost_import_route_has_no_inbound_impact_path(
     assert status == 0
     assert captured.out == "depth 0: pkg.sub.go\n"
     assert "caller.owner" not in captured.out
+
+
+_TIE_SOURCE = "def g(): pass\ndef f(): g()\nclass f: y = g()\n"
+_TIE_JSON = (
+    '{"query":"impact","refreshed":false,"results":['
+    '{"boundary":false,"depth":0,"kind":"function","symbol":"m.g"},'
+    '{"boundary":false,"depth":1,"kind":"class","symbol":"m.f"},'
+    '{"boundary":false,"depth":1,"kind":"function","symbol":"m.f"}'
+    '],"stale":[],"stale_analyzer":null}\n'
+)
+_TIE_TEXT = "depth 0: m.g\ndepth 1: m.f\ndepth 1: m.f\n"
+
+
+@pytest.mark.parametrize("hash_seed", ["0", "1"])
+def test_impact_orders_same_symbol_rows_by_kind_under_any_hash_seed(
+    tmp_path: Path, hash_seed: str
+) -> None:
+    _write(tmp_path, "m.py", _TIE_SOURCE)
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status, out, _err = _query_subprocess(
+        graph, tmp_path, "impact", "m.g", "--json", "--no-refresh", hash_seed=hash_seed
+    )
+    assert status == 0
+    assert out.decode("utf-8") == _TIE_JSON
+
+    status, out, _err = _query_subprocess(
+        graph, tmp_path, "impact", "m.g", "--no-refresh", hash_seed=hash_seed
+    )
+    assert status == 0
+    assert out.decode("utf-8") == _TIE_TEXT
