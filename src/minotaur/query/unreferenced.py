@@ -97,7 +97,18 @@ def unreferenced(
                 ),
             )
         )
-    return tuple(sorted(records, key=lambda record: (record.path, record.line, record.symbol)))
+    return tuple(
+        sorted(
+            records,
+            key=lambda record: (
+                record.path,
+                record.line,
+                record.symbol,
+                record.kind,
+                record.text_mention,
+            ),
+        )
+    )
 
 
 def render_text(records: Iterable[UnreferencedRecord]) -> str:
