@@ -35,7 +35,8 @@ def filter_system_diff(
 
     ``complete_result`` remains the caller-retained complete value.  Passing
     ``None`` copies every category, while a name retains every change whose stored
-    ``involved_systems`` contains it.  A later selection must therefore call
+    ``involved_systems`` contains it and every limitation about a retained call
+    change.  A later selection must therefore call
     this function with that same complete value; cumulative narrowing is not
     the default because it would hide a change involving the newly selected
     system.  An explicit intersection need is the point at which this policy
@@ -81,7 +82,14 @@ def filter_system_diff(
         kwargs[field_name] = tuple(
             change for change in getattr(complete_result, field_name) if retain(change)
         )
-    kwargs["limitations"] = tuple(complete_result.limitations)
+    retained_calls = {
+        change.relationship_id for change in complete_result.call_changes if retain(change)
+    }
+    kwargs["limitations"] = tuple(
+        item
+        for item in complete_result.limitations
+        if system_name is None or item.relationship_id in retained_calls
+    )
     return SystemDiffResult(**cast(Any, kwargs))
 
 
