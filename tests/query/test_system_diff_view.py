@@ -1108,3 +1108,76 @@ def test_exact_grammar_fixtures_print_rows_exactly_when_they_exit_one() -> None:
         rendered = render_text(result, complete=names)
         assert result.exit_code == 1
         _assert_rows_iff_exit_one(result, rendered)
+
+
+def _two_system_unavailable_result() -> SystemDiffResult:
+    """Two matched calls with a missing fingerprint, one inside A and one inside B."""
+
+    def site(path: str) -> Location:
+        return Location(path, Range(Position(2, 0), Position(2, 4)))
+
+    def call(source, target, path: str) -> Relationship:
+        return Relationship(
+            source.id,
+            target.id,
+            "calls",
+            (Evidence(Provenance.STATIC_ANALYSIS, locations=(site(path),)),),
+        )
+
+    def observation(path: str, fingerprint: str | None) -> CallExpressionObservation:
+        return CallExpressionObservation(
+            "python",
+            site(path),
+            Location(path, Range(Position(2, 0), Position(2, 9))),
+            fingerprint,
+        )
+
+    a_caller, a_callee = _symbol("a_caller", "a.py"), _symbol("a_callee", "a.py", line=5)
+    b_caller, b_callee = _symbol("b_caller", "b.py"), _symbol("b_callee", "b.py", line=5)
+    systems = _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    snapshot = _snapshot(
+        (a_caller, a_callee, b_caller, b_callee),
+        (call(a_caller, a_callee, "a.py"), call(b_caller, b_callee, "b.py")),
+        systems,
+    )
+    return compare_systems(
+        snapshot,
+        snapshot,
+        old_call_observations=(observation("a.py", None), observation("b.py", None)),
+        new_call_observations=(observation("a.py", "x"), observation("b.py", "x")),
+    )
+
+
+def test_selected_view_keeps_only_its_own_limitations_in_text_and_json() -> None:
+    complete = _two_system_unavailable_result()
+    by_system = {
+        name: {
+            item.relationship_id for item in complete.call_changes if name in item.involved_systems
+        }
+        for name in ("A", "B")
+    }
+    assert [item.status for item in complete.call_changes] == ["unavailable", "unavailable"]
+    assert len(by_system["A"]) == len(by_system["B"]) == 1
+    assert len(complete.limitations) == 2
+    assert render_text(complete).count("limitation old:") == 2
+
+    selected = filter_system_diff(complete, "A")
+
+    assert {item.relationship_id for item in selected.limitations} == by_system["A"]
+    assert render_text(selected).count("limitation old:") == 1
+    assert [item["relationship_id"] for item in selected.to_dict()["limitations"]] == list(
+        by_system["A"]
+    )
+    assert len(complete.to_dict()["limitations"]) == 2
+
+
+def test_no_selection_copies_every_limitation_and_equals_the_complete_result() -> None:
+    complete = _two_system_unavailable_result()
+
+    selected = filter_system_diff(complete, None)
+
+    assert selected == complete
+    assert selected.limitations == complete.limitations
+    assert render_json(selected) == render_json(complete)
+    assert render_text(selected) == render_text(complete)
+    assert render_text(selected).count("limitation old:") == 2
