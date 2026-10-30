@@ -136,7 +136,9 @@ def definitions(index: GraphIndex, bare_name: str) -> tuple[DefinitionRecord, ..
                 duplicate=duplicate,
             )
         )
-    return tuple(sorted(records, key=lambda record: (record.path, record.line, record.symbol)))
+    return tuple(
+        sorted(records, key=lambda record: (record.path, record.line, record.symbol, record.kind))
+    )
 
 
 def _locations(relationship: Relationship) -> tuple[Location, ...]:
