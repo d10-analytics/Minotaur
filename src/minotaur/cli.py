@@ -760,10 +760,13 @@ def _run_system_query(
 
 
 def _diff_output(
-    query: argparse.Namespace, old: GraphDocument, new: GraphDocument
+    query: argparse.Namespace,
+    old: GraphDocument,
+    new: GraphDocument,
+    error_paths: frozenset[str] = frozenset(),
 ) -> tuple[str, bool]:
     """Render one diff and report whether it contains any structural change."""
-    result = diff_query.diff(old, new)
+    result = diff_query.diff(old, new, error_paths)
     changed = any(
         (
             result.added,
@@ -853,9 +856,19 @@ def _run_committed_diff(query: argparse.Namespace, located: Path) -> int:
     )
     for diagnostic in produced.diagnostics:
         print(_format_diagnostic(diagnostic), file=sys.stderr)
-    output, changed = _diff_output(query, old_loaded.document, produced.document)
+    # An error diagnostic marks its file's current analysis as incomplete, so
+    # the diff withholds rows a missing fact could fabricate and exits 2.
+    errors = produced.errors
+    output, changed = _diff_output(
+        query,
+        old_loaded.document,
+        produced.document,
+        frozenset(item.path for item in errors),
+    )
     _write_stdout(output)
-    return 1 if produced.errors or changed else 0
+    if errors:
+        return 2
+    return 1 if changed else 0
 
 
 def _run_context(query: argparse.Namespace) -> str:
@@ -1552,11 +1565,13 @@ def _query_source_paths(
     directory selection semantics. A stale ``--no-refresh`` query instead
     filters the saved graph lexically: its command paths may be deleted or
     unreadable, but containment checks still reject paths outside ``root``.
+    In both modes the first command path that selects no recorded graph file
+    is refused, so a path the graph never examined is not an empty answer.
     """
     graph_paths = {node.path for node in index.nodes.values() if node.path is not None}
     if not paths:
         return tuple(sorted(graph_paths))
-    targets: list[tuple[Path, str]] = []
+    targets: list[tuple[str, Path, str]] = []
     for value in paths:
         target = Path(value)
         if not target.is_absolute():
@@ -1568,26 +1583,26 @@ def _query_source_paths(
             raise ValueError(f"query path escapes root: {value}") from error
         if validate_current_paths and not resolved.exists():
             raise ValueError(f"query path does not exist: {value}")
-        targets.append((resolved, resolved.relative_to(root).as_posix()))
+        targets.append((value, resolved, resolved.relative_to(root).as_posix()))
+
+    def selects(target: Path, target_relative: str, relative: str) -> bool:
+        if validate_current_paths:
+            candidate = root / relative
+            return candidate == target or (target.is_dir() and target in candidate.parents)
+        return (
+            target_relative == "."
+            or relative == target_relative
+            or relative.startswith(f"{target_relative}/")
+        )
 
     selected: set[str] = set()
-    if validate_current_paths:
-        for relative in graph_paths:
-            candidate = root / relative
-            if any(
-                candidate == target or (target.is_dir() and target in candidate.parents)
-                for target, _ in targets
-            ):
-                selected.add(relative)
-    else:
-        for relative in graph_paths:
-            if any(
-                target_relative == "."
-                or relative == target_relative
-                or relative.startswith(f"{target_relative}/")
-                for _, target_relative in targets
-            ):
-                selected.add(relative)
+    for value, target, target_relative in targets:
+        matched = {
+            relative for relative in graph_paths if selects(target, target_relative, relative)
+        }
+        if not matched:
+            raise ValueError(f"path has no analyzed source: {value}")
+        selected |= matched
     return tuple(sorted(selected))
 
 
