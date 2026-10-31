@@ -760,10 +760,13 @@ def _run_system_query(
 
 
 def _diff_output(
-    query: argparse.Namespace, old: GraphDocument, new: GraphDocument
+    query: argparse.Namespace,
+    old: GraphDocument,
+    new: GraphDocument,
+    error_paths: frozenset[str] = frozenset(),
 ) -> tuple[str, bool]:
     """Render one diff and report whether it contains any structural change."""
-    result = diff_query.diff(old, new)
+    result = diff_query.diff(old, new, error_paths)
     changed = any(
         (
             result.added,
@@ -853,9 +856,19 @@ def _run_committed_diff(query: argparse.Namespace, located: Path) -> int:
     )
     for diagnostic in produced.diagnostics:
         print(_format_diagnostic(diagnostic), file=sys.stderr)
-    output, changed = _diff_output(query, old_loaded.document, produced.document)
+    # An error diagnostic marks its file's current analysis as incomplete, so
+    # the diff withholds rows a missing fact could fabricate and exits 2.
+    errors = produced.errors
+    output, changed = _diff_output(
+        query,
+        old_loaded.document,
+        produced.document,
+        frozenset(item.path for item in errors),
+    )
     _write_stdout(output)
-    return 1 if produced.errors or changed else 0
+    if errors:
+        return 2
+    return 1 if changed else 0
 
 
 def _run_context(query: argparse.Namespace) -> str:
