@@ -47,7 +47,6 @@ class SnapshotError(ValueError):
         self.side = side
         self.revision = revision
         self.commit = commit
-        self.pinned_sha = commit
         super().__init__(f"{side} revision {revision!r}: {detail}")
 
 
@@ -198,15 +197,6 @@ class RevisionSnapshot:
     @property
     def commit(self) -> str:
         return self.pin.commit
-
-    @property
-    def pinned_sha(self) -> str:
-        return self.pin.commit
-
-    @property
-    def checkout_root(self) -> Path:
-        """Compatibility name that emphasizes this is not a Git checkout."""
-        return self.temporary_root
 
     def path(self, relative: str | Path = ".") -> Path:
         """Return a captured path, rejecting lexical escape from the root."""

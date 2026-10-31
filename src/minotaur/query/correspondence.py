@@ -283,10 +283,6 @@ class CorrespondenceIndex:
     whole_graph: bool = False
 
     @property
-    def candidate_groups(self) -> Mapping[NodeKey, tuple[Node, ...]]:
-        return self.nodes_by_key
-
-    @property
     def relationship_groups(self) -> Mapping[RelationshipKey, tuple[RelationshipOccurrence, ...]]:
         return self.relationships_by_key
 
@@ -575,19 +571,6 @@ def prepare_whole_graph(document: GraphDocument, *, side: str = "local") -> Corr
     )
 
 
-prepare_whole_graph_correspondence = prepare_whole_graph
-
-
-def validate_required_keys(
-    index: CorrespondenceIndex,
-    requested_keys: Iterable[RelationshipKey],
-    *,
-    side: str = "local",
-) -> CorrespondenceIndex:
-    """Validate requested local relationship keys on a prepared index."""
-    return index.validate_required_keys(requested_keys, side=side)
-
-
 __all__ = [
     "CorrespondenceAdmissionError",
     "CorrespondenceAmbiguityError",
@@ -601,6 +584,4 @@ __all__ = [
     "node_key",
     "prepare_correspondence",
     "prepare_whole_graph",
-    "prepare_whole_graph_correspondence",
-    "validate_required_keys",
 ]

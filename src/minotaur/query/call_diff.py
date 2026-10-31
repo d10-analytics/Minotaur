@@ -14,7 +14,7 @@ from minotaur.graph_model.location import Location
 from minotaur.language_interpreter.call_expressions import CallExpressionObservation
 from minotaur.query.correspondence import CorrespondenceIndex
 from minotaur.query.graph_comparison import relationship_display_id
-from minotaur.system import EndpointKind, System, SystemMembership
+from minotaur.system import EndpointKind
 
 if TYPE_CHECKING:
     from minotaur.query.system import ReportingSnapshot
@@ -192,7 +192,6 @@ def _relationship_memberships(
     index: CorrespondenceIndex | None,
     *,
     snapshot: ReportingSnapshot | None,
-    systems: Sequence[System] | None,
 ) -> dict[str, frozenset[str]]:
     """Associate graph relationship IDs with named endpoint systems.
 
@@ -204,8 +203,9 @@ def _relationship_memberships(
     """
     if index is None:
         return {}
-    declared_systems = snapshot.systems if snapshot is not None else (systems or ())
-    classifier = SystemMembership(declared_systems)
+    if snapshot is None:
+        return {relationship_display_id(key): frozenset() for key in index.relationship_groups}
+    classifier = snapshot.membership
     result: dict[str, frozenset[str]] = {}
     for key, occurrences in index.relationship_groups.items():
         names: set[str] = set()
@@ -226,17 +226,11 @@ def compare_call_observations(
     new_index: CorrespondenceIndex | None = None,
     old_snapshot: ReportingSnapshot | None = None,
     new_snapshot: ReportingSnapshot | None = None,
-    old_systems: Sequence[System] | None = None,
-    new_systems: Sequence[System] | None = None,
 ) -> CallComparison:
     """Compare observations as multisets; never pair residuals by position."""
     old_groups, new_groups = _normalize(old, old_index), _normalize(new, new_index)
-    old_memberships = _relationship_memberships(
-        old_index, snapshot=old_snapshot, systems=old_systems
-    )
-    new_memberships = _relationship_memberships(
-        new_index, snapshot=new_snapshot, systems=new_systems
-    )
+    old_memberships = _relationship_memberships(old_index, snapshot=old_snapshot)
+    new_memberships = _relationship_memberships(new_index, snapshot=new_snapshot)
     changes: list[CallChange] = []
     limitations: list[CallLimitation] = []
     for relation_id in sorted(set(old_groups) | set(new_groups)):
@@ -299,21 +293,10 @@ def compare_call_observations(
     return CallComparison(tuple(changes), tuple(limitations))
 
 
-compare_calls = compare_call_observations
-compare_call_diff = compare_call_observations
-compare_call_residuals = compare_call_observations
-CallResidual = CallChange
-ComparisonLimitation = CallLimitation
-
 __all__ = [
     "CallChange",
     "CallComparison",
     "CallCorrespondenceAmbiguityError",
     "CallLimitation",
-    "CallResidual",
-    "ComparisonLimitation",
-    "compare_call_diff",
     "compare_call_observations",
-    "compare_call_residuals",
-    "compare_calls",
 ]
