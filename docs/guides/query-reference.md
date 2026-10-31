@@ -168,17 +168,23 @@ Every caller record contains `caller`, `column`, `kind`, `line`, `path`, and
 
 ### Find definitions
 
-Pass a bare name to find every symbol whose qualified label ends with it:
+Pass an exact qualified label or a bare name. A symbol matches when the query
+equals its exact label or its bare name, which is the recorded SQL name for SQL
+and otherwise the final label segment. A root module `main` therefore does not
+hide `app.cli.main` for the query `main`. A table declared as
+`dbo.[order.lines]` has the recorded name `order.lines`, so the query
+`order.lines` finds it and `lines` does not, while `lines` finds `dbo.lines`:
 
 ```bash
 minotaur query definitions parse --graph GRAPH.json --root ROOT
 ```
 
 The text form is `path:line  qualified.name  kind`. If more than one
-definition has that bare name, every matching line is marked
-`[duplicate-name]`. JSON result objects contain `path`, `line`, `symbol`,
-`kind`, and the boolean `duplicate`. SQL bare names are matched
-case-insensitively; non-SQL names retain exact matching.
+definition matches the query, by exact label or by bare name, every matching
+line is marked `[duplicate-name]`. JSON result objects contain `path`, `line`,
+`symbol`, `kind`, and the boolean `duplicate`. For SQL, both the exact-label
+and the bare-name comparison are case-insensitive, so `DBO.LINES` finds
+`dbo.lines`; non-SQL names retain exact matching.
 
 ### Trace inbound impact
 
@@ -269,7 +275,10 @@ fallback is keyed by bare name, not by symbol: when two classes both define
 one was meant.
 
 JSON records contain `path`, `line`, `symbol`, `kind`, and `text_mention`.
-An empty result prints `no unreferenced symbols` and still exits `0`.
+An empty result prints `no unreferenced symbols` and still exits `0`. A path
+with no analyzed source, including a selected directory that contains no
+recorded file, exits `2` with `path has no analyzed source: PATH` instead of
+printing an empty result.
 
 `--text-fallback` is suppressed on a stale graph queried with `--no-refresh`,
 since that mode intentionally answers from graph relationships only; see the
@@ -566,8 +575,18 @@ minotaur query diff OLD.json NEW.json
 minotaur query diff OLD.json NEW.json --json
 ```
 
-Symbols are keyed by `(symbol kind, qualified label)`, so inserting lines is
-reported as relocation rather than as an unrelated removal and addition.
+Symbols are keyed by `(symbol kind, qualified label, recorded declaration
+role, ordinal)`, where the ordinal counts same-key definitions in source order.
+Inserting lines is therefore reported as relocation rather than as an unrelated
+removal and addition, while removing one of two `def f` definitions, or one of a
+property getter and setter pair, is a removed symbol. A relocation is reported
+only when the start `(path, line)` changed; a body edit or a column-only shift
+at the same start is not one, and a move to another file at the same line is.
+Plain `diff` appends a recorded role to every such symbol in text, as in
+`- mod.C.x (setter)`, and adds a `role` field to its JSON record. This differs
+from `--systems`, which names a role only when same-label nodes collide and has
+no separate JSON `role` field. Symbols without a recorded role keep their plain
+label, and `diff` adds no duplicate-name marker.
 Module symbols are excluded from `added`/`removed`/`relocated` entirely:
 their source range is the whole file, so any unrelated edit would otherwise
 register as a spurious relocation. This is the opposite of `impact`, which
@@ -583,14 +602,35 @@ changes:
 + calls package.routes.dispatch → package.api.handle
 ```
 
-The relocation suffix carries the same `from`/`to` locations as JSON, using
+Text and JSON relocations carry the same `from`/`to` start locations, using
 1-based start lines; a relocated symbol whose old or new location is unknown
 falls back to the bare `~ symbol (relocated)` form.
 
 The JSON object has `added`, `removed`, `relocated`,
 `relationships_added`, and `relationships_removed` arrays. A relocation entry
-contains `kind`, `symbol`, `from`, and `to` location objects. Relationships are
-keyed semantically by endpoint labels and kind, never by node ID.
+contains `kind`, `symbol`, `from`, and `to` location objects, plus `role` when
+one is recorded. Each location is a flat object with `path`, one-based `line`,
+and one-based `column`, or `null` for an unknown endpoint. Relationships are
+keyed semantically by endpoint labels and kind, never by node ID. A
+relationship whose target is an unresolved reference ends its text line with
+`[unresolved]` and carries `"unresolved": true` in JSON, as in `callers`;
+absence of the marker means resolved. A relocation-only difference still exits
+`1`.
+
+Committed-reference `diff` prints its diagnostics and exits `2` when the current
+analysis has any error-severity diagnostic; the answer is then partial, and it
+suppresses only rows that a missing fact could fabricate. Symbols sharing kind,
+label, and role form a group. A group is affected when one of its old
+definitions is in an error file and its per-file definition counts changed. An
+affected group pairs its definitions within each file, hides unmatched old
+definitions and moves inside error files, and still reports that group's
+clean-file additions, removals, and relocations. A removed relationship is
+suppressed when any old-side instance's endpoint or recorded evidence location
+is in an error file. Every addition, every row of an unaffected group
+(including relocations inside an error file whose counts did not change),
+every warning-only row, and every clean-source edge that became unresolved
+because its target's file failed is kept. Without error diagnostics the status
+is `0` or `1` by structure.
 
 ### Show source context
 
