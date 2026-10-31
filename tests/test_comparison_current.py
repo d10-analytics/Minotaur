@@ -1307,7 +1307,7 @@ def test_prepare_comparison_verifies_manifest_around_each_side_analysis(tmp_path
         prepare_comparison(root, None, producer)  # type: ignore[arg-type]
 
     assert error.value.side == "before"
-    assert error.value.pinned_sha
+    assert error.value.commit
     assert "app.py" in str(error.value)
 
 

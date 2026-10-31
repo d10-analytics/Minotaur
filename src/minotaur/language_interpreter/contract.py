@@ -39,11 +39,6 @@ class DiagnosticSeverity(str, Enum):
     WARNING = "warning"
 
 
-# Keep the shorter spelling available to callers that treat severity as the
-# primary part of the contract while retaining the explicit public enum name.
-Severity = DiagnosticSeverity
-
-
 def _freeze_metadata(value: object) -> object:
     """Freeze nested diagnostic metadata without changing its JSON shape."""
     if isinstance(value, Mapping):

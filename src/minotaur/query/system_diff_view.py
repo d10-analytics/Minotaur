@@ -173,11 +173,6 @@ def _render_details(change: SystemChange) -> str:
     )
 
 
-def render_json(result: SystemDiffResult) -> str:
-    """Render the selected typed result through the canonical JSON owner."""
-    return dump_json(result.to_dict())
-
-
 def _ordered(changes: Sequence[SystemChange]) -> tuple[SystemChange, ...]:
     return tuple(
         sorted(
@@ -608,4 +603,4 @@ def _thaw(value: object) -> object:
     return value
 
 
-__all__ = ["filter_system_diff", "render_context_text", "render_json", "render_text"]
+__all__ = ["filter_system_diff", "render_context_text", "render_text"]

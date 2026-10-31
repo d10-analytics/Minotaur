@@ -23,7 +23,6 @@ from minotaur.query.system_diff import SystemChange, SystemDiffResult, compare_s
 from minotaur.query.system_diff_view import (
     filter_system_diff,
     render_context_text,
-    render_json,
     render_text,
 )
 from minotaur.system import UnknownSystem
@@ -206,7 +205,6 @@ def test_view_retains_complete_graph_call_and_limitation_facts() -> None:
     selected = filter_system_diff(complete, "Checkout")
     assert selected.nodes == complete.nodes
     assert selected.to_dict()["nodes"] == [item.to_dict() for item in complete.nodes]
-    assert render_json(selected) == dump_json(selected.to_dict())
 
 
 def test_call_change_retains_endpoint_membership_in_selected_view() -> None:
@@ -557,7 +555,6 @@ def test_rendering_is_pure_after_all_acquisition_seams_fail(monkeypatch) -> None
     changed, exit_code = selected.changed, selected.exit_code
     assert render_context_text(selected)
     assert render_text(selected, details=True)
-    assert render_json(selected) == dump_json(selected.to_dict())
     assert selected.changed is changed
     assert selected.exit_code == exit_code
 
@@ -612,29 +609,8 @@ def test_permuted_source_and_evidence_order_has_identical_selected_views() -> No
     new_second = _snapshot((target, source), (reverse,), systems)
     first_result = filter_system_diff(compare_systems(old_first, new_first), "B")
     second_result = filter_system_diff(compare_systems(old_second, new_second), "B")
-    assert render_json(first_result) == render_json(second_result)
+    assert dump_json(first_result.to_dict()) == dump_json(second_result.to_dict())
     assert render_text(first_result, details=True) == render_text(second_result, details=True)
-
-
-def test_canonical_dumper_receives_exact_to_dict_and_status_stays_typed(monkeypatch) -> None:
-    result = filter_system_diff(_ab_addition(), "B")
-    expected_bytes = dump_json(result.to_dict())
-    assert render_json(result) == expected_bytes
-    changed, exit_code = result.changed, result.exit_code
-    sentinel = {"sentinel": True}
-    observed: list[object] = []
-
-    monkeypatch.setattr(SystemDiffResult, "to_dict", lambda _self: sentinel)
-
-    def observe(payload: object) -> str:
-        observed.append(payload)
-        return "sentinel-json\n"
-
-    monkeypatch.setattr("minotaur.query.system_diff_view.dump_json", observe)
-    assert render_json(result) == "sentinel-json\n"
-    assert observed == [sentinel]
-    assert result.changed is changed
-    assert result.exit_code == exit_code
 
 
 _SENTINELS = ("no_system", "external", "unassigned")
@@ -705,7 +681,7 @@ def test_literal_names_render_once_by_field_semantics(name):
         f"boundary added: {atom(shown + '.source')} -> {atom(shown + '.target')} (calls)\n"
     )
     assert render_text(result) == expected + render_context_text(result)
-    assert json.loads(render_json(result))["membership_changes"][0]["new"]["system"] == name
+    assert json.loads(dump_json(result.to_dict()))["membership_changes"][0]["new"]["system"] == name
     assert result.exit_code == 1
     detailed = render_text(result, details=True)
     assert all(line in detailed.splitlines() for line in expected.splitlines())
@@ -1161,6 +1137,6 @@ def test_no_selection_copies_every_limitation_and_equals_the_complete_result() -
 
     assert selected == complete
     assert selected.limitations == complete.limitations
-    assert render_json(selected) == render_json(complete)
+    assert dump_json(selected.to_dict()) == dump_json(complete.to_dict())
     assert render_text(selected) == render_text(complete)
     assert render_text(selected).count("limitation old:") == 2

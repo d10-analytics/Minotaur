@@ -204,28 +204,8 @@ class SystemDiffResult:
             object.__setattr__(self, name, tuple(getattr(self, name)))
 
     @property
-    def old_names(self) -> tuple[str, ...]:
-        return self.old_system_names
-
-    @property
-    def new_names(self) -> tuple[str, ...]:
-        return self.new_system_names
-
-    @property
-    def old_systems(self) -> tuple[str, ...]:
-        return self.old_system_names
-
-    @property
-    def new_systems(self) -> tuple[str, ...]:
-        return self.new_system_names
-
-    @property
     def changed(self) -> bool:
         return any(True for _ in self._iter_differences())
-
-    @property
-    def has_changes(self) -> bool:
-        return self.changed
 
     @property
     def exit_code(self) -> int:
@@ -309,10 +289,6 @@ class SystemDiffResult:
             "limitations": [item.to_dict() for item in self.limitations],
             "revisions": {"old": self.old_revision, "new": self.new_revision},
         }
-
-
-SystemStructureDiff = SystemDiffResult
-SystemStructureChange = SystemChange
 
 
 def _context(snapshot: ReportingSnapshot) -> tuple[Mapping[str, object], Mapping[str, object]]:
@@ -663,8 +639,6 @@ def compare_systems(
     *,
     old_call_observations: Sequence[CallExpressionObservation] | None = None,
     new_call_observations: Sequence[CallExpressionObservation] | None = None,
-    old_calls: Sequence[CallExpressionObservation] | None = None,
-    new_calls: Sequence[CallExpressionObservation] | None = None,
     old_revision: str | None = None,
     new_revision: str | None = None,
 ) -> SystemDiffResult:
@@ -700,15 +674,13 @@ def compare_systems(
     new_coverage, new_selection = _context(new_snapshot)
     membership = _membership_changes(old_snapshot, new_snapshot)
     boundary = _boundary_changes(old_snapshot, new_snapshot, old_index, new_index, selected)
-    old_observations = old_call_observations if old_call_observations is not None else old_calls
-    new_observations = new_call_observations if new_call_observations is not None else new_calls
     call_comparison = CallComparison()
-    if old_observations is not None or new_observations is not None:
+    if old_call_observations is not None or new_call_observations is not None:
         old_call_index = prepare_correspondence(old_snapshot.document, side="old", whole_graph=True)
         new_call_index = prepare_correspondence(new_snapshot.document, side="new", whole_graph=True)
         call_comparison = compare_call_observations(
-            tuple(old_observations or ()),
-            tuple(new_observations or ()),
+            tuple(old_call_observations or ()),
+            tuple(new_call_observations or ()),
             old_index=old_call_index,
             new_index=new_call_index,
             old_snapshot=old_snapshot,
@@ -743,23 +715,12 @@ def _admit(snapshot: ReportingSnapshot, side: str) -> None:
         raise CorrespondenceAdmissionError(report, snapshot.document, side=side)
 
 
-def compare_system_snapshots(
-    old_snapshot: ReportingSnapshot,
-    new_snapshot: ReportingSnapshot,
-    **kwargs: object,
-) -> SystemDiffResult:
-    return compare_systems(old_snapshot, new_snapshot, **kwargs)  # type: ignore[arg-type]
-
-
 __all__ = [
     "SystemChange",
     "SystemDiffResult",
-    "SystemStructureChange",
-    "SystemStructureDiff",
     "CorrespondenceAdmissionError",
     "CorrespondenceAmbiguityError",
     "CorrespondenceEligibilityError",
     "CorrespondenceError",
     "compare_systems",
-    "compare_system_snapshots",
 ]

@@ -328,7 +328,7 @@ def test_working_tree_attributes_copy_failure_to_after_side(
 
     assert error.value.side == "after"
     assert error.value.revision == "WORKTREE"
-    assert error.value.pinned_sha
+    assert error.value.commit
     assert "simulated working-tree copy failure" in str(error.value)
     assert _leftovers(temp_root) == []
 
@@ -351,7 +351,7 @@ def test_capture_attributes_materialization_write_failure_to_side(
 
     assert error.value.side == "before"
     assert error.value.revision == "HEAD"
-    assert error.value.pinned_sha
+    assert error.value.commit
     assert "simulated materialization write failure" in str(error.value)
     assert _leftovers(temp_root) == []
 
@@ -377,7 +377,7 @@ def test_manifest_verification_translates_traversal_failure_to_mutation_error(
 
     assert error.value.side == "before"
     assert error.value.revision == "HEAD"
-    assert error.value.pinned_sha
+    assert error.value.commit
     assert "simulated manifest traversal failure" in str(error.value)
 
 

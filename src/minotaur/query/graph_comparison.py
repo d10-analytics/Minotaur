@@ -274,10 +274,6 @@ class GraphComparison:
             item.status != "unchanged" for item in self.relationships
         )
 
-    @property
-    def has_changes(self) -> bool:
-        return self.changed
-
     def to_dict(self) -> dict[str, object]:
         return {
             "nodes": [item.to_dict() for item in self.nodes],
@@ -454,20 +450,11 @@ def compare_graphs(old: object, new: object) -> GraphComparison:
     )
 
 
-compare_whole_graph = compare_graphs
-compare_graph = compare_graphs
-GraphNodeClassification = GraphNodeChange
-GraphRelationshipClassification = GraphRelationshipChange
-
 __all__ = [
     "GraphComparison",
     "GraphNodeChange",
-    "GraphNodeClassification",
     "GraphRelationshipChange",
-    "GraphRelationshipClassification",
-    "compare_graph",
     "compare_graphs",
-    "compare_whole_graph",
     "endpoint_eligibility",
     "node_display_id",
     "relationship_display_id",
