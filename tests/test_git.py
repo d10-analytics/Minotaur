@@ -185,8 +185,8 @@ def test_resolve_missing_revision_is_side_specific_and_never_fetches(
     assert all(arguments[0] not in {"checkout", "worktree"} for arguments in calls)
 
 
-def test_promisor_clone_reads_refuse_lazy_fetching_missing_objects(tmp_path: Path) -> None:
-    """A promised object is a side-attributed error, never an implicit fetch."""
+def test_promisor_clone_listing_resolves_without_fetching_promised_blob(tmp_path: Path) -> None:
+    """Listing a promisor clone's tree needs no blob, so none is fetched."""
     clone, sha = _promisor_clone(tmp_path)
     pinned = git.PinnedCommit.resolve(clone, sha, side="before")
 
@@ -198,17 +198,6 @@ def test_promisor_clone_reads_refuse_lazy_fetching_missing_objects(tmp_path: Pat
     # from the local object store. Enumerating local objects cannot lazy-fetch.
     blob_oid = _tree_blob_oid(clone, sha, "promised.py")
     assert blob_oid not in _local_object_oids(clone)
-
-    # Control: the same object is genuinely fetchable from the promisor remote,
-    # so the refusal above is the lazy-fetch policy and not an absent object.
-    fetched = subprocess.run(
-        ["git", "show", f"{sha}:promised.py"],
-        cwd=clone,
-        capture_output=True,
-        check=False,
-    )
-    assert fetched.returncode == 0
-    assert fetched.stdout == b"print('promised bytes')\n"
 
 
 def test_run_git_environment_disables_lazy_fetch(
@@ -572,6 +561,17 @@ def test_stream_blobs_refuses_lazy_fetch_of_promised_blob(tmp_path: Path) -> Non
     _assert_batch_failure(pinned, item, side="before")
 
     assert item.oid not in _local_object_oids(clone)
+
+    # Control: the same object is genuinely fetchable from the promisor remote,
+    # so the refusal above is the lazy-fetch policy and not an absent object.
+    fetched = subprocess.run(
+        ["git", "show", f"{sha}:promised.py"],
+        cwd=clone,
+        capture_output=True,
+        check=False,
+    )
+    assert fetched.returncode == 0
+    assert fetched.stdout == b"print('promised bytes')\n"
 
 
 def test_stream_blobs_rejects_tree_object(tmp_path: Path) -> None:
