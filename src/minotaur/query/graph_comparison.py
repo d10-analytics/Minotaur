@@ -13,8 +13,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.node import Node
@@ -25,34 +24,12 @@ from minotaur.query.correspondence import (
     RelationshipOccurrence,
     prepare_whole_graph,
 )
+from minotaur.query.system import ReportingSnapshot, _freeze_json, _thaw_json
 from minotaur.system import EndpointKind
-
-if TYPE_CHECKING:
-    from minotaur.query.system import ReportingSnapshot
-
-
-def _freeze(value: object) -> object:
-    if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, set):
-        return frozenset(_freeze(item) for item in value)
-    return value
-
-
-def _thaw(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: _thaw(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_thaw(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        return [_thaw(item) for item in sorted(value, key=repr)]
-    return value
 
 
 def _key_json(key: tuple[object, ...]) -> str:
-    return json.dumps(_thaw(key), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(_thaw_json(key), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def node_display_id(key: NodeKey) -> str:
@@ -83,11 +60,11 @@ def _node_payload(node: Node) -> Mapping[str, object]:
 
 
 def _group_payload(values: Iterable[object]) -> object:
-    rendered = tuple(sorted((_freeze(value) for value in values), key=repr))
+    rendered = tuple(sorted((_freeze_json(value) for value in values), key=repr))
     return rendered[0] if len(rendered) == 1 else rendered
 
 
-def _category(snapshot: ReportingSnapshot | None, node: Node) -> str | None:
+def _system_name(snapshot: ReportingSnapshot | None, node: Node) -> str | None:
     if snapshot is None:
         return None
     membership = snapshot.membership.classify(node)
@@ -106,7 +83,7 @@ def _node_side(nodes: Sequence[Node], snapshot: ReportingSnapshot | None) -> obj
     if not nodes:
         return None
     records = tuple(
-        _freeze({"node": _node_payload(item), "system": _category(snapshot, item)})
+        _freeze_json({"node": _node_payload(item), "system": _system_name(snapshot, item)})
         for item in nodes
     )
     return records[0] if len(records) == 1 else records
@@ -143,7 +120,7 @@ def endpoint_eligibility(
         "internal_systems": internal,
         "boundary_systems": sorted(touching - set(internal)),
     }
-    return cast(Mapping[str, object], _freeze(payload))
+    return cast(Mapping[str, object], _freeze_json(payload))
 
 
 def _eligibility(
@@ -155,11 +132,11 @@ def _eligibility(
     """Precompute eligibility from matched occurrence endpoints and snapshots."""
     return endpoint_eligibility(
         tuple(
-            (_category(old_snapshot, item.source), _category(old_snapshot, item.target))
+            (_system_name(old_snapshot, item.source), _system_name(old_snapshot, item.target))
             for item in old
         ),
         tuple(
-            (_category(new_snapshot, item.source), _category(new_snapshot, item.target))
+            (_system_name(new_snapshot, item.source), _system_name(new_snapshot, item.target))
             for item in new
         ),
     )
@@ -179,7 +156,7 @@ def _involved(
         )
         if snapshot is not None
         for node in nodes
-        if (name := _category(snapshot, node)) is not None
+        if (name := _system_name(snapshot, node)) is not None
     }
     return tuple(sorted(names))
 
@@ -198,8 +175,8 @@ class GraphNodeChange:
     def __post_init__(self) -> None:
         object.__setattr__(self, "reasons", tuple(sorted(set(self.reasons))))
         object.__setattr__(self, "involved_systems", tuple(sorted(set(self.involved_systems))))
-        object.__setattr__(self, "before", _freeze(self.before))
-        object.__setattr__(self, "after", _freeze(self.after))
+        object.__setattr__(self, "before", _freeze_json(self.before))
+        object.__setattr__(self, "after", _freeze_json(self.after))
 
     @property
     def key(self) -> str:
@@ -211,8 +188,8 @@ class GraphNodeChange:
             "status": self.status,
             "reasons": list(self.reasons),
             "involved_systems": list(self.involved_systems),
-            "before": _thaw(self.before),
-            "after": _thaw(self.after),
+            "before": _thaw_json(self.before),
+            "after": _thaw_json(self.after),
         }
 
 
@@ -234,9 +211,9 @@ class GraphRelationshipChange:
     def __post_init__(self) -> None:
         object.__setattr__(self, "reasons", tuple(sorted(set(self.reasons))))
         object.__setattr__(self, "involved_systems", tuple(sorted(set(self.involved_systems))))
-        object.__setattr__(self, "before", _freeze(self.before))
-        object.__setattr__(self, "after", _freeze(self.after))
-        object.__setattr__(self, "eligibility", _freeze(self.eligibility))
+        object.__setattr__(self, "before", _freeze_json(self.before))
+        object.__setattr__(self, "after", _freeze_json(self.after))
+        object.__setattr__(self, "eligibility", _freeze_json(self.eligibility))
 
     @property
     def key(self) -> str:
@@ -251,9 +228,9 @@ class GraphRelationshipChange:
             "status": self.status,
             "reasons": list(self.reasons),
             "involved_systems": list(self.involved_systems),
-            "before": _thaw(self.before),
-            "after": _thaw(self.after),
-            "eligibility": _thaw(self.eligibility),
+            "before": _thaw_json(self.before),
+            "after": _thaw_json(self.after),
+            "eligibility": _thaw_json(self.eligibility),
         }
 
 
@@ -332,8 +309,8 @@ def _node_changes(
             ):
                 status = "changed"
                 reasons.append("changed")
-            old_membership = {_category(old_snapshot, item) for item in left}
-            new_membership = {_category(new_snapshot, item) for item in right}
+            old_membership = {_system_name(old_snapshot, item) for item in left}
+            new_membership = {_system_name(new_snapshot, item) for item in right}
             if old_membership != new_membership:
                 status = "changed"
                 reasons.append("membership_changed")
@@ -384,11 +361,11 @@ def _relationship_changes(
                 status = "changed"
                 reasons.append("multiplicity_changed")
             old_membership = {
-                (_category(old_snapshot, item.source), _category(old_snapshot, item.target))
+                (_system_name(old_snapshot, item.source), _system_name(old_snapshot, item.target))
                 for item in left
             }
             new_membership = {
-                (_category(new_snapshot, item.source), _category(new_snapshot, item.target))
+                (_system_name(new_snapshot, item.source), _system_name(new_snapshot, item.target))
                 for item in right
             }
             if old_membership != new_membership:
@@ -420,7 +397,7 @@ def _relationship_changes(
                             if snapshot is not None
                             for item in items
                             for endpoint in (item.target,)
-                            if (name := _category(snapshot, endpoint)) is not None
+                            if (name := _system_name(snapshot, endpoint)) is not None
                         )
                         - set(
                             _involved(

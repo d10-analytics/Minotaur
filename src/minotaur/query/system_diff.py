@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Any, cast
 
 from minotaur.graph_model.node import Node
@@ -30,6 +29,7 @@ from minotaur.query.correspondence import (
     CorrespondenceIndex,
     RelationshipKey,
     RelationshipOccurrence,
+    _key_sort,
     prepare_correspondence,
 )
 from minotaur.query.graph_comparison import (
@@ -44,48 +44,13 @@ from minotaur.query.system import (
     ReportingSnapshot,
     SurfaceRecord,
     SystemDepsRecord,
+    _freeze_json,
+    _membership_category,
+    _thaw_json,
 )
-from minotaur.system import EndpointKind
 
 _REPORT_QUERIES = ("surface", "consumers", "system-deps")
 _BOUNDARY_KINDS = frozenset({"calls", "references", "imports"})
-
-
-def _freeze(value: object) -> object:
-    if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, set):
-        return frozenset(_freeze(item) for item in value)
-    return value
-
-
-def _thaw(value: object) -> object:
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        return _thaw(to_dict())
-    if isinstance(value, Mapping):
-        return {key: _thaw(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_thaw(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        return [_thaw(item) for item in sorted(value, key=repr)]
-    return value
-
-
-def _sort_token(value: object) -> tuple[object, ...]:
-    if value is None:
-        return (0, "")
-    if isinstance(value, tuple):
-        return (1, tuple(_sort_token(item) for item in value))
-    if isinstance(value, str):
-        return (2, value)
-    return (3, repr(value))
-
-
-def _key_token(key: tuple[object, ...]) -> tuple[object, ...]:
-    return tuple(_sort_token(item) for item in key)
 
 
 def _public_key(key: tuple[object, ...]) -> tuple[str, ...]:
@@ -94,12 +59,7 @@ def _public_key(key: tuple[object, ...]) -> tuple[str, ...]:
 
 
 def _category(snapshot: ReportingSnapshot, node: Node) -> str:
-    membership = snapshot.membership.classify(node)
-    if membership.kind is EndpointKind.SYSTEM and membership.system is not None:
-        return f"system: {membership.system.name}"
-    if membership.kind is EndpointKind.NO_SYSTEM:
-        return "no_system"
-    return "external"
+    return _membership_category(snapshot.membership.classify(node))
 
 
 def _named(category: str) -> str | None:
@@ -139,8 +99,8 @@ class SystemChange:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "key", tuple(self.key))
-        object.__setattr__(self, "old", _freeze(self.old))
-        object.__setattr__(self, "new", _freeze(self.new))
+        object.__setattr__(self, "old", _freeze_json(self.old))
+        object.__setattr__(self, "new", _freeze_json(self.new))
         involved = self.involved_systems or _involved(
             self.old if isinstance(self.old, Mapping) else None,
             self.new if isinstance(self.new, Mapping) else None,
@@ -152,8 +112,8 @@ class SystemChange:
             "domain": self.domain,
             "kind": self.kind,
             "key": list(self.key),
-            "old": _thaw(self.old),
-            "new": _thaw(self.new),
+            "old": _thaw_json(self.old),
+            "new": _thaw_json(self.new),
             "involved_systems": list(self.involved_systems),
         }
 
@@ -199,7 +159,7 @@ class SystemDiffResult:
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         for name in ("old_coverage", "new_coverage", "old_selection", "new_selection"):
-            object.__setattr__(self, name, _freeze(getattr(self, name)))
+            object.__setattr__(self, name, _freeze_json(getattr(self, name)))
         for name in ("nodes", "relationships", "call_changes", "limitations"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
 
@@ -281,8 +241,14 @@ class SystemDiffResult:
             "consumer_changes": [item.to_dict() for item in self.consumer_changes],
             "dependency_changes": [item.to_dict() for item in self.dependency_changes],
             "boundary_changes": [item.to_dict() for item in self.boundary_changes],
-            "coverage": {"old": _thaw(self.old_coverage), "new": _thaw(self.new_coverage)},
-            "selection": {"old": _thaw(self.old_selection), "new": _thaw(self.new_selection)},
+            "coverage": {
+                "old": _thaw_json(self.old_coverage),
+                "new": _thaw_json(self.new_coverage),
+            },
+            "selection": {
+                "old": _thaw_json(self.old_selection),
+                "new": _thaw_json(self.new_selection),
+            },
             "nodes": [item.to_dict() for item in self.nodes],
             "relationships": [item.to_dict() for item in self.relationships],
             "call_changes": [item.to_dict() for item in self.call_changes],
@@ -436,7 +402,7 @@ def _row_changes(
     changed_keys: set[RelationshipKey] = set()
     for query in _REPORT_QUERIES:
         left, right = old_reports[query], new_reports[query]
-        for key in sorted(set(left) | set(right), key=_key_token):
+        for key in sorted(set(left) | set(right), key=_key_sort):
             old_row, new_row = left.get(key), right.get(key)
             old_record = old_row.get("record") if old_row else None
             new_record = new_row.get("record") if new_row else None
@@ -519,8 +485,8 @@ def _relation_payload(
         if categories is None:
             categories = (source_category, target_category)
         projection = (
-            _freeze(_endpoint_structure(snapshot, detail.source)),
-            _freeze(_endpoint_structure(snapshot, detail.target)),
+            _freeze_json(_endpoint_structure(snapshot, detail.source)),
+            _freeze_json(_endpoint_structure(snapshot, detail.target)),
         )
         if projection not in projections:
             projections.append(cast(tuple[Mapping[str, object], Mapping[str, object]], projection))
@@ -535,8 +501,8 @@ def _relation_payload(
         "target_category": categories[1],
         "kind": key[2],
         "relationships": tuple(grouped),
-        "source_endpoint": _thaw(first_projection[0]),
-        "target_endpoint": _thaw(first_projection[1]),
+        "source_endpoint": _thaw_json(first_projection[0]),
+        "target_endpoint": _thaw_json(first_projection[1]),
         "projections": tuple(sorted(projections, key=repr)),
         "source_membership": categories[0],
         "target_membership": categories[1],
@@ -568,7 +534,7 @@ def _boundary_map(
     """
     details = None
     result: dict[RelationshipKey, Mapping[str, object]] = {}
-    for key in sorted(selected, key=_key_token):
+    for key in sorted(selected, key=_key_sort):
         occurrences = index.relationship_groups.get(key)
         if not occurrences:
             continue
@@ -591,7 +557,7 @@ def _boundary_changes(
     old_map = _boundary_map(old, old_index, selected)
     new_map = _boundary_map(new, new_index, selected)
     result: list[SystemChange] = []
-    for key in sorted(set(old_map) | set(new_map), key=_key_token):
+    for key in sorted(set(old_map) | set(new_map), key=_key_sort):
         left, right = old_map.get(key), new_map.get(key)
         if left is None or right is None:
             entry = right or left

@@ -5,19 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from types import MappingProxyType
-from typing import TYPE_CHECKING
 
 from minotaur.graph_model.location import Location
 from minotaur.language_interpreter.call_expressions import CallExpressionObservation
 from minotaur.query.correspondence import CorrespondenceIndex
 from minotaur.query.graph_comparison import relationship_display_id
+from minotaur.query.system import ReportingSnapshot, _freeze_json, _thaw_json
 from minotaur.system import EndpointKind
-
-if TYPE_CHECKING:
-    from minotaur.query.system import ReportingSnapshot
 
 
 def _location_key(location: Location) -> tuple[object, ...]:
@@ -42,22 +38,6 @@ def _observation_dict(observation: CallExpressionObservation) -> dict[str, objec
         "expression": _location_dict(observation.expression_location),
         "fingerprint": observation.fingerprint,
     }
-
-
-def _freeze(value: object) -> object:
-    if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
-    return value
-
-
-def _thaw(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: _thaw(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_thaw(item) for item in value]
-    return value
 
 
 def _fallback_relationship_id(observation: CallExpressionObservation) -> str:
@@ -100,8 +80,8 @@ class CallChange:
     def __post_init__(self) -> None:
         object.__setattr__(self, "reasons", tuple(sorted(set(self.reasons))))
         object.__setattr__(self, "involved_systems", tuple(sorted(set(self.involved_systems))))
-        object.__setattr__(self, "before", _freeze(self.before))
-        object.__setattr__(self, "after", _freeze(self.after))
+        object.__setattr__(self, "before", _freeze_json(self.before))
+        object.__setattr__(self, "after", _freeze_json(self.after))
 
     @property
     def id(self) -> str:
@@ -113,8 +93,8 @@ class CallChange:
             "status": self.status,
             "reasons": list(self.reasons),
             "involved_systems": list(self.involved_systems),
-            "before": _thaw(self.before),
-            "after": _thaw(self.after),
+            "before": _thaw_json(self.before),
+            "after": _thaw_json(self.after),
         }
 
 
