@@ -642,3 +642,58 @@ def test_javascript_anonymous_default_export_callers_use_module_owner(
 
     assert control == 0
     assert control_captured.out == "no callers\n"
+
+
+def _definitions(root: Path, graph: Path, name: str, capsys: object) -> tuple[int, str]:
+    status = cli.main(["query", "definitions", name, "--graph", str(graph), "--root", str(root)])
+    return status, capsys.readouterr().out  # type: ignore[attr-defined]
+
+
+def test_definitions_matches_quoted_dotted_sql_names(tmp_path: Path, capsys: object) -> None:
+    _write(
+        tmp_path,
+        "schema.sql",
+        "CREATE TABLE dbo.lines (id int);\nCREATE TABLE dbo.[order.lines] (id int);\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    assert _definitions(tmp_path, graph, "order.lines", capsys) == (
+        0,
+        "schema.sql:2  dbo.order.lines  sql:table\n",
+    )
+    assert _definitions(tmp_path, graph, "lines", capsys) == (
+        0,
+        "schema.sql:1  dbo.lines  sql:table\n",
+    )
+    assert _definitions(tmp_path, graph, "LINES", capsys) == (
+        0,
+        "schema.sql:1  dbo.lines  sql:table\n",
+    )
+
+
+def test_definitions_accepts_exact_qualified_label(tmp_path: Path, capsys: object) -> None:
+    _write(tmp_path, "pkg/base.py", "def target():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    assert _definitions(tmp_path, graph, "pkg.base.target", capsys) == (
+        0,
+        "pkg/base.py:1  pkg.base.target  function\n",
+    )
+
+
+def test_definitions_root_module_does_not_hide_nested_same_name(
+    tmp_path: Path, capsys: object
+) -> None:
+    _write(tmp_path, "main.py", "X = 1\n")
+    _write(tmp_path, "app/cli.py", "def main():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status, out = _definitions(tmp_path, graph, "main", capsys)
+    assert status == 0
+    assert out == (
+        "app/cli.py:1  app.cli.main  function [duplicate-name]\n"
+        "main.py:1  main  module [duplicate-name]\n"
+    )

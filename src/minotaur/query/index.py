@@ -97,6 +97,21 @@ class GraphIndex:
     def symbols(self) -> tuple[Node, ...]:
         return tuple(node for node in self.nodes.values() if node.node_class == NodeClass.SYMBOL)
 
+    def lookup(self, label: str) -> tuple[Node, ...]:
+        """Return every symbol labelled ``label``; SQL labels fall back to case-insensitive.
+
+        Never raises: an empty tuple means no symbol carries the label.
+        """
+        matches = self.symbols_by_label.get(label, ())
+        if matches:
+            return tuple(matches)
+        folded_label = label.casefold()
+        return tuple(
+            node
+            for node in self.symbols()
+            if node.language == "sql" and node.label.casefold() == folded_label
+        )
+
     def resolve(self, label: str) -> Node:
         """Return the one symbol node labelled ``label`` or raise.
 
@@ -104,14 +119,7 @@ class GraphIndex:
         the "unknown" and "ambiguous" outcomes are decided once instead of
         being re-derived (and disagreed about) by each caller.
         """
-        matches = self.symbols_by_label.get(label, ())
-        if not matches:
-            folded_label = label.casefold()
-            matches = tuple(
-                node
-                for node in self.symbols()
-                if node.language == "sql" and node.label.casefold() == folded_label
-            )
+        matches = self.lookup(label)
         if not matches:
             # The default cutoff (0.6) is intentional: a lower cutoff, or 0.0,
             # always returns ``n`` labels regardless of similarity, so an
