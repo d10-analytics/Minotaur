@@ -122,13 +122,17 @@ def callers(index: GraphIndex, qualified_name: str) -> tuple[CallerRecord, ...]:
 def definitions(index: GraphIndex, bare_name: str) -> tuple[DefinitionRecord, ...]:
     """Return symbols labelled ``bare_name`` or declared with that name.
 
-    A node matches on its exact label or its bare name; SQL comparisons ignore case.
+    A node matches on its exact label or its bare name; SQL comparisons ignore case,
+    so every spelling of a qualified SQL label finds all of its case variants.
     """
     folded = bare_name.casefold()
     by_id = {node.id: node for node in index.lookup(bare_name)}
     for node in index.symbols():
         name = node_bare_name(node)
-        if name == bare_name or (node.language == "sql" and name.casefold() == folded):
+        if name == bare_name or (
+            node.language == "sql"
+            and (name.casefold() == folded or node.label.casefold() == folded)
+        ):
             by_id[node.id] = node
     matches = [node for node in by_id.values() if node.location is not None]
     duplicate = len(matches) > 1
