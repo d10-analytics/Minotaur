@@ -697,3 +697,30 @@ def test_definitions_root_module_does_not_hide_nested_same_name(
         "app/cli.py:1  app.cli.main  function [duplicate-name]\n"
         "main.py:1  main  module [duplicate-name]\n"
     )
+
+
+def test_definitions_qualified_sql_spelling_finds_every_case_variant(
+    tmp_path: Path, capsys: object
+) -> None:
+    _write(tmp_path, "a.sql", "CREATE TABLE dbo.Lines (id int);\n")
+    _write(tmp_path, "b.sql", "CREATE TABLE DBO.LINES (id int);\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    both = (
+        "a.sql:1  dbo.Lines  sql:table [duplicate-name]\n"
+        "b.sql:1  DBO.LINES  sql:table [duplicate-name]\n"
+    )
+
+    assert _definitions(tmp_path, graph, "dbo.Lines", capsys) == (0, both)
+    assert _definitions(tmp_path, graph, "DBO.LINES", capsys) == (0, both)
+
+
+def test_definitions_qualified_sql_label_ignores_case(tmp_path: Path, capsys: object) -> None:
+    _write(tmp_path, "a.sql", "CREATE TABLE dbo.lines (id int);\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    assert _definitions(tmp_path, graph, "DBO.LINES", capsys) == (
+        0,
+        "a.sql:1  dbo.lines  sql:table\n",
+    )
