@@ -83,6 +83,65 @@ def test_impact_groups_depths_and_marks_cutoff_boundary(tmp_path: Path, capsys: 
     ]
 
 
+def test_impact_text_marks_cutoff_boundary_line_exactly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(
+        tmp_path,
+        "chain.py",
+        "def c():\n    pass\n\ndef d():\n    c()\n\ndef e():\n    d()\n",
+    )
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "impact",
+            "chain.c",
+            "--depth",
+            "1",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out.splitlines() == [
+        "depth 0: chain.c",
+        "depth 1: chain.d",
+        "[boundary] depth 2: chain.e",
+    ]
+
+
+def test_impact_unknown_symbol_exits_2_with_nearest_label(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "mod.py", "def target():\n    return 1\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+
+    status = cli.main(
+        [
+            "query",
+            "impact",
+            "mod.targte",
+            "--graph",
+            str(graph),
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert captured.out == ""
+    assert "unknown symbol: mod.targte; nearest labels: mod.target" in captured.err
+
+
 def test_impact_includes_module_scope_caller_as_module_symbol(
     tmp_path: Path, capsys: object
 ) -> None:
