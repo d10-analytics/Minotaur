@@ -1014,3 +1014,87 @@ def test_unreferenced_does_not_list_a_function_named_like_a_from_imported_module
         *expected[:2],
         "pkg/utils.py:1  pkg.utils.foo  function [text-mention]",
     ]
+
+
+def _analyze_only_app(root: Path) -> Path:
+    _write(root, "app.py", "def orphan():\n    pass\n")
+    _write(root, "other/x.py", "def stray():\n    pass\n")
+    graph = root / "graph.json"
+    status = cli.main(
+        ["analyze", "--root", str(root), "--output", str(graph), str(root / "app.py")]
+    )
+    assert status == 0
+    return graph
+
+
+def _unreferenced(root: Path, graph: Path, *args: str) -> int:
+    return cli.main(["query", "unreferenced", *args, "--graph", str(graph), "--root", str(root)])
+
+
+@pytest.mark.parametrize(
+    ("paths", "offender"),
+    [
+        (("other/x.py",), "other/x.py"),
+        (("other",), "other"),
+        (("app.py", "other/x.py"), "other/x.py"),
+    ],
+)
+def test_unreferenced_refuses_path_without_analyzed_source(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    paths: tuple[str, ...],
+    offender: str,
+) -> None:
+    graph = _analyze_only_app(tmp_path)
+    capsys.readouterr()
+
+    status = _unreferenced(tmp_path, graph, *paths)
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err.splitlines()[-1].endswith(f"path has no analyzed source: {offender}")
+
+
+def test_unreferenced_stale_no_refresh_refuses_path_without_analyzed_source(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = _analyze_only_app(tmp_path)
+    (tmp_path / "app.py").write_text("def orphan():\n    pass\n# edited\n", encoding="utf-8")
+    capsys.readouterr()
+
+    status = _unreferenced(tmp_path, graph, "other/x.py", "--no-refresh")
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err.splitlines()[-1].endswith("path has no analyzed source: other/x.py")
+    assert "minotaur: stale: app.py" in captured.err
+
+
+def test_unreferenced_analyzed_path_still_answers_beside_unanalyzed_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = _analyze_only_app(tmp_path)
+    capsys.readouterr()
+
+    status = _unreferenced(tmp_path, graph, "app.py")
+    captured = capsys.readouterr()
+
+    assert status == 0, captured.err
+    assert captured.out == "app.py:1  app.orphan  function\n"
+
+
+def test_unreferenced_reports_python_function_used_only_by_its_own_recursion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, "rec.py", "def walk(n):\n    return walk(n - 1)\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(tmp_path, graph) == 0
+    capsys.readouterr()
+
+    status = _unreferenced(tmp_path, graph, "rec.py")
+    captured = capsys.readouterr()
+
+    assert status == 0, captured.err
+    assert captured.out == "rec.py:1  rec.walk  function\n"
