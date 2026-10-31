@@ -189,3 +189,4 @@ def test_call_memberships_prepare_system_files_without_contains_scans() -> None:
     assert result.changes[0].status == "removed"
     assert result.changes[0].involved_systems == ("A", "B")
     assert scans == 0
+    assert iterations == len(systems)
