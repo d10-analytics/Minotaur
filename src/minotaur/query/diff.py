@@ -8,13 +8,16 @@ from minotaur.graph_model.document import GraphDocument
 from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
+from minotaur.query.correspondence import declaration_role
 from minotaur.query.render import dump_json
 
-# The first item makes keys from different node classes unambiguous.  Symbol
-# keys intentionally contain exactly the two fields promised by R-09; the
-# class marker is an implementation detail used to avoid collisions with
-# files and unresolved references.
+# The first item makes keys from different node classes unambiguous and avoids
+# collisions between symbols, files, and unresolved references.
 NodeKey = tuple[str, ...]
+# Symbols are keyed by (kind, label, role, ordinal).  The role is "" when none
+# is recorded so keys with and without a role sort together; the ordinal counts
+# same-role definitions of one label in source order.
+SymbolKey = tuple[str, str, str, int]
 RelationshipKey = tuple[NodeKey, NodeKey, str]
 
 
@@ -24,9 +27,13 @@ class SymbolChange:
 
     kind: str
     symbol: str
+    role: str | None = None
 
     def to_dict(self) -> dict[str, str]:
-        return {"kind": self.kind, "symbol": self.symbol}
+        record = {"kind": self.kind, "symbol": self.symbol}
+        if self.role is not None:
+            record["role"] = self.role
+        return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,14 +44,18 @@ class Relocation:
     symbol: str
     old_location: Location | None
     new_location: Location | None
+    role: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "from": self.old_location.to_dict() if self.old_location is not None else None,
+        record: dict[str, object] = {
+            "from": _start_record(self.old_location),
             "kind": self.kind,
             "symbol": self.symbol,
-            "to": self.new_location.to_dict() if self.new_location is not None else None,
+            "to": _start_record(self.new_location),
         }
+        if self.role is not None:
+            record["role"] = self.role
+        return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,9 +65,17 @@ class RelationshipChange:
     kind: str
     source: str
     target: str
+    unresolved: bool = False
 
-    def to_dict(self) -> dict[str, str]:
-        return {"kind": self.kind, "source": self.source, "target": self.target}
+    def to_dict(self) -> dict[str, object]:
+        record: dict[str, object] = {
+            "kind": self.kind,
+            "source": self.source,
+            "target": self.target,
+        }
+        if self.unresolved:
+            record["unresolved"] = True
+        return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +112,7 @@ def diff(old: GraphDocument, new: GraphDocument) -> DiffResult:
     relocated = tuple(
         _relocation(old_symbols[key], new_symbols[key])
         for key in sorted(old_keys & new_keys)
-        if old_symbols[key].location != new_symbols[key].location
+        if _start(old_symbols[key].location) != _start(new_symbols[key].location)
     )
 
     old_relationships = _keyed_relationships(old)
@@ -117,16 +136,37 @@ def render_text(result: DiffResult) -> str:
     """Render changes grouped as additions, removals, relocations, and edges."""
 
     lines: list[str] = []
-    lines.extend(f"+ {item.symbol}\n" for item in result.added)
-    lines.extend(f"- {item.symbol}\n" for item in result.removed)
+    lines.extend(f"+ {_symbol_text(item.symbol, item.role)}\n" for item in result.added)
+    lines.extend(f"- {_symbol_text(item.symbol, item.role)}\n" for item in result.removed)
     lines.extend(_relocation_text(item) for item in result.relocated)
-    lines.extend(
-        f"+ {item.kind} {item.source} → {item.target}\n" for item in result.relationships_added
-    )
-    lines.extend(
-        f"- {item.kind} {item.source} → {item.target}\n" for item in result.relationships_removed
-    )
+    lines.extend(f"+ {_relationship_text(item)}\n" for item in result.relationships_added)
+    lines.extend(f"- {_relationship_text(item)}\n" for item in result.relationships_removed)
     return "".join(lines) if lines else "no changes\n"
+
+
+def _symbol_text(symbol: str, role: str | None) -> str:
+    return symbol if role is None else f"{symbol} ({role})"
+
+
+def _relationship_text(item: RelationshipChange) -> str:
+    suffix = " [unresolved]" if item.unresolved else ""
+    return f"{item.kind} {item.source} → {item.target}{suffix}"
+
+
+def _start(location: Location | None) -> tuple[str, int] | None:
+    if location is None:
+        return None
+    return (location.path, location.range.start.line)
+
+
+def _start_record(location: Location | None) -> dict[str, object] | None:
+    if location is None:
+        return None
+    return {
+        "path": location.path,
+        "line": location.range.start.line + 1,
+        "column": location.range.start.character + 1,
+    }
 
 
 def _relocation_text(item: Relocation) -> str:
@@ -137,14 +177,14 @@ def _relocation_text(item: Relocation) -> str:
     old_location = item.old_location
     new_location = item.new_location
     if old_location is None or new_location is None:
-        return f"~ {item.symbol} (relocated)\n"
+        return f"~ {_symbol_text(item.symbol, item.role)} (relocated)\n"
     old_line = old_location.range.start.line + 1
     new_line = new_location.range.start.line + 1
     if old_location.path == new_location.path:
         move = f"{old_location.path}:{old_line}→{new_line}"
     else:
         move = f"{old_location.path}:{old_line}→{new_location.path}:{new_line}"
-    return f"~ {item.symbol} (relocated {move})\n"
+    return f"~ {_symbol_text(item.symbol, item.role)} (relocated {move})\n"
 
 
 def render_json(result: DiffResult) -> str:
@@ -153,33 +193,35 @@ def render_json(result: DiffResult) -> str:
     return dump_json(result.to_dict())
 
 
-def _keyed_symbols(document: GraphDocument) -> dict[NodeKey, Node]:
-    result: dict[NodeKey, Node] = {}
+def _keyed_symbols(document: GraphDocument) -> dict[SymbolKey, Node]:
+    # Module nodes and contains edges describe graph scaffolding rather
+    # than declarations an agent can act on.  Their source ranges shift
+    # when a line is inserted, which would otherwise drown out the
+    # function/class changes in a useful diff.  impact.py deliberately
+    # makes the opposite call: it keeps module symbols as real inbound
+    # dependants, because a module-scope caller is a genuine impact
+    # target even though its location is unstable across edits.
+    groups: dict[tuple[str, str, str], list[Node]] = {}
     for node in document.nodes:
-        # Module nodes and contains edges describe graph scaffolding rather
-        # than declarations an agent can act on.  Their source ranges shift
-        # when a line is inserted, which would otherwise drown out the
-        # function/class changes in a useful diff.  impact.py deliberately
-        # makes the opposite call: it keeps module symbols as real inbound
-        # dependants, because a module-scope caller is a genuine impact
-        # target even though its location is unstable across edits.
         if node.node_class == NodeClass.SYMBOL and node.symbol_kind != "module":
-            key = ("symbol", node.symbol_kind or "unknown", node.label)
-        else:
-            continue
-        # Duplicate symbols are legal and definitions() reports them.  A diff
-        # still needs one deterministic representative for the shared key.
-        current = result.get(key)
-        if current is None or _node_sort_key(node) < _node_sort_key(current):
-            result[key] = node
+            group = (node.symbol_kind or "unknown", node.label, declaration_role(node) or "")
+            groups.setdefault(group, []).append(node)
+    # Duplicate symbols are legal and definitions() reports them.  Each
+    # same-role duplicate gets its source-order position as an ordinal so a
+    # removed duplicate is a removal rather than a collapsed no-op.
+    result: dict[SymbolKey, Node] = {}
+    for (kind, label, role), nodes in groups.items():
+        for ordinal, node in enumerate(sorted(nodes, key=_node_sort_key)):
+            result[(kind, label, role, ordinal)] = node
     return result
 
 
-def _node_keys(document: GraphDocument) -> dict[str, NodeKey]:
+def _node_keys(document: GraphDocument) -> tuple[dict[str, NodeKey], frozenset[str]]:
     labels: dict[str, str] = {}
     for node in document.nodes:
         labels.setdefault(node.id, node.label)
     result: dict[str, NodeKey] = {}
+    unresolved: set[str] = set()
     for node in document.nodes:
         key: NodeKey
         if node.node_class == NodeClass.SYMBOL:
@@ -188,16 +230,17 @@ def _node_keys(document: GraphDocument) -> dict[str, NodeKey]:
             origin = node.identity.originating_node
             origin_label = _node_label(labels, origin) if origin is not None else ""
             key = ("unresolved", origin_label, node.reference_text or node.label)
+            unresolved.add(node.id)
         elif node.node_class == NodeClass.FILE:
             key = ("file", node.path or node.label)
         else:
             key = (node.node_class.value, node.label)
         result[node.id] = key
-    return result
+    return result, frozenset(unresolved)
 
 
 def _keyed_relationships(document: GraphDocument) -> dict[RelationshipKey, RelationshipChange]:
-    endpoint_keys = _node_keys(document)
+    endpoint_keys, unresolved_ids = _node_keys(document)
     result: dict[RelationshipKey, RelationshipChange] = {}
     for relationship in document.relationships:
         if relationship.kind == "contains":
@@ -211,6 +254,7 @@ def _keyed_relationships(document: GraphDocument) -> dict[RelationshipKey, Relat
                 kind=relationship.kind,
                 source=_display_key(source_key),
                 target=_display_key(target_key),
+                unresolved=relationship.target in unresolved_ids,
             ),
         )
     return result
@@ -239,7 +283,9 @@ def _node_sort_key(node: Node) -> tuple[object, ...]:
 
 
 def _symbol_change(node: Node) -> SymbolChange:
-    return SymbolChange(kind=node.symbol_kind or "unknown", symbol=node.label)
+    return SymbolChange(
+        kind=node.symbol_kind or "unknown", symbol=node.label, role=declaration_role(node)
+    )
 
 
 def _relocation(old: Node, new: Node) -> Relocation:
@@ -248,4 +294,5 @@ def _relocation(old: Node, new: Node) -> Relocation:
         symbol=new.label,
         old_location=old.location,
         new_location=new.location,
+        role=declaration_role(new),
     )
