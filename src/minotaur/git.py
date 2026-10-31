@@ -210,9 +210,7 @@ class GitInputError(ValueError):
         cause: str | None = None,
     ) -> None:
         self.side = side
-        self.historical_side = side
         self.commit = commit
-        self.pinned_sha = commit
         self.path = path
         self.cause = cause
         identity = f"commit {commit}" if commit else cause or "unavailable probe"
@@ -340,36 +338,7 @@ class PinnedCommit:
     def _error(self, path: str, detail: str) -> GitInputError:
         return GitInputError(side=self.side, commit=self.commit, path=path, detail=detail)
 
-    def _validate_relative(self, relative: str) -> tuple[str, ...]:
-        if not relative or relative.startswith("/"):
-            raise self._error(relative, "invalid committed path")
-        parts = tuple(relative.split("/"))
-        if any(part in {"", ".", ".."} for part in parts):
-            raise self._error(relative, "invalid committed path")
-        return parts
-
-    def entries(self, relative: str = "") -> tuple[TreeEntry, ...]:
-        """List direct entries in one tree from this pinned commit."""
-        if relative:
-            parts = self._validate_relative(relative)
-            treeish = f"{self.commit}:{'/'.join(parts)}"
-            display_path = relative
-        else:
-            treeish = self.commit
-            display_path = "."
-        completed = run_git(self.root, ("ls-tree", "-z", treeish), text=False)
-        if completed is None:
-            raise self._error(display_path, "Git tree listing probe was unavailable")
-        if completed.returncode != 0:
-            raise self._error(display_path, _error_text(completed.stderr))
-        output = completed.stdout
-        if not isinstance(output, bytes):
-            raise self._error(display_path, "Git tree listing did not return bytes")
-        return self._parse_tree_records(output, display_path, relative)
-
-    def _parse_tree_records(
-        self, output: bytes, display_path: str, prefix: str
-    ) -> tuple[TreeEntry, ...]:
+    def _parse_tree_records(self, output: bytes) -> tuple[TreeEntry, ...]:
         """Parse NUL-separated ``ls-tree`` records into sorted entries."""
         result: list[TreeEntry] = []
         for raw in output.split(b"\0"):
@@ -377,19 +346,18 @@ class PinnedCommit:
                 continue
             header, separator, name_bytes = raw.partition(b"\t")
             if not separator:
-                raise self._error(display_path, "invalid Git tree entry")
+                raise self._error(".", "invalid Git tree entry")
             fields = header.split()
             if len(fields) != 3:
-                raise self._error(display_path, "invalid Git tree entry")
+                raise self._error(".", "invalid Git tree entry")
             try:
                 mode = fields[0].decode("ascii")
                 kind = fields[1].decode("ascii")
                 oid = fields[2].decode("ascii")
             except UnicodeDecodeError:
-                raise self._error(display_path, "invalid Git tree entry") from None
+                raise self._error(".", "invalid Git tree entry") from None
             name = name_bytes.decode("utf-8", errors="surrogateescape")
-            path = f"{prefix}/{name}" if prefix else name
-            result.append(TreeEntry(path=path, mode=mode, kind=kind, oid=oid))
+            result.append(TreeEntry(path=name, mode=mode, kind=kind, oid=oid))
         return tuple(sorted(result, key=lambda entry: entry.path))
 
     def full_listing(self) -> tuple[TreeEntry, ...]:
@@ -402,7 +370,7 @@ class PinnedCommit:
         output = completed.stdout
         if not isinstance(output, bytes):
             raise self._error(".", "Git tree listing did not return bytes")
-        return self._parse_tree_records(output, ".", "")
+        return self._parse_tree_records(output)
 
     def stream_blobs(
         self,
@@ -468,43 +436,3 @@ class PinnedCommit:
             raise self._error(first, _error_text(completed.stderr))
         if shortfall:
             raise shortfall[0]
-
-    def entry(self, relative: str) -> TreeEntry | None:
-        """Find one pinned entry, distinguishing confirmed absence from failure."""
-        parts = self._validate_relative(relative)
-        parent = ""
-        current: TreeEntry | None = None
-        for index, part in enumerate(parts):
-            candidates = {item.path.rsplit("/", 1)[-1]: item for item in self.entries(parent)}
-            current = candidates.get(part)
-            if current is None:
-                return None
-            if index < len(parts) - 1:
-                if current.is_link or current.is_gitlink or current.kind != "tree":
-                    raise self._error(
-                        relative,
-                        "path traverses a non-tree entry",
-                    )
-                parent = current.path
-        return current
-
-    def read_blob(self, relative: str) -> bytes:
-        """Read exact bytes from a pinned regular-file blob."""
-        item = self.entry(relative)
-        if item is None:
-            raise self._error(relative, "path is absent")
-        if item.is_link:
-            raise self._error(relative, "path is a symbolic link")
-        if item.is_gitlink:
-            raise self._error(relative, "path is a gitlink")
-        if not item.is_regular_file:
-            raise self._error(relative, "path is not a regular file")
-        completed = run_git(self.root, ("show", f"{self.commit}:{relative}"), text=False)
-        if completed is None:
-            raise self._error(relative, "Git blob read probe was unavailable")
-        if completed.returncode != 0:
-            raise self._error(relative, _error_text(completed.stderr))
-        output = completed.stdout
-        if not isinstance(output, bytes):
-            raise self._error(relative, "Git blob read did not return bytes")
-        return output

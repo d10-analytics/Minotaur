@@ -159,7 +159,8 @@ def test_resolve_accepts_local_refs_and_pins_before_the_ref_moves(tmp_path: Path
 
     assert pinned.commit == first_sha
     assert git.resolve_commit(root, "release", side="after") != pinned.commit
-    assert pinned.read_blob("plain file.txt") == b"historical\x00bytes\n"
+    (plain,) = [item for item in pinned.full_listing() if item.path == "plain file.txt"]
+    assert _collect(pinned, [plain]) == [b"historical\x00bytes\n"]
 
 
 def test_resolve_missing_revision_is_side_specific_and_never_fetches(
@@ -184,38 +185,19 @@ def test_resolve_missing_revision_is_side_specific_and_never_fetches(
     assert all(arguments[0] not in {"checkout", "worktree"} for arguments in calls)
 
 
-def test_promisor_clone_reads_refuse_lazy_fetching_missing_objects(tmp_path: Path) -> None:
-    """A promised object is a side-attributed error, never an implicit fetch."""
+def test_promisor_clone_listing_resolves_without_fetching_promised_blob(tmp_path: Path) -> None:
+    """Listing a promisor clone's tree needs no blob, so none is fetched."""
     clone, sha = _promisor_clone(tmp_path)
     pinned = git.PinnedCommit.resolve(clone, sha, side="before")
 
     # The commit and tree resolve locally; the blob is only promised.
     assert pinned.commit == sha
-    assert [entry.path for entry in pinned.entries()] == ["promised.py"]
+    assert [entry.path for entry in pinned.full_listing()] == ["promised.py"]
 
-    with pytest.raises(git.GitInputError) as error:
-        pinned.read_blob("promised.py")
-
-    assert error.value.side == "before"
-    assert error.value.commit == sha
-    assert error.value.path == "promised.py"
-
-    # Behavior-based proof that the strict read refused to fetch rather than
-    # failing for an unrelated reason: the promised blob is still absent from
-    # the local object store. Enumerating local objects cannot lazy-fetch.
+    # The listing resolved without fetching: the promised blob is still absent
+    # from the local object store. Enumerating local objects cannot lazy-fetch.
     blob_oid = _tree_blob_oid(clone, sha, "promised.py")
     assert blob_oid not in _local_object_oids(clone)
-
-    # Control: the same object is genuinely fetchable from the promisor remote,
-    # so the refusal above is the lazy-fetch policy and not an absent object.
-    fetched = subprocess.run(
-        ["git", "show", f"{sha}:promised.py"],
-        cwd=clone,
-        capture_output=True,
-        check=False,
-    )
-    assert fetched.returncode == 0
-    assert fetched.stdout == b"print('promised bytes')\n"
 
 
 def test_run_git_environment_disables_lazy_fetch(
@@ -239,25 +221,6 @@ def test_run_git_environment_disables_lazy_fetch(
     assert all(environment.get("GIT_NO_LAZY_FETCH") == "1" for environment in captured)
 
 
-def test_resolved_pin_keeps_side_attribution_for_later_input_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root, _ = _repository(tmp_path)
-    pinned = git.PinnedCommit.resolve(root, "HEAD", side="before")
-    original = git.run_git
-
-    def unavailable_listing(root_arg: Path, arguments: tuple[str, ...], **kwargs: object):
-        if arguments[:2] == ("ls-tree", "-z"):
-            return None
-        return original(root_arg, arguments, **kwargs)
-
-    monkeypatch.setattr(git, "run_git", unavailable_listing)
-    with pytest.raises(git.GitInputError) as error:
-        pinned.entries()
-
-    assert error.value.side == "before"
-
-
 def test_pinned_commit_reads_old_bytes_after_head_advances(tmp_path: Path) -> None:
     root, first_sha = _repository(tmp_path)
     pinned = git.PinnedCommit.pin(root)
@@ -266,7 +229,8 @@ def test_pinned_commit_reads_old_bytes_after_head_advances(tmp_path: Path) -> No
     _run(root, "commit", "--quiet", "-m", "advance")
 
     assert pinned.commit == first_sha
-    assert pinned.read_blob("plain file.txt") == b"historical\x00bytes\n"
+    (plain,) = [item for item in pinned.full_listing() if item.path == "plain file.txt"]
+    assert _collect(pinned, [plain]) == [b"historical\x00bytes\n"]
     assert git.PinnedCommit.pin(root).commit != pinned.commit
 
 
@@ -296,123 +260,7 @@ def test_pin_reports_unavailable_and_unborn_repositories(
 def test_empty_pinned_tree_lists_as_empty_tuple(tmp_path: Path) -> None:
     pinned = git.PinnedCommit.pin(_empty_repository(tmp_path))
 
-    assert pinned.entries() == ()
-
-
-def test_entries_classify_modes_and_preserve_names_and_bytes(tmp_path: Path) -> None:
-    root, sha = _repository(tmp_path)
-    pinned = git.PinnedCommit.pin(root)
-
-    entries = {entry.path: entry for entry in pinned.entries()}
-    assert pinned.commit == sha
-    assert entries["plain file.txt"].is_regular_file
-    assert entries["run.sh"].is_regular_file
-    assert entries["run.sh"].mode == "100755"
-    assert entries["link"].is_link
-    assert entries["vendor"].is_gitlink
-    assert entries["vendor"].mode == "160000"
-    assert entries["nested"].kind == "tree"
-    assert pinned.entries("nested")[0].path == "nested/deep file.py"
-    assert pinned.read_blob("plain file.txt") == b"historical\x00bytes\n"
-    assert pinned.read_blob("nested/deep file.py") == b"print('old')\n"
-
-
-def test_entry_returns_absence_or_typed_entry_and_rejects_blocked_ancestors(
-    tmp_path: Path,
-) -> None:
-    root, _ = _repository(tmp_path)
-    pinned = git.PinnedCommit.pin(root)
-
-    assert pinned.entry("missing.txt") is None
-    assert pinned.entry("nested/missing.py") is None
-    assert pinned.entry("nested") == git.TreeEntry("nested", "040000", "tree")
-    assert pinned.entry("link").is_link  # type: ignore[union-attr]
-    assert pinned.entry("vendor").is_gitlink  # type: ignore[union-attr]
-
-    for blocked in ("plain file.txt/child", "link/child", "vendor/child"):
-        with pytest.raises(git.GitInputError) as error:
-            pinned.entry(blocked)
-        assert error.value.commit == pinned.commit
-        assert error.value.path == blocked
-        assert "historical" in str(error.value)
-
-
-def test_failed_listing_is_not_reported_as_empty_or_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root, _ = _repository(tmp_path)
-    pinned = git.PinnedCommit.pin(root)
-    original = git.run_git
-
-    def failed_listing(root_arg: Path, arguments: tuple[str, ...], **kwargs: object):
-        if arguments[:2] == ("ls-tree", "-z"):
-            return subprocess.CompletedProcess(
-                ["git", *arguments], 128, b"", b"Not a valid object name\n"
-            )
-        return original(root_arg, arguments, **kwargs)
-
-    monkeypatch.setattr(git, "run_git", failed_listing)
-    with pytest.raises(git.GitInputError) as error:
-        pinned.entries("nested")
-    assert error.value.commit == pinned.commit
-    assert error.value.path == "nested"
-    assert "historical" in str(error.value)
-    assert "Not a valid object name" in str(error.value)
-
-
-def test_unavailable_listing_is_attributed_to_historical_pin_and_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root, _ = _repository(tmp_path)
-    pinned = git.PinnedCommit.pin(root)
-    original = git.run_git
-
-    def unavailable_listing(root_arg: Path, arguments: tuple[str, ...], **kwargs: object):
-        if arguments[:2] == ("ls-tree", "-z"):
-            return None
-        return original(root_arg, arguments, **kwargs)
-
-    monkeypatch.setattr(git, "run_git", unavailable_listing)
-    with pytest.raises(git.GitInputError) as error:
-        pinned.entries("nested")
-    assert error.value.commit == pinned.commit
-    assert error.value.path == "nested"
-    assert "historical" in str(error.value)
-    assert "unavailable" in str(error.value)
-
-
-def test_failed_blob_read_is_attributed_and_successful_sibling_remains_exact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root, _ = _repository(tmp_path)
-    pinned = git.PinnedCommit.pin(root)
-    original = git.run_git
-
-    def failed_read(root_arg: Path, arguments: tuple[str, ...], **kwargs: object):
-        if arguments == ("show", f"{pinned.commit}:plain file.txt"):
-            return subprocess.CompletedProcess(["git", *arguments], 128, b"", b"blob read failed\n")
-        return original(root_arg, arguments, **kwargs)
-
-    monkeypatch.setattr(git, "run_git", failed_read)
-    with pytest.raises(git.GitInputError) as error:
-        pinned.read_blob("plain file.txt")
-    assert error.value.commit == pinned.commit
-    assert error.value.path == "plain file.txt"
-    assert "historical" in str(error.value)
-    assert "blob read failed" in str(error.value)
-    assert pinned.read_blob("nested/deep file.py") == b"print('old')\n"
-
-
-def test_read_blob_rejects_non_regular_entries(tmp_path: Path) -> None:
-    root, _ = _repository(tmp_path)
-    pinned = git.PinnedCommit.pin(root)
-
-    for path in ("link", "vendor", "nested"):
-        with pytest.raises(git.GitInputError) as error:
-            pinned.read_blob(path)
-        assert error.value.commit == pinned.commit
-        assert error.value.path == path
-        assert "historical" in str(error.value)
+    assert pinned.full_listing() == ()
 
 
 def test_tolerant_head_probe_still_returns_none_for_absence_and_failure(
@@ -713,6 +561,17 @@ def test_stream_blobs_refuses_lazy_fetch_of_promised_blob(tmp_path: Path) -> Non
     _assert_batch_failure(pinned, item, side="before")
 
     assert item.oid not in _local_object_oids(clone)
+
+    # Control: the same object is genuinely fetchable from the promisor remote,
+    # so the refusal above is the lazy-fetch policy and not an absent object.
+    fetched = subprocess.run(
+        ["git", "show", f"{sha}:promised.py"],
+        cwd=clone,
+        capture_output=True,
+        check=False,
+    )
+    assert fetched.returncode == 0
+    assert fetched.stdout == b"print('promised bytes')\n"
 
 
 def test_stream_blobs_rejects_tree_object(tmp_path: Path) -> None:
