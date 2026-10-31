@@ -398,7 +398,7 @@ def test_scope_ignores_out_of_scope_edit_and_json_matches_explicit_mode(
     assert source.read_text(encoding="utf-8").startswith("def app")
 
 
-def test_diagnostic_is_stderr_only_and_does_not_change_structure_exit(
+def test_parse_error_diagnostic_goes_to_stderr_and_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root, source, graph = _graph_fixture(tmp_path)
@@ -409,7 +409,7 @@ def test_diagnostic_is_stderr_only_and_does_not_change_structure_exit(
     _commit_all(root)
     status = cli.main(["query", "diff", "--json"])
     captured = capsys.readouterr()
-    assert status == 1
+    assert status == 2
     assert "parse-error" in captured.err
     payload = json.loads(captured.out)
     assert payload["added"] == []
@@ -474,7 +474,9 @@ def test_committed_mode_preserves_configured_sql_migration_patterns(
     monkeypatch.chdir(root)
     assert cli.main(["analyze"]) == 0
     _commit_all(root, "baseline")
-    direct.write_text("CREATE TABLE base (id int)\nCREATE TABLE added (id int)\n", encoding="utf-8")
+    direct.write_text(
+        "CREATE TABLE base (id int)\nGO\nCREATE TABLE added (id int)\n", encoding="utf-8"
+    )
 
     observed = []
     original = sql_interpreter.analyze_view_warnings
@@ -700,14 +702,279 @@ def test_committed_diff_isolates_a_failing_file_and_exits_on_the_diagnostic(
     status = cli.main(["query", "diff", "--json"])
 
     captured = capsys.readouterr()
-    assert status == 1
+    assert status == 2
     assert (
         "b.py: interpreter-error: RuntimeError: injected fault [severity=error]"
         in captured.err.splitlines()
     )
     assert "Traceback" not in captured.err
     payload = json.loads(captured.out)
-    # Every one of these lists counts as a structural change, so empty lists
-    # mean the exit status comes from the diagnostic alone.
+    # Empty lists show the exit status comes from the diagnostic alone.
     for key in ("added", "removed", "relocated", "relationships_added", "relationships_removed"):
         assert payload[key] == [], key
+
+
+_TABLE_T = "CREATE TABLE dbo.T (id int)\n"
+
+
+def _committed_files(tmp_path: Path, files: dict[str, str | bytes]) -> Path:
+    """Analyze and commit ``files`` as a configured project and return its root."""
+    root = _repo(tmp_path)
+    targets = ", ".join(f'"{name}"' for name in files)
+    _write_config(root, targets=f"targets = [{targets}]")
+    for name, content in files.items():
+        _write(root / name, content)
+    return root
+
+
+def _write(path: Path, content: str | bytes) -> None:
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content, encoding="utf-8")
+
+
+def _analyze_and_commit(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(root)
+    cli.main(["analyze"])
+    capsys.readouterr()
+    _commit_all(root)
+
+
+def _has_diagnostic(err: str, path: str, code: str) -> bool:
+    return any(
+        line.startswith(f"{path}:") and f": {code}: " in line and "[severity=error" in line
+        for line in err.splitlines()
+    )
+
+
+def _diff(capsys: pytest.CaptureFixture[str], *args: str) -> tuple[int, str, str]:
+    status = cli.main(["query", "diff", *args])
+    captured = capsys.readouterr()
+    return status, captured.out, captured.err
+
+
+_PYTHON_MOD = "from other import other\n\n\ndef caller():\n    return other()\n"
+_PYTHON_OTHER = "def other():\n    return 1\n"
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_python_parse_error_withholds_error_file_rows_and_exits_two(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scoped: bool,
+) -> None:
+    root = _committed_files(tmp_path, {"mod.py": _PYTHON_MOD, "other.py": _PYTHON_OTHER})
+    scope_args: tuple[str, ...] = ()
+    if scoped:
+        definition = root / "docs" / "systems" / "app"
+        definition.mkdir(parents=True)
+        (definition / "system.toml").write_text(
+            'schema_version = 1\nname = "app"\nfiles = ["mod.py", "other.py"]\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(root)
+        assert cli.main(["analyze", "--scope", "app"]) == 0
+        capsys.readouterr()
+        _commit_all(root)
+        scope_args = ("--scope", "app")
+    else:
+        _analyze_and_commit(root, monkeypatch, capsys)
+    (root / "mod.py").write_text(_PYTHON_MOD + "\n\ndef added():\n    return 1\n", encoding="utf-8")
+    (root / "other.py").write_text("def other(:\n", encoding="utf-8")
+
+    status, out, err = _diff(capsys, *scope_args)
+    assert status == 2
+    assert _has_diagnostic(err, "other.py", "parse-error")
+    assert out == (
+        "+ mod.added\n"
+        "+ references mod.caller → other [unresolved]\n"
+        "+ references mod → other.other [unresolved]\n"
+    )
+
+    status, out, err = _diff(capsys, *scope_args, "--json")
+    assert status == 2
+    assert _has_diagnostic(err, "other.py", "parse-error")
+    payload = json.loads(out)
+    assert [item["symbol"] for item in payload["added"]] == ["mod.added"]
+    assert payload["removed"] == []
+    assert payload["relationships_removed"] == []
+    assert [
+        (item["source"], item["target"], item.get("unresolved"))
+        for item in payload["relationships_added"]
+    ] == [
+        ("mod.caller", "other", True),
+        ("mod", "other.other", True),
+    ]
+
+    (root / "other.py").write_text(_PYTHON_OTHER, encoding="utf-8")
+    status, out, err = _diff(capsys, *scope_args)
+    assert status == 1
+    assert err == ""
+    assert out == "+ mod.added\n"
+    assert "[unresolved]" not in out
+
+
+def _sql_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    committed: dict[str, str | bytes],
+    working: dict[str, str | bytes | None],
+) -> tuple[int, str, str]:
+    root = _committed_files(tmp_path, committed)
+    _analyze_and_commit(root, monkeypatch, capsys)
+    targets = ", ".join(f'"{name}"' for name in sorted({*committed, *working}))
+    _write_config(root, targets=f"targets = [{targets}]")
+    for name, content in working.items():
+        if content is None:
+            (root / name).unlink()
+        else:
+            _write(root / name, content)
+    return _diff(capsys)
+
+
+def test_sql_unsupported_syntax_keeps_additions_and_unaffected_relocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = "CREATE TABLE dbo.A (id int)\nGO 2\n"
+    status, out, err = _sql_case(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {"s.sql": base},
+        {"s.sql": "-- note\n" + base + "CREATE TABLE dbo.B (id int)\n"},
+    )
+    assert status == 2
+    assert _has_diagnostic(err, "s.sql", "unsupported-syntax")
+    assert out == "+ dbo.B\n~ dbo.A (relocated s.sql:1→2)\n"
+
+
+def test_sql_ambiguous_reference_keeps_unresolved_addition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, err = _sql_case(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {"a.sql": _TABLE_T, "c.sql": "CREATE VIEW dbo.V AS SELECT id FROM dbo.T\n"},
+        {"b.sql": _TABLE_T},
+    )
+    assert status == 2
+    assert _has_diagnostic(err, "c.sql", "ambiguous-reference")
+    assert out == "+ dbo.T\n+ references dbo.V → dbo.T [unresolved]\n"
+
+
+def test_unreadable_duplicate_prints_no_false_removal_or_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, err = _sql_case(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {"a.sql": _TABLE_T, "b.sql": _TABLE_T},
+        {"a.sql": _TABLE_T.encode() + b"\xff"},
+    )
+    assert status == 2
+    assert _has_diagnostic(err, "a.sql", "source-read-error")
+    assert out == "no changes\n"
+
+
+def test_unreadable_single_member_reports_only_the_clean_addition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, err = _sql_case(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {"a.sql": _TABLE_T},
+        {"a.sql": _TABLE_T.encode() + b"\xff", "b.sql": _TABLE_T},
+    )
+    assert status == 2
+    assert _has_diagnostic(err, "a.sql", "source-read-error")
+    assert out == "+ dbo.T\n"
+
+
+def test_move_out_of_an_error_file_is_an_addition_not_a_relocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    head = "CREATE TABLE dbo.A (id int)\nGO 2\n"
+    status, out, err = _sql_case(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {"s.sql": head + "CREATE TABLE dbo.X (id int)\n"},
+        {"s.sql": head, "t.sql": "CREATE TABLE dbo.X (id int)\n"},
+    )
+    assert status == 2
+    assert _has_diagnostic(err, "s.sql", "unsupported-syntax")
+    assert out == "+ dbo.X\n"
+
+
+def test_clean_relocation_in_an_affected_group_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, err = _sql_case(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {"a.sql": _TABLE_T, "b.sql": _TABLE_T},
+        {"a.sql": _TABLE_T.encode() + b"\xff", "b.sql": "-- 1\n-- 2\n" + _TABLE_T},
+    )
+    assert status == 2
+    assert _has_diagnostic(err, "a.sql", "source-read-error")
+    assert out == "~ dbo.T (relocated b.sql:1→3)\n"
+
+
+def test_clean_removal_in_an_affected_group_is_kept_without_cross_file_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, err = _sql_case(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {
+            "s.sql": "CREATE TABLE dbo.A (id int)\nGO 2\n" + _TABLE_T,
+            "b.sql": "CREATE TABLE dbo.U (id int)\nGO\n" + _TABLE_T,
+        },
+        {
+            "s.sql": "CREATE TABLE dbo.A (id int)\nGO 2\n-- note\n" + _TABLE_T,
+            "b.sql": "CREATE TABLE dbo.U (id int)\nGO\n",
+        },
+    )
+    assert status == 2
+    assert _has_diagnostic(err, "s.sql", "unsupported-syntax")
+    assert out == "- dbo.T\n"
+
+
+def test_warning_only_diagnostic_keeps_rows_and_structural_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path)
+    config = (
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\n'
+        'targets = ["schema.sql"]\n[minotaur.sql]\nview_depth_threshold = {}\n'
+    )
+    (root / ".minotaur.toml").write_text(config.format(3), encoding="utf-8")
+    (root / "schema.sql").write_text(
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\nGO\n"
+        "CREATE TABLE extra (id int)\n",
+        encoding="utf-8",
+    )
+    _analyze_and_commit(root, monkeypatch, capsys)
+    (root / ".minotaur.toml").write_text(config.format(1), encoding="utf-8")
+    (root / "schema.sql").write_text(
+        "CREATE TABLE base (id int)\nGO\n"
+        "CREATE VIEW v1 AS SELECT * FROM base\nGO\n"
+        "CREATE VIEW v2 AS SELECT * FROM v1\nGO\n",
+        encoding="utf-8",
+    )
+    status, out, err = _diff(capsys)
+    assert status == 1
+    assert "view-depth-warning" in err
+    assert out == "- extra\n"
