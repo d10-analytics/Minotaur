@@ -171,18 +171,20 @@ Every caller record contains `caller`, `column`, `kind`, `line`, `path`, and
 Pass an exact qualified label or a bare name. A symbol matches when the query
 equals its exact label or its bare name, which is the recorded SQL name for SQL
 and otherwise the final label segment. A root module `main` therefore does not
-hide `app.cli.main` for the query `main`, and `lines` finds `dbo.lines` but not
-`dbo.order.lines`:
+hide `app.cli.main` for the query `main`. A table declared as
+`dbo.[order.lines]` has the recorded name `order.lines`, so the query
+`order.lines` finds it and `lines` does not, while `lines` finds `dbo.lines`:
 
 ```bash
 minotaur query definitions parse --graph GRAPH.json --root ROOT
 ```
 
 The text form is `path:line  qualified.name  kind`. If more than one
-definition has that bare name, every matching line is marked
-`[duplicate-name]`. JSON result objects contain `path`, `line`, `symbol`,
-`kind`, and the boolean `duplicate`. SQL bare names are matched
-case-insensitively; non-SQL names retain exact matching.
+definition matches the query, by exact label or by bare name, every matching
+line is marked `[duplicate-name]`. JSON result objects contain `path`, `line`,
+`symbol`, `kind`, and the boolean `duplicate`. For SQL, both the exact-label
+and the bare-name comparison are case-insensitive, so `DBO.LINES` finds
+`dbo.lines`; non-SQL names retain exact matching.
 
 ### Trace inbound impact
 

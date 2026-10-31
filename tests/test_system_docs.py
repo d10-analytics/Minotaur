@@ -1083,7 +1083,21 @@ def test_query_reference_documents_definitions_matching_and_unreferenced_refusal
         "is the recorded SQL name for SQL and otherwise the final label segment."
     ) in text
     assert "A root module `main` therefore does not hide `app.cli.main`" in text
-    assert "finds `dbo.lines` but not `dbo.order.lines`" in text
+    assert (
+        "A table declared as `dbo.[order.lines]` has the recorded name `order.lines`, so "
+        "the query `order.lines` finds it and `lines` does not, while `lines` finds "
+        "`dbo.lines`"
+    ) in text
+    assert "but not `dbo.order.lines`" not in text
+    assert (
+        "If more than one definition matches the query, by exact label or by bare name, "
+        "every matching line is marked `[duplicate-name]`."
+    ) in text
+    assert "If more than one definition has that bare name" not in text
+    assert (
+        "For SQL, both the exact-label and the bare-name comparison are case-insensitive, "
+        "so `DBO.LINES` finds `dbo.lines`; non-SQL names retain exact matching."
+    ) in text
     assert "every symbol whose qualified label ends with it" not in text
     assert (
         "exits `2` with `path has no analyzed source: PATH` instead of printing an empty result."
