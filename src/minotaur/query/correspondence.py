@@ -597,6 +597,7 @@ __all__ = [
     "NodeKey",
     "RelationshipKey",
     "RelationshipOccurrence",
+    "declaration_role",
     "node_key",
     "prepare_correspondence",
     "prepare_whole_graph",

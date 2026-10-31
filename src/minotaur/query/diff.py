@@ -174,16 +174,14 @@ def _relocation_text(item: Relocation) -> str:
     # otherwise only visible in JSON. Falls back to the bare "(relocated)"
     # form when either endpoint has no location -- e.g. a symbol whose
     # location became unknown across snapshots -- rather than guessing.
-    old_location = item.old_location
-    new_location = item.new_location
-    if old_location is None or new_location is None:
+    old_start = _start_record(item.old_location)
+    new_start = _start_record(item.new_location)
+    if old_start is None or new_start is None:
         return f"~ {_symbol_text(item.symbol, item.role)} (relocated)\n"
-    old_line = old_location.range.start.line + 1
-    new_line = new_location.range.start.line + 1
-    if old_location.path == new_location.path:
-        move = f"{old_location.path}:{old_line}→{new_line}"
+    if old_start["path"] == new_start["path"]:
+        move = f"{old_start['path']}:{old_start['line']}→{new_start['line']}"
     else:
-        move = f"{old_location.path}:{old_line}→{new_location.path}:{new_line}"
+        move = f"{old_start['path']}:{old_start['line']}→{new_start['path']}:{new_start['line']}"
     return f"~ {_symbol_text(item.symbol, item.role)} (relocated {move})\n"
 
 
