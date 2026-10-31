@@ -1053,7 +1053,9 @@ def test_unreferenced_refuses_path_without_analyzed_source(
 
     assert status == 2
     assert captured.out == ""
-    assert captured.err.splitlines()[-1].endswith(f"path has no analyzed source: {offender}")
+    assert captured.err.splitlines()[-1] == (
+        f"minotaur: error: path has no analyzed source: {offender}"
+    )
 
 
 def test_unreferenced_stale_no_refresh_refuses_path_without_analyzed_source(
@@ -1068,7 +1070,9 @@ def test_unreferenced_stale_no_refresh_refuses_path_without_analyzed_source(
 
     assert status == 2
     assert captured.out == ""
-    assert captured.err.splitlines()[-1].endswith("path has no analyzed source: other/x.py")
+    assert captured.err.splitlines()[-1] == (
+        "minotaur: error: path has no analyzed source: other/x.py"
+    )
     assert "minotaur: stale: app.py" in captured.err
 
 
