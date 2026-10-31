@@ -71,7 +71,7 @@ _DECLARATION_ROLES = frozenset(
 )
 
 
-def _declaration_role(node: Node) -> str | None:
+def declaration_role(node: Node) -> str | None:
     """Return the recognised declaration role recorded by a Minotaur analyzer.
 
     The role is an identity input only for a source-location symbol whose own
@@ -138,7 +138,7 @@ def _role_free_key(node: Node, origin: NodeKey | None) -> NodeKey:
 def _pre_ordinal_key(node: Node, *, origin: NodeKey | None = None) -> NodeKey:
     """Return the key with any declaration role but without an overload ordinal."""
     fields = _role_free_key(node, origin)
-    role = _declaration_role(node)
+    role = declaration_role(node)
     if role is not None:
         fields += (role,)
     return fields
@@ -163,7 +163,7 @@ def node_key(
     it is required for such a node and rejected for every other node.
     """
     fields = _pre_ordinal_key(node, origin=origin)
-    if _declaration_role(node) != _OVERLOAD_ROLE:
+    if declaration_role(node) != _OVERLOAD_ROLE:
         if ordinal is not None:
             raise ValueError("only an overload declaration correspondence key takes an ordinal")
         return fields
@@ -436,7 +436,7 @@ def prepare_correspondence(
     for node in document.nodes:
         if node.node_class == NodeClass.UNRESOLVED_REFERENCE:
             continue
-        if _declaration_role(node) == _OVERLOAD_ROLE:
+        if declaration_role(node) == _OVERLOAD_ROLE:
             overloads[_pre_ordinal_key(node)].append(node)
         else:
             ordinary_keys[node.id] = node_key(node)
@@ -597,6 +597,7 @@ __all__ = [
     "NodeKey",
     "RelationshipKey",
     "RelationshipOccurrence",
+    "declaration_role",
     "node_key",
     "prepare_correspondence",
     "prepare_whole_graph",
