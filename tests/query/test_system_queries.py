@@ -502,7 +502,11 @@ def test_external_category_from_a_pathless_upstream_endpoint(
             ),
         ),
     )
-    records = system_query.system_deps(systems, GraphIndex.build(extended), target)
+    records = (
+        system_query.ReportingSnapshot.prepare(extended, systems)
+        .report("system-deps", target.name)
+        .results
+    )
     assert len(records) == 1
     record = records[0]
     assert record.category == "external"
@@ -1606,13 +1610,10 @@ def test_shared_resolution_keeps_complete_supported_edges_before_row_filter(
         return values
 
     monkeypatch.setattr(system_query, "_resolve_supported_relationships", recording_resolver)
-    target = resolve_system(systems, "orders")
-    standalone = system_query.surface(systems, index, target)
     detailed = system_query.ReportingSnapshot.prepare(expanded, systems).report(
         "surface", "orders", details=True
     )
-    assert standalone == detailed.results
-    assert calls == [expected, expected]
+    assert calls == [expected]
     assert detailed.relationships is not None
     surface_expected = tuple(
         sorted(
@@ -1726,7 +1727,6 @@ def test_report_selection_and_detail_projection_are_shared_and_lazy(
 ) -> None:
     document, systems = _row_reporting_fixture()
     snapshot = system_query.ReportingSnapshot.prepare(document, systems)
-    target = resolve_system(systems, "orders")
     sentinel = system_query.SurfaceRecord(
         category="system: orders", kinds=("calls",), path="sentinel.py", symbol="sentinel"
     )
@@ -1736,7 +1736,6 @@ def test_report_selection_and_detail_projection_are_shared_and_lazy(
         relationships_by_key={("sentinel.py", "sentinel"): ()},
     )
     monkeypatch.setattr(system_query, "_select_report", lambda *_args: selection)
-    assert system_query.surface(systems, snapshot.index, target) == (sentinel,)
     assert snapshot.report("surface", "orders").results == (sentinel,)
     monkeypatch.setattr(system_query, "_select_report", real_selector)
 

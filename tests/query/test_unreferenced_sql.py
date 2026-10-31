@@ -178,15 +178,8 @@ CREATE FUNCTION S.Recur() RETURNS TABLE AS RETURN (SELECT S.Recur() FROM S.Base)
 
 
 def test_system_query_docstrings_name_registry_relative_sql_kinds() -> None:
-    docstrings = (
-        system_query.__doc__,
-        system_query.surface.__doc__,
-        system_query.consumers.__doc__,
-        system_query.system_deps.__doc__,
-    )
-    assert all(
-        doc is not None and "current SQL dependency" in " ".join(doc.split()) for doc in docstrings
-    )
+    doc = system_query.__doc__
+    assert doc is not None and "current SQL dependency" in " ".join(doc.split())
     assert "CURRENT_SQL_DEPENDENCY_KINDS" in (system_query.__doc__ or "")
     assert "sql:reads-from`` / ``sql:foreign-key-to" not in (system_query.__doc__ or "")
 

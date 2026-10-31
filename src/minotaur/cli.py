@@ -670,10 +670,12 @@ def _load_and_refresh_graph(
 
 @dataclass(frozen=True, slots=True)
 class _GraphQuery:
-    """One query answered from a freshness-checked graph index.
+    """One record query answered from a freshness-checked graph index.
 
-    The table below is the single place that knows how a query is run and
-    rendered.  Keeping the per-query differences as data means a new query is
+    The table below is the single place that knows how a record query is run
+    and rendered; the system queries are answered by ``ReportingSnapshot`` and
+    only need a text renderer (``_SYSTEM_QUERY_RENDERERS``).  Keeping the
+    per-query differences as data means a new query is
     one entry rather than another branch in the dispatcher, and the shared
     steps (refresh, index build, JSON envelope, diagnostics exit code) cannot
     be spelled differently for one query by accident.
@@ -727,36 +729,6 @@ def _run_unreferenced(
         # current workspace in this mode.
         text_fallback=query.text_fallback and not stale_graph,
     )
-
-
-def _run_surface(
-    query: argparse.Namespace, index: GraphIndex, observed: Drift
-) -> Sequence[QueryRecord]:
-    return _run_system_query(system_query.surface, query, index)
-
-
-def _run_consumers(
-    query: argparse.Namespace, index: GraphIndex, observed: Drift
-) -> Sequence[QueryRecord]:
-    return _run_system_query(system_query.consumers, query, index)
-
-
-def _run_system_deps(
-    query: argparse.Namespace, index: GraphIndex, observed: Drift
-) -> Sequence[QueryRecord]:
-    return _run_system_query(system_query.system_deps, query, index)
-
-
-def _run_system_query(
-    producer: Callable[[Sequence[System], GraphIndex, System], Sequence[QueryRecord]],
-    query: argparse.Namespace,
-    index: GraphIndex,
-) -> Sequence[QueryRecord]:
-    # D-10/AC-11: the absent-file diagnosis runs after load or refresh against
-    # the final index, as one warning line per listed-but-absent file of the
-    # queried system, and never changes the answer or its exit status.
-    _report_absent_files((query.system,), index)
-    return producer(query.systems, index, query.system)
 
 
 def _diff_output(
@@ -902,18 +874,12 @@ _GRAPH_QUERIES: Mapping[str, _GraphQuery] = {
         run=_run_unreferenced,
         render_text=unreferenced_query.render_text,
     ),
-    "surface": _GraphQuery(
-        run=_run_surface,
-        render_text=system_query.render_surface_text,
-    ),
-    "consumers": _GraphQuery(
-        run=_run_consumers,
-        render_text=system_query.render_consumers_text,
-    ),
-    "system-deps": _GraphQuery(
-        run=_run_system_deps,
-        render_text=system_query.render_system_deps_text,
-    ),
+}
+
+_SYSTEM_QUERY_RENDERERS: Mapping[str, Callable[[Sequence[Any]], str]] = {
+    "surface": system_query.render_surface_text,
+    "consumers": system_query.render_consumers_text,
+    "system-deps": system_query.render_system_deps_text,
 }
 
 # The context snapshot query intentionally does not call _load_and_refresh_graph:
@@ -954,28 +920,27 @@ def _query(arguments: argparse.Namespace, located: Path | None) -> int:
                 raise ValueError("diff requires either OLD NEW or a located project config")
             return _run_explicit_diff(arguments)
         snapshot = _SNAPSHOT_QUERIES.get(arguments.name)
-        if arguments.name != "diff":
-            resolved = resolve_config(
-                Path.cwd(),
-                config=located,
-                explicit_root=_as_path(arguments.root),
-                explicit_graph=_as_path(arguments.graph),
-            )
-            arguments.graph = resolved.graph
-            arguments.root = resolved.root
-            arguments.sql_settings = resolved.sql
-            if arguments.name in _SYSTEM_QUERIES:
-                # AC-12 (D-09): the strict system-tree load runs here, in
-                # _query's system-query path, before _run_graph_query can
-                # invoke _load_and_refresh_graph -- so an invalid committed
-                # declaration exits 2 before any freshness refresh or rewrite
-                # can start, on every freshness state (clean graph, drifted
-                # graph, and --no-refresh alike).  The loaded systems and the
-                # resolved name are stashed on the namespace for the run
-                # handler, which consumes them after the graph is final.
-                arguments.systems = load_systems(resolved.systems_dir)
-                if arguments.name != "systems":
-                    arguments.system = resolve_system(arguments.systems, arguments.system_name)
+        resolved = resolve_config(
+            Path.cwd(),
+            config=located,
+            explicit_root=_as_path(arguments.root),
+            explicit_graph=_as_path(arguments.graph),
+        )
+        arguments.graph = resolved.graph
+        arguments.root = resolved.root
+        arguments.sql_settings = resolved.sql
+        if arguments.name in _SYSTEM_QUERIES:
+            # AC-12 (D-09): the strict system-tree load runs here, in
+            # _query's system-query path, before _run_graph_query can
+            # invoke _load_and_refresh_graph -- so an invalid committed
+            # declaration exits 2 before any freshness refresh or rewrite
+            # can start, on every freshness state (clean graph, drifted
+            # graph, and --no-refresh alike).  The loaded systems and the
+            # resolved name are stashed on the namespace for
+            # _run_graph_query, which consumes them after the graph is final.
+            arguments.systems = load_systems(resolved.systems_dir)
+            if arguments.name != "systems":
+                arguments.system = resolve_system(arguments.systems, arguments.system_name)
         if snapshot is not None:
             _write_stdout(snapshot(arguments))
             return 0
@@ -1331,9 +1296,6 @@ def _run_graph_query(query: argparse.Namespace) -> int:
         output = render_systems_json(composed) if query.json else render_systems_text(composed)
         _write_stdout(output)
         return 1 if graph.errors else 0
-    handler = _GRAPH_QUERIES.get(query.name)
-    if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
-        raise ValueError(f"unsupported query: {query.name}")
     index = GraphIndex.build(graph.document)
     # No symbol guard here: each query resolves its own name through
     # GraphIndex.resolve, whose SymbolResolutionError is a ValueError and so
@@ -1352,11 +1314,14 @@ def _run_graph_query(query: argparse.Namespace) -> int:
             source_errors=(len(graph.errors) if graph.refreshed else None),
         )
         composed = system_query.compose_system_query(report, invocation)
-        summary = handler.render_text(report.results)
+        summary = _SYSTEM_QUERY_RENDERERS[query.name](report.results)
         output = (
             render_system_json(composed) if query.json else render_system_text(composed, summary)
         )
     else:
+        handler = _GRAPH_QUERIES.get(query.name)
+        if handler is None:  # pragma: no cover - argparse restricts the subcommand set.
+            raise ValueError(f"unsupported query: {query.name}")
         records = handler.run(query, index, graph.drift)
         output = (
             render_json(
