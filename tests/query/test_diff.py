@@ -286,16 +286,12 @@ def test_unresolved_relationship_is_marked_in_text_and_json(tmp_path: Path, caps
 
     status, out = _run_diff(tmp_path, capsys, old, new, json_out=False)
     assert status == 1
-    assert out.splitlines()[-1].endswith(" [unresolved]")
-    assert out.count("[unresolved]") == 1
-    line = out.splitlines()[-1]
-    assert line.startswith("+ ") and "mod.caller → " in line
+    assert out == "+ references mod.caller → other.f [unresolved]\n"
 
     _, out = _run_diff(tmp_path / "j", capsys, old, new, json_out=True)
-    records = json.loads(out)["relationships_added"]
-    assert len(records) == 1
-    assert records[0]["unresolved"] is True
-    assert set(records[0]) == {"kind", "source", "target", "unresolved"}
+    assert json.loads(out)["relationships_added"] == [
+        {"kind": "references", "source": "mod.caller", "target": "other.f", "unresolved": True}
+    ]
 
 
 def test_relocation_start_projection_is_flat_one_based() -> None:
