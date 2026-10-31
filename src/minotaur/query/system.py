@@ -416,9 +416,12 @@ def _freeze_json(value: object) -> object:
 
 def _thaw_json(value: object) -> object:
     """Return fresh mutable JSON containers for a public ``to_dict`` view."""
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _thaw_json(to_dict())
     if isinstance(value, Mapping):
         return {key: _thaw_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
+    if isinstance(value, (list, tuple)):
         return [_thaw_json(item) for item in value]
     return value
 

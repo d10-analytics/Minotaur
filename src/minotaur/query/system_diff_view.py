@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from minotaur.query.call_diff import CallChange
 from minotaur.query.render import dump_json
+from minotaur.query.system import _thaw_json
 from minotaur.query.system_diff import SystemChange, SystemDiffResult
 from minotaur.system import UnknownSystem
 
@@ -103,7 +104,7 @@ def render_context_text(result: SystemDiffResult) -> str:
         ("old selection", result.old_selection),
         ("new selection", result.new_selection),
     ):
-        lines.append(f"{label}: {dump_json(_thaw(value)).rstrip(chr(10))}\n")
+        lines.append(f"{label}: {dump_json(_thaw_json(value)).rstrip(chr(10))}\n")
     return "".join(lines)
 
 
@@ -497,7 +498,7 @@ def _change_after(change: object) -> object:
 def _detail_value(value: object) -> str:
     if value is None or value == "unavailable":
         return "unavailable"
-    return dump_json(_thaw(value)).rstrip(chr(10))
+    return dump_json(_thaw_json(value)).rstrip(chr(10))
 
 
 _SENTINEL_LABELS = frozenset({"no_system", "external", "unassigned"})
@@ -588,19 +589,6 @@ def _safe_atom(value: object) -> str:
     ):
         return json.dumps(text, ensure_ascii=True)
     return text
-
-
-def _thaw(value: object) -> object:
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        return _thaw(to_dict())
-    if isinstance(value, Mapping):
-        return {key: _thaw(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_thaw(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        return [_thaw(item) for item in sorted(value, key=repr)]
-    return value
 
 
 __all__ = ["filter_system_diff", "render_context_text", "render_text"]
