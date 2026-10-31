@@ -71,7 +71,7 @@ def impact(
         node = index.nodes.get(node_id)
         if node is None or node.node_class != NodeClass.SYMBOL:
             continue
-        # Module symbols are kept here, unlike diff._keyed_symbols(), which
+        # Module symbols are kept here, unlike diff._grouped_symbols(), which
         # drops them as scaffolding. A call made at module scope has a real
         # inbound dependant (the importing module runs it on import), so
         # impact must report it; diff excludes the same node class only

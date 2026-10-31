@@ -106,7 +106,7 @@ def diff(
 
     ``error_paths`` names files whose current analysis reported an error.  A
     missing fact there could fabricate a row, so rows judged from old-side
-    locations in those files are withheld (see ``_symbol_changes``).
+    locations in those files are withheld (see ``_compare_affected``).
     """
 
     old_groups = _grouped_symbols(old)
@@ -346,7 +346,15 @@ def _keyed_relationships(
         source_key = endpoint_keys.get(relationship.source, ("node", relationship.source))
         target_key = endpoint_keys.get(relationship.target, ("node", relationship.target))
         key = (source_key, target_key, relationship.kind)
-        if relationship.source in error_ids or relationship.target in error_ids:
+        if (
+            relationship.source in error_ids
+            or relationship.target in error_ids
+            or any(
+                location.path in error_paths
+                for record in relationship.evidence
+                for location in record.locations
+            )
+        ):
             error_keys.add(key)
         result.setdefault(
             key,
