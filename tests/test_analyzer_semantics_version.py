@@ -529,9 +529,9 @@ def test_refresh_and_committed_diff_share_version_stamp(
     versions = []
     original = cli._diff_output
 
-    def observe(query, old, new):
+    def observe(query, old, new, error_paths=frozenset()):
         versions.append(new.generated_by.version)
-        return original(query, old, new)
+        return original(query, old, new, error_paths)
 
     monkeypatch.setattr(cli, "_diff_output", observe)
     capsys.readouterr()
