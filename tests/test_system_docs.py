@@ -1014,3 +1014,87 @@ def test_contributing_pins_the_comparison_capture_route_and_its_proving_test() -
         isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == name
         for node in module.body
     )
+
+
+def test_query_reference_documents_role_aware_diff_key_and_systems_contrast() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert (
+        "Symbols are keyed by `(symbol kind, qualified label, recorded declaration role, "
+        "ordinal)`, where the ordinal counts same-key definitions in source order."
+    ) in text
+    assert "`(symbol kind, qualified label)`" not in text
+    assert (
+        "Plain `diff` appends a recorded role to every such symbol in text, as in "
+        "`- mod.C.x (setter)`, and adds a `role` field to its JSON record."
+    ) in text
+    assert (
+        "which names a role only when same-label nodes collide and has no separate "
+        "JSON `role` field"
+    ) in text
+
+
+def test_query_reference_documents_diff_unresolved_marker_and_relocation_projection() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert (
+        'ends its text line with `[unresolved]` and carries `"unresolved": true` in JSON, '
+        "as in `callers`; absence of the marker means resolved."
+    ) in text
+    assert (
+        "Each location is a flat object with `path`, one-based `line`, and one-based "
+        "`column`, or `null` for an unknown endpoint."
+    ) in text
+    assert (
+        "A relocation is reported only when the start `(path, line)` changed; a body "
+        "edit or a column-only shift at the same start is not one"
+    ) in text
+    assert "A relocation-only difference still exits `1`." in text
+
+
+def test_query_reference_documents_committed_diff_error_handling() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert (
+        "Committed-reference `diff` prints its diagnostics and exits `2` when the current "
+        "analysis has any error-severity diagnostic"
+    ) in text
+    assert (
+        "A group is affected when one of its old definitions is in an error file and its "
+        "per-file definition counts changed."
+    ) in text
+    assert (
+        "An affected group pairs its definitions within each file, hides unmatched old "
+        "definitions and moves inside error files, and still reports that group's "
+        "clean-file additions, removals, and relocations."
+    ) in text
+    assert (
+        "A removed relationship is suppressed when any old-side instance's endpoint or "
+        "recorded evidence location is in an error file."
+    ) in text
+    assert (
+        "Every addition, every row of an unaffected group (including relocations inside "
+        "an error file whose counts did not change), every warning-only row, and every "
+        "clean-source edge that became unresolved because its target's file failed is kept."
+    ) in text
+
+
+def test_query_reference_documents_definitions_matching_and_unreferenced_refusal() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    assert (
+        "A symbol matches when the query equals its exact label or its bare name, which "
+        "is the recorded SQL name for SQL and otherwise the final label segment."
+    ) in text
+    assert "A root module `main` therefore does not hide `app.cli.main`" in text
+    assert "finds `dbo.lines` but not `dbo.order.lines`" in text
+    assert "every symbol whose qualified label ends with it" not in text
+    assert (
+        "exits `2` with `path has no analyzed source: PATH` instead of printing an empty result."
+    ) in text
+
+
+def test_graph_format_reference_states_plain_diff_reads_declaration_role() -> None:
+    text = _collapsed(GRAPH_FORMAT_REFERENCE)
+    assert "does not change node labels or symbol kinds." in text
+    assert "or plain `query diff` results" not in text
+    assert (
+        "Plain `query diff` reads the same recognised role, keys each symbol by kind, "
+        "label, role and source order, and appends the role to its text label and JSON record."
+    ) in text

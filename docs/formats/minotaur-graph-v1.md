@@ -213,7 +213,9 @@ non-string value, a string outside those seven roles, a role stored under a
 namespace other than the node's own, and a role on a node whose own namespace
 is neither `minotaur-python` nor `minotaur-javascript` are ignored, so such a
 node keeps its role-free key. The role is not a node-ID input and does not
-change node labels, symbol kinds, or plain `query diff` results.
+change node labels or symbol kinds. Plain `query diff` reads the same recognised
+role, keys each symbol by kind, label, role and source order, and appends the
+role to its text label and JSON record.
 The CLI also records analysis facts in the document's `minotaur` extension:
 `errors` is the integer count of error-severity diagnostics from the run that
 produced the graph, omitted when zero. It is not a stored diagnostic list.
