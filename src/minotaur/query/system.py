@@ -14,27 +14,30 @@ spellings ``system: <name>`` | ``no_system`` | ``external`` -- never node
 IDs (R-08, D-07).
 
 Record producers key on the semantic participant, never on the call site
-(D-05):
+(D-05).  ``ReportingSnapshot.report(query, system_name)`` answers each query:
 
-- ``surface(systems, index, target)`` returns one record per *exposed
+- ``surface`` returns one record per *exposed
   in-scope symbol* -- a symbol defined in a file the target system lists and
   reached by an inbound ``calls``, ``references``, or current SQL dependency
   edge whose source sits outside the system.  Imports are never surface, and
   an edge between two in-scope endpoints (including a same-file edge) exposes
-  nothing (R-05, AC-05).
-- ``consumers(systems, index, target)`` returns one record per *outside
+  nothing; additional outside call sites never add a record (R-05, AC-05).
+- ``consumers`` returns one record per *outside
   file* participating in a boundary relationship into the target system,
-  carrying the distinct relationship kinds that file contributes and the
-  concrete in-scope targets it reaches as detail (R-06, AC-06).  An outside
+  carrying the distinct relationship kinds that file contributes (``calls``,
+  ``references``, ``imports``, or current SQL dependency kinds) and the
+  concrete in-scope targets it reaches as detail.  A path-less source endpoint
+  has no file and so is not a consumer row (R-06, AC-06).  An outside
   module that only imports a system module is a consumer through
   ``imports`` even when its calls never resolve.
-- ``system_deps(systems, index, target)`` returns one record per *target
+- ``system-deps`` returns one record per *target
   category* -- each named target system plus explicit ``no_system``
   (path-carrying target in no declared system) and ``external`` (path-less
   upstream target) rows -- from the target system's own outgoing boundary
   relationships, each row carrying the deterministic nested target detail
-  list (endpoint label, root-relative path, kind) package 03 extends (R-07,
-  D-13, AC-07).
+  list (endpoint label, root-relative path, kind) package 03 extends.
+  Same-system and same-file edges are internal and never a dependency, and no
+  target is silently attributed to a system or dropped (R-07, D-13, AC-07).
 
 Text output is one deterministic line per record; an empty result has its
 own text form (``no consumers`` is pinned by AC-10).  JSON rendering uses
@@ -169,55 +172,6 @@ class SystemDepsRecord:
         }
 
 
-def surface(
-    systems: Sequence[System], index: GraphIndex, target: System
-) -> tuple[SurfaceRecord, ...]:
-    """Return one record per exposed in-scope symbol of ``target``.
-
-    An in-scope symbol is exposed when at least one inbound ``calls``,
-    ``references``, or current SQL dependency edge reaches it from an endpoint
-    whose derived file the system does not list. Internal edges between two
-    in-scope endpoints (including same-file edges) and module-layer ``imports``
-    expose nothing. Rows key on the symbol, so additional outside call sites
-    never add a record (AC-05, D-05).
-    """
-    selection = _select_report(systems, index, target, "surface")
-    return cast(tuple[SurfaceRecord, ...], selection.records)
-
-
-def consumers(
-    systems: Sequence[System], index: GraphIndex, target: System
-) -> tuple[ConsumersRecord, ...]:
-    """Return one record per outside file consuming ``target``.
-
-    A boundary relationship into the system (any of ``calls``, ``references``,
-    ``imports``, or current SQL dependency kinds) whose source endpoint's
-    derived file is not listed by the system makes that file a consumer: the
-    row carries the file's distinct relationship kinds and the concrete
-    in-scope targets it reaches as detail.  A path-less source endpoint has no
-    file and so is not a consumer row (R-06, AC-06).
-    """
-    selection = _select_report(systems, index, target, "consumers")
-    return cast(tuple[ConsumersRecord, ...], selection.records)
-
-
-def system_deps(
-    systems: Sequence[System], index: GraphIndex, target: System
-) -> tuple[SystemDepsRecord, ...]:
-    """Return one record per target category of ``target``'s dependencies.
-
-    Every outgoing ``calls``, ``references``, ``imports``, or current SQL
-    dependency edge whose source endpoint lies inside the system classifies its
-    target endpoint: a target a *different* declared system lists makes a
-    ``system: <name>`` row, a path-carrying target in no declared system a
-    ``no_system`` row, and a path-less upstream target an ``external`` row.
-    Same-system and same-file edges are internal and never a dependency; no
-    target is silently attributed to a system or dropped (R-07, D-13, AC-07).
-    """
-    selection = _select_report(systems, index, target, "system-deps")
-    return cast(tuple[SystemDepsRecord, ...], selection.records)
-
-
 @dataclass(frozen=True, slots=True)
 class _ReportSelection:
     """Private records and resolved edge triples grouped by semantic row."""
@@ -246,13 +200,12 @@ def _resolve_supported_relationships(index: GraphIndex) -> tuple[_ResolvedRelati
 
 
 def _select_report(
-    systems: Sequence[System] | SystemMembership,
+    membership: SystemMembership,
     index: GraphIndex,
     target: System,
     query: Literal["surface", "consumers", "system-deps"],
 ) -> _ReportSelection:
     """Select one system through the shared partition owner."""
-    membership = systems if isinstance(systems, SystemMembership) else SystemMembership(systems)
     return _partition_report(membership, index, query, target)[target.name]
 
 
@@ -463,9 +416,12 @@ def _freeze_json(value: object) -> object:
 
 def _thaw_json(value: object) -> object:
     """Return fresh mutable JSON containers for a public ``to_dict`` view."""
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _thaw_json(to_dict())
     if isinstance(value, Mapping):
         return {key: _thaw_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
+    if isinstance(value, (list, tuple)):
         return [_thaw_json(item) for item in value]
     return value
 
@@ -990,17 +946,9 @@ class ReportingSnapshot:
         SystemReport[SurfaceRecord] | SystemReport[ConsumersRecord] | SystemReport[SystemDepsRecord]
     ): ...
 
-    def report(
-        self, query: str, system_name: str | None = None, details: bool = False
-    ) -> SystemReport[Any] | SystemsReport:
-        if query == "systems":
-            if system_name is not None:
-                raise ValueError("systems query does not accept a system name")
-            return self.all_systems_report(details=details)
+    def report(self, query: str, system_name: str, details: bool = False) -> SystemReport[Any]:
         if query not in _QUERY_NAMES:
             raise ValueError(f"unknown system query: {query}")
-        if system_name is None:
-            raise ValueError(f"{query} query requires a system name")
         target = resolve_system(self.systems, system_name)
         selection = _select_report(
             self.membership,
@@ -1075,10 +1023,6 @@ class ReportingSnapshot:
         if details:
             coverage = self._systems_coverage(include_paths=True)
         return SystemsReport(results=tuple(records), coverage=coverage, connections=connections)
-
-    def systems_report(self, *, details: bool = False) -> SystemsReport:
-        """Compatibility spelling for the all-systems report routine."""
-        return self.all_systems_report(details=details)
 
     def _represented_files_by_system(self) -> dict[str, set[str]]:
         represented: dict[str, set[str]] = defaultdict(set)
