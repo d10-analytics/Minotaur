@@ -12,7 +12,7 @@ from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.query.index import GraphIndex
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
-from minotaur.query.symbols import label_bare_name
+from minotaur.query.symbols import label_bare_name, node_bare_name
 from minotaur.source_encoding import decode_python_source, is_python_source_path
 
 _TOKEN_PATTERN = re.compile(r"\w+")
@@ -69,7 +69,7 @@ def unreferenced(
             node,
             excluded_names,
             excluded_patterns,
-            bare_name=_bare_name(node),
+            bare_name=node_bare_name(node),
         )
         and _is_unreferenced(index, node)
     ]
@@ -91,7 +91,7 @@ def unreferenced(
                 symbol=node.label,
                 kind=node.symbol_kind or "unknown",
                 text_mention=(
-                    _bare_name(node).casefold() in sql_mentions
+                    node_bare_name(node).casefold() in sql_mentions
                     if _is_sql_candidate(node)
                     else label_bare_name(node.label) in core_mentions
                 ),
@@ -276,16 +276,6 @@ def _sql_definition_counts(index: GraphIndex, selected: frozenset[str]) -> dict[
         location = node.location
         if not _is_sql_candidate(node) or location is None or location.path not in selected:
             continue
-        name = _bare_name(node).casefold()
+        name = node_bare_name(node).casefold()
         counts[name] = counts.get(name, 0) + 1
     return counts
-
-
-def _bare_name(node: Node) -> str:
-    """Use the analyzed SQL identifier, including dots inside quoted names."""
-    if _is_sql_candidate(node) and node.extensions is not None:
-        name = node.extensions.get("minotaur-sql", {}).get("name")
-        if isinstance(name, str) and name:
-            return name
-    # Older graph snapshots have only the flattened display label.
-    return label_bare_name(node.label)

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from minotaur.graph_model.location import Location
+from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.graph_model.relationship import Relationship
 from minotaur.query.index import GraphIndex
@@ -59,6 +60,19 @@ def label_bare_name(label: str) -> str:
     return label.rsplit(".", 1)[-1]
 
 
+def node_bare_name(node: Node) -> str:
+    """Return the declared name: the recorded SQL identifier, else the final label segment.
+
+    The recorded SQL name keeps dots inside quoted identifiers intact.
+    """
+    if node.language == "sql" and node.extensions is not None:
+        name = node.extensions.get("minotaur-sql", {}).get("name")
+        if isinstance(name, str) and name:
+            return name
+    # Older graph snapshots have only the flattened display label.
+    return label_bare_name(node.label)
+
+
 def callers(index: GraphIndex, qualified_name: str) -> tuple[CallerRecord, ...]:
     """Return resolved call sites and matching unresolved references.
 
@@ -106,21 +120,17 @@ def callers(index: GraphIndex, qualified_name: str) -> tuple[CallerRecord, ...]:
 
 
 def definitions(index: GraphIndex, bare_name: str) -> tuple[DefinitionRecord, ...]:
-    """Return symbols whose final qualified-name segment matches ``bare_name``."""
-    matches = [
-        node
-        for node in index.symbols()
-        if (
-            node.location is not None
-            and (
-                label_bare_name(node.label) == bare_name
-                or (
-                    node.language == "sql"
-                    and label_bare_name(node.label).casefold() == bare_name.casefold()
-                )
-            )
-        )
-    ]
+    """Return symbols labelled ``bare_name`` or declared with that name.
+
+    A node matches on its exact label or its bare name; SQL comparisons ignore case.
+    """
+    folded = bare_name.casefold()
+    by_id = {node.id: node for node in index.lookup(bare_name)}
+    for node in index.symbols():
+        name = node_bare_name(node)
+        if name == bare_name or (node.language == "sql" and name.casefold() == folded):
+            by_id[node.id] = node
+    matches = [node for node in by_id.values() if node.location is not None]
     duplicate = len(matches) > 1
     records: list[DefinitionRecord] = []
     for node in matches:
