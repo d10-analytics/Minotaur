@@ -950,6 +950,29 @@ def test_clean_removal_in_an_affected_group_is_kept_without_cross_file_moves(
     assert out == "- dbo.T\n"
 
 
+def test_removed_relationship_recorded_in_an_error_file_is_withheld(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    alter = (
+        "ALTER TABLE dbo.Child ADD CONSTRAINT fk_child "
+        "FOREIGN KEY (pid) REFERENCES dbo.Parent (id)\n"
+    )
+    status, out, err = _sql_case(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        {
+            "parent.sql": "CREATE TABLE dbo.Parent (id int PRIMARY KEY)\n",
+            "child.sql": "CREATE TABLE dbo.Child (id int, pid int)\n",
+            "alter.sql": alter,
+        },
+        {"alter.sql": alter + "CREATE TABLE dbo.Audit (id int)\n"},
+    )
+    assert status == 2
+    assert _has_diagnostic(err, "alter.sql", "unsupported-syntax")
+    assert out == "no changes\n"
+
+
 def test_warning_only_diagnostic_keeps_rows_and_structural_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
