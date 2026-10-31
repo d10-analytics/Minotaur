@@ -500,7 +500,6 @@ def test_exposed_lookup_state_is_deeply_immutable() -> None:
     mapping_attempts = (
         (prepared.nodes_by_id, source.id, prepared.nodes_by_id[target.id]),
         (prepared.nodes_by_key, source_key, ()),
-        (prepared.candidate_groups, source_key, ()),
         (prepared.relationships_by_key, relation_key, ()),
         (prepared.relationship_groups, relation_key, ()),
         (prepared.origin_dependencies, unresolved_key, source_key),

@@ -167,6 +167,10 @@ def test_call_memberships_prepare_system_files_without_contains_scans() -> None:
     source = _symbol("source", "a.py")
     target = _symbol("target", "b.py")
     observation = _observation("call")
+    systems = tuple(
+        replace(system, files=CountedFiles(system.files))
+        for system in _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
+    )
     snapshot = _snapshot(
         (source, target),
         (
@@ -177,16 +181,11 @@ def test_call_memberships_prepare_system_files_without_contains_scans() -> None:
                 (Evidence(Provenance.STATIC_ANALYSIS, locations=(observation.callee_location,)),),
             ),
         ),
-        (),
+        systems,
     )
     index = prepare_whole_graph(snapshot.document, side="old")
-    systems = tuple(
-        replace(system, files=CountedFiles(system.files))
-        for system in _systems(("a.toml", "A", ("a.py",)), ("b.toml", "B", ("b.py",)))
-    )
-    result = compare_call_observations((observation,), (), old_index=index, old_systems=systems)
+    result = compare_call_observations((observation,), (), old_index=index, old_snapshot=snapshot)
     assert len(result.changes) == 1
     assert result.changes[0].status == "removed"
     assert result.changes[0].involved_systems == ("A", "B")
     assert scans == 0
-    assert iterations == len(systems)
