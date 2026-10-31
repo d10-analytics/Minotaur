@@ -171,9 +171,10 @@ def test_diff_missing_unresolved_origins_keep_distinct_raw_ids() -> None:
     assert result.relationships_added == result.relationships_removed
 
 
-def _run_diff(
-    tmp_path: Path, capsys: object, old: dict[str, str], new: dict[str, str], *, json_out: bool
-) -> tuple[int, str]:
+def _graph_paths(
+    tmp_path: Path, capsys: object, old: dict[str, str], new: dict[str, str]
+) -> list[str]:
+    """Analyze each snapshot once and return the diff command arguments."""
     old_root = tmp_path / "old"
     new_root = tmp_path / "new"
     for root, files in ((old_root, old), (new_root, new)):
@@ -184,7 +185,25 @@ def _run_diff(
     assert _analyze(old_root, old_graph) == 0
     assert _analyze(new_root, new_graph) == 0
     capsys.readouterr()  # type: ignore[attr-defined]
-    args = ["query", "diff", str(old_graph), str(new_graph)]
+    return ["query", "diff", str(old_graph), str(new_graph)]
+
+
+def _run_diff_both(
+    tmp_path: Path, capsys: object, old: dict[str, str], new: dict[str, str]
+) -> tuple[tuple[int, str], tuple[int, str]]:
+    """Run text and JSON diffs against one pair of analyzed snapshots."""
+    args = _graph_paths(tmp_path, capsys, old, new)
+    text_status = cli.main(args)
+    text = capsys.readouterr().out  # type: ignore[attr-defined]
+    json_status = cli.main([*args, "--json"])
+    payload = capsys.readouterr().out  # type: ignore[attr-defined]
+    return (text_status, text), (json_status, payload)
+
+
+def _run_diff(
+    tmp_path: Path, capsys: object, old: dict[str, str], new: dict[str, str], *, json_out: bool
+) -> tuple[int, str]:
+    args = _graph_paths(tmp_path, capsys, old, new)
     status = cli.main([*args, "--json"] if json_out else args)
     return status, capsys.readouterr().out  # type: ignore[attr-defined]
 
@@ -217,13 +236,12 @@ def test_replacing_setter_with_deleter_reports_roles_in_text_and_json(
     old = {"mod.py": _SETTER}
     new = {"mod.py": _SETTER.replace("x.setter", "x.deleter")}
 
-    status, out = _run_diff(tmp_path, capsys, old, new, json_out=False)
+    (status, out), (json_status, json_out) = _run_diff_both(tmp_path, capsys, old, new)
     assert status == 1
     assert out == "+ mod.C.x (deleter)\n- mod.C.x (setter)\n"
 
-    status, out = _run_diff(tmp_path / "j", capsys, old, new, json_out=True)
-    payload = json.loads(out)
-    assert status == 1
+    payload = json.loads(json_out)
+    assert json_status == 1
     assert payload["added"] == [{"kind": "method", "role": "deleter", "symbol": "mod.C.x"}]
     assert payload["removed"] == [{"kind": "method", "role": "setter", "symbol": "mod.C.x"}]
     assert payload["relocated"] == []
@@ -244,7 +262,7 @@ def test_shifted_property_pair_relocates_each_role(tmp_path: Path, capsys: objec
     old = {"mod.py": _SETTER}
     new = {"mod.py": "# header\n" + _SETTER}
 
-    status, out = _run_diff(tmp_path, capsys, old, new, json_out=False)
+    (status, out), (_, json_out) = _run_diff_both(tmp_path, capsys, old, new)
     assert status == 1
     assert out == (
         "~ mod.C (relocated mod.py:1→2)\n"
@@ -252,8 +270,7 @@ def test_shifted_property_pair_relocates_each_role(tmp_path: Path, capsys: objec
         "~ mod.C.x (setter) (relocated mod.py:7→8)\n"
     )
 
-    _, out = _run_diff(tmp_path / "j", capsys, old, new, json_out=True)
-    records = [r for r in json.loads(out)["relocated"] if r["symbol"] == "mod.C.x"]
+    records = [r for r in json.loads(json_out)["relocated"] if r["symbol"] == "mod.C.x"]
     assert [(r["role"], r["from"]["line"], r["to"]["line"]) for r in records] == [
         ("property", 3, 4),
         ("setter", 7, 8),
@@ -284,12 +301,11 @@ def test_unresolved_relationship_is_marked_in_text_and_json(tmp_path: Path, caps
     old = {"mod.py": "def caller():\n    pass\n"}
     new = {"mod.py": "def caller():\n    other.f()\n"}
 
-    status, out = _run_diff(tmp_path, capsys, old, new, json_out=False)
+    (status, out), (_, json_out) = _run_diff_both(tmp_path, capsys, old, new)
     assert status == 1
     assert out == "+ references mod.caller → other.f [unresolved]\n"
 
-    _, out = _run_diff(tmp_path / "j", capsys, old, new, json_out=True)
-    assert json.loads(out)["relationships_added"] == [
+    assert json.loads(json_out)["relationships_added"] == [
         {"kind": "references", "source": "mod.caller", "target": "other.f", "unresolved": True}
     ]
 
@@ -336,12 +352,13 @@ def test_sql_column_only_shift_is_not_a_relocation(tmp_path: Path, capsys: objec
 
 
 def test_sql_cross_file_move_at_same_line_is_a_relocation(tmp_path: Path, capsys: object) -> None:
-    status, out = _run_diff(tmp_path, capsys, {"a.sql": _TABLE}, {"b.sql": _TABLE}, json_out=False)
+    (status, out), (_, json_out) = _run_diff_both(
+        tmp_path, capsys, {"a.sql": _TABLE}, {"b.sql": _TABLE}
+    )
     assert status == 1
     assert out == "~ dbo.T (relocated a.sql:1→b.sql:1)\n"
 
-    _, out = _run_diff(tmp_path / "j", capsys, {"a.sql": _TABLE}, {"b.sql": _TABLE}, json_out=True)
-    record = json.loads(out)["relocated"][0]
+    record = json.loads(json_out)["relocated"][0]
     assert record["from"] == {"path": "a.sql", "line": 1, "column": 14}
     assert record["to"] == {"path": "b.sql", "line": 1, "column": 14}
 
