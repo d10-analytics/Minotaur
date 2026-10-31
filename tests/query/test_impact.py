@@ -82,18 +82,6 @@ def test_impact_groups_depths_and_marks_cutoff_boundary(tmp_path: Path, capsys: 
         {"boundary": True, "depth": 2, "kind": "function", "symbol": "chain.e"},
     ]
 
-
-def test_impact_text_marks_cutoff_boundary_line_exactly(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _write(
-        tmp_path,
-        "chain.py",
-        "def c():\n    pass\n\ndef d():\n    c()\n\ndef e():\n    d()\n",
-    )
-    graph = tmp_path / "graph.json"
-    assert _analyze(tmp_path, graph) == 0
-
     status = cli.main(
         [
             "query",
@@ -107,10 +95,9 @@ def test_impact_text_marks_cutoff_boundary_line_exactly(
             str(tmp_path),
         ]
     )
-    captured = capsys.readouterr()
-
+    text_cut = capsys.readouterr()
     assert status == 0
-    assert captured.out.splitlines() == [
+    assert text_cut.out.splitlines() == [
         "depth 0: chain.c",
         "depth 1: chain.d",
         "[boundary] depth 2: chain.e",
