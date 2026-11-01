@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import ast
 import json
+import linecache
 import os
+import sys
+import warnings
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -24,11 +28,15 @@ from minotaur.language_interpreter import ANALYZER_SEMANTICS_VERSION
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="hostile file names are POSIX only")
 
-#: Characters whose raw stderr appearance the escape rule forbids; ``\n`` is
-#: the line separator between stderr messages and is allowed between lines.
-HOSTILE = "\x1b\x9b\u202e\t\r\x0b\x0c\x7f"
+#: Characters whose raw appearance inside a stderr message the escape rule
+#: forbids. A raw ``\n`` may only terminate a message, never occur within one.
+HOSTILE = "\n\x1b\x9b\u202e\t\r\x0b\x0c\x7f\x07"
 
 ESC_FILE = "esc\x1bx.py"
+
+#: A file name that would forge a command error if its newlines printed raw.
+FORGED_FILE = "nl\nminotaur: error: forged line\nz.py"
+ESCAPED_FORGED_FILE = "nl\\nminotaur: error: forged line\\nz.py"
 
 
 def _write(root: Path, relative: str, text: str) -> None:
@@ -43,10 +51,30 @@ def _assert_no_hostile(text: str) -> None:
 
 
 def _stderr_lines(err: str) -> list[str]:
-    lines = err.splitlines()
+    """Split on real newlines only, so ``\\r`` and friends stay visible to the check."""
+    assert err == "" or err.endswith("\n")
+    lines = err.split("\n")[:-1]
     for line in lines:
         _assert_no_hostile(line)
     return lines
+
+
+def _analyze(root: Path) -> list[str]:
+    return ["analyze", "--root", str(root), "--output", str(root / "g.json"), str(root)]
+
+
+@pytest.fixture
+def visible_warnings() -> Iterator[None]:
+    """Show every warning, since the invalid-escape category differs by Python version.
+
+    Python's display reads source lines through ``linecache``, which keeps them
+    by file name across this process, so each test starts from an empty cache.
+    """
+    linecache.clearcache()
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        yield
+    linecache.clearcache()
 
 
 @pytest.fixture(scope="module")
@@ -246,6 +274,176 @@ def test_root_mismatch_warning_escapes_the_import_root_hint(
         f"with a different root; pass --root {root}/esc\\x1bdir "
         "so module names match import names"
     ]
+
+
+def test_stale_line_prints_a_recorded_path_with_a_real_newline_as_one_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A drifted file whose name holds real newlines cannot forge further stderr lines."""
+    root = tmp_path
+    _write(root, FORGED_FILE, "def nlfn():\n    return 1\n")
+    assert cli.main(_analyze(root)) == 0
+    capsys.readouterr()
+    (root / FORGED_FILE).write_text("def nlfn():\n    return 2\n", encoding="utf-8")
+
+    status = cli.main(
+        [
+            "query",
+            "definitions",
+            "nlfn",
+            "--graph",
+            str(root / "g.json"),
+            "--root",
+            str(root),
+            "--no-refresh",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out != ""
+    assert len(captured.err.splitlines()) == 1
+    assert _stderr_lines(captured.err) == [f"minotaur: stale: {ESCAPED_FORGED_FILE}"]
+
+
+def test_diagnostic_metadata_prints_json_ascii_escapes_for_a_non_ascii_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A printed JSON fragment spells ``é`` as ``\\u00e9``, not as the raw character."""
+    root = tmp_path
+    _write(root, "child.sql", "CREATE TABLE Café (parent_id int REFERENCES Parent(id))\n")
+
+    status = cli.main(_analyze(root))
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert "é" not in captured.err
+    lines = _stderr_lines(captured.err)
+    assert len(lines) == 1
+    assert lines[0].startswith("child.sql:")
+    assert lines[0].endswith(
+        ": orphaned-foreign-key: orphaned foreign key [severity=warning "
+        'metadata={"minotaur-sql":{"source_table":"Caf\\u00e9","constraint_name":"unnamed",'
+        '"target":"Parent","reason":"undeclared"}}]'
+    )
+
+
+def test_python_warning_display_escapes_the_file_name_and_source_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    visible_warnings: None,
+) -> None:
+    """Parsing invalid escapes warns through the writer, then the display is restored."""
+    root = tmp_path
+    _write(root, FORGED_FILE, 'y = "\\q"\n')
+    _write(root, "plain.py", 'x = "\\d \x1b[2J\x1b]0;owned\x07"\n')
+    monkeypatch.chdir(root)
+    display = warnings.showwarning
+
+    status = cli.main(_analyze(root))
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert warnings.showwarning is display
+    lines = _stderr_lines(captured.err)
+    assert len(lines) == 2
+    assert lines[0].startswith(f"{ESCAPED_FORGED_FILE}:1: ")
+    assert lines[0].endswith('\\n  y = "\\q"')
+    assert lines[1].startswith("plain.py:1: ")
+    assert lines[1].endswith('\\n  x = "\\d \\x1b[2J\\x1b]0;owned\\x07"')
+
+
+def test_query_auto_refresh_warning_display_escapes_the_source_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    visible_warnings: None,
+) -> None:
+    """A query re-analyzing an edited file shows the same warning escaped."""
+    root = tmp_path
+    _write(root, "plain.py", "def f():\n    return 1\n")
+    monkeypatch.chdir(root)
+    assert cli.main(_analyze(root)) == 0
+    capsys.readouterr()
+    (root / "plain.py").write_text('x = "\\d \x1b[2J"\ndef f():\n    return 1\n', encoding="utf-8")
+
+    status = cli.main(
+        ["query", "definitions", "f", "--graph", str(root / "g.json"), "--root", str(root)]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == "plain.py:2  plain.f  function\n"
+    lines = _stderr_lines(captured.err)
+    assert lines[:2] == [
+        "minotaur: refreshing graph (1 drifted paths)",
+        "minotaur: stale: plain.py",
+    ]
+    assert len(lines) == 3
+    assert lines[2].startswith("plain.py:1: ")
+    assert lines[2].endswith('\\n  x = "\\d \\x1b[2J"')
+
+
+def test_warning_filters_still_decide_whether_a_warning_shows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CLI routes the display only; a filter that hides a warning keeps it hidden."""
+    root = tmp_path
+    _write(root, "plain.py", 'x = "\\d"\n')
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        status = cli.main(_analyze(root))
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.err == ""
+
+
+class _FailingStream:
+    """A stderr whose descriptor has gone away, as after its reader closes."""
+
+    def write(self, text: str) -> int:
+        raise OSError("stderr is gone")
+
+    def flush(self) -> None:
+        raise OSError("stderr is gone")
+
+
+def test_failed_warning_write_keeps_the_file_in_the_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, visible_warnings: None
+) -> None:
+    """A warning that cannot print is lost; it must not fail the parse of its file."""
+    root = tmp_path
+    _write(root, "plain.py", 'x = "\\d"\ndef f():\n    return 1\n')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stderr", _FailingStream())
+        status = cli.main(_analyze(root))
+
+    assert status == 0
+    graph = json.loads((root / "g.json").read_text(encoding="utf-8"))
+    assert "plain.f" in {node["label"] for node in graph["nodes"]}
+
+
+def test_closed_stderr_drops_a_warning_instead_of_writing_it_to_stdout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    visible_warnings: None,
+) -> None:
+    """Python sets ``sys.stderr`` to ``None`` when descriptor 2 is closed at startup."""
+    root = tmp_path
+    _write(root, "plain.py", 'x = "\\d"\n')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stderr", None)
+        status = cli.main(_analyze(root))
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out == ""
 
 
 def _function(name: str, tree: ast.Module) -> ast.FunctionDef:
