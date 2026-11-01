@@ -70,6 +70,18 @@ def version_repo(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     return {"root": root, "graph": graph}
 
 
+@pytest.fixture(scope="module")
+def stale_repo(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """A separate analyzed repository so the stale test's file edit cannot drift
+    any other test's graph: the edit lives inside this fixture only."""
+    root = tmp_path_factory.mktemp("stale_repo")
+    _write(root, ESC_FILE, "def escfn():\n    return 1\n")
+    _write(root, "app.py", "def alpha():\n    return 1\n")
+    graph = root / "g.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(graph), str(root)]) == 0
+    return {"root": root, "graph": graph}
+
+
 def test_unknown_symbol_error_escapes_the_hostile_nearest_label(
     stderr_repo: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -96,10 +108,15 @@ def test_unknown_symbol_error_escapes_the_hostile_nearest_label(
 
 
 def test_stale_lines_escape_the_drifted_hostile_path(
-    stderr_repo: dict[str, Path], capsys: pytest.CaptureFixture[str]
+    stale_repo: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Editing the hostile-named file leaves one stale line for that path."""
-    stderr = stderr_repo
+    """Editing the hostile-named file leaves one stale line for that path.
+
+    The mutation happens inside this test's own analyzed repository, so no
+    assertion elsewhere reads a drifted or rewritten graph and the suite may
+    run in any order.
+    """
+    stderr = stale_repo
     path = stderr["root"] / ESC_FILE
     path.write_text("def escfn():\n    return 2\n", encoding="utf-8")
 
