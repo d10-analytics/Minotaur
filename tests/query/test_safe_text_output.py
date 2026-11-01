@@ -831,14 +831,16 @@ def test_system_queries_select_only_fixed_kinds(
     _assert_refused(capsys, ["query", "diff", base, str(hostile)], RELATIONSHIP_KIND_REFUSAL)
     for query in ("surface", "consumers", "system-deps"):
         target = "plain" if query == "system-deps" else "zone\u202e"
-        out = _systems_run(
-            systems_repo,
-            capsys,
-            ["query", query, target, "--graph", str(hostile), "--no-refresh"],
-            edited=False,
-            status=2,
-        )
-        assert out == ""
+        previous = os.getcwd()
+        os.chdir(systems_repo["root"])
+        try:
+            _assert_refused(
+                capsys,
+                ["query", query, target, "--graph", str(hostile), "--no-refresh"],
+                RELATIONSHIP_KIND_REFUSAL,
+            )
+        finally:
+            os.chdir(previous)
 
     edited = kinds_graph("graph_kinds.json", (VALID_KIND,))
     common = ["--graph", str(edited), "--no-refresh"]
