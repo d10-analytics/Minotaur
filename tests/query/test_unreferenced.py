@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from minotaur import cli
+from minotaur.graph_model.loading import load_graph_file
+from minotaur.query.index import GraphIndex
+from minotaur.query.unreferenced import unreferenced
 
 
 def _write(root: Path, relative: str, content: str) -> None:
@@ -1102,3 +1105,41 @@ def test_unreferenced_reports_python_function_used_only_by_its_own_recursion(
 
     assert status == 0, captured.err
     assert captured.out == "rec.py:1  rec.walk  function\n"
+
+
+def _fallback_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "source"
+    _write(root, "a.py", "def orphan():\n    pass\n\nmessage = 'orphan'\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+    return root, graph
+
+
+def test_unreferenced_text_fallback_refuses_a_path_symlinked_outside_the_root(
+    tmp_path: Path,
+) -> None:
+    root, graph = _fallback_fixture(tmp_path)
+    index = GraphIndex.build(load_graph_file(graph).document)
+    outside = tmp_path / "outside.py"
+    outside.write_bytes((root / "a.py").read_bytes())
+    (root / "a.py").unlink()
+    (root / "a.py").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="source path is missing or escapes the source root: a.py"):
+        unreferenced(index, root, ("a.py",), text_fallback=True)
+
+
+def test_unreferenced_text_fallback_through_a_symlinked_root_matches_the_real_root(
+    tmp_path: Path,
+) -> None:
+    root, graph = _fallback_fixture(tmp_path)
+    index = GraphIndex.build(load_graph_file(graph).document)
+    alias = tmp_path / "alias"
+    alias.symlink_to(root)
+
+    real = unreferenced(index, root, ("a.py",), text_fallback=True)
+    aliased = unreferenced(index, alias, ("a.py",), text_fallback=True)
+
+    assert real
+    assert aliased == real
+    assert any(record.text_mention for record in real)

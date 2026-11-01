@@ -121,6 +121,19 @@ def _comparison() -> SystemDiffResult:
     )
 
 
+def test_capture_source_bytes_omits_escaping_symlink_loop_and_directory(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    (root / "pkg").mkdir(parents=True)
+    (root / "app.py").write_bytes(b"value = 1\n")
+    (tmp_path / "outside.py").write_bytes(b"secret = 1\n")
+    (root / "escape.py").symlink_to(tmp_path / "outside.py")
+    (root / "loop.py").symlink_to("loop.py")
+
+    captured = capture_source_bytes(root, ["app.py", "escape.py", "loop.py", "pkg"])
+
+    assert dict(captured) == {"app.py": b"value = 1\n"}
+
+
 def test_comparison_excerpts_use_captured_bytes_after_live_source_changes(tmp_path: Path) -> None:
     root = tmp_path / "source"
     root.mkdir()

@@ -92,6 +92,17 @@ def test_source_excerpts_are_contained_merged_and_explicit_when_unavailable(tmp_
         "reason": "path is missing or escapes the source root",
     }
 
+    loop = source_root / "src/loop.py"
+    loop.symlink_to("loop.py")
+    relationships[0]["evidence"][0]["locations"][0]["path"] = "src/loop.py"
+    looped = prepare_excerpts(
+        load_graph_bytes(json.dumps(escaped_graph).encode()).canonical, source_root
+    )
+    assert looped["paths"]["src/loop.py"] == {
+        "status": "unavailable",
+        "reason": "path is missing or escapes the source root",
+    }
+
 
 _LATIN_SOURCE = (
     b"# -*- coding: latin-1 -*-\n"

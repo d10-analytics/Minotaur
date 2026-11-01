@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -586,3 +587,109 @@ def test_isolated_explicit_target_is_reanalyzed_once_its_failure_is_gone(
     graph = json.loads(output.read_text(encoding="utf-8"))
     assert _file_node_paths(output) == ["a.py", "b.py", "c.py"]
     assert "errors" not in graph["extensions"]["minotaur"]
+
+
+def _replace_with_symlink(path: Path, target: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        for child in sorted(path.rglob("*"), reverse=True):
+            child.unlink() if not child.is_dir() else child.rmdir()
+        path.rmdir()
+    else:
+        path.unlink()
+    path.symlink_to(target)
+
+
+def _analyzed_pair(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "source"
+    _write(root, "a.py", "def foo():\n    return 1\n")
+    _write(root, "b.py", "def bar():\n    return 2\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    return root, output
+
+
+def test_drift_reports_file_symlinked_outside_root_missing_without_hashing_it(
+    tmp_path: Path,
+) -> None:
+    root, output = _analyzed_pair(tmp_path)
+    outside = _write(tmp_path / "outside", "a.py", "def foo():\n    return 1\n")
+    _replace_with_symlink(root / "a.py", outside)
+
+    observed = drift(load_graph_file(output).document, root)
+
+    assert observed.missing == ("a.py",)
+    assert observed.changed == ()
+
+
+def test_drift_reports_directory_symlinked_outside_root_missing(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    _write(root, "pkg/a.py", "def foo():\n    return 1\n")
+    _write(root, "b.py", "def bar():\n    return 2\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    _write(tmp_path / "outside", "a.py", "def foo():\n    return 1\n")
+    _replace_with_symlink(root / "pkg", tmp_path / "outside")
+
+    observed = drift(load_graph_file(output).document, root)
+
+    assert observed.missing == ("pkg/a.py",)
+    assert observed.changed == ()
+
+
+def test_drift_follows_in_root_symlink_and_compares_its_bytes(tmp_path: Path) -> None:
+    root, output = _analyzed_pair(tmp_path)
+    different = _write(root, "other.txt", "different\n")
+    _replace_with_symlink(root / "a.py", different)
+
+    observed = drift(load_graph_file(output).document, root)
+
+    assert observed.changed == ("a.py",)
+    assert observed.missing == ()
+
+
+def test_drift_with_symlinked_root_and_no_edit_is_clean(tmp_path: Path) -> None:
+    root, output = _analyzed_pair(tmp_path)
+    alias = tmp_path / "alias"
+    alias.symlink_to(root)
+
+    observed = drift(load_graph_file(output).document, alias)
+
+    assert observed.changed == ()
+    assert observed.missing == ()
+
+
+def test_drift_reports_dangling_symlink_missing(tmp_path: Path) -> None:
+    root, output = _analyzed_pair(tmp_path)
+    _replace_with_symlink(root / "a.py", tmp_path / "nowhere.py")
+
+    observed = drift(load_graph_file(output).document, root)
+
+    assert observed.missing == ("a.py",)
+    assert observed.changed == ()
+
+
+def test_drift_reports_file_replaced_by_directory_missing(tmp_path: Path) -> None:
+    root, output = _analyzed_pair(tmp_path)
+    (root / "a.py").unlink()
+    (root / "a.py").mkdir()
+
+    observed = drift(load_graph_file(output).document, root)
+
+    assert observed.missing == ("a.py",)
+    assert observed.changed == ()
+
+
+def test_drift_reports_self_referential_symlink_missing_without_raising(
+    tmp_path: Path,
+) -> None:
+    root, output = _analyzed_pair(tmp_path)
+    (root / "a.py").unlink()
+    (root / "a.py").symlink_to("a.py")
+    if sys.version_info < (3, 13):
+        with pytest.raises(RuntimeError):
+            (root / "a.py").resolve(strict=True)
+
+    observed = drift(load_graph_file(output).document, root)
+
+    assert observed.missing == ("a.py",)
+    assert observed.changed == ()
