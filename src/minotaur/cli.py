@@ -67,6 +67,7 @@ from minotaur.query.index import GraphIndex
 from minotaur.query.render import (
     QueryRecord,
     dump_json,
+    escape_text,
     render_json,
     render_system_json,
     render_system_text,
@@ -346,7 +347,7 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
                     and same_selection
                     and _analysis_facts_match(existing.document, selection.files, resolved.sql)
                 ):
-                    print("minotaur: graph is up to date, skipping analysis", file=sys.stderr)
+                    _write_stderr("minotaur: graph is up to date, skipping analysis")
                     return 0
                 # Ownership has been checked for explicit outputs; derived
                 # outputs also reconcile changes to their configured selection.
@@ -364,7 +365,7 @@ def _analyze(arguments: argparse.Namespace, located: Path | None) -> int:
         # Diagnostics describe source problems, not command misuse.  The
         # partial graph has already been written so tools can still consume
         # facts from readable files; stderr remains the human-facing summary.
-        print(_format_diagnostic(diagnostic), file=sys.stderr)
+        _write_stderr(_format_diagnostic(diagnostic))
     return 1 if result.errors else 0
 
 
@@ -498,10 +499,9 @@ def _warn_unresolved_imports(document: GraphDocument, root: Path) -> None:
         return
     percent = round(100 * mismatched / total)
     suggestion = f"--root {root / hint}" if hint else "a --root matching the package layout"
-    print(
+    _write_stderr(
         f"minotaur: warning: {percent}% of imports ({mismatched} of {total}) only resolve "
         f"with a different root; pass {suggestion} so module names match import names",
-        file=sys.stderr,
     )
 
 
@@ -510,7 +510,7 @@ def _git_source_control(root: Path) -> SourceControl | None:
     try:
         work_tree = git.work_tree_root(root)
     except git.GitProbeError as error:
-        print(f"minotaur: warning: {error}; source_control omitted", file=sys.stderr)
+        _write_stderr(f"minotaur: warning: {error}; source_control omitted")
         return None
     if work_tree is None:
         return None
@@ -566,10 +566,9 @@ def _report_analyzer_change(change: AnalyzerChange | None, *, refreshing: bool) 
     """Report analyzer drift consistently for analysis and query refreshes."""
     if change is not None:
         action = "refreshing" if refreshing else "not refreshing"
-        print(
+        _write_stderr(
             f"minotaur: analyzer version changed ({change.graph or 'none'} -> {change.current}), "
             f"{action}",
-            file=sys.stderr,
         )
 
 
@@ -581,7 +580,7 @@ def _report_stale(paths: Sequence[str]) -> None:
     refreshed or answered as-is.
     """
     for path in paths:
-        print(f"minotaur: stale: {path}", file=sys.stderr)
+        _write_stderr(f"minotaur: stale: {path}")
 
 
 def _report_absent_files(systems: Sequence[System], index: GraphIndex) -> None:
@@ -595,9 +594,8 @@ def _report_absent_files(systems: Sequence[System], index: GraphIndex) -> None:
     index (D-09), and never affects the query's own exit status.
     """
     for absent in absent_files(systems, index.nodes.values()):
-        print(
+        _write_stderr(
             f"minotaur: warning: {absent.file} (listed by system {absent.system.name})",
-            file=sys.stderr,
         )
 
 
@@ -639,9 +637,8 @@ def _load_and_refresh_graph(
     # line must not claim that a new graph exists yet.
     _report_analyzer_change(observed.analyzer, refreshing=True)
     if observed.paths:
-        print(
+        _write_stderr(
             f"minotaur: refreshing graph ({len(observed.paths)} drifted paths)",
-            file=sys.stderr,
         )
         _report_stale(observed.paths)
     all_targets = tuple(root / target for target in recorded)
@@ -827,7 +824,7 @@ def _run_committed_diff(query: argparse.Namespace, located: Path) -> int:
         sql_settings=resolved.sql,
     )
     for diagnostic in produced.diagnostics:
-        print(_format_diagnostic(diagnostic), file=sys.stderr)
+        _write_stderr(_format_diagnostic(diagnostic))
     # An error diagnostic marks its file's current analysis as incomplete, so
     # the diff withholds rows a missing fact could fabricate and exits 2.
     errors = produced.errors
@@ -1012,7 +1009,7 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
     )
     for diagnostic in (*before.diagnostics, *after.diagnostics):
         if diagnostic.is_warning:
-            print(_format_diagnostic(diagnostic), file=sys.stderr)
+            _write_stderr(_format_diagnostic(diagnostic))
     protected_files, protected_directories = _protected_comparison_paths(
         worktree, (before, after), (old_snapshot, new_snapshot)
     )
@@ -1063,7 +1060,7 @@ def _run_systems_diff(query: argparse.Namespace) -> int:
         )
     _write_stdout(output)
     if content is not None and len(content) > _LARGE_ARTIFACT_BYTES:
-        print("minotaur: warning: comparison report exceeds 10 MiB", file=sys.stderr)
+        _write_stderr("minotaur: warning: comparison report exceeds 10 MiB")
     return selected.exit_code
 
 
@@ -1715,7 +1712,7 @@ def _visualize(arguments: argparse.Namespace, located: Path | None) -> int:
         _error(str(error))
         return 2
     if len(content) > 10 * 1024 * 1024:
-        print("minotaur: warning: embedded visualizer exceeds 10 MiB", file=sys.stderr)
+        _write_stderr("minotaur: warning: embedded visualizer exceeds 10 MiB")
     return 0
 
 
@@ -1992,6 +1989,19 @@ def _thaw_diagnostic_metadata(value: object) -> object:
     return value
 
 
+def _write_stderr(line: str) -> None:
+    """Write one finished stderr line with non-printable characters escaped.
+
+    Every stderr producer passes its completed message through here, so text
+    supplied by the analyzed repository, its configuration, its system
+    definitions, a graph document, or a Git probe cannot carry raw control
+    characters to the terminal. The whole line is escaped as one unit --
+    which deliberately flattens a multi-line message such as a Git-probe
+    remediation to its escape spellings -- and one newline terminates it.
+    """
+    print(escape_text(line), file=sys.stderr)
+
+
 def _write_stdout(text: str) -> None:
     """Write command output without a failed write replacing the command's status.
 
@@ -2026,4 +2036,4 @@ def _discard_unwritten_output(stream: TextIO | None) -> None:
 
 def _error(message: str) -> None:
     """Keep command errors on stderr so stdout stays available to future piping."""
-    print(f"minotaur: error: {message}", file=sys.stderr)
+    _write_stderr(f"minotaur: error: {message}")
