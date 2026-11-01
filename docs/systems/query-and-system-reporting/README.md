@@ -10,6 +10,23 @@ This boundary includes the query package and the shared system-definition
 loader listed in `system.toml`. It excludes graph production, interpreter
 semantics, policy or architectural enforcement, and browser rendering.
 
+## Cross-system invariants
+
+Safe text output spans this system and `command-interface`. `escape_text` in
+`src/minotaur/query/render.py` is the single definition of an unsafe character:
+each character whose `str` form is not printable is replaced by Python's own
+escape, printable characters — including every non-ASCII letter — pass through
+unchanged, and no quotes are added. Record renderers escape the values they
+print field by field, at the point where each is interpolated, so no symbol
+label, path, kind, or role reaches a result line raw. `query diff --systems`
+prints a value as a JSON string when it contains whitespace or any character the
+helper changes, so one value stays one token. The `command-interface` whole-line
+stderr writer `_write_stderr` in `src/minotaur/cli.py` escapes each finished
+line once before printing it, so graph, configuration, system-definition, and
+Git-probe text cannot carry a raw control character to the terminal. `--json`
+output bypasses the helper and carries the exact strings, encoded only by the
+JSON serializer.
+
 ## Expected interactions
 
 The bullets below follow a fixed claim convention: a bullet of the form

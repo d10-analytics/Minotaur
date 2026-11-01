@@ -690,6 +690,14 @@ graph bytes unchanged, reports `refreshed: false`, `stale: []` and a non-null
 `diff` and `context` refresh nothing and keep their own envelopes; `context` reports per-file
 staleness in its result instead.
 
+Text output never prints a raw control or other non-printable character taken
+from the analyzed repository or a graph: in result lines and in messages on
+standard error, each such character prints as its Python escape (a newline as
+`\n`, ESC as `\x1b`, U+202E as `\u202e`), and printable text, including
+non-ASCII, prints unchanged. `query context` source lines keep a real tab,
+`query diff --systems` prints a value containing whitespace or such a character
+as a JSON string, and `--json` output carries the exact strings.
+
 Exit statuses are:
 
 * `0` — the compared structures are identical (ordinary graph queries also
