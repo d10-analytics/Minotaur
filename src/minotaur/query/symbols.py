@@ -10,6 +10,7 @@ from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.graph_model.relationship import Relationship
 from minotaur.query.index import GraphIndex
+from minotaur.query.render import escape_text
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 
 
@@ -212,13 +213,15 @@ def render_definitions_text(records: Sequence[DefinitionRecord]) -> str:
 
 
 def _caller_text(record: CallerRecord) -> str:
-    suffix = f" [{record.kind}]"
+    suffix = f" [{escape_text(record.kind)}]"
     if record.unresolved:
         suffix += " [unresolved]"
     label = (
         record.reference if record.unresolved and record.reference is not None else record.caller
     )
-    return f"{record.path}:{record.line}:{record.column}  {label}{suffix}\n"
+    return (
+        f"{escape_text(record.path)}:{record.line}:{record.column}  {escape_text(label)}{suffix}\n"
+    )
 
 
 def _matches_reference(reference: str, bare_name: str, *, sql: bool) -> bool:
@@ -234,4 +237,7 @@ def _matches_reference(reference: str, bare_name: str, *, sql: bool) -> bool:
 
 def _definition_text(record: DefinitionRecord) -> str:
     suffix = " [duplicate-name]" if record.duplicate else ""
-    return f"{record.path}:{record.line}  {record.symbol}  {record.kind}{suffix}\n"
+    return (
+        f"{escape_text(record.path)}:{record.line}  {escape_text(record.symbol)}  "
+        f"{escape_text(record.kind)}{suffix}\n"
+    )

@@ -9,7 +9,7 @@ from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
 from minotaur.query.correspondence import declaration_role
-from minotaur.query.render import dump_json
+from minotaur.query.render import dump_json, escape_text
 
 # The first item makes keys from different node classes unambiguous and avoids
 # collisions between symbols, files, and unresolved references.
@@ -234,12 +234,15 @@ def render_text(result: DiffResult) -> str:
 
 
 def _symbol_text(symbol: str, role: str | None) -> str:
-    return symbol if role is None else f"{symbol} ({role})"
+    symbol = escape_text(symbol)
+    return symbol if role is None else f"{symbol} ({escape_text(role)})"
 
 
 def _relationship_text(item: RelationshipChange) -> str:
     suffix = " [unresolved]" if item.unresolved else ""
-    return f"{item.kind} {item.source} → {item.target}{suffix}"
+    return (
+        f"{escape_text(item.kind)} {escape_text(item.source)} → {escape_text(item.target)}{suffix}"
+    )
 
 
 def _start(location: Location | None) -> tuple[str, int] | None:
@@ -267,10 +270,12 @@ def _relocation_text(item: Relocation) -> str:
     new_start = _start_record(item.new_location)
     if old_start is None or new_start is None:
         return f"~ {_symbol_text(item.symbol, item.role)} (relocated)\n"
-    if old_start["path"] == new_start["path"]:
-        move = f"{old_start['path']}:{old_start['line']}→{new_start['line']}"
+    old_path = escape_text(str(old_start["path"]))
+    new_path = escape_text(str(new_start["path"]))
+    if old_path == new_path:
+        move = f"{old_path}:{old_start['line']}→{new_start['line']}"
     else:
-        move = f"{old_start['path']}:{old_start['line']}→{new_start['path']}:{new_start['line']}"
+        move = f"{old_path}:{old_start['line']}→{new_path}:{new_start['line']}"
     return f"~ {_symbol_text(item.symbol, item.role)} (relocated {move})\n"
 
 

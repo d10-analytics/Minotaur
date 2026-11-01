@@ -1,17 +1,44 @@
-"""Shared JSON envelope helpers for query output."""
+"""Shared output helpers for query JSON envelopes and safe text.
+
+``dump_json`` renders the one canonical JSON form for every query envelope.
+``escape_text`` is the single owner of the safe-text character rule for text
+renderers: each character whose ``str`` form is not printable is replaced by
+Python's own spelling (``repr(c)[1:-1]``) with no quoting added, while
+printable characters -- including every non-ASCII letter -- pass through, so
+re-running the helper changes nothing. Ordinary renderer text escapes one
+interpolated graph/repo field at a time; ``query context`` source lines are
+exempt from the tab rule only and still use this helper for every other
+unsafe character.
+"""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from minotaur.query.freshness import AnalyzerChange
-from minotaur.query.system import SystemQueryResult
+
+if TYPE_CHECKING:
+    from minotaur.query.system import SystemQueryResult
 
 
 class QueryRecord(Protocol):
     def to_dict(self) -> dict[str, object]: ...
+
+
+def escape_text(text: str) -> str:
+    """Spell every non-printable character in ``text`` with Python's own escape.
+
+    This is the one definition of an unsafe character: a character for which
+    ``c.isprintable()`` is false is replaced by ``repr(c)[1:-1]`` -- ``\\n``,
+    ``\\r``, ``\\t``, ``\\x1b``, ``\\x7f``, the C1 range, and ``\\uNNNN`` format
+    characters such as ``\\u202e`` -- while printable characters, including
+    spaces, backslashes, quotes, and every non-ASCII letter, are returned
+    unchanged and no quotes are added. Escaped output is itself fully
+    printable, so applying the helper twice changes nothing.
+    """
+    return "".join(repr(char)[1:-1] if not char.isprintable() else char for char in text)
 
 
 def dump_json(payload: object) -> str:
@@ -86,7 +113,7 @@ def render_systems_text(result: SystemQueryResult[Any]) -> str:
         for record in records:
             declared = cast(Mapping[str, object], record["declared_files"])
             output += (
-                f"{record['name']}  declared {declared['total']}  "
+                f"{escape_text(str(record['name']))}  declared {declared['total']}  "
                 f"represented {declared['represented']}  absent {declared['absent']}\n"
             )
     else:
