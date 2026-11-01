@@ -46,11 +46,27 @@ CSI_FILE = "c1\x9bcsi.py"
 ESC_FILE = "esc\x1bx.py"
 RTL_FILE = "rtl\u202eevil.py"
 
-#: A namespaced kind the graph schema admits: its pattern ends in ``$``, which
-#: also matches before a trailing newline.
+#: A namespaced kind with a trailing newline: the schema's Python ``re.search``
+#: accepts it, and the model's ``re.fullmatch`` refuses it, so no graph carrying
+#: it loads. Direct renderer calls below still hand it to the renderers.
 HOSTILE_KIND = "x:y\n"
 #: The same trailing newline on a spelling a real query does select.
 HOSTILE_SQL_CALLS = "sql:calls\n"
+#: The same spellings without the newline: valid namespaced kinds.
+VALID_KIND = "x:y"
+VALID_SQL_CALLS = "sql:calls"
+
+SYMBOL_KIND_REFUSAL = "is not a core symbol_kind or a valid namespaced extension"
+RELATIONSHIP_KIND_REFUSAL = "is not a core relationship kind or a valid namespaced extension"
+
+
+def _assert_refused(capsys: pytest.CaptureFixture[str], args: list, *fragments: str) -> None:
+    """The load is refused: exit 2, nothing on stdout, the model message on stderr."""
+    assert cli.main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    for fragment in fragments:
+        assert fragment in captured.err
 
 
 def _write(root: Path, relative: str, text: str) -> None:
@@ -257,29 +273,57 @@ def test_callers_and_impact_escape_hand_edited_labels(
     assert captured.err == ""
 
 
-@pytest.fixture(scope="module")
-def hostile_kind_graph(hostile_repo: dict) -> Path:
-    """The analyzed graph with one hostile symbol kind and two hostile edge kinds."""
+def _kind_graph(hostile_repo: dict, name: str, symbol_kind: str, edge_kinds: tuple) -> Path:
+    """The analyzed graph with one symbol kind and two added edge kinds."""
     raw = json.loads(hostile_repo["graph"].read_text(encoding="utf-8"))
-    _set_symbol_kind(raw, "rtl\u202eevil.rtl_unused", HOSTILE_KIND)
-    for kind in (HOSTILE_KIND, HOSTILE_SQL_CALLS):
+    _set_symbol_kind(raw, "rtl\u202eevil.rtl_unused", symbol_kind)
+    for kind in edge_kinds:
         _add_edge(raw, "c1\x9bcsi.csi_caller", "nl\nname.target", CSI_FILE, kind=kind)
-    edited = hostile_repo["root"] / "graph_kinds.json"
+    edited = hostile_repo["root"] / name
     edited.write_text(json.dumps(raw), encoding="utf-8")
     return edited
 
 
-def test_definitions_and_diff_escape_hostile_kinds(
-    hostile_repo: dict, hostile_kind_graph: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    common = ["--graph", str(hostile_kind_graph), "--root", str(hostile_repo["source"])]
+@pytest.fixture(scope="module")
+def hostile_kind_graph(hostile_repo: dict) -> Path:
+    """The analyzed graph with a hostile symbol kind and two hostile edge kinds."""
+    return _kind_graph(
+        hostile_repo, "graph_hostile_kinds.json", HOSTILE_KIND, (HOSTILE_KIND, HOSTILE_SQL_CALLS)
+    )
 
+
+@pytest.fixture(scope="module")
+def valid_kind_graph(hostile_repo: dict) -> Path:
+    """The same graph with the kinds spelled without the trailing newline."""
+    return _kind_graph(hostile_repo, "graph_kinds.json", VALID_KIND, (VALID_KIND, VALID_SQL_CALLS))
+
+
+def test_definitions_and_diff_escape_hostile_kinds(
+    hostile_repo: dict,
+    hostile_kind_graph: Path,
+    valid_kind_graph: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = str(hostile_repo["source"])
+    base = str(hostile_repo["graph"])
+
+    # A kind with a trailing newline never loads, so no query prints it.
+    refused = ["--graph", str(hostile_kind_graph), "--root", source]
+    _assert_refused(
+        capsys,
+        ["query", "definitions", "rtl_unused", *refused, "--no-refresh"],
+        SYMBOL_KIND_REFUSAL,
+    )
+    _assert_refused(capsys, ["query", "diff", base, str(hostile_kind_graph)], SYMBOL_KIND_REFUSAL)
+
+    # The path and label escapes hold on a graph whose kinds are valid.
+    common = ["--graph", str(valid_kind_graph), "--root", source]
     assert cli.main(["query", "definitions", "rtl_unused", *common, "--no-refresh"]) == 0
     captured = capsys.readouterr()
-    _assert_safe_lines(captured.out, ["rtl\\u202eevil.py:1  rtl\\u202eevil.rtl_unused  x:y\\n"])
+    _assert_safe_lines(captured.out, ["rtl\\u202eevil.py:1  rtl\\u202eevil.rtl_unused  x:y"])
     assert captured.err == ""
 
-    diff = ["query", "diff", str(hostile_repo["graph"]), str(hostile_kind_graph)]
+    diff = ["query", "diff", base, str(valid_kind_graph)]
     assert cli.main(diff) == 1
     captured = capsys.readouterr()
     _assert_safe_lines(
@@ -287,8 +331,8 @@ def test_definitions_and_diff_escape_hostile_kinds(
         [
             "+ rtl\\u202eevil.rtl_unused",
             "- rtl\\u202eevil.rtl_unused",
-            "+ sql:calls\\n c1\\x9bcsi.csi_caller → nl\\nname.target",
-            "+ x:y\\n c1\\x9bcsi.csi_caller → nl\\nname.target",
+            "+ sql:calls c1\\x9bcsi.csi_caller → nl\\nname.target",
+            "+ x:y c1\\x9bcsi.csi_caller → nl\\nname.target",
         ],
     )
     assert captured.err == ""
@@ -296,36 +340,50 @@ def test_definitions_and_diff_escape_hostile_kinds(
     payload, out = _json_run(
         capsys, ["query", "definitions", "rtl_unused", *common, "--no-refresh"]
     )
-    assert payload["results"][0]["kind"] == HOSTILE_KIND
+    assert payload["results"][0]["kind"] == VALID_KIND
     _assert_canonical_json(out)
 
     payload, out = _json_run(capsys, diff, status=1)
     assert [item["kind"] for item in payload["relationships_added"]] == [
-        HOSTILE_SQL_CALLS,
-        HOSTILE_KIND,
+        VALID_SQL_CALLS,
+        VALID_KIND,
     ]
     _assert_canonical_json(out)
 
 
 def test_callers_and_unreferenced_select_only_fixed_kinds(
-    hostile_repo: dict, hostile_kind_graph: Path, capsys: pytest.CaptureFixture[str]
+    hostile_repo: dict,
+    hostile_kind_graph: Path,
+    valid_kind_graph: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The graph carries the hostile kinds, and these two queries never list them.
+    """A hostile kind refuses the load; unselected extension kinds are absent.
 
-    Both queries match kinds exactly against fixed sets, so the edges and the
-    symbol the previous test prints are absent here rather than escaped.
+    ``unreferenced`` matches symbol kinds exactly against a fixed set, so the
+    symbol the previous test prints is absent here; ``callers`` lists the
+    valid ``sql:calls`` edge it selects and omits the ``x:y`` edge.
     """
-    common = [
-        "--graph",
-        str(hostile_kind_graph),
-        "--root",
-        str(hostile_repo["source"]),
-        "--no-refresh",
-    ]
 
+    def args(graph: Path) -> list:
+        return ["--graph", str(graph), "--root", str(hostile_repo["source"]), "--no-refresh"]
+
+    _assert_refused(
+        capsys,
+        ["query", "callers", "nl\nname.target", *args(hostile_kind_graph)],
+        SYMBOL_KIND_REFUSAL,
+    )
+    _assert_refused(
+        capsys, ["query", "unreferenced", *args(hostile_kind_graph)], SYMBOL_KIND_REFUSAL
+    )
+
+    common = args(valid_kind_graph)
     assert cli.main(["query", "callers", "nl\nname.target", *common]) == 0
     _assert_safe_lines(
-        capsys.readouterr().out, ["c1\\x9bcsi.py:2:12  target [references] [unresolved]"]
+        capsys.readouterr().out,
+        [
+            "c1\\x9bcsi.py:2:12  c1\\x9bcsi.csi_caller [sql:calls]",
+            "c1\\x9bcsi.py:2:12  target [references] [unresolved]",
+        ],
     )
 
     assert cli.main(["query", "unreferenced", *common]) == 0
@@ -490,36 +548,46 @@ def test_diff_escapes_hostile_graph_changes(
 def test_diff_relocation_chooses_the_form_on_raw_paths(
     hostile_repo: dict, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A move between two paths that print alike still shows both endpoints.
+    """A path with a backslash after a newline is refused; a real newline prints escaped.
 
-    ``a<LF>q<LF>z.py`` and ``a<LF>q\\nz.py`` (a real newline, then a literal
-    backslash and ``n``) are different files with one escaped spelling, so a
-    form chosen on escaped text would print this cross-file move as a line
-    shift, ``…:1→1``. The destination's real newline also proves that endpoint
-    is escaped. The pair is schema-valid only because the safe-path checks stop
-    at the first newline and miss the later backslash; once that gap is closed
-    this test fails at graph load rather than passing silently.
+    ``a<LF>q\\nz.py`` (a real newline, then a literal backslash and ``n``) is
+    not a valid graph path: the safe-path rule applies across line breaks, so
+    the graph is refused at load rather than printed as a line shift. The
+    graph is written by hand because ``Location.from_dict`` raises on that
+    path. A relocation to a valid path with a real newline still prints both
+    endpoints, the destination escaped.
     """
-    old_path, new_path = "a\nq\nz.py", "a\nq\\nz.py"
-    graphs = []
-    for name, path in (("old.json", old_path), ("new.json", new_path)):
+    old_path, valid_path, bad_path = "a\nq\nz.py", "b\nz.py", "a\nq\\nz.py"
+    graphs = {}
+    for name, path in (("old.json", old_path), ("new.json", valid_path)):
         raw = json.loads(hostile_repo["graph"].read_text(encoding="utf-8"))
         _relocate_symbol(raw, "nl\nname.unused", path, 0)
         graph = tmp_path / name
         graph.write_text(json.dumps(raw), encoding="utf-8")
-        graphs.append(str(graph))
-    diff = ["query", "diff", *graphs]
+        graphs[name] = str(graph)
 
+    raw = json.loads(Path(graphs["old.json"]).read_text(encoding="utf-8"))
+    node = next(n for n in raw["nodes"] if n.get("label") == "nl\nname.unused")
+    assert node["location"]["path"] == old_path
+    node["location"]["path"] = bad_path
+    bad_graph = tmp_path / "bad.json"
+    bad_graph.write_text(json.dumps(raw), encoding="utf-8")
+    _assert_refused(
+        capsys,
+        ["query", "diff", graphs["old.json"], str(bad_graph)],
+        "location.path:",
+        "does not match",
+    )
+
+    diff = ["query", "diff", graphs["old.json"], graphs["new.json"]]
     assert cli.main(diff) == 1
     captured = capsys.readouterr()
-    _assert_safe_lines(
-        captured.out, ["~ nl\\nname.unused (relocated a\\nq\\nz.py:1→a\\nq\\nz.py:1)"]
-    )
+    _assert_safe_lines(captured.out, ["~ nl\\nname.unused (relocated a\\nq\\nz.py:1→b\\nz.py:1)"])
     assert captured.err == ""
 
     payload, out = _json_run(capsys, diff, status=1)
     assert [(item["from"]["path"], item["to"]["path"]) for item in payload["relocated"]] == [
-        (old_path, new_path)
+        (old_path, valid_path)
     ]
     _assert_canonical_json(out)
 
@@ -630,7 +698,12 @@ def systems_edited_graph(systems_repo: dict) -> dict:
 
 
 def _systems_run(
-    systems_repo: dict, capsys: pytest.CaptureFixture[str], args: list, *, edited: bool
+    systems_repo: dict,
+    capsys: pytest.CaptureFixture[str],
+    args: list,
+    *,
+    edited: bool,
+    status: int = 0,
 ) -> str:
     """Answer one system query from the configured repository, via the real CLI."""
     root = systems_repo["root"]
@@ -640,7 +713,7 @@ def _systems_run(
         complete = list(args)
         if edited:
             complete += ["--graph", str(systems_repo["edited"]), "--no-refresh"]
-        assert cli.main(complete) == 0
+        assert cli.main(complete) == status
     finally:
         os.chdir(previous)
     return capsys.readouterr().out
@@ -743,20 +816,38 @@ def test_system_details_lines_spell_hostile_text_as_json_ascii(
 def test_system_queries_select_only_fixed_kinds(
     systems_repo: dict, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A loaded edge with a hostile kind reaches no system-query kind field."""
-    raw = json.loads((systems_repo["root"] / "graph.json").read_text(encoding="utf-8"))
-    for kind in (HOSTILE_KIND, HOSTILE_SQL_CALLS):
-        _add_edge(raw, "consumer.consume", "app.api.offered", "consumer.py", kind=kind)
-    edited = systems_repo["root"] / "graph_kinds.json"
-    edited.write_text(json.dumps(raw), encoding="utf-8")
+    """A hostile edge kind refuses the load; an unselected valid kind reaches no field."""
+
+    def kinds_graph(name: str, kinds: tuple) -> Path:
+        raw = json.loads((systems_repo["root"] / "graph.json").read_text(encoding="utf-8"))
+        for kind in kinds:
+            _add_edge(raw, "consumer.consume", "app.api.offered", "consumer.py", kind=kind)
+        path = systems_repo["root"] / name
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        return path
+
+    hostile = kinds_graph("graph_hostile_kinds.json", (HOSTILE_KIND, HOSTILE_SQL_CALLS))
+    base = str(systems_repo["root"] / "graph.json")
+    _assert_refused(capsys, ["query", "diff", base, str(hostile)], RELATIONSHIP_KIND_REFUSAL)
+    for query in ("surface", "consumers", "system-deps"):
+        target = "plain" if query == "system-deps" else "zone\u202e"
+        out = _systems_run(
+            systems_repo,
+            capsys,
+            ["query", query, target, "--graph", str(hostile), "--no-refresh"],
+            edited=False,
+            status=2,
+        )
+        assert out == ""
+
+    edited = kinds_graph("graph_kinds.json", (VALID_KIND,))
     common = ["--graph", str(edited), "--no-refresh"]
 
     assert cli.main(["query", "diff", str(systems_repo["root"] / "graph.json"), str(edited)]) == 1
     _assert_safe_lines(
         capsys.readouterr().out,
         [
-            "+ sql:calls\\n consumer.consume → app.api.offered",
-            "+ x:y\\n consumer.consume → app.api.offered",
+            "+ x:y consumer.consume → app.api.offered",
         ],
     )
 
