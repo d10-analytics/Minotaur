@@ -1081,6 +1081,12 @@ def test_format_document_states_the_pattern_and_path_rules() -> None:
         "(extension property-name patterns are not in that list)"
     ) in text
     assert (
+        "so both paths agree on the field ranges; a trailing line feed is rejected in "
+        "every one of these fields except paths, where it is an ordinary control "
+        "character and valid;"
+    ) in text
+    assert "a trailing line feed is rejected; only" not in text
+    assert (
         "A path is invalid if it is empty, has a leading `/`, has an empty segment (`//`), "
         "has a `.` or `..` segment, contains `\\`, or contains NUL. The rule applies across "
         "line breaks, so a line feed does not hide a later segment or `\\`; other control "

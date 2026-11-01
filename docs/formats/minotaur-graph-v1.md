@@ -34,7 +34,8 @@ context. When present, `generated_at` is a UTC RFC 3339 timestamp ending in
 `source_control.commit`, node ids and paths are each checked by the schema
 `pattern` and by the model's `re.fullmatch` of the same pattern (extension
 property-name patterns are not in that list), so both paths agree on the field
-ranges and a trailing line feed is rejected; only the model separately verifies
+ranges; a trailing line feed is rejected in every one of these fields except
+paths, where it is an ordinary control character and valid; only the model separately verifies
 day-of-month validity with `datetime.fromisoformat`, so a well-formed but
 impossible date such as `2026-02-30T00:00:00Z` is rejected on the model path
 alone. Git commits are full lowercase 40- or 64-character IDs. These fields are
