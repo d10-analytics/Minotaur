@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from minotaur.query.call_diff import CallChange
-from minotaur.query.render import dump_json
+from minotaur.query.render import dump_json, escape_text
 from minotaur.query.system import _thaw_json
 from minotaur.query.system_diff import SystemChange, SystemDiffResult
 from minotaur.system import UnknownSystem
@@ -584,9 +584,7 @@ def _safe_atom(value: object) -> str:
     if value is None:
         return "unavailable"
     text = str(value)
-    if any(
-        character.isspace() or ord(character) < 32 or ord(character) == 127 for character in text
-    ):
+    if any(character.isspace() for character in text) or escape_text(text) != text:
         return json.dumps(text, ensure_ascii=True)
     return text
 

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from minotaur.graph_model.provenance import NodeClass, RelationshipKind
 from minotaur.graph_model.slicing import bfs
 from minotaur.query.index import GraphIndex
+from minotaur.query.render import escape_text
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 
 
@@ -109,6 +110,7 @@ def render_text(records: Sequence[ImpactRecord]) -> str:
     if not records:
         return "no impact\n"
     return "".join(
-        f"{'[boundary] ' if record.boundary else ''}depth {record.depth}: {record.symbol}\n"
+        f"{'[boundary] ' if record.boundary else ''}depth {record.depth}: "
+        f"{escape_text(record.symbol)}\n"
         for record in records
     )

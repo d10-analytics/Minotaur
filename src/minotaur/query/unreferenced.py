@@ -11,6 +11,7 @@ from pathlib import Path
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.query.index import GraphIndex
+from minotaur.query.render import escape_text
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.query.symbols import label_bare_name, node_bare_name
 from minotaur.source_encoding import decode_python_source, is_python_source_path
@@ -117,7 +118,8 @@ def render_text(records: Iterable[UnreferencedRecord]) -> str:
     if not records:
         return "no unreferenced symbols\n"
     return "".join(
-        f"{record.path}:{record.line}  {record.symbol}  {record.kind}"
+        f"{escape_text(record.path)}:{record.line}  {escape_text(record.symbol)}  "
+        f"{escape_text(record.kind)}"
         f"{' [text-mention]' if record.text_mention else ''}\n"
         for record in records
     )

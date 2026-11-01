@@ -11,6 +11,9 @@ implementation listed in `system.toml`. It excludes project acquisition,
 graph entities and serialization, language-analysis semantics, query policy,
 and source or browser presentation.
 
+Safe text output, including this system's whole-line stderr escaping, follows
+the [query and system reporting cross-system invariants](../query-and-system-reporting/README.md#cross-system-invariants).
+
 ## Expected interactions
 
 The bullets below follow a fixed claim convention: a bullet of the form

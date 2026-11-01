@@ -18,6 +18,7 @@ from minotaur.graph_model.loading import graph_digest, stamp_path
 from minotaur.graph_model.provenance import NodeClass, Provenance
 from minotaur.language_interpreter.contract import AnalysisResult
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
+from minotaur.query.render import dump_json
 
 if TYPE_CHECKING:
     from conftest import InterpreterFault
@@ -4385,3 +4386,59 @@ def test_systems_diff_keeps_unique_node_names_free_of_role_and_line(
         "node added: app.m.C.b (app/m.py, method)",
         "relationship added: app.m.C -> app.m.C.b (contains)",
     ]
+
+
+def _hostile_declared_repo(tmp_path: Path) -> Path:
+    """A Git repository whose system declares files with control and format
+    characters in their names, committed, then redeclared in the tree."""
+    root = _repo(tmp_path)
+    module = root / "a"
+    module.mkdir(parents=True)
+    (module / "api.py").write_text("def receive():\n    return 1\n", encoding="utf-8")
+    (module / "c1\x9bcsi.py").write_text("def csi():\n    return 1\n", encoding="utf-8")
+    (module / "rtl\u202eevil.py").write_text("def rtl():\n    return 1\n", encoding="utf-8")
+    (root / ".minotaur.toml").write_text(
+        '[minotaur]\nschema_version = 1\nroot = "."\ngraph = "graph.json"\ntargets = ["a"]\n',
+        encoding="utf-8",
+    )
+    definition = root / "docs" / "systems" / "app"
+    definition.mkdir(parents=True)
+    definition.joinpath("system.toml").write_text(
+        'schema_version = 1\nname = "App"\nfiles = ["a/c1\u009bcsi.py"]\n', encoding="utf-8"
+    )
+    previous = os.getcwd()
+    os.chdir(root)
+    try:
+        assert cli.main(["analyze"]) == 0
+    finally:
+        os.chdir(previous)
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "baseline")
+    definition.joinpath("system.toml").write_text(
+        'schema_version = 1\nname = "App"\nfiles = ["a/rtl\u202eevil.py"]\n', encoding="utf-8"
+    )
+    return root
+
+
+def test_systems_diff_quotes_control_character_declared_files_as_text_and_keeps_json_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _hostile_declared_repo(tmp_path)
+    monkeypatch.chdir(root)
+
+    assert cli.main(["query", "diff", "--systems"]) == 1
+    text = capsys.readouterr().out
+    # The quoted \u009b and \u202e spellings; neither raw character may appear.
+    assert 'membership changed: "a/c1\\u009bcsi.py"' in text
+    assert 'membership changed: "a/rtl\\u202eevil.py"' in text
+    assert "\u009b" not in text
+    assert "\u202e" not in text
+
+    assert cli.main(["query", "diff", "--systems", "--json"]) == 1
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    keys = [change["key"] for change in payload["membership_changes"]]
+    assert keys == [["a/c1\x9bcsi.py"], ["a/rtl\u202eevil.py"]]
+    assert out == dump_json(payload)
+    assert "\u009b" not in out
+    assert "\u202e" not in out

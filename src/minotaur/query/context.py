@@ -11,7 +11,7 @@ from minotaur.graph_model.location import is_safe_path
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
 from minotaur.query.freshness import content_sha256
-from minotaur.query.render import dump_json
+from minotaur.query.render import dump_json, escape_text
 from minotaur.source import read_source_path
 
 
@@ -139,11 +139,21 @@ def render_text(record: ContextRecord) -> str:
         output.append("[file changed since analysis]\n")
     elif not record.hash_available:
         output.append("[file hash unavailable]\n")
-    output.append(f"{record.path}:{record.lines[0].line}-{record.lines[-1].line}\n")
+    output.append(f"{escape_text(record.path)}:{record.lines[0].line}-{record.lines[-1].line}\n")
     output.extend(
-        f"{'>' if line.target else ' '} {line.line}: {line.text}\n" for line in record.lines
+        f"{'>' if line.target else ' '} {line.line}: {_escape_source_line(line.text)}\n"
+        for line in record.lines
     )
     return "".join(output)
+
+
+def _escape_source_line(text: str) -> str:
+    # A real tab is the one exempt character in source lines: splitting on it,
+    # escaping each tab-free segment, and rejoining keeps tab indentation
+    # legible while every other unsafe character in the line is spelled out by
+    # escape_text. escape_text maps a tab to ``\t`` inside a segment, so no
+    # introduced spelling can be split again.
+    return "\t".join(escape_text(part) for part in text.split("\t"))
 
 
 def render_json(record: ContextRecord) -> str:

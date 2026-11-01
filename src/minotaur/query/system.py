@@ -60,6 +60,7 @@ from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.graph_model.relationship import Relationship
 from minotaur.query.freshness import AnalyzerChange, recorded_selection_view
 from minotaur.query.index import GraphIndex
+from minotaur.query.render import escape_text
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.system import EndpointKind, System, SystemMembership, resolve_system
 
@@ -347,7 +348,9 @@ def render_surface_text(records: Sequence[SurfaceRecord]) -> str:
     if not records:
         return "no exposed symbols\n"
     return "".join(
-        f"{record.path}  {record.symbol}  {', '.join(record.kinds)}\n" for record in records
+        f"{escape_text(record.path)}  {escape_text(record.symbol)}  "
+        f"{', '.join(escape_text(kind) for kind in record.kinds)}\n"
+        for record in records
     )
 
 
@@ -356,7 +359,8 @@ def render_consumers_text(records: Sequence[ConsumersRecord]) -> str:
     if not records:
         return "no consumers\n"
     return "".join(
-        f"{record.file} ({record.category})  {_render_groups(record.targets)}\n"
+        f"{escape_text(record.file)} ({escape_text(record.category)})  "
+        f"{_render_groups(record.targets)}\n"
         for record in records
     )
 
@@ -365,7 +369,9 @@ def render_system_deps_text(records: Sequence[SystemDepsRecord]) -> str:
     """Render one line per target category with its grouped target detail."""
     if not records:
         return "no dependencies\n"
-    return "".join(f"{record.category}  {_render_groups(record.targets)}\n" for record in records)
+    return "".join(
+        f"{escape_text(record.category)}  {_render_groups(record.targets)}\n" for record in records
+    )
 
 
 def _endpoint_file(membership: SystemMembership, node: Node) -> str | None:
@@ -390,10 +396,10 @@ def _render_groups(targets: Iterable[TargetDetail]) -> str:
     """Render a nested target list grouped by kind, deterministic order."""
     groups: dict[str, list[str]] = defaultdict(list)
     for target in sorted(targets, key=_target_sort_key):
-        entry = target.label or ""
+        entry = escape_text(target.label or "")
         if target.path is not None:
-            entry = f"{entry} ({target.path})"
-        groups[target.kind].append(entry)
+            entry = f"{entry} ({escape_text(target.path)})"
+        groups[escape_text(target.kind)].append(entry)
     return "; ".join(f"{kind}: {', '.join(groups[kind])}" for kind in sorted(groups))
 
 

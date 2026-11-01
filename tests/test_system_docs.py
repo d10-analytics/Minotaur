@@ -1112,3 +1112,132 @@ def test_graph_format_reference_states_plain_diff_reads_declaration_role() -> No
         "Plain `query diff` reads the same recognised role, keys each symbol by kind, "
         "label, role and source order, and appends the role to its text label and JSON record."
     ) in text
+
+
+# ---------------------------------------------------------------------------
+# AC-12: the safe text output contract and its system-README invariant
+# ---------------------------------------------------------------------------
+
+QUERY_AND_SYSTEM_REPORTING_README = ROOT / "docs/systems/query-and-system-reporting/README.md"
+COMMAND_INTERFACE_README = ROOT / "docs/systems/command-interface/README.md"
+
+SAFE_TEXT_RULE = (
+    "Text output never prints a raw control or other non-printable character taken "
+    "from the analyzed repository or a graph: in result lines and in messages on "
+    "standard error, each such character prints as its Python escape (a newline as "
+    "`\\n`, ESC as `\\x1b`, U+202E as `\\u202e`), and printable text, including "
+    "non-ASCII, prints unchanged."
+)
+
+SAFE_TEXT_EXCEPTIONS = (
+    "`query context` source lines keep a real tab, `query diff --systems` prints a "
+    "value containing whitespace or such a character as a JSON string, and `--json` "
+    "output carries the exact strings."
+)
+
+GUIDE_JSON_FRAGMENT_ESCAPES = (
+    "A JSON-encoded fragment embedded in any printed line — a result line on standard "
+    "output or a diagnostic or message line on standard error — is escaped by the JSON "
+    "serializer instead: a value there uses JSON's ASCII escapes, such as `\\u001b` for "
+    "ESC and `\\u00e9` for `é`, so the same name can appear in two spellings on adjacent "
+    "lines, and no raw character is ever printed."
+)
+
+GUIDE_JSON_FRAGMENT_SITES = (
+    "Examples include `coverage` and `relationships` in system-query text, "
+    "`declared_files` and `connections` in `query systems --details`, the "
+    "`old coverage`, `new coverage`, `old selection`, and `new selection` lines of "
+    "`query diff --systems` with its `old`, `new`, `old evidence`, and `new evidence` "
+    "values, and the `metadata=` object of an analysis diagnostic on standard error."
+)
+
+ESCAPE_HELPER_SENTENCE = (
+    "`escape_text` in `src/minotaur/query/render.py` is the single definition of an "
+    "unsafe character: each character whose `str` form is not printable is replaced by "
+    "Python's own escape, printable characters — including every non-ASCII letter — pass "
+    "through unchanged, and no quotes are added."
+)
+
+PER_FIELD_STDOUT_SENTENCE = (
+    "Record renderers escape the values they print field by field, at the point where "
+    "each is interpolated, so no symbol label, path, kind, or role reaches a result line "
+    "raw."
+)
+
+SYSTEMS_DIFF_QUOTING_SENTENCE = (
+    "`query diff --systems` prints a value as a JSON string when it contains whitespace "
+    "or any character the helper changes, so one value stays one token."
+)
+
+STDERR_WRITER_SENTENCE = (
+    "The `command-interface` whole-line stderr writer `_write_stderr` in "
+    "`src/minotaur/cli.py` escapes each finished line once before printing it, so graph, "
+    "configuration, system-definition, and Git-probe text cannot carry a raw control "
+    "character to the terminal."
+)
+
+UNESCAPED_JSON_SENTENCE = (
+    "`--json` output bypasses the helper and carries the exact strings, encoded only by "
+    "the JSON serializer."
+)
+
+README_JSON_FRAGMENT_ESCAPES = (
+    "A JSON-encoded fragment embedded in any printed line — a result line on standard "
+    "output or a diagnostic or message line on standard error — is escaped by the JSON "
+    "serializer instead, so its values use JSON's ASCII escapes (`\\u001b` for ESC, "
+    "`\\u00e9` for `é`) and a value there can differ in spelling from an escaped field on "
+    "the next line; no raw character is printed."
+)
+
+README_JSON_FRAGMENT_SITES = (
+    "Examples include the `coverage` and `relationships` lines of system-query text, the "
+    "`declared_files` and `connections` lines of `query systems --details`, the old/new "
+    "coverage and selection lines with the detail values of `query diff --systems`, and "
+    "the `metadata=` object of an analysis diagnostic on standard error."
+)
+
+INVARIANT_LINK = "../query-and-system-reporting/README.md#cross-system-invariants"
+
+COMMAND_INTERFACE_INVARIANT_POINTER = (
+    "Safe text output, including this system's whole-line stderr escaping, follows the "
+    f"[query and system reporting cross-system invariants]({INVARIANT_LINK})."
+)
+
+
+def test_query_reference_documents_the_safe_text_output_contract() -> None:
+    text = _collapsed(QUERY_REFERENCE)
+    # The contract belongs to the output section, not to a command's description.
+    section = text[text.index("## Output and exit status") :]
+    assert SAFE_TEXT_RULE in section
+    assert SAFE_TEXT_EXCEPTIONS in section
+    assert GUIDE_JSON_FRAGMENT_ESCAPES in section
+    assert GUIDE_JSON_FRAGMENT_SITES in section
+
+
+def test_system_readme_documents_the_cross_system_safe_text_invariants() -> None:
+    text = _collapsed(QUERY_AND_SYSTEM_REPORTING_README)
+    # The shared helper lives in this system, so it owns the invariant section;
+    # the owner rule places it before the interaction claims.
+    assert text.index("## Cross-system invariants") < text.index("## Expected interactions")
+    section = text[
+        text.index("## Cross-system invariants") : text.index("## Expected interactions")
+    ]
+    assert ESCAPE_HELPER_SENTENCE in section
+    assert PER_FIELD_STDOUT_SENTENCE in section
+    assert SYSTEMS_DIFF_QUOTING_SENTENCE in section
+    assert README_JSON_FRAGMENT_ESCAPES in section
+    assert README_JSON_FRAGMENT_SITES in section
+    assert STDERR_WRITER_SENTENCE in section
+    assert UNESCAPED_JSON_SENTENCE in section
+    assert "points to" not in section, "the invariant text must not read as an interaction claim"
+
+
+def test_command_interface_readme_links_the_cross_system_safe_text_invariants() -> None:
+    text = _collapsed(COMMAND_INTERFACE_README)
+    # The stderr writer lives here, but the shared rule is owned by the other
+    # system, so this README carries one pointer before its interaction claims.
+    before_interactions = text[: text.index("## Expected interactions")]
+    # The pointer sentence embeds the link target, so its assertion also covers
+    # the exact anchor; the repository-wide link check resolves it.
+    assert COMMAND_INTERFACE_INVARIANT_POINTER in before_interactions
+    assert "points to" not in before_interactions, "the pointer must not read as a claim"
