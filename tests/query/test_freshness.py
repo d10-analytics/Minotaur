@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import pytest
 from minotaur import cli
 from minotaur.graph_model.loading import graph_digest, load_graph_file, stamp_path
 from minotaur.query.freshness import content_sha256, drift
+from minotaur.source import resolve_source_path
 
 if TYPE_CHECKING:
     from conftest import InterpreterFault
@@ -693,3 +695,65 @@ def test_drift_reports_self_referential_symlink_missing_without_raising(
 
     assert observed.missing == ("a.py",)
     assert observed.changed == ()
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores directory modes"
+)
+def test_source_path_helper_propagates_permission_errors_and_maps_absence_to_none(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "source").resolve()
+    _write(root, "pkg/a.py", "x = 1\n")
+    _write(root, "plain.py", "x = 1\n")
+    (root / "loop.py").symlink_to("loop.py")
+    assert resolve_source_path(root, "pkg/a.py") == root / "pkg/a.py"
+    assert resolve_source_path(root, "missing.py") is None
+    assert resolve_source_path(root, "plain.py/inner.py") is None
+    assert resolve_source_path(root, "loop.py") is None
+
+    (root / "pkg").chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            resolve_source_path(root, "pkg/a.py")
+    finally:
+        (root / "pkg").chmod(0o755)
+
+
+def test_source_path_helper_maps_eloop_oserror_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+
+    def loop(self: Path, strict: bool = False) -> Path:
+        raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+
+    monkeypatch.setattr(Path, "resolve", loop)
+
+    assert resolve_source_path(root, "a.py") is None
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores directory modes"
+)
+def test_query_under_unreadable_directory_keeps_the_permission_error_and_graph(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "pkg/a.py", "def foo():\n    return 1\n")
+    _write(root, "b.py", "def bar():\n    return 2\n")
+    output = tmp_path / "graph.json"
+    assert _analyze(root, output, root) == 0
+    before = output.read_bytes()
+    sidecar = stamp_path(output).read_bytes()
+    capsys.readouterr()
+    (root / "pkg").chmod(0)
+    try:
+        assert _query_definitions(root, output) == 2
+    finally:
+        (root / "pkg").chmod(0o755)
+
+    captured = capsys.readouterr()
+    assert "minotaur: error: [Errno 13] Permission denied" in captured.err
+    assert output.read_bytes() == before
+    assert stamp_path(output).read_bytes() == sidecar

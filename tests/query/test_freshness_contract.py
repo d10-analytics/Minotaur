@@ -995,23 +995,54 @@ def test_tracked_file_replaced_by_out_of_root_symlink_is_reported_missing(
     assert explicit_output.read_bytes() == graph_before
     assert stamp_path(explicit_output).read_bytes() == sidecar_before
 
-    # The document states both rows' claims.
+    # The document states each row's claims inside that row.
     repository = Path(__file__).resolve().parents[2]
-    text = re.sub(
-        r"\s+", " ", (repository / "docs/concepts/freshness.md").read_text(encoding="utf-8")
-    )
-    for claim in (
-        "`analyze` a directory, replace a tracked file, or a directory on its path, with a "
-        "symlink that resolves outside the root, then query",
-        "`analyze` explicit files, replace one with a symlink that resolves outside the root, "
-        "then query",
-        "the refreshed graph omits the file",
-        "the different-tree refusal (exit `2`) applies when every recorded file is missing or "
-        "escapes",
-        "the refresh is refused with `target escapes root`",
-        "graph and sidecar unchanged",
+    rows = [
+        re.sub(r"\s+", " ", line)
+        for line in (repository / "docs/concepts/freshness.md")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.startswith("| ")
+    ]
+    pinned = "test_tracked_file_replaced_by_out_of_root_symlink_is_reported_missing"
+    owners = (
         "`resolve_source_path` in `minotaur/source.py`",
         "`drift` in `minotaur/query/freshness.py`",
-        "test_tracked_file_replaced_by_out_of_root_symlink_is_reported_missing",
+        pinned,
+    )
+    (directory_row,) = (
+        row
+        for row in rows
+        if row.startswith(
+            "| `analyze` a directory, replace a tracked file, or a directory on its path, with a "
+            "symlink that resolves outside the root, then query |"
+        )
+    )
+    (explicit_row,) = (
+        row
+        for row in rows
+        if row.startswith(
+            "| `analyze` explicit files, replace one with a symlink that resolves outside the "
+            "root, then query |"
+        )
+    )
+    for claim in (
+        *owners,
+        "the refreshed graph omits the file",
+        "the query exits `0` when clean",
+        "the different-tree refusal (exit `2`) applies when every recorded file is missing or "
+        "escapes",
+        "graph and sidecar unchanged",
+        "Restore the file inside the root, or run `analyze --force` with targets that exclude it",
     ):
-        assert claim in text
+        assert claim in directory_row
+    for claim in (
+        *owners,
+        "stale lines print",
+        "the refresh is refused with `target escapes root`",
+        "exit `2`",
+        "graph and sidecar unchanged",
+        "Query with `--no-refresh` for the saved facts, or run `analyze --force` with targets "
+        "that exclude the escaping file",
+    ):
+        assert claim in explicit_row

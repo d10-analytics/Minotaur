@@ -31,6 +31,7 @@ from minotaur.graph_visualizer.source import (
     read_source_bytes,
 )
 from minotaur.query.graph_comparison import compare_graphs
+from minotaur.source import read_source_path
 from minotaur.system import System
 
 ROOT = Path(__file__).parents[1]
@@ -900,3 +901,22 @@ def test_comparison_fixture_overrides_preserve_identity_and_grouped_evidence() -
         ["curated-rule"],
         ["imported-graph", "static-analysis"],
     ]
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores directory modes"
+)
+def test_source_excerpt_under_an_unreadable_directory_is_unavailable(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg/a.py").write_text("value = 1\n", encoding="utf-8")
+    (root / "pkg").chmod(0)
+    try:
+        payload = read_source_path(root.resolve(), "pkg/a.py", [(0, 0)])
+    finally:
+        (root / "pkg").chmod(0o755)
+
+    assert payload == {
+        "status": "unavailable",
+        "reason": "path is missing or escapes the source root",
+    }

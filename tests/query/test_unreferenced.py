@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -1143,3 +1144,22 @@ def test_unreferenced_text_fallback_through_a_symlinked_root_matches_the_real_ro
     assert real
     assert aliased == real
     assert any(record.text_mention for record in real)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores directory modes"
+)
+def test_unreferenced_text_fallback_keeps_the_permission_error_under_an_unreadable_directory(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "pkg/a.py", "def orphan():\n    pass\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+    index = GraphIndex.build(load_graph_file(graph).document)
+    (root / "pkg").chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            unreferenced(index, root, ("pkg/a.py",), text_fallback=True)
+    finally:
+        (root / "pkg").chmod(0o755)

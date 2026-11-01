@@ -361,3 +361,27 @@ def test_context_reports_an_unreadable_site_file_as_an_exit_2_error(
     assert exit_code == 2
     assert captured.out == ""
     assert captured.err.startswith("minotaur: error: site path is unreadable: ")
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores directory modes"
+)
+def test_context_reports_a_site_under_an_unreadable_directory_as_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    _write(root, "pkg/app.py", "value = 1\n")
+    graph = tmp_path / "graph.json"
+    assert _analyze(root, graph) == 0
+    capsys.readouterr()
+    (root / "pkg").chmod(0)
+    try:
+        status = cli.main(
+            ["query", "context", "--graph", str(graph), "--root", str(root)]
+            + ["--site", "pkg/app.py:1"]
+        )
+    finally:
+        (root / "pkg").chmod(0o755)
+
+    assert status == 2
+    assert "site path is missing or escapes the source root: pkg/app.py" in capsys.readouterr().err
