@@ -698,12 +698,7 @@ def systems_edited_graph(systems_repo: dict) -> dict:
 
 
 def _systems_run(
-    systems_repo: dict,
-    capsys: pytest.CaptureFixture[str],
-    args: list,
-    *,
-    edited: bool,
-    status: int = 0,
+    systems_repo: dict, capsys: pytest.CaptureFixture[str], args: list, *, edited: bool
 ) -> str:
     """Answer one system query from the configured repository, via the real CLI."""
     root = systems_repo["root"]
@@ -713,7 +708,7 @@ def _systems_run(
         complete = list(args)
         if edited:
             complete += ["--graph", str(systems_repo["edited"]), "--no-refresh"]
-        assert cli.main(complete) == status
+        assert cli.main(complete) == 0
     finally:
         os.chdir(previous)
     return capsys.readouterr().out
