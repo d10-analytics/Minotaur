@@ -70,7 +70,10 @@ def context(
     if not workspace_root.is_dir():
         raise ValueError(f"source root is not a directory: {root}")
     file_node = _file_node(document, path)
-    resolved = resolve_source_path(workspace_root, path)
+    try:
+        resolved = resolve_source_path(workspace_root, path)
+    except OSError as error:
+        raise ValueError(f"site path is missing or escapes the source root: {path}") from error
     if resolved is None:
         raise ValueError(f"site path is missing or escapes the source root: {path}")
     if not resolved.is_file():

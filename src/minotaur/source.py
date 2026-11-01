@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -15,7 +16,10 @@ def resolve_source_path(root: Path, wire_path: str) -> Path | None:
 
     Returns the resolved path, or ``None`` when it is missing, unresolvable
     (including a symlink loop, which Python before 3.13 reports as
-    ``RuntimeError``), or resolves outside *root*. File type is the caller's
+    ``RuntimeError`` and 3.13+ as ``OSError`` with ``ELOOP``), or resolves
+    outside *root*. Any other ``OSError`` (permission denied, I/O failure)
+    propagates so each caller keeps its own handling and an unreadable
+    directory is never mistaken for a missing file. File type is the caller's
     concern, and callers read the returned path rather than the joined one so
     a symlink cannot be followed past this check.
     """
@@ -25,8 +29,12 @@ def resolve_source_path(root: Path, wire_path: str) -> Path | None:
         # Resolve before checking containment so a symlink cannot make an
         # apparently relative graph path disclose a file outside the root.
         resolved.relative_to(root)
-    except (OSError, ValueError, RuntimeError):
+    except (FileNotFoundError, NotADirectoryError, ValueError, RuntimeError):
         return None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            return None
+        raise
     return resolved
 
 
@@ -38,7 +46,10 @@ def read_source_path(root: Path, wire_path: str, spans: list[tuple[int, int]]) -
     intentionally the visualizer's existing presentation payload so the
     source-reading policy has one owner for every consumer.
     """
-    resolved = resolve_source_path(root, wire_path)
+    try:
+        resolved = resolve_source_path(root, wire_path)
+    except OSError:
+        resolved = None
     if resolved is None:
         return {"status": "unavailable", "reason": "path is missing or escapes the source root"}
     try:
@@ -102,10 +113,10 @@ def capture_source_bytes(root: Path, paths: Iterable[str]) -> Mapping[str, bytes
     for wire_path in sorted(set(paths)):
         if not isinstance(wire_path, str) or not is_safe_path(wire_path):
             continue
-        resolved = resolve_source_path(source_root, wire_path)
-        if resolved is None:
-            continue
         try:
+            resolved = resolve_source_path(source_root, wire_path)
+            if resolved is None:
+                continue
             if not resolved.is_file():
                 continue
             captured[wire_path] = bytes(resolved.read_bytes())
