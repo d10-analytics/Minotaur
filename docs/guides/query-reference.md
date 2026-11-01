@@ -696,15 +696,17 @@ standard error, each such character prints as its Python escape (a newline as
 `\n`, ESC as `\x1b`, U+202E as `\u202e`), and printable text, including
 non-ASCII, prints unchanged. `query context` source lines keep a real tab,
 `query diff --systems` prints a value containing whitespace or such a character
-as a JSON string, and `--json` output carries the exact strings. A JSON fragment
-printed inside a text line is escaped by the JSON serializer instead: a value
-there uses JSON's ASCII escapes, such as `\u001b` for ESC and `\u00e9` for `é`,
-so the same name can appear in two spellings on adjacent lines, and no raw
-character is ever printed. Those fragments are `coverage` and `relationships`
-in system-query text, `declared_files` and `connections` in
-`query systems --details`, and the `old coverage`, `new coverage`,
-`old selection`, and `new selection` lines of `query diff --systems` together
-with its `old`, `new`, `old evidence`, and `new evidence` values.
+as a JSON string, and `--json` output carries the exact strings. A JSON-encoded
+fragment embedded in any printed line — a result line on standard output or a
+diagnostic or message line on standard error — is escaped by the JSON serializer
+instead: a value there uses JSON's ASCII escapes, such as `\u001b` for ESC and
+`\u00e9` for `é`, so the same name can appear in two spellings on adjacent
+lines, and no raw character is ever printed. Examples include `coverage` and
+`relationships` in system-query text, `declared_files` and `connections` in
+`query systems --details`, the `old coverage`, `new coverage`, `old selection`,
+and `new selection` lines of `query diff --systems` with its `old`, `new`,
+`old evidence`, and `new evidence` values, and the `metadata=` object of an
+analysis diagnostic on standard error.
 
 Exit statuses are:
 

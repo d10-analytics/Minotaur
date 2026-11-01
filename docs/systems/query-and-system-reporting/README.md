@@ -20,18 +20,21 @@ unchanged, and no quotes are added. Record renderers escape the values they
 print field by field, at the point where each is interpolated, so no symbol
 label, path, kind, or role reaches a result line raw. `query diff --systems`
 prints a value as a JSON string when it contains whitespace or any character the
-helper changes, so one value stays one token. A JSON fragment printed inside a
-text line is escaped by the JSON serializer instead, so its values use JSON's
-ASCII escapes (`\u001b` for ESC, `\u00e9` for `é`) and a value there can differ
-in spelling from an escaped field on the next line; no raw character is printed.
-Those fragments are `coverage` and `relationships` in system-query text,
-`declared_files` and `connections` in `query systems --details`, and the old/new
-coverage and selection lines plus detail values of `query diff --systems`. The
-`command-interface` whole-line stderr writer `_write_stderr` in
-`src/minotaur/cli.py` escapes each finished line once before printing it, so
-graph, configuration, system-definition, and Git-probe text cannot carry a raw
-control character to the terminal. `--json` output bypasses the helper and
-carries the exact strings, encoded only by the JSON serializer.
+helper changes, so one value stays one token. A JSON-encoded fragment embedded in
+any printed line — a result line on standard output or a diagnostic or message
+line on standard error — is escaped by the JSON serializer instead, so its
+values use JSON's ASCII escapes (`\u001b` for ESC, `\u00e9` for `é`) and a value
+there can differ in spelling from an escaped field on the next line; no raw
+character is printed. Examples include the `coverage` and `relationships` lines
+of system-query text, the `declared_files` and `connections` lines of
+`query systems --details`, the old/new coverage and selection lines with the
+detail values of `query diff --systems`, and the `metadata=` object of an
+analysis diagnostic on standard error. The `command-interface` whole-line
+stderr writer `_write_stderr` in `src/minotaur/cli.py` escapes each finished
+line once before printing it, so graph, configuration, system-definition, and
+Git-probe text cannot carry a raw control character to the terminal. `--json`
+output bypasses the helper and carries the exact strings, encoded only by the
+JSON serializer.
 
 ## Expected interactions
 

@@ -1136,18 +1136,19 @@ SAFE_TEXT_EXCEPTIONS = (
 )
 
 GUIDE_JSON_FRAGMENT_ESCAPES = (
-    "A JSON fragment printed inside a text line is escaped by the JSON serializer "
-    "instead: a value there uses JSON's ASCII escapes, such as `\\u001b` for ESC and "
-    "`\\u00e9` for `é`, so the same name can appear in two spellings on adjacent lines, "
-    "and no raw character is ever printed."
+    "A JSON-encoded fragment embedded in any printed line — a result line on standard "
+    "output or a diagnostic or message line on standard error — is escaped by the JSON "
+    "serializer instead: a value there uses JSON's ASCII escapes, such as `\\u001b` for "
+    "ESC and `\\u00e9` for `é`, so the same name can appear in two spellings on adjacent "
+    "lines, and no raw character is ever printed."
 )
 
 GUIDE_JSON_FRAGMENT_SITES = (
-    "Those fragments are `coverage` and `relationships` in system-query text, "
-    "`declared_files` and `connections` in `query systems --details`, and the "
+    "Examples include `coverage` and `relationships` in system-query text, "
+    "`declared_files` and `connections` in `query systems --details`, the "
     "`old coverage`, `new coverage`, `old selection`, and `new selection` lines of "
-    "`query diff --systems` together with its `old`, `new`, `old evidence`, and "
-    "`new evidence` values."
+    "`query diff --systems` with its `old`, `new`, `old evidence`, and `new evidence` "
+    "values, and the `metadata=` object of an analysis diagnostic on standard error."
 )
 
 ESCAPE_HELPER_SENTENCE = (
@@ -1181,16 +1182,18 @@ UNESCAPED_JSON_SENTENCE = (
 )
 
 README_JSON_FRAGMENT_ESCAPES = (
-    "A JSON fragment printed inside a text line is escaped by the JSON serializer "
-    "instead, so its values use JSON's ASCII escapes (`\\u001b` for ESC, `\\u00e9` for "
-    "`é`) and a value there can differ in spelling from an escaped field on the next "
-    "line; no raw character is printed."
+    "A JSON-encoded fragment embedded in any printed line — a result line on standard "
+    "output or a diagnostic or message line on standard error — is escaped by the JSON "
+    "serializer instead, so its values use JSON's ASCII escapes (`\\u001b` for ESC, "
+    "`\\u00e9` for `é`) and a value there can differ in spelling from an escaped field on "
+    "the next line; no raw character is printed."
 )
 
 README_JSON_FRAGMENT_SITES = (
-    "Those fragments are `coverage` and `relationships` in system-query text, "
-    "`declared_files` and `connections` in `query systems --details`, and the old/new "
-    "coverage and selection lines plus detail values of `query diff --systems`."
+    "Examples include the `coverage` and `relationships` lines of system-query text, the "
+    "`declared_files` and `connections` lines of `query systems --details`, the old/new "
+    "coverage and selection lines with the detail values of `query diff --systems`, and "
+    "the `metadata=` object of an analysis diagnostic on standard error."
 )
 
 INVARIANT_LINK = "../query-and-system-reporting/README.md#cross-system-invariants"
