@@ -13,6 +13,7 @@ from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
 from minotaur.language_interpreter.registry import default_registry
 from minotaur.language_interpreter.selection import SelectionError, select_sources
+from minotaur.source import resolve_source_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,8 +115,8 @@ def drift(document: GraphDocument, root: Path) -> Drift:
     changed: list[str] = []
     missing: list[str] = []
     for relative, node in files.items():
-        source = workspace_root / relative
-        if not source.is_file():
+        source = resolve_source_path(workspace_root, relative)
+        if source is None or not source.is_file():
             missing.append(relative)
             continue
         expected = content_sha256(node)
