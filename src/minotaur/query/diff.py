@@ -270,12 +270,19 @@ def _relocation_text(item: Relocation) -> str:
     new_start = _start_record(item.new_location)
     if old_start is None or new_start is None:
         return f"~ {_symbol_text(item.symbol, item.role)} (relocated)\n"
-    old_path = escape_text(str(old_start["path"]))
-    new_path = escape_text(str(new_start["path"]))
+    # The in-file/cross-file choice reads the raw paths: escape_text is not
+    # injective, so two distinct raw paths can spell identically and a
+    # committed hostile graph could otherwise print a cross-file move as a
+    # one-file line-number shift. Escaping happens at interpolation only.
+    old_path = str(old_start["path"])
+    new_path = str(new_start["path"])
     if old_path == new_path:
-        move = f"{old_path}:{old_start['line']}→{new_start['line']}"
+        move = f"{escape_text(old_path)}:{old_start['line']}→{new_start['line']}"
     else:
-        move = f"{old_path}:{old_start['line']}→{new_path}:{new_start['line']}"
+        move = (
+            f"{escape_text(old_path)}:{old_start['line']}→"
+            f"{escape_text(new_path)}:{new_start['line']}"
+        )
     return f"~ {_symbol_text(item.symbol, item.role)} (relocated {move})\n"
 
 
