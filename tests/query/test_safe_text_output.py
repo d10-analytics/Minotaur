@@ -2,11 +2,13 @@
 
 Hostile characters enter through real fixture repositories analyzed by
 ``analyze``; every claim is answered through the real ``query`` stdout
-(``capsys``), never by calling the helper directly except for the one
-parametrized ``escape_text`` semantics test. The committed-graph route is
-exercised by hand-edited graphs queried ``--no-refresh``: label edits are
-legal because labels carry no identity, and edits that change identity
-inputs recompute the node id the way the model itself does.
+(``capsys``). Two tests go below the CLI on purpose: the one parametrized
+``escape_text`` semantics test, and the one renderer test for the kind fields
+no real query can select a hostile value for, whose selection the test beside
+it pins. The committed-graph route is exercised by hand-edited graphs queried
+``--no-refresh``: label edits are legal because labels carry no identity, and
+edits that change identity inputs recompute the node id the way the model
+itself does.
 """
 
 from __future__ import annotations
@@ -19,9 +21,20 @@ import pytest
 
 from minotaur import cli
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
-from minotaur.graph_model.location import Location, Position, Range
-from minotaur.query.diff import DiffResult, Relocation, render_text
+from minotaur.graph_model.location import Location
 from minotaur.query.render import dump_json, escape_text
+from minotaur.query.symbols import CallerRecord, render_callers_text
+from minotaur.query.system import (
+    ConsumersRecord,
+    SurfaceRecord,
+    SystemDepsRecord,
+    TargetDetail,
+    render_consumers_text,
+    render_surface_text,
+    render_system_deps_text,
+)
+from minotaur.query.unreferenced import UnreferencedRecord
+from minotaur.query.unreferenced import render_text as render_unreferenced_text
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="hostile file names are POSIX only")
 
@@ -32,6 +45,12 @@ HOSTILE = "\x1b\x9b\u202e\t\r\x7f\x0b\x0c\u0085"
 CSI_FILE = "c1\x9bcsi.py"
 ESC_FILE = "esc\x1bx.py"
 RTL_FILE = "rtl\u202eevil.py"
+
+#: A namespaced kind the graph schema admits: its pattern ends in ``$``, which
+#: also matches before a trailing newline.
+HOSTILE_KIND = "x:y\n"
+#: The same trailing newline on a spelling a real query does select.
+HOSTILE_SQL_CALLS = "sql:calls\n"
 
 
 def _write(root: Path, relative: str, text: str) -> None:
@@ -109,13 +128,15 @@ def hostile_repo(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     return {"root": root, "source": source, "graph": graph}
 
 
-def _add_calls_edge(raw: dict, source_label: str, target_label: str, path: str) -> None:
+def _add_edge(
+    raw: dict, source_label: str, target_label: str, path: str, *, kind: str = "calls"
+) -> None:
     def node_id(label: str) -> object:
         return next(node["id"] for node in raw["nodes"] if node.get("label") == label)
 
     raw["relationships"].append(
         {
-            "kind": "calls",
+            "kind": kind,
             "source": node_id(source_label),
             "target": node_id(target_label),
             "evidence": [
@@ -137,6 +158,14 @@ def _add_calls_edge(raw: dict, source_label: str, target_label: str, path: str) 
     )
 
 
+def _rewrite_endpoints(raw: dict, old_id: str, new_id: str) -> None:
+    for relationship in raw["relationships"]:
+        if relationship["source"] == old_id:
+            relationship["source"] = new_id
+        if relationship["target"] == old_id:
+            relationship["target"] = new_id
+
+
 def _relabel_unresolved(raw: dict, label: str, new_reference: str) -> None:
     """Give an unresolved reference a hostile spelling, recomputing its id."""
     node = next(n for n in raw["nodes"] if n.get("label") == label)
@@ -151,18 +180,14 @@ def _relabel_unresolved(raw: dict, label: str, new_reference: str) -> None:
     )
     node["id"] = new_id
     node["label"] = new_reference
-    for relationship in raw["relationships"]:
-        if relationship["source"] == old_id:
-            relationship["source"] = new_id
-        if relationship["target"] == old_id:
-            relationship["target"] = new_id
+    _rewrite_endpoints(raw, old_id, new_id)
 
 
 @pytest.fixture(scope="module")
 def hostile_edited_graph(hostile_repo: dict) -> Path:
     """The same analyzed graph with one added call and one hostile reference label."""
     raw = json.loads(hostile_repo["graph"].read_text(encoding="utf-8"))
-    _add_calls_edge(raw, "c1\x9bcsi.csi_caller", "nl\nname.target", CSI_FILE)
+    _add_edge(raw, "c1\x9bcsi.csi_caller", "nl\nname.target", CSI_FILE)
     _relabel_unresolved(raw, "unknown.zzz", "esc\x1bx.target")
     edited = hostile_repo["root"] / "graph_edited.json"
     edited.write_text(json.dumps(raw), encoding="utf-8")
@@ -232,6 +257,124 @@ def test_callers_and_impact_escape_hand_edited_labels(
     assert captured.err == ""
 
 
+@pytest.fixture(scope="module")
+def hostile_kind_graph(hostile_repo: dict) -> Path:
+    """The analyzed graph with one hostile symbol kind and two hostile edge kinds."""
+    raw = json.loads(hostile_repo["graph"].read_text(encoding="utf-8"))
+    _set_symbol_kind(raw, "rtl\u202eevil.rtl_unused", HOSTILE_KIND)
+    for kind in (HOSTILE_KIND, HOSTILE_SQL_CALLS):
+        _add_edge(raw, "c1\x9bcsi.csi_caller", "nl\nname.target", CSI_FILE, kind=kind)
+    edited = hostile_repo["root"] / "graph_kinds.json"
+    edited.write_text(json.dumps(raw), encoding="utf-8")
+    return edited
+
+
+def test_definitions_and_diff_escape_hostile_kinds(
+    hostile_repo: dict, hostile_kind_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    common = ["--graph", str(hostile_kind_graph), "--root", str(hostile_repo["source"])]
+
+    assert cli.main(["query", "definitions", "rtl_unused", *common, "--no-refresh"]) == 0
+    captured = capsys.readouterr()
+    _assert_safe_lines(captured.out, ["rtl\\u202eevil.py:1  rtl\\u202eevil.rtl_unused  x:y\\n"])
+    assert captured.err == ""
+
+    diff = ["query", "diff", str(hostile_repo["graph"]), str(hostile_kind_graph)]
+    assert cli.main(diff) == 1
+    captured = capsys.readouterr()
+    _assert_safe_lines(
+        captured.out,
+        [
+            "+ rtl\\u202eevil.rtl_unused",
+            "- rtl\\u202eevil.rtl_unused",
+            "+ sql:calls\\n c1\\x9bcsi.csi_caller → nl\\nname.target",
+            "+ x:y\\n c1\\x9bcsi.csi_caller → nl\\nname.target",
+        ],
+    )
+    assert captured.err == ""
+
+    payload, out = _json_run(
+        capsys, ["query", "definitions", "rtl_unused", *common, "--no-refresh"]
+    )
+    assert payload["results"][0]["kind"] == HOSTILE_KIND
+    _assert_canonical_json(out)
+
+    payload, out = _json_run(capsys, diff, status=1)
+    assert [item["kind"] for item in payload["relationships_added"]] == [
+        HOSTILE_SQL_CALLS,
+        HOSTILE_KIND,
+    ]
+    _assert_canonical_json(out)
+
+
+def test_callers_and_unreferenced_select_only_fixed_kinds(
+    hostile_repo: dict, hostile_kind_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The graph carries the hostile kinds, and these two queries never list them.
+
+    Both queries match kinds exactly against fixed sets, so the edges and the
+    symbol the previous test prints are absent here rather than escaped.
+    """
+    common = [
+        "--graph",
+        str(hostile_kind_graph),
+        "--root",
+        str(hostile_repo["source"]),
+        "--no-refresh",
+    ]
+
+    assert cli.main(["query", "callers", "nl\nname.target", *common]) == 0
+    _assert_safe_lines(
+        capsys.readouterr().out, ["c1\\x9bcsi.py:2:12  target [references] [unresolved]"]
+    )
+
+    assert cli.main(["query", "unreferenced", *common]) == 0
+    _assert_safe_lines(
+        capsys.readouterr().out,
+        [
+            "c1\\x9bcsi.py:1  c1\\x9bcsi.csi_caller  function",
+            "café x.py:1  café x.friendly  function",
+            "café x.py:5  café x.site  function",
+            "esc\\x1bx.py:1  esc\\x1bx.escfn  function",
+            "nl\\nname.py:1  nl\\nname.target  function",
+            "nl\\nname.py:5  nl\\nname.unused  function",
+        ],
+    )
+
+
+def test_renderers_escape_kinds_their_queries_do_not_select() -> None:
+    """Each renderer spells a kind field by the rule, whatever selected the record.
+
+    The real callers, unreferenced, and system queries select these kinds from
+    fixed sets, which their tests here pin through the CLI, so no graph reaches
+    these fields with a hostile value today. The records are built directly
+    because that is the only way to observe the renderer's own escape, which
+    keeps a future wider selection from printing a raw kind.
+    """
+    assert (
+        render_callers_text([CallerRecord("m.py", 4, 1, "m.c", HOSTILE_KIND)])
+        == "m.py:4:1  m.c [x:y\\n]\n"
+    )
+    assert (
+        render_unreferenced_text([UnreferencedRecord("m.py", 4, "m.c", HOSTILE_KIND)])
+        == "m.py:4  m.c  x:y\\n\n"
+    )
+    # Every entry of the comma-joined list is spelled, not only the joined text.
+    assert (
+        render_surface_text([SurfaceRecord("system: z", ("a:b\n", HOSTILE_KIND), "m.py", "m.c")])
+        == "m.py  m.c  a:b\\n, x:y\\n\n"
+    )
+    target = TargetDetail(label="m.c", path="m.py", kind=HOSTILE_KIND)
+    assert (
+        render_consumers_text([ConsumersRecord("system: z", "f.py", (HOSTILE_KIND,), (target,))])
+        == "f.py (system: z)  x:y\\n: m.c (m.py)\n"
+    )
+    assert (
+        render_system_deps_text([SystemDepsRecord("system: z", (target,))])
+        == "system: z  x:y\\n: m.c (m.py)\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Graph diff (AC-03; AC-07 for these inputs)
 # ---------------------------------------------------------------------------
@@ -259,11 +402,22 @@ def _relocate_symbol(raw: dict, label: str, path: str, line: int) -> None:
     )
     node["id"] = new_id
     node["location"] = location
-    for relationship in raw["relationships"]:
-        if relationship["source"] == old_id:
-            relationship["source"] = new_id
-        if relationship["target"] == old_id:
-            relationship["target"] = new_id
+    _rewrite_endpoints(raw, old_id, new_id)
+
+
+def _set_symbol_kind(raw: dict, label: str, kind: str) -> None:
+    """Change one symbol's kind, recomputing the id the kind is an input to."""
+    node = next(n for n in raw["nodes"] if n.get("label") == label)
+    old_id = node["id"]
+    new_id = compute_node_id(
+        NodeIdentity.from_dict(node["identity"]),  # type: ignore[arg-type]
+        node_class=node["node_class"],
+        symbol_kind=kind,
+        location=Location.from_dict(node["location"]),  # type: ignore[arg-type]
+    )
+    node["id"] = new_id
+    node["symbol_kind"] = kind
+    _rewrite_endpoints(raw, old_id, new_id)
 
 
 @pytest.fixture(scope="module")
@@ -331,6 +485,43 @@ def test_diff_escapes_hostile_graph_changes(
         ],
     )
     assert captured.err == ""
+
+
+def test_diff_relocation_chooses_the_form_on_raw_paths(
+    hostile_repo: dict, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A move between two paths that print alike still shows both endpoints.
+
+    ``a<LF>q<LF>z.py`` and ``a<LF>q\\nz.py`` (a real newline, then a literal
+    backslash and ``n``) are different files with one escaped spelling, so a
+    form chosen on escaped text would print this cross-file move as a line
+    shift, ``…:1→1``. The destination's real newline also proves that endpoint
+    is escaped. The pair is schema-valid only because the safe-path checks stop
+    at the first newline and miss the later backslash; once that gap is closed
+    this test fails at graph load rather than passing silently.
+    """
+    old_path, new_path = "a\nq\nz.py", "a\nq\\nz.py"
+    graphs = []
+    for name, path in (("old.json", old_path), ("new.json", new_path)):
+        raw = json.loads(hostile_repo["graph"].read_text(encoding="utf-8"))
+        _relocate_symbol(raw, "nl\nname.unused", path, 0)
+        graph = tmp_path / name
+        graph.write_text(json.dumps(raw), encoding="utf-8")
+        graphs.append(str(graph))
+    diff = ["query", "diff", *graphs]
+
+    assert cli.main(diff) == 1
+    captured = capsys.readouterr()
+    _assert_safe_lines(
+        captured.out, ["~ nl\\nname.unused (relocated a\\nq\\nz.py:1→a\\nq\\nz.py:1)"]
+    )
+    assert captured.err == ""
+
+    payload, out = _json_run(capsys, diff, status=1)
+    assert [(item["from"]["path"], item["to"]["path"]) for item in payload["relocated"]] == [
+        (old_path, new_path)
+    ]
+    _assert_canonical_json(out)
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +666,18 @@ def test_system_queries_escape_hostile_system_names_and_files(
         ],
     )
 
+    plain_consumers = _systems_run(
+        systems_repo, capsys, ["query", "consumers", "plain"], edited=False
+    )
+    _assert_safe_lines(
+        plain_consumers,
+        [
+            plain_consumers.splitlines()[0],
+            "app/c1\\x9bcsi.py (system: zone\\u202e)  calls: consumer.external (consumer.py); "
+            "imports: consumer.external (consumer.py)",
+        ],
+    )
+
     deps_zone = _systems_run(
         systems_repo, capsys, ["query", "system-deps", "zone\u202e"], edited=False
     )
@@ -508,6 +711,81 @@ def test_systems_overview_escapes_hostile_system_name(
             "coverage " + out.splitlines()[0][len("coverage ") :],
             "plain  declared 1  represented 1  absent 0",
             "zone\\u202e  declared 2  represented 2  absent 0",
+        ],
+    )
+
+
+def test_system_details_lines_spell_hostile_text_as_json_ascii(
+    systems_repo: dict, capsys: pytest.CaptureFixture[str]
+) -> None:
+    raw = json.loads((systems_repo["root"] / "graph.json").read_text(encoding="utf-8"))
+    raw["extensions"]["minotaur"]["selection"] = [RTL_FILE]
+    edited = systems_repo["root"] / "graph_selection.json"
+    edited.write_text(json.dumps(raw), encoding="utf-8")
+    query = ["query", "surface", "zone\u202e", "--details", "--graph", str(edited), "--no-refresh"]
+
+    out = _systems_run(systems_repo, capsys, query, edited=False)
+    coverage, record, relationships = out.splitlines()
+    _assert_no_hostile(out)
+    assert record == "app/api.py  app.api.offered  calls"
+
+    assert coverage.startswith("coverage ")
+    assert '"rtl\\u202eevil.py"' in coverage
+    assert "rtl\u202eevil.py" in json.loads(coverage[len("coverage ") :])["selection"]["targets"]
+
+    assert relationships.startswith("relationships ")
+    assert '"label":"rtl\\u202eevil.evilconsume"' in relationships
+    assert "rtl\u202eevil.evilconsume" in [
+        item["source"]["label"] for item in json.loads(relationships[len("relationships ") :])
+    ]
+
+
+def test_system_queries_select_only_fixed_kinds(
+    systems_repo: dict, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A loaded edge with a hostile kind reaches no system-query kind field."""
+    raw = json.loads((systems_repo["root"] / "graph.json").read_text(encoding="utf-8"))
+    for kind in (HOSTILE_KIND, HOSTILE_SQL_CALLS):
+        _add_edge(raw, "consumer.consume", "app.api.offered", "consumer.py", kind=kind)
+    edited = systems_repo["root"] / "graph_kinds.json"
+    edited.write_text(json.dumps(raw), encoding="utf-8")
+    common = ["--graph", str(edited), "--no-refresh"]
+
+    assert cli.main(["query", "diff", str(systems_repo["root"] / "graph.json"), str(edited)]) == 1
+    _assert_safe_lines(
+        capsys.readouterr().out,
+        [
+            "+ sql:calls\\n consumer.consume → app.api.offered",
+            "+ x:y\\n consumer.consume → app.api.offered",
+        ],
+    )
+
+    for query, expected in (
+        ("surface", ["app/api.py  app.api.offered  calls"]),
+        (
+            "consumers",
+            [
+                "consumer.py (system: plain)  calls: app.api.offered (app/api.py); "
+                "imports: app.api.offered (app/api.py)",
+                "rtl\\u202eevil.py (no_system)  calls: app.api.offered (app/api.py); "
+                "imports: app.api.offered (app/api.py)",
+            ],
+        ),
+    ):
+        out = _systems_run(
+            systems_repo, capsys, ["query", query, "zone\u202e", *common], edited=False
+        )
+        _assert_safe_lines(out, [out.splitlines()[0], *expected])
+
+    out = _systems_run(
+        systems_repo, capsys, ["query", "system-deps", "plain", *common], edited=False
+    )
+    _assert_safe_lines(
+        out,
+        [
+            out.splitlines()[0],
+            "system: zone\\u202e  calls: app.api.offered (app/api.py); "
+            "imports: app.api.offered (app/api.py)",
         ],
     )
 
@@ -592,42 +870,6 @@ def test_record_json_keeps_raw_hostile_strings(
     assert record["path"] == ESC_FILE
     assert record["lines"][1]["text"] == "\tx = 1  # \x1b[2J\u202e"
     _assert_canonical_json(out)
-
-
-def test_relocation_text_chooses_the_form_on_raw_paths() -> None:
-    """The relocation in-file/cross-file form compares raw paths, not escapes.
-
-    ``escape_text`` is not injective: two distinct raw paths -- one carrying
-    real newline characters, one carrying the literal ``\\n`` spelling -- can
-    escape to identical text, and output would then present a cross-file move
-    as a one-file line-number shift. The v1 location schema rejects every
-    backslash in a graph path, and escape_text is injective over the paths it
-    admits, so this pair provably cannot exist in any schema-valid committed
-    graph; the decision being pinned lives entirely in the relocation render,
-    so the colliding to-path is attached to the location value here after
-    construction (a value the model itself would never emit) and the line is
-    asserted where ``tests/query/test_diff.py`` already pins relocation
-    forms.
-    """
-    old_location = Location("a\nq\nz.py", Range(Position(0, 1), Position(0, 12)))
-    new_location = Location("post.py", Range(Position(0, 1), Position(0, 12)))
-    object.__setattr__(new_location, "path", "a\\nq\\nz.py")
-    result = DiffResult(
-        relocated=(
-            Relocation(
-                kind="function",
-                symbol="two.gamma",
-                old_location=old_location,
-                new_location=new_location,
-            ),
-        )
-    )
-    text = render_text(result)
-    # Cross-file form: the escaped spelling appears at both the from and the
-    # to endpoint; a decision taken on the escaped texts would choose the
-    # in-file form and print the path once, as ``…:1→1``.
-    assert text == "~ two.gamma (relocated a\\nq\\nz.py:1→a\\nq\\nz.py:1)\n"
-    assert text.count("a\\nq\\nz.py") == 2
 
 
 def test_diff_json_keeps_raw_hostile_strings(
