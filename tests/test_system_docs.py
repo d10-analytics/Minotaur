@@ -1135,6 +1135,21 @@ SAFE_TEXT_EXCEPTIONS = (
     "output carries the exact strings."
 )
 
+GUIDE_JSON_FRAGMENT_ESCAPES = (
+    "A JSON fragment printed inside a text line is escaped by the JSON serializer "
+    "instead: a value there uses JSON's ASCII escapes, such as `\\u001b` for ESC and "
+    "`\\u00e9` for `é`, so the same name can appear in two spellings on adjacent lines, "
+    "and no raw character is ever printed."
+)
+
+GUIDE_JSON_FRAGMENT_SITES = (
+    "Those fragments are `coverage` and `relationships` in system-query text, "
+    "`declared_files` and `connections` in `query systems --details`, and the "
+    "`old coverage`, `new coverage`, `old selection`, and `new selection` lines of "
+    "`query diff --systems` together with its `old`, `new`, `old evidence`, and "
+    "`new evidence` values."
+)
+
 ESCAPE_HELPER_SENTENCE = (
     "`escape_text` in `src/minotaur/query/render.py` is the single definition of an "
     "unsafe character: each character whose `str` form is not printable is replaced by "
@@ -1165,6 +1180,19 @@ UNESCAPED_JSON_SENTENCE = (
     "the JSON serializer."
 )
 
+README_JSON_FRAGMENT_ESCAPES = (
+    "A JSON fragment printed inside a text line is escaped by the JSON serializer "
+    "instead, so its values use JSON's ASCII escapes (`\\u001b` for ESC, `\\u00e9` for "
+    "`é`) and a value there can differ in spelling from an escaped field on the next "
+    "line; no raw character is printed."
+)
+
+README_JSON_FRAGMENT_SITES = (
+    "Those fragments are `coverage` and `relationships` in system-query text, "
+    "`declared_files` and `connections` in `query systems --details`, and the old/new "
+    "coverage and selection lines plus detail values of `query diff --systems`."
+)
+
 INVARIANT_LINK = "../query-and-system-reporting/README.md#cross-system-invariants"
 
 COMMAND_INTERFACE_INVARIANT_POINTER = (
@@ -1179,6 +1207,8 @@ def test_query_reference_documents_the_safe_text_output_contract() -> None:
     section = text[text.index("## Output and exit status") :]
     assert SAFE_TEXT_RULE in section
     assert SAFE_TEXT_EXCEPTIONS in section
+    assert GUIDE_JSON_FRAGMENT_ESCAPES in section
+    assert GUIDE_JSON_FRAGMENT_SITES in section
 
 
 def test_system_readme_documents_the_cross_system_safe_text_invariants() -> None:
@@ -1192,6 +1222,8 @@ def test_system_readme_documents_the_cross_system_safe_text_invariants() -> None
     assert ESCAPE_HELPER_SENTENCE in section
     assert PER_FIELD_STDOUT_SENTENCE in section
     assert SYSTEMS_DIFF_QUOTING_SENTENCE in section
+    assert README_JSON_FRAGMENT_ESCAPES in section
+    assert README_JSON_FRAGMENT_SITES in section
     assert STDERR_WRITER_SENTENCE in section
     assert UNESCAPED_JSON_SENTENCE in section
     assert "points to" not in section, "the invariant text must not read as an interaction claim"
@@ -1202,6 +1234,7 @@ def test_command_interface_readme_links_the_cross_system_safe_text_invariants() 
     # The stderr writer lives here, but the shared rule is owned by the other
     # system, so this README carries one pointer before its interaction claims.
     before_interactions = text[: text.index("## Expected interactions")]
+    # The pointer sentence embeds the link target, so its assertion also covers
+    # the exact anchor; the repository-wide link check resolves it.
     assert COMMAND_INTERFACE_INVARIANT_POINTER in before_interactions
-    assert f"({INVARIANT_LINK})" in before_interactions
     assert "points to" not in before_interactions, "the pointer must not read as a claim"
