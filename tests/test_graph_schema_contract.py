@@ -1081,11 +1081,23 @@ def test_format_document_states_the_pattern_and_path_rules() -> None:
         "(extension property-name patterns are not in that list)"
     ) in text
     assert (
-        "so both paths agree on the field ranges; a trailing line feed is rejected in "
-        "every one of these fields except paths, where it is an ordinary control "
-        "character and valid;"
+        "so both paths agree on the field ranges. The model rejects a trailing line feed "
+        "in every one of these fields except paths, where it is an ordinary control "
+        "character and valid, and so does an ECMA-262 validator, where `$` is the end of "
+        "input. A validator that applies the schema with Python's `re.search`, such as "
+        "`jsonschema`, which `--validate` uses, accepts it, so such a value passes schema "
+        "validation alone and is refused when Minotaur loads the graph."
     ) in text
     assert "a trailing line feed is rejected; only" not in text
+    assert "rejected in every one of these fields except paths" not in text
+
+    # The qualified claim describes real behavior: the plain `re.search`
+    # validator accepts a trailing line feed that the model refuses.
+    document = _small_workflow()
+    _mutate_language(document)
+    _validator().validate(document)
+    with pytest.raises(ValueError, match="language must match"):
+        GraphDocument.from_dict(document)
     assert (
         "A path is invalid if it is empty, has a leading `/`, has an empty segment (`//`), "
         "has a `.` or `..` segment, contains `\\`, or contains NUL. The rule applies across "
