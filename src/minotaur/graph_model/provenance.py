@@ -42,12 +42,12 @@ def is_namespaced_extension(value: str) -> bool:
     namespace prefix makes the origin attributable and prevents
     collisions between independent producers.
     """
-    return _NAMESPACED_EXTENSION_RE.match(value) is not None
+    return _NAMESPACED_EXTENSION_RE.fullmatch(value) is not None
 
 
 def is_valid_language(value: str) -> bool:
     """Check whether a string is a valid v1 language identifier."""
-    return _LANGUAGE_RE.match(value) is not None
+    return _LANGUAGE_RE.fullmatch(value) is not None
 
 
 class CoordinateEncoding(Enum):
