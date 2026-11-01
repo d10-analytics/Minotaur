@@ -19,7 +19,8 @@ import pytest
 
 from minotaur import cli
 from minotaur.graph_model.identity import NodeIdentity, compute_node_id
-from minotaur.graph_model.location import Location
+from minotaur.graph_model.location import Location, Position, Range
+from minotaur.query.diff import DiffResult, Relocation, render_text
 from minotaur.query.render import dump_json, escape_text
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="hostile file names are POSIX only")
@@ -267,13 +268,18 @@ def _relocate_symbol(raw: dict, label: str, path: str, line: int) -> None:
 
 @pytest.fixture(scope="module")
 def diff_graphs(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
-    """Two hostile graphs: NEW adds symbols, drops one, adds and drops a calls
-    relationship, relocates one symbol in its file, and relocates another
-    across files."""
+    """Two hostile graphs: NEW adds symbols and a calls relationship between
+    hostile module-derived labels, and OLD carries a calls relationship that
+    NEW removes; NEW relocates one symbol inside its file and OLD relocates
+    another across files."""
     root = tmp_path_factory.mktemp("diff_repo")
     old_root, new_root = root / "old", root / "new"
     _write(old_root, "one.py", "def alpha():\n    return 1\n\n\ndef beta():\n    return alpha()\n")
-    _write(old_root, ESC_FILE, "def first():\n    return 1\n")
+    _write(
+        old_root,
+        ESC_FILE,
+        "def first():\n    return 1\n\n\ndef removed_helper():\n    return first()\n",
+    )
     _write(old_root, "post.py", "def delta():\n    return 1\n")
     _write(old_root, "two.py", "def gamma():\n    return 1\n")
     _write(
@@ -286,7 +292,12 @@ def diff_graphs(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     _write(new_root, "post.py", "def delta():\n    return 1\n")
     _write(new_root, CSI_FILE, "x = 1\n")
     _write(new_root, "two.py", "x = 1\n")
-    _write(new_root, RTL_FILE, "def added_evil():\n    return 1\n")
+    _write(
+        new_root,
+        RTL_FILE,
+        "def added_evil():\n    return 1\n\n\ndef outer():\n    return helper2()\n"
+        "\n\ndef helper2():\n    return 1\n",
+    )
     old_graph, new_graph = root / "old.json", root / "new.json"
     _analyze(old_root, old_graph)
     _analyze(new_root, new_graph)
@@ -307,10 +318,15 @@ def test_diff_escapes_hostile_graph_changes(
         [
             "+ one.extra_caller",
             "+ rtl\\u202eevil.added_evil",
+            "+ rtl\\u202eevil.helper2",
+            "+ rtl\\u202eevil.outer",
+            "- esc\\x1bx.removed_helper",
             "- two.gamma",
             "~ esc\\x1bx.first (relocated esc\\x1bx.py:1→2)",
             "~ post.delta (relocated c1\\x9bcsi.py:1→post.py:1)",
             "+ calls one.extra_caller → one.alpha",
+            "+ calls rtl\\u202eevil.outer → rtl\\u202eevil.helper2",
+            "- calls esc\\x1bx.removed_helper → esc\\x1bx.first",
             "- calls one.beta → one.alpha",
         ],
     )
@@ -409,9 +425,15 @@ def _relabel_node(raw: dict, label: str, new_label: str) -> None:
 
 @pytest.fixture(scope="module")
 def systems_edited_graph(systems_repo: dict) -> dict:
-    """The systems graph with an in-scope symbol label carrying a hostile character."""
+    """The systems graph, hand-edited along the committed-graph route: the
+    in-scope offered symbol carries a hostile label, and its location claims
+    the hostile-named zone member file ``app/c1\x9bcsi.py`` (the module stem is
+    not a legal identifier, so no importer could reach it from source text;
+    the committed graph still carries the fact), which is how the outside
+    consumers and the plain system reach it."""
     raw = json.loads((systems_repo["root"] / "graph.json").read_text(encoding="utf-8"))
     _relabel_node(raw, "app.api.offered", "app.api.\u202eviolet")
+    _relocate_symbol(raw, "app.api.\u202eviolet", "app/" + CSI_FILE, 0)
     systems_repo["edited"].write_text(json.dumps(raw), encoding="utf-8")
     return systems_repo
 
@@ -496,7 +518,8 @@ def test_system_queries_escape_hand_edited_labels(
     del systems_edited_graph
     surface = _systems_run(systems_repo, capsys, ["query", "surface", "zone\u202e"], edited=True)
     _assert_safe_lines(
-        surface, [surface.splitlines()[0], "app/api.py  app.api.\\u202eviolet  calls"]
+        surface,
+        [surface.splitlines()[0], "app/c1\\x9bcsi.py  app.api.\\u202eviolet  calls"],
     )
 
     consumers = _systems_run(
@@ -506,10 +529,10 @@ def test_system_queries_escape_hand_edited_labels(
         consumers,
         [
             consumers.splitlines()[0],
-            "consumer.py (system: plain)  calls: app.api.\\u202eviolet (app/api.py); "
-            "imports: app.api.\\u202eviolet (app/api.py)",
-            "rtl\\u202eevil.py (no_system)  calls: app.api.\\u202eviolet (app/api.py); "
-            "imports: app.api.\\u202eviolet (app/api.py)",
+            "consumer.py (system: plain)  calls: app.api.\\u202eviolet (app/c1\\x9bcsi.py); "
+            "imports: app.api.\\u202eviolet (app/c1\\x9bcsi.py)",
+            "rtl\\u202eevil.py (no_system)  calls: app.api.\\u202eviolet (app/c1\\x9bcsi.py); "
+            "imports: app.api.\\u202eviolet (app/c1\\x9bcsi.py)",
         ],
     )
 
@@ -518,8 +541,8 @@ def test_system_queries_escape_hand_edited_labels(
         deps_plain,
         [
             deps_plain.splitlines()[0],
-            "system: zone\\u202e  calls: app.api.\\u202eviolet (app/api.py); "
-            "imports: app.api.\\u202eviolet (app/api.py)",
+            "system: zone\\u202e  calls: app.api.\\u202eviolet (app/c1\\x9bcsi.py); "
+            "imports: app.api.\\u202eviolet (app/c1\\x9bcsi.py)",
         ],
     )
 
@@ -571,22 +594,66 @@ def test_record_json_keeps_raw_hostile_strings(
     _assert_canonical_json(out)
 
 
+def test_relocation_text_chooses_the_form_on_raw_paths() -> None:
+    """The relocation in-file/cross-file form compares raw paths, not escapes.
+
+    ``escape_text`` is not injective: two distinct raw paths -- one carrying
+    real newline characters, one carrying the literal ``\\n`` spelling -- can
+    escape to identical text, and output would then present a cross-file move
+    as a one-file line-number shift. The v1 location schema rejects every
+    backslash in a graph path, and escape_text is injective over the paths it
+    admits, so this pair provably cannot exist in any schema-valid committed
+    graph; the decision being pinned lives entirely in the relocation render,
+    so the colliding to-path is attached to the location value here after
+    construction (a value the model itself would never emit) and the line is
+    asserted where ``tests/query/test_diff.py`` already pins relocation
+    forms.
+    """
+    old_location = Location("a\nq\nz.py", Range(Position(0, 1), Position(0, 12)))
+    new_location = Location("post.py", Range(Position(0, 1), Position(0, 12)))
+    object.__setattr__(new_location, "path", "a\\nq\\nz.py")
+    result = DiffResult(
+        relocated=(
+            Relocation(
+                kind="function",
+                symbol="two.gamma",
+                old_location=old_location,
+                new_location=new_location,
+            ),
+        )
+    )
+    text = render_text(result)
+    # Cross-file form: the escaped spelling appears at both the from and the
+    # to endpoint; a decision taken on the escaped texts would choose the
+    # in-file form and print the path once, as ``…:1→1``.
+    assert text == "~ two.gamma (relocated a\\nq\\nz.py:1→a\\nq\\nz.py:1)\n"
+    assert text.count("a\\nq\\nz.py") == 2
+
+
 def test_diff_json_keeps_raw_hostile_strings(
     diff_graphs: tuple, capsys: pytest.CaptureFixture[str]
 ) -> None:
     old_graph, new_graph = diff_graphs
     payload, out = _json_run(capsys, ["query", "diff", str(old_graph), str(new_graph)], status=1)
     assert {"kind": "function", "symbol": "rtl\u202eevil.added_evil"} in payload["added"]
-    assert {"kind": "function", "symbol": "two.gamma"} in payload["removed"]
+    assert {"kind": "function", "symbol": "rtl\u202eevil.helper2"} in payload["added"]
+    assert {"kind": "function", "symbol": "esc\x1bx.removed_helper"} in payload["removed"]
     same_path = next(item for item in payload["relocated"] if item["symbol"] == "esc\x1bx.first")
     assert same_path["from"] == {"path": ESC_FILE, "line": 1, "column": 1}
     assert same_path["to"] == {"path": ESC_FILE, "line": 2, "column": 1}
     cross_path = next(item for item in payload["relocated"] if item["symbol"] == "post.delta")
     assert cross_path["from"]["path"] == CSI_FILE
     assert cross_path["to"]["path"] == "post.py"
-    assert {"kind": "calls", "source": "one.extra_caller", "target": "one.alpha"} in payload[
-        "relationships_added"
-    ]
+    assert {
+        "kind": "calls",
+        "source": "rtl\u202eevil.outer",
+        "target": "rtl\u202eevil.helper2",
+    } in payload["relationships_added"]
+    assert {
+        "kind": "calls",
+        "source": "esc\x1bx.removed_helper",
+        "target": "esc\x1bx.first",
+    } in payload["relationships_removed"]
     _assert_canonical_json(out)
     _assert_no_hostile(out)
 
@@ -609,10 +676,11 @@ def test_system_json_keeps_raw_hostile_strings(
     assert [record["name"] for record in payload["results"]] == ["plain", "zone\u202e"]
     _assert_canonical_json(out)
 
-    # The hand-edited label survives as the raw string in JSON.
+    # The hand-edited label and the relocated location survive as raw strings.
     raw_out = _systems_run(
         systems_repo, capsys, ["query", "surface", "zone\u202e", "--json"], edited=True
     )
     payload = json.loads(raw_out)
     assert payload["results"][0]["symbol"] == "app.api.\u202eviolet"
+    assert payload["results"][0]["path"] == "app/" + CSI_FILE
     _assert_canonical_json(raw_out)
