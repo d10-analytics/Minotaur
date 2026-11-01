@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import tempfile
+import warnings
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -97,6 +98,39 @@ _CONFIG_CONSUMING_QUERIES = frozenset(
 _SYSTEM_QUERIES = frozenset({"surface", "consumers", "system-deps", "systems"})
 
 
+@contextmanager
+def _warnings_through_stderr_writer() -> Iterator[None]:
+    """Show Python warnings through the escaping writer, then restore the display.
+
+    Parsing analyzed source can raise a compile-time warning, and Python's
+    default display would print the analyzed file's name and source line raw.
+    Filters are untouched, so Python still decides whether a warning shows. A
+    failed stderr write loses the warning, as Python's display does: it must
+    not fail the parse and cost the file its facts. Any ``file`` argument is
+    ignored so a warning cannot leave through a stream that skips the escape.
+    """
+
+    def show(
+        message: Warning | str,
+        category: type[Warning],
+        filename: str,
+        lineno: int,
+        file: TextIO | None = None,
+        line: str | None = None,
+    ) -> None:
+        text = warnings.formatwarning(message, category, filename, lineno, line)
+        with suppress(OSError):
+            _write_stderr(text.rstrip("\n"))
+
+    previous = warnings.showwarning
+    warnings.showwarning = show
+    try:
+        yield
+    finally:
+        warnings.showwarning = previous
+
+
+@_warnings_through_stderr_writer()
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the console entry point and return its process exit status.
 
@@ -1997,9 +2031,12 @@ def _write_stderr(line: str) -> None:
     definitions, a graph document, or a Git probe cannot carry raw control
     characters to the terminal. The whole line is escaped as one unit --
     which deliberately flattens a multi-line message such as a Git-probe
-    remediation to its escape spellings -- and one newline terminates it.
+    remediation to its escape spellings -- and one newline terminates it. A
+    closed stderr drops the line, since ``print`` would otherwise send it to
+    standard output and corrupt the command's answer.
     """
-    print(escape_text(line), file=sys.stderr)
+    if sys.stderr is not None:
+        print(escape_text(line), file=sys.stderr)
 
 
 def _write_stdout(text: str) -> None:
