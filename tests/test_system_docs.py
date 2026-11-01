@@ -1120,6 +1120,8 @@ def test_graph_format_reference_states_plain_diff_reads_declaration_role() -> No
 
 QUERY_AND_SYSTEM_REPORTING_README = ROOT / "docs/systems/query-and-system-reporting/README.md"
 COMMAND_INTERFACE_README = ROOT / "docs/systems/command-interface/README.md"
+SOURCE_PRESENTATION_README = ROOT / "docs/systems/source-presentation/README.md"
+PROJECT_ACQUISITION_README = ROOT / "docs/systems/project-acquisition/README.md"
 
 SAFE_TEXT_RULE = (
     "Text output never prints a raw control or other non-printable character taken "
@@ -1240,4 +1242,57 @@ def test_command_interface_readme_links_the_cross_system_safe_text_invariants() 
     # The pointer sentence embeds the link target, so its assertion also covers
     # the exact anchor; the repository-wide link check resolves it.
     assert COMMAND_INTERFACE_INVARIANT_POINTER in before_interactions
+    assert "points to" not in before_interactions, "the pointer must not read as a claim"
+
+
+SOURCE_PATH_INVARIANT_LINK = "../source-presentation/README.md#cross-system-invariants"
+
+SOURCE_PATH_OWNER_SENTENCES = (
+    "A path recorded in a graph is read from disk only through `resolve_source_path` in "
+    "`src/minotaur/source.py`, which this system owns.",
+    "it resolves the joined path strictly and returns the resolved path, or `None` when "
+    "the path is missing, a parent component is not a directory, it contains NUL, it "
+    "loops through symlinks, or it resolves outside the root, including through a "
+    "symlink.",
+    "Any other `OSError`, such as a permission error, propagates, so an unreadable "
+    "directory is never mistaken for a missing file.",
+    "a caller reads the returned path, never the root joined with the graph path, so a "
+    "symlink cannot be followed past the containment check.",
+    "`read_source_path` reports the source as unavailable and `capture_source_bytes` omits it",
+)
+
+QUERY_SOURCE_PATH_POINTER = (
+    "Every read of a graph-recorded source path, in freshness drift, source context, and "
+    "the unreferenced-symbol text scan, follows the "
+    f"[source presentation cross-system invariants]({SOURCE_PATH_INVARIANT_LINK})"
+)
+
+PROJECT_ACQUISITION_SOURCE_PATH_POINTER = (
+    "Comparison source capture follows the "
+    f"[source presentation cross-system invariants]({SOURCE_PATH_INVARIANT_LINK}): each "
+    "captured path is resolved with `resolve_source_path` before its bytes are read."
+)
+
+
+def test_source_presentation_readme_owns_the_source_path_containment_invariant() -> None:
+    text = _collapsed(SOURCE_PRESENTATION_README)
+    assert text.index("## Cross-system invariants") < text.index("## Expected interactions")
+    section = text[
+        text.index("## Cross-system invariants") : text.index("## Expected interactions")
+    ]
+    for sentence in SOURCE_PATH_OWNER_SENTENCES:
+        assert sentence in section
+    assert "points to" not in section, "the invariant text must not read as an interaction claim"
+
+
+def test_source_path_readers_link_the_containment_invariant() -> None:
+    query = _collapsed(QUERY_AND_SYSTEM_REPORTING_README)
+    assert QUERY_SOURCE_PATH_POINTER in query[: query.index("## Expected interactions")]
+    assert (
+        "the path is resolved with `resolve_source_path` and the returned path is read."
+        in (query[: query.index("## Expected interactions")])
+    )
+    acquisition = _collapsed(PROJECT_ACQUISITION_README)
+    before_interactions = acquisition[: acquisition.index("## Expected interactions")]
+    assert PROJECT_ACQUISITION_SOURCE_PATH_POINTER in before_interactions
     assert "points to" not in before_interactions, "the pointer must not read as a claim"

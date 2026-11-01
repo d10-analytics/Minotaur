@@ -12,6 +12,11 @@ owners listed in `system.toml`. It excludes CLI grammar and dispatch,
 subsystem semantics, graph representation, interpreter behavior, and
 presentation details.
 
+Comparison source capture follows the
+[source presentation cross-system invariants](../source-presentation/README.md#cross-system-invariants):
+each captured path is resolved with `resolve_source_path` before its bytes are
+read.
+
 ## Expected interactions
 
 The bullets below follow a fixed claim convention: a bullet of the form
