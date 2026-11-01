@@ -14,6 +14,7 @@ from minotaur.query.index import GraphIndex
 from minotaur.query.render import escape_text
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 from minotaur.query.symbols import label_bare_name, node_bare_name
+from minotaur.source import resolve_source_path
 from minotaur.source_encoding import decode_python_source, is_python_source_path
 
 _TOKEN_PATTERN = re.compile(r"\w+")
@@ -221,8 +222,11 @@ def _text_mentions(
 ) -> tuple[frozenset[str], frozenset[str]]:
     counts: dict[str, int] = {}
     folded_counts: dict[str, int] = {}
+    resolved_root = root.resolve()
     for relative in selected:
-        path = root / relative
+        path = resolve_source_path(resolved_root, relative)
+        if path is None:
+            raise ValueError(f"source path is missing or escapes the source root: {relative}")
         # Python files are read with their declared encoding, as analysis
         # reads them, so a name spelled in that encoding is found here too.
         text = (

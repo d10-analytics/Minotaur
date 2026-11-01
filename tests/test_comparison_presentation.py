@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import (
@@ -119,6 +122,19 @@ def _comparison() -> SystemDiffResult:
         old_revision="old-sha",
         new_revision="new-sha",
     )
+
+
+def test_capture_source_bytes_omits_escaping_symlink_loop_and_directory(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    (root / "pkg").mkdir(parents=True)
+    (root / "app.py").write_bytes(b"value = 1\n")
+    (tmp_path / "outside.py").write_bytes(b"secret = 1\n")
+    (root / "escape.py").symlink_to(tmp_path / "outside.py")
+    (root / "loop.py").symlink_to("loop.py")
+
+    captured = capture_source_bytes(root, ["app.py", "escape.py", "loop.py", "pkg"])
+
+    assert dict(captured) == {"app.py": b"value = 1\n"}
 
 
 def test_comparison_excerpts_use_captured_bytes_after_live_source_changes(tmp_path: Path) -> None:
@@ -463,3 +479,20 @@ def test_comparison_unavailable_expression_evidence_is_reported_not_equality() -
     html = render_html(payload).decode("utf-8")
     assert "call-expression-unavailable" in html
     assert "structural call expression was unavailable" in html
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores directory modes"
+)
+def test_capture_source_bytes_omits_a_path_under_an_unreadable_directory(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg/a.py").write_bytes(b"value = 1\n")
+    (root / "app.py").write_bytes(b"value = 2\n")
+    (root / "pkg").chmod(0)
+    try:
+        captured = capture_source_bytes(root, ["app.py", "pkg/a.py"])
+    finally:
+        (root / "pkg").chmod(0o755)
+
+    assert dict(captured) == {"app.py": b"value = 2\n"}
