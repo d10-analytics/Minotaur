@@ -911,3 +911,138 @@ def test_file_without_a_module_name_stays_fresh(tmp_path: Path, capsys) -> None:
     assert query == 0
     assert "stale:" not in capsys.readouterr().err
     assert drift(_document(output), root).is_clean
+
+
+def _file_node_paths(output: Path) -> list[str]:
+    graph = json.loads(output.read_text(encoding="utf-8"))
+    return sorted(node["path"] for node in graph["nodes"] if node["node_class"] == "file")
+
+
+def _query_foo(root: Path, output: Path) -> int:
+    return cli.main(["query", "definitions", "foo", "--graph", str(output), "--root", str(root)])
+
+
+def _escape(root: Path, outside: Path) -> None:
+    (root / "a.py").unlink()
+    (root / "a.py").symlink_to(outside)
+
+
+def test_tracked_file_replaced_by_out_of_root_symlink_is_reported_missing(
+    tmp_path: Path, capsys
+) -> None:
+    """Two docs/concepts/freshness.md rows: an out-of-root symlink counts as missing.
+
+    Row 1: `analyze` a directory, replace a tracked file with a symlink that
+    resolves outside the root, then query. The refreshed graph omits the file
+    and the query exits 0; when every recorded file escapes, the different-tree
+    refusal exits 2 and leaves graph and sidecar unchanged.
+
+    Row 2: `analyze` explicit files, replace one with a symlink that resolves
+    outside the root, then query. The stale lines print, the refresh is refused
+    with `target escapes root`, the query exits 2, and graph and sidecar bytes
+    are unchanged.
+    """
+    outside = _write(tmp_path / "outside", "a.py", "def foo():\n    return 1\n")
+    refreshing = "minotaur: refreshing graph (1 drifted paths)"
+
+    # Directory target: the refresh omits the escaping file.
+    root = tmp_path / "dir"
+    _write(root, "a.py", "def foo():\n    return 1\n")
+    _write(root, "b.py", "def bar():\n    return 2\n")
+    output = tmp_path / "dir.json"
+    assert _analyze(root, output, root) == 0
+    _escape(root, outside)
+    capsys.readouterr()
+    assert _query_foo(root, output) == 0
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [refreshing, "minotaur: stale: a.py"]
+    assert captured.out == "no definitions\n"
+    assert _file_node_paths(output) == ["b.py"]
+
+    # Directory target, only recorded file escapes: different-tree refusal.
+    solo = tmp_path / "solo"
+    _write(solo, "a.py", "def foo():\n    return 1\n")
+    solo_output = tmp_path / "solo.json"
+    assert _analyze(solo, solo_output, solo) == 0
+    _escape(solo, outside)
+    graph_before = solo_output.read_bytes()
+    sidecar_before = stamp_path(solo_output).read_bytes()
+    capsys.readouterr()
+    assert _query_foo(solo, solo_output) == 2
+    refused = capsys.readouterr()
+    assert "all 1 recorded files" in refused.err
+    assert "refreshing graph" not in refused.err
+    assert solo_output.read_bytes() == graph_before
+    assert stamp_path(solo_output).read_bytes() == sidecar_before
+
+    # Explicit file targets: the refresh keeps the target and selection refuses it.
+    explicit = tmp_path / "explicit"
+    _write(explicit, "a.py", "def foo():\n    return 1\n")
+    _write(explicit, "b.py", "def bar():\n    return 2\n")
+    explicit_output = tmp_path / "explicit.json"
+    assert _analyze(explicit, explicit_output, explicit / "a.py", explicit / "b.py") == 0
+    _escape(explicit, outside)
+    graph_before = explicit_output.read_bytes()
+    sidecar_before = stamp_path(explicit_output).read_bytes()
+    capsys.readouterr()
+    assert _query_foo(explicit, explicit_output) == 2
+    escaped = capsys.readouterr()
+    assert escaped.err.splitlines() == [
+        refreshing,
+        "minotaur: stale: a.py",
+        f"minotaur: error: target escapes root: {explicit / 'a.py'}",
+    ]
+    assert explicit_output.read_bytes() == graph_before
+    assert stamp_path(explicit_output).read_bytes() == sidecar_before
+
+    # The document states each row's claims inside that row.
+    repository = Path(__file__).resolve().parents[2]
+    rows = [
+        re.sub(r"\s+", " ", line)
+        for line in (repository / "docs/concepts/freshness.md")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.startswith("| ")
+    ]
+    pinned = "test_tracked_file_replaced_by_out_of_root_symlink_is_reported_missing"
+    owners = (
+        "`resolve_source_path` in `minotaur/source.py`",
+        "`drift` in `minotaur/query/freshness.py`",
+        pinned,
+    )
+    (directory_row,) = (
+        row
+        for row in rows
+        if row.startswith(
+            "| `analyze` a directory, replace a tracked file, or a directory on its path, with a "
+            "symlink that resolves outside the root, then query |"
+        )
+    )
+    (explicit_row,) = (
+        row
+        for row in rows
+        if row.startswith(
+            "| `analyze` explicit files, replace one with a symlink that resolves outside the "
+            "root, then query |"
+        )
+    )
+    for claim in (
+        *owners,
+        "the refreshed graph omits the file",
+        "the query exits `0` when clean",
+        "the different-tree refusal (exit `2`) applies when every recorded file is missing or "
+        "escapes",
+        "graph and sidecar unchanged",
+        "Restore the file inside the root, or run `analyze --force` with targets that exclude it",
+    ):
+        assert claim in directory_row
+    for claim in (
+        *owners,
+        "stale lines print",
+        "the refresh is refused with `target escapes root`",
+        "exit `2`",
+        "graph and sidecar unchanged",
+        "Query with `--no-refresh` for the saved facts, or run `analyze --force` with targets "
+        "that exclude the escaping file",
+    ):
+        assert claim in explicit_row

@@ -64,13 +64,20 @@ _MEMO_LOCATION_FIELDS = frozenset({"path", "range"})
 #   - no NUL bytes
 #
 # This protects consumers from directory traversal and ensures the path
-# is meaningful as a repository-relative identifier. The regex matches
-# the JSON Schema `safePath` pattern exactly so that Python validation
-# rejects the same inputs the schema does.
-# The JSON Schema encodes this as "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000]+$"
-# where \\. is JSON-escaped \.  (literal dot in regex). In a Python raw
-# string the equivalent is \. without the extra backslash.
-_SAFE_PATH_RE = re.compile(r"^(?!/)(?!.*//)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*\\)[^\x00]+$")
+# is meaningful as a repository-relative identifier. The regex is the JSON
+# Schema `safePath` pattern character for character, and is applied with
+# `re.fullmatch`, so Python validation rejects the same inputs the schema does.
+# The rule applies across line breaks with the same verdict in Python `re`
+# and ECMA-262: the pattern uses `[\s\S]` where a wildcard is needed (`.`
+# stops at some line terminators, and which ones differs between engines) and
+# `(?![\s\S])` for end of input inside the lookahead (`$` is not the same
+# anchor in both engines). The JSON Schema encodes the same text with each
+# backslash doubled. Control characters other than NUL are valid path
+# characters.
+_SAFE_PATH_RE = re.compile(
+    r"^(?!/)(?![\s\S]*//)(?![\s\S]*(?:^|/)\.{1,2}(?:/|(?![\s\S])))"
+    r"(?![\s\S]*\\)[^\u0000]+$"
+)
 
 # CRLF must be tried before CR so "\r\n" is one terminator, not two.
 _LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
@@ -99,7 +106,7 @@ def encoded_length(line: str, encoding: CoordinateEncoding) -> int:
 
 def is_safe_path(path: str) -> bool:
     """Check whether a path satisfies the v1 safe-path contract."""
-    return bool(path) and _SAFE_PATH_RE.match(path) is not None
+    return bool(path) and _SAFE_PATH_RE.fullmatch(path) is not None
 
 
 @functools.total_ordering

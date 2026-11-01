@@ -49,7 +49,7 @@ NODE_ID_RE = re.compile(r"^node:sha256:[a-f0-9]{64}$")
 
 def is_valid_node_id_format(node_id: str) -> bool:
     """Check whether a string has the correct node ID wire format."""
-    return NODE_ID_RE.match(node_id) is not None
+    return NODE_ID_RE.fullmatch(node_id) is not None
 
 
 # The conditional identity fields each basis is permitted (and, where listed,

@@ -36,6 +36,11 @@ Git-probe text cannot carry a raw control character to the terminal. `--json`
 output bypasses the helper and carries the exact strings, encoded only by the
 JSON serializer.
 
+Every read of a graph-recorded source path, in freshness drift, source context,
+and the unreferenced-symbol text scan, follows the
+[source presentation cross-system invariants](../source-presentation/README.md#cross-system-invariants):
+the path is resolved with `resolve_source_path` and the returned path is read.
+
 ## Expected interactions
 
 The bullets below follow a fixed claim convention: a bullet of the form
@@ -55,7 +60,8 @@ through composition rather than a direct static edge.
 - `query-and-system-reporting` points to `project-acquisition` for
   configuration and project inputs.
 - `query-and-system-reporting` points to `source-presentation` for source
-  excerpts and presentation payloads.
+  excerpts, presentation payloads, and containment-checked source path
+  resolution.
 
 System membership remains an exact TOML scope, not a desired dependency,
 allow/deny rule, architectural grade, or runtime requirement. These

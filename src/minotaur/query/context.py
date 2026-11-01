@@ -12,7 +12,7 @@ from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import NodeClass
 from minotaur.query.freshness import content_sha256
 from minotaur.query.render import dump_json, escape_text
-from minotaur.source import read_source_path
+from minotaur.source import read_source_path, resolve_source_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +70,12 @@ def context(
     if not workspace_root.is_dir():
         raise ValueError(f"source root is not a directory: {root}")
     file_node = _file_node(document, path)
-    candidate = workspace_root.joinpath(*path.split("/"))
     try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(workspace_root)
-    except (OSError, ValueError) as error:
+        resolved = resolve_source_path(workspace_root, path)
+    except OSError as error:
         raise ValueError(f"site path is missing or escapes the source root: {path}") from error
+    if resolved is None:
+        raise ValueError(f"site path is missing or escapes the source root: {path}")
     if not resolved.is_file():
         raise ValueError(f"site path is not a file: {path}")
 

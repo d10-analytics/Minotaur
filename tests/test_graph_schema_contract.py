@@ -11,7 +11,8 @@ import jsonschema
 import pytest
 
 from minotaur import cli
-from minotaur.graph_model.document import _RFC3339_UTC_RE, GraphDocument
+from minotaur.graph_model.document import _GIT_COMMIT_RE, _RFC3339_UTC_RE, GraphDocument
+from minotaur.graph_model.identity import NODE_ID_RE
 from minotaur.graph_model.loading import (
     GraphLoadError,
     _validate_wire_shape,
@@ -22,6 +23,8 @@ from minotaur.graph_model.loading import (
     schema,
     stamp_path,
 )
+from minotaur.graph_model.location import _SAFE_PATH_RE, is_safe_path
+from minotaur.graph_model.provenance import _LANGUAGE_RE, _NAMESPACED_EXTENSION_RE
 from minotaur.graph_model.validation import IssueCode, validate_document
 
 ROOT = Path(__file__).parents[1]
@@ -851,3 +854,253 @@ def test_public_schema_path_matches_packaged_schema() -> None:
             "text (unmaterialized link, core.symlinks=false)"
         )
     assert public.read_bytes() == packaged_bytes
+
+
+# ---------------------------------------------------------------------------
+# Path and pattern containment across line breaks
+# ---------------------------------------------------------------------------
+
+_REJECTED_PATHS = [
+    "x\n/../../o.py",
+    "x\n//y",
+    "x\n\\..\\y",
+    "a\r\n/../b",
+    "a\r/../b",
+    "a\u2028/../b",
+    "a\u2029//b",
+    "a\u2029\\b",
+    "a\u0085/../b",
+    "a\x00b",
+    "",
+    "/a",
+    "a//b",
+    ".",
+    "..",
+    "./a",
+    "a/.",
+    "a/..",
+    "../a",
+    "a\\b",
+]
+_ACCEPTED_PATHS = [
+    "ctl\x1b[31mred.py",
+    "\n/etc/passwd",
+    "x\ny.py",
+    "a\u2028b",
+    "a.py\n",
+    "a/",
+    ".hidden",
+    "..a",
+    "...",
+    "a\n..",
+    "a/..\n",
+]
+
+
+def _safe_path_schema_pattern() -> str:
+    definitions = schema()["$defs"]
+    assert isinstance(definitions, dict)
+    safe_path = definitions["safePath"]
+    assert isinstance(safe_path, dict)
+    pattern = safe_path["pattern"]
+    assert isinstance(pattern, str)
+    return pattern
+
+
+def _ecma_reading_accepts(pattern: str, value: str) -> bool:
+    """Read the pattern as an ECMA-262 validator does: ``$`` is end of input."""
+    assert pattern.endswith("$")
+    return re.search(pattern[:-1] + r"\Z", value) is not None and value != ""
+
+
+@pytest.mark.parametrize(
+    ("value", "verdict"),
+    [(value, False) for value in _REJECTED_PATHS] + [(value, True) for value in _ACCEPTED_PATHS],
+)
+def test_safe_path_verdicts_hold_in_the_model_and_the_ecma_reading(
+    value: str, verdict: bool
+) -> None:
+    assert is_safe_path(value) is verdict
+    assert _ecma_reading_accepts(_safe_path_schema_pattern(), value) is verdict
+
+
+def test_safe_path_pattern_has_no_wildcard_and_one_end_anchor() -> None:
+    """With no ``.`` and a lone final ``$``, Python and ECMA read the text alike."""
+    pattern = _safe_path_schema_pattern()
+    bare = re.sub(r"\\.", "", pattern)
+    assert "." not in bare
+    assert bare.count("$") == 1
+    assert bare.endswith("$")
+
+
+def _small_workflow_with_path(location: str, path: str) -> dict[str, object]:
+    document = _small_workflow()
+    if location == "node":
+        file_node = next(n for n in _nodes(document) if n["node_class"] == "file")
+        file_node["path"] = path
+    else:
+        relationships = document["relationships"]
+        assert isinstance(relationships, list)
+        relationships[0]["evidence"][0]["locations"][0]["path"] = path
+    return document
+
+
+def _write_stamped(document: dict[str, object], tmp_path: Path) -> Path:
+    graph_path = tmp_path / "minotaur-graph.json"
+    graph_path.write_text(json.dumps(document), encoding="utf-8")
+    stamp_path(graph_path).write_text(graph_digest(graph_path.read_bytes()), encoding="utf-8")
+    return graph_path
+
+
+@pytest.mark.parametrize(
+    ("location", "model_message", "schema_path"),
+    [
+        (
+            "node",
+            "node path must be a safe repository-relative path",
+            r"\$\.nodes\[1\]\.path: .* does not match '\^\(\?!/\)",
+        ),
+        (
+            "location",
+            "path must be a non-empty, repository-relative, slash-separated path",
+            r"\$\.relationships\[0\]\.evidence\[0\]\.locations\[0\]\.path: "
+            r".* does not match '\^\(\?!/\)",
+        ),
+    ],
+)
+def test_newline_traversal_path_is_rejected_on_every_path(
+    location: str, model_message: str, schema_path: str, tmp_path: Path
+) -> None:
+    document = _small_workflow_with_path(location, "x\n/../../o.py")
+
+    with pytest.raises(jsonschema.ValidationError):
+        _validator().validate(document)
+    with pytest.raises(ValueError, match=model_message):
+        GraphDocument.from_dict(document)
+
+    graph_path = _write_stamped(document, tmp_path)
+    with pytest.raises(GraphLoadError, match=model_message):
+        load_graph_file(graph_path)
+    with pytest.raises(GraphLoadError, match=schema_path):
+        load_graph_file(graph_path, validate=True)
+
+
+def _mutate_language(document: dict[str, object]) -> None:
+    _nodes(document)[0]["language"] = "python\n"
+
+
+def _mutate_symbol_kind(document: dict[str, object]) -> None:
+    _nodes(document)[0]["symbol_kind"] = "x:y\n"
+
+
+def _mutate_relationship_kind(document: dict[str, object]) -> None:
+    relationships = document["relationships"]
+    assert isinstance(relationships, list)
+    relationships[0]["kind"] = "sql:calls\n"
+
+
+def _mutate_commit(document: dict[str, object]) -> None:
+    document["source_control"] = {"system": "git", "commit": "a" * 40 + "\n"}
+
+
+def _mutate_node_id(document: dict[str, object]) -> None:
+    node = _nodes(document)[0]
+    assert isinstance(node["id"], str)
+    node["id"] += "\n"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "model_message"),
+    [
+        (_mutate_language, "language must match"),
+        (_mutate_symbol_kind, "is not a core symbol_kind or a valid namespaced extension"),
+        (_mutate_relationship_kind, "is not a core relationship kind or a valid namespaced"),
+        (_mutate_commit, "git commit must be a full 40 or 64 character lowercase hex"),
+        (_mutate_node_id, "node id must match 'node:sha256:<64 hex chars>'"),
+    ],
+)
+def test_trailing_newline_pattern_values_are_rejected_on_every_model_path(
+    mutate: object, model_message: str, tmp_path: Path
+) -> None:
+    """Python's ``$`` accepts a final newline; the model's ``fullmatch`` does not.
+
+    The plain validator (``re.search``) accepts each document, so the model owns
+    the verdict on the matching-sidecar and ``validate=True`` paths alike.
+    """
+    document = _small_workflow()
+    assert callable(mutate)
+    mutate(document)
+    _validator().validate(document)
+
+    with pytest.raises(ValueError, match=model_message):
+        GraphDocument.from_dict(document)
+
+    graph_path = _write_stamped(document, tmp_path)
+    with pytest.raises(GraphLoadError, match=model_message):
+        load_graph_file(graph_path)
+    with pytest.raises(GraphLoadError, match=model_message):
+        load_graph_file(graph_path, validate=True)
+
+
+def _schema_pattern(*keys: str) -> str:
+    node: object = schema()
+    for key in keys:
+        assert isinstance(node, dict | list)
+        node = node[key]  # type: ignore[index]
+    assert isinstance(node, str)
+    return node
+
+
+@pytest.mark.parametrize(
+    ("schema_keys", "model_pattern"),
+    [
+        (("$defs", "nodeId", "pattern"), NODE_ID_RE.pattern),
+        (("$defs", "language", "pattern"), _LANGUAGE_RE.pattern),
+        (("$defs", "safePath", "pattern"), _SAFE_PATH_RE.pattern),
+        (
+            ("$defs", "sourceControl", "properties", "commit", "pattern"),
+            _GIT_COMMIT_RE.pattern,
+        ),
+        (("$defs", "symbolKind", "oneOf", 1, "pattern"), _NAMESPACED_EXTENSION_RE.pattern),
+        (("$defs", "relationshipKind", "oneOf", 1, "pattern"), _NAMESPACED_EXTENSION_RE.pattern),
+    ],
+)
+def test_schema_pattern_equals_the_model_pattern(schema_keys: tuple, model_pattern: str) -> None:
+    """Either side of a pair changing alone fails here."""
+    assert _schema_pattern(*schema_keys) == model_pattern
+
+
+def test_format_document_states_the_pattern_and_path_rules() -> None:
+    text = " ".join(
+        (ROOT / "docs/formats/minotaur-graph-v1.md").read_text(encoding="utf-8").split()
+    )
+    assert (
+        "`generated_at`, `language`, the symbol and relationship kinds, "
+        "`source_control.commit`, node ids and paths are each checked by the schema "
+        "`pattern` and by the model's `re.fullmatch` of the same pattern "
+        "(extension property-name patterns are not in that list)"
+    ) in text
+    assert (
+        "so both paths agree on the field ranges. The model rejects a trailing line feed "
+        "in every one of these fields except paths, where it is an ordinary control "
+        "character and valid, and so does an ECMA-262 validator, where `$` is the end of "
+        "input. A validator that applies the schema with Python's `re.search`, such as "
+        "`jsonschema`, which `--validate` uses, accepts it, so such a value passes schema "
+        "validation alone and is refused when Minotaur loads the graph."
+    ) in text
+    assert "a trailing line feed is rejected; only" not in text
+    assert "rejected in every one of these fields except paths" not in text
+
+    # The qualified claim describes real behavior: the plain `re.search`
+    # validator accepts a trailing line feed that the model refuses.
+    document = _small_workflow()
+    _mutate_language(document)
+    _validator().validate(document)
+    with pytest.raises(ValueError, match="language must match"):
+        GraphDocument.from_dict(document)
+    assert (
+        "A path is invalid if it is empty, has a leading `/`, has an empty segment (`//`), "
+        "has a `.` or `..` segment, contains `\\`, or contains NUL. The rule applies across "
+        "line breaks, so a line feed does not hide a later segment or `\\`; other control "
+        "characters are valid."
+    ) in text

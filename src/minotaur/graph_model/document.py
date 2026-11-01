@@ -112,7 +112,7 @@ class SourceControl:
         if self.commit is None and self.branch is None:
             raise ValueError("source_control requires at least one of 'commit' or 'branch'")
 
-        if self.commit is not None and not _GIT_COMMIT_RE.match(self.commit):
+        if self.commit is not None and not _GIT_COMMIT_RE.fullmatch(self.commit):
             raise ValueError(
                 f"git commit must be a full 40 or 64 character lowercase hex "
                 f"identifier, got {self.commit!r}"

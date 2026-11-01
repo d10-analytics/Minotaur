@@ -30,14 +30,22 @@ excluded. A user interface converts lines to one-based values for display.
 
 `generated_by`, `generated_at`, and `source_control` are optional snapshot
 context. When present, `generated_at` is a UTC RFC 3339 timestamp ending in
-`Z`. The schema `pattern` and the model's `re.fullmatch` check the same pattern,
-so both paths agree on the field ranges; only the model separately verifies
-day-of-month validity with `datetime.fromisoformat`, so a well-formed but
-impossible date such as `2026-02-30T00:00:00Z` is rejected on the model path
-alone. Git commits are full lowercase 40- or 64-character IDs. These fields are
-neither node identity nor history. Minotaur-written graphs record the analyzer
-semantics version in `generated_by.version`; freshness compares this version
-for graphs with a recorded, non-empty source selection. This is separate from the graph schema
+`Z`. `generated_at`, `language`, the symbol and relationship kinds,
+`source_control.commit`, node ids and paths are each checked by the schema
+`pattern` and by the model's `re.fullmatch` of the same pattern (extension
+property-name patterns are not in that list), so both paths agree on the field
+ranges. The model rejects a trailing line feed in every one of these fields
+except paths, where it is an ordinary control character and valid, and so does an
+ECMA-262 validator, where `$` is the end of input. A validator that applies the
+schema with Python's `re.search`, such as `jsonschema`, which `--validate` uses,
+accepts it, so such a value passes schema validation alone and is refused when
+Minotaur loads the graph. Only the model separately verifies day-of-month
+validity with `datetime.fromisoformat`, so a well-formed but impossible date such
+as `2026-02-30T00:00:00Z` is rejected on the model path alone. Git commits are
+full lowercase 40- or 64-character IDs. These fields are neither node identity
+nor history. Minotaur-written graphs record the analyzer semantics version in
+`generated_by.version`; freshness compares this version for graphs with a
+recorded, non-empty source selection. This is separate from the graph schema
 version and from interpreter evidence producer metadata.
 
 ## Locations
@@ -54,8 +62,11 @@ A location is either absent or complete:
 }
 ```
 
-Paths are canonical repository-relative paths with slash separators. Absolute
-paths and `.` or `..` components are invalid. All positions are non-negative
+Paths are canonical repository-relative paths with slash separators. A path
+is invalid if it is empty, has a leading `/`, has an empty segment (`//`), has a
+`.` or `..` segment, contains `\`, or contains NUL. The rule applies across
+line breaks, so a line feed does not hide a later segment or `\`; other control
+characters are valid. All positions are non-negative
 integers. The range end must not precede its start; when source text is
 available, ranges must also fit that text.
 
