@@ -50,7 +50,6 @@ from minotaur.query.system import (
 )
 
 _REPORT_QUERIES = ("surface", "consumers", "system-deps")
-_BOUNDARY_KINDS = frozenset({"calls", "references", "imports"})
 
 
 def _public_key(key: tuple[object, ...]) -> tuple[str, ...]:

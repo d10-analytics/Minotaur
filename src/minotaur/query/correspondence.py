@@ -20,16 +20,19 @@ from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import IdentityBasis, NodeClass, RelationshipKind
 from minotaur.graph_model.relationship import Relationship
 from minotaur.graph_model.validation import ValidationReport, validate_document
+from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
 
 NodeKey: TypeAlias = tuple[object, ...]
 RelationshipKey: TypeAlias = tuple[NodeKey, NodeKey, str]
 
-_SUPPORTED_RELATIONSHIPS = frozenset(
-    {
-        RelationshipKind.CALLS.value,
-        RelationshipKind.REFERENCES.value,
-        RelationshipKind.IMPORTS.value,
-    }
+#: Consumers, dependencies, and overview connections report all current
+#: boundary relationships; correspondence admits exactly these kinds in
+#: boundary mode.
+BOUNDARY_RELATIONSHIP_KINDS: tuple[str, ...] = (
+    RelationshipKind.CALLS.value,
+    RelationshipKind.REFERENCES.value,
+    RelationshipKind.IMPORTS.value,
+    *CURRENT_SQL_DEPENDENCY_KINDS,
 )
 
 
@@ -463,7 +466,7 @@ def prepare_correspondence(
             candidate_ids[key].add(node.id)
 
     for relationship in document.relationships:
-        if not whole_graph and relationship.kind not in _SUPPORTED_RELATIONSHIPS:
+        if not whole_graph and relationship.kind not in BOUNDARY_RELATIONSHIP_KINDS:
             continue
         for endpoint_name, endpoint_id in (
             ("source", relationship.source),
@@ -531,7 +534,7 @@ def prepare_correspondence(
 
     relationship_groups: dict[RelationshipKey, list[RelationshipOccurrence]] = defaultdict(list)
     for relationship in document.relationships:
-        if not whole_graph and relationship.kind not in _SUPPORTED_RELATIONSHIPS:
+        if not whole_graph and relationship.kind not in BOUNDARY_RELATIONSHIP_KINDS:
             continue
         source = by_id[relationship.source]
         target = by_id[relationship.target]
@@ -572,6 +575,7 @@ def prepare_whole_graph(document: GraphDocument, *, side: str = "local") -> Corr
 
 
 __all__ = [
+    "BOUNDARY_RELATIONSHIP_KINDS",
     "CorrespondenceAdmissionError",
     "CorrespondenceAmbiguityError",
     "CorrespondenceEligibilityError",

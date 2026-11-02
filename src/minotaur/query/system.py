@@ -58,6 +58,7 @@ from minotaur.graph_model.location import Location
 from minotaur.graph_model.node import Node
 from minotaur.graph_model.provenance import RelationshipKind
 from minotaur.graph_model.relationship import Relationship
+from minotaur.query.correspondence import BOUNDARY_RELATIONSHIP_KINDS
 from minotaur.query.freshness import AnalyzerChange, recorded_selection_view
 from minotaur.query.index import GraphIndex
 from minotaur.query.render import escape_text
@@ -66,15 +67,10 @@ from minotaur.system import EndpointKind, System, SystemMembership, resolve_syst
 
 _CALLS = RelationshipKind.CALLS.value
 _REFERENCES = RelationshipKind.REFERENCES.value
-_IMPORTS = RelationshipKind.IMPORTS.value
 
 #: Surface reports symbol-layer and current SQL dependency relationships;
 #: imports of a system module are a consumer fact, never an exposed boundary.
 _SURFACE_KINDS = (_CALLS, _REFERENCES, *CURRENT_SQL_DEPENDENCY_KINDS)
-
-#: Consumers, dependencies, and overview connections report all current
-#: boundary relationships (D-06).
-_BOUNDARY_KINDS = (_CALLS, _REFERENCES, _IMPORTS, *CURRENT_SQL_DEPENDENCY_KINDS)
 
 RowKey = tuple[str, ...]
 _ResolvedRelationship = tuple[Relationship, Node, Node]
@@ -189,7 +185,7 @@ class _ReportSelection:
 def _resolve_supported_relationships(index: GraphIndex) -> tuple[_ResolvedRelationship, ...]:
     """Resolve every supported edge once, independent of a report boundary."""
     resolved: list[_ResolvedRelationship] = []
-    for kind in _BOUNDARY_KINDS:
+    for kind in BOUNDARY_RELATIONSHIP_KINDS:
         for relationship in index.relationships(kind):
             source = index.nodes.get(relationship.source)
             destination = index.nodes.get(relationship.target)
@@ -1095,7 +1091,7 @@ class ReportingSnapshot:
     def _connections(self) -> tuple[ConnectionRecord, ...]:
         grouped: dict[tuple[str, str], dict[str, Any]] = {}
         for relationship in self.document.relationships:
-            if relationship.kind not in _BOUNDARY_KINDS:
+            if relationship.kind not in BOUNDARY_RELATIONSHIP_KINDS:
                 continue
             source = self.index.nodes.get(relationship.source)
             target = self.index.nodes.get(relationship.target)
