@@ -19,12 +19,22 @@ def _observation(fingerprint: str | None, *, line: int = 1) -> CallExpressionObs
 
 
 def test_call_residuals_are_multisets_and_ignore_observation_order() -> None:
-    old = (_observation("same"), _observation("same", line=2), _observation("other", line=3))
-    new = (_observation("other", line=3), _observation("same", line=2), _observation("same"))
+    old = (
+        _observation("a"),
+        _observation("b"),
+        _observation("a"),
+        _observation("other", line=3),
+    )
+    new = (
+        _observation("other", line=3),
+        _observation("a"),
+        _observation("a"),
+        _observation("b"),
+    )
 
     comparison = compare_call_observations(old, new)
 
-    assert [item.status for item in comparison.changes] == ["unchanged"] * 3
+    assert [item.status for item in comparison.changes] == ["unchanged", "unchanged"]
     assert comparison.limitations == ()
     assert not comparison.changed
 
