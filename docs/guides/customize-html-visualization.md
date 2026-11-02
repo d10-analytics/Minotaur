@@ -154,9 +154,13 @@ the downloaded file must contain no source text, and ensure no project
 configuration supplies a source root (run from outside that configured tree
 with explicit graph/output paths if necessary). Python files are excerpted
 through their declared encoding, as analysis reads them, and through UTF-8
-when they declare none. Missing, unreadable, and escaping-symlink paths are not
-embedded, nor is any other path that cannot be decoded: a non-Python file that
-is not UTF-8, or a Python file whose declaration cannot be honoured or whose
-bytes its codec cannot decode. The
-command warns,
+when they declare none. Other files are decoded as UTF-8 with a leading
+byte-order mark removed, as JavaScript and SQL analysis decode them. Excerpt
+lines are numbered on LF, CRLF and CR only, as graph locations are, so a form
+feed, vertical tab, NEL, U+2028 or U+2029 stays inside its line. Missing,
+unreadable, and escaping-symlink paths are not embedded, nor is a path that is
+not a regular file (for example a named pipe or directory), nor any other path
+that cannot be decoded: a non-Python file that is not UTF-8, or a Python file
+whose declaration cannot be honoured or whose bytes its codec cannot decode.
+The command warns,
 while still writing successfully, when the artifact exceeds 10 MiB.
