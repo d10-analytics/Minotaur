@@ -1,4 +1,7 @@
-"""Decode Python source bytes as the Python compiler would (PEP 263).
+"""Decode source bytes: Python as the compiler would (PEP 263), others as UTF-8.
+
+:func:`decode_utf8_sig` decodes every other source as UTF-8 and drops a
+leading byte-order mark, as JavaScript and SQL analysis do.
 
 A Python file may declare its encoding in a comment on one of its first two
 lines, and a UTF-8 byte-order mark selects UTF-8. As in the compiler, the
@@ -41,6 +44,11 @@ def decode_python_source(content: bytes) -> str:
         encoding = _declared_beside_non_utf8_bytes(lines, error)
     _require_ascii_compatible(encoding)
     return content.decode(encoding)
+
+
+def decode_utf8_sig(content: bytes) -> str:
+    """Decode source bytes as UTF-8, dropping a leading byte-order mark."""
+    return content.decode("utf-8-sig")
 
 
 def is_python_source_path(path: str) -> bool:

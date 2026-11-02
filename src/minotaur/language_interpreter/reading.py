@@ -11,6 +11,7 @@ from minotaur.graph_model.location import Location
 from minotaur.language_interpreter.contract import Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.paths import is_graph_path
 from minotaur.language_interpreter.workspace import Workspace
+from minotaur.source_encoding import decode_utf8_sig
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,11 +43,6 @@ class ParseFailure(Exception):
         super().__init__(message)
         self.message = message
         self.location = location
-
-
-def decode_utf8_sig(content: bytes) -> str:
-    """Decode source bytes as UTF-8, dropping a leading byte-order mark."""
-    return content.decode("utf-8-sig")
 
 
 def read_sources(

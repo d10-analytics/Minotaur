@@ -7,8 +7,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 
-from minotaur.graph_model.location import is_safe_path
-from minotaur.source_encoding import decode_python_source, is_python_source_path
+from minotaur.graph_model.location import is_safe_path, split_lines
+from minotaur.source_encoding import decode_python_source, decode_utf8_sig, is_python_source_path
 
 
 def resolve_source_path(root: Path, wire_path: str) -> Path | None:
@@ -53,6 +53,8 @@ def read_source_path(root: Path, wire_path: str, spans: list[tuple[int, int]]) -
     if resolved is None:
         return {"status": "unavailable", "reason": "path is missing or escapes the source root"}
     try:
+        if not resolved.is_file():
+            return {"status": "unavailable", "reason": "source path is not a regular file"}
         content = resolved.read_bytes()
     except OSError as error:
         return {
@@ -68,8 +70,10 @@ def read_source_bytes(
     """Render bounded line spans from already captured source *content*.
 
     A Python path is decoded with its declared encoding, exactly as analysis
-    decodes it, and every other path is decoded as UTF-8; the excerpt lines
-    are the decoded text's ``str.splitlines()`` lines. Comparison
+    decodes it, and every other path is decoded as UTF-8 with a leading
+    byte-order mark removed. Excerpt lines are numbered on LF, CRLF and CR
+    only, as graph locations are, and a final terminator does not start
+    another line. Comparison
     presentation must use this boundary after
     its source captures have been released.  Keeping byte decoding here makes
     it impossible for a later renderer call to silently fall back to a live
@@ -84,10 +88,13 @@ def read_source_bytes(
             return {"status": "unavailable", "reason": f"source file cannot be decoded: {error}"}
     else:
         try:
-            text = content.decode("utf-8")
+            text = decode_utf8_sig(content)
         except UnicodeDecodeError:
             return {"status": "unavailable", "reason": "source file is not UTF-8"}
-    lines = text.splitlines()
+    lines = split_lines(text)
+    if lines and not lines[-1]:
+        # ``split_lines`` yields an empty element after a final terminator.
+        lines.pop()
     merged = merge_spans(spans, len(lines))
     return {
         "status": "available",
