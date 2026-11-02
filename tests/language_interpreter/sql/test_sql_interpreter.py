@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 import sqlglot
 
 from minotaur.config import SqlSettings
+from minotaur.graph_model.identity import NodeIdentity
+from minotaur.graph_model.location import Location, Position, Range
+from minotaur.graph_model.node import Node
+from minotaur.graph_model.provenance import IdentityBasis, NodeClass
 from minotaur.language_interpreter.contract import DiagnosticCode, DiagnosticSeverity
-from minotaur.language_interpreter.sql import analyze_sql_files
+from minotaur.language_interpreter.sql import analyze_sql_files, diagnostics
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -168,6 +174,123 @@ def test_cyclic_views_and_branches_entering_cycles_have_no_depth_warning(
         if item.code is DiagnosticCode.CIRCULAR_DEPENDENCY
     ] == [("cycle_a", "cycle_b", "cycle_a")]
     assert not [item for item in result.warnings if item.code is DiagnosticCode.VIEW_DEPTH_WARNING]
+
+
+def _count_module_calls(module_file: str, action: Callable[[], object]) -> tuple[object, int]:
+    """Run action, counting Python calls whose code lives in module_file."""
+    calls = 0
+
+    def profiler(frame: object, event: str, _arg: object) -> None:
+        nonlocal calls
+        if event == "call" and frame.f_code.co_filename == module_file:  # type: ignore[attr-defined]
+            calls += 1
+
+    sys.setprofile(profiler)
+    try:
+        result = action()
+    finally:
+        sys.setprofile(None)
+    return result, calls
+
+
+def test_layered_views_report_depth_warnings_in_bounded_calls(tmp_path: Path) -> None:
+    statements = ["CREATE TABLE dbo.base (x int)"]
+    statements += [f"CREATE VIEW v0_{j} AS SELECT x FROM dbo.base" for j in (0, 1)]
+    for layer in range(1, 14):
+        for j in (0, 1):
+            statements.append(
+                f"CREATE VIEW v{layer}_{j} AS SELECT x FROM v{layer - 1}_0 "
+                f"UNION ALL SELECT x FROM v{layer - 1}_1"
+            )
+    source = tmp_path / "layers.sql"
+    source.write_text("\nGO\n".join(statements) + "\n", encoding="utf-8")
+
+    result, calls = _count_module_calls(
+        diagnostics.__file__,
+        lambda: analyze_sql_files(
+            Workspace(tmp_path), (source,), SqlSettings(view_depth_threshold=13)
+        ),
+    )
+
+    tail = " -> v12_1 -> v11_1 -> v10_1 -> v9_1 -> v8_1 -> v7_1 -> v6_1 -> v5_1 -> v4_1"
+    tail += " -> v3_1 -> v2_1 -> v1_1 -> v0_1 -> dbo.base"
+    assert sorted(
+        (item.code, item.message)
+        for item in result.warnings  # type: ignore[attr-defined]
+    ) == sorted(
+        (
+            DiagnosticCode.VIEW_DEPTH_WARNING,
+            f"view dependency depth 14 exceeds threshold 13: {first}{tail}",
+        )
+        for first in ("v13_0", "v13_1")
+    )
+    # Measured 697 calls on Python 3.12.3; bound is 3x rounded up to 1,000.
+    assert calls <= 3_000
+
+
+def test_cycle_search_over_acyclic_layers_is_bounded(tmp_path: Path) -> None:
+    ids = [f"{layer:02d}_{j}" for layer in range(16) for j in (0, 1)]
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, "minotaur-sql")
+    location = Location("views.sql", Range(Position(1, 0), Position(1, 1)))
+    views = {
+        node_id: Node(
+            id="node:sha256:" + hashlib.sha256(node_id.encode()).hexdigest(),
+            identity=identity,
+            node_class=NodeClass.SYMBOL,
+            label=node_id,
+            symbol_kind="sql:view",
+            location=location,
+        )
+        for node_id in ids
+    }
+    edges = {
+        f"{layer:02d}_{j}": (f"{layer + 1:02d}_0", f"{layer + 1:02d}_1")
+        for layer in range(15)
+        for j in (0, 1)
+    }
+
+    result, calls = _count_module_calls(
+        diagnostics.__file__, lambda: diagnostics._elementary_cycles(edges, views)
+    )
+
+    assert result == ()
+    # Measured 2 calls on Python 3.12.3; bound is 3x rounded up to 1,000.
+    assert calls <= 1_000
+
+
+def test_cycle_and_branch_view_warnings_keep_literal_output(tmp_path: Path) -> None:
+    source = tmp_path / "parity.sql"
+    source.write_text(
+        "CREATE TABLE dbo.base (x int)\nGO\n"
+        "CREATE VIEW cycle_a AS SELECT x FROM cycle_b\nGO\n"
+        "CREATE VIEW cycle_b AS SELECT x FROM cycle_a\nGO\n"
+        "CREATE VIEW leaf AS SELECT x FROM dbo.base\nGO\n"
+        "CREATE VIEW mixed AS SELECT x FROM cycle_a UNION ALL SELECT x FROM leaf\nGO\n"
+        "CREATE VIEW enters AS SELECT x FROM cycle_b\nGO\n"
+        "CREATE VIEW root_view AS SELECT x FROM mixed UNION ALL SELECT x FROM enters\n",
+        encoding="utf-8",
+    )
+    result = analyze_sql_files(Workspace(tmp_path), (source,), SqlSettings(view_depth_threshold=1))
+
+    assert [
+        (item.code, item.message, item.extensions["minotaur-sql"]) for item in result.warnings
+    ] == [
+        (
+            DiagnosticCode.CIRCULAR_DEPENDENCY,
+            "circular view dependency: cycle_a -> cycle_b -> cycle_a",
+            {"path": ("cycle_a", "cycle_b", "cycle_a")},
+        ),
+        (
+            DiagnosticCode.VIEW_DEPTH_WARNING,
+            "view dependency depth 2 exceeds threshold 1: mixed -> leaf -> dbo.base",
+            {"depth": 2, "path": ("mixed", "leaf", "dbo.base")},
+        ),
+        (
+            DiagnosticCode.VIEW_DEPTH_WARNING,
+            "view dependency depth 3 exceeds threshold 1: root_view -> mixed -> leaf -> dbo.base",
+            {"depth": 3, "path": ("root_view", "mixed", "leaf", "dbo.base")},
+        ),
+    ]
 
 
 def test_view_depth_warning_keeps_fk_and_path_metadata(tmp_path: Path) -> None:
