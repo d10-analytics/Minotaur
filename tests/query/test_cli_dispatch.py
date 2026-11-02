@@ -97,7 +97,6 @@ def test_help_exits_zero_next_to_an_invalid_config(
 def test_query_grammar_relaxes_only_when_a_config_is_located(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """AC-03/AC-07: with a config present, --graph/--root are no longer required."""
     root = _repo(tmp_path)
     _write(root, "src/app.py", "def app():\n    return 1\n")
     (root / ".minotaur.toml").write_text(
@@ -109,8 +108,12 @@ def test_query_grammar_relaxes_only_when_a_config_is_located(
     status = cli.main(["query", "callers", "some_symbol"])
 
     assert status == 2
-    err = capsys.readouterr().err
-    assert "the following arguments are required" not in err
+    captured = capsys.readouterr()
+    assert "the following arguments are required" not in captured.err
+    assert captured.err.startswith(
+        f"minotaur: error: could not read graph input {root / 'g.json'}:"
+    )
+    assert captured.out == ""
 
 
 def test_analyze_without_flags_runs_from_config_next_to_a_config(

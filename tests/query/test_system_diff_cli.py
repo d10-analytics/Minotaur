@@ -1633,6 +1633,16 @@ def test_systems_public_route_accepts_supported_unresolved_origin_chain(
     assert captured.err == ""
 
 
+def _membership_label(system):
+    if system is None:
+        return "unassigned"
+    return json.dumps(system) if system == "system: App" else system
+
+
+def _membership_record(system):
+    return json.dumps({"file": "absent.py", "system": system}, separators=(",", ":"))
+
+
 @pytest.mark.parametrize(
     ("before", "after"),
     (
@@ -1690,7 +1700,27 @@ def test_literal_owner_graph_absent_membership(tmp_path, monkeypatch, capsys, be
         )
         for flags in ([], ["--details"]):
             assert cli.main([*arguments, *flags]) == expected
-            capsys.readouterr()
+            lines = [
+                line
+                for line in capsys.readouterr().out.splitlines()
+                if not line.startswith(("old coverage:", "new coverage:"))
+                and not line.startswith(("old selection:", "new selection:"))
+            ]
+            if not expected:
+                assert lines == ["no system differences"]
+                continue
+            expected_lines = [
+                f"membership changed: absent.py — {_membership_label(before)} -> "
+                f"{_membership_label(after)}"
+            ]
+            if flags:
+                expected_lines += [
+                    f"old: {_membership_record(before)}",
+                    f"new: {_membership_record(after)}",
+                    "old evidence: unavailable",
+                    "new evidence: unavailable",
+                ]
+            assert lines == expected_lines
 
 
 def _embedded_comparison_payload(html: str) -> dict[str, object]:
@@ -1921,7 +1951,9 @@ def test_systems_html_unchanged_pair_reports_zero_without_touching_inputs(
     captured = capsys.readouterr()
     assert "no system differences" in captured.out
     assert captured.err == ""
-    assert report.exists()
+    comparison = _embedded_comparison_payload(report.read_text(encoding="utf-8"))
+    assert comparison["changed"] is False
+    assert comparison["exit_code"] == 0
     for relative, content in inputs.items():
         assert (root / relative).read_bytes() == content
 
@@ -1962,7 +1994,9 @@ def test_systems_force_replaces_report_and_requires_html(
     report = root / "comparison.html"
     report.write_text("existing report", encoding="utf-8")
     assert cli.main(["query", "diff", "--systems", "--html", str(report), "--force"]) == 0
-    assert "existing report" not in report.read_text(encoding="utf-8")
+    comparison = _embedded_comparison_payload(report.read_text(encoding="utf-8"))
+    assert comparison["changed"] is False
+    assert comparison["exit_code"] == 0
 
 
 @pytest.mark.parametrize(
@@ -1992,7 +2026,12 @@ def test_systems_force_refuses_protected_output_aliases(
     assert cli.main(["query", "diff", "--systems", "--html", str(target), "--force"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "comparison input" in captured.err or "protected" in captured.err
+    message = (
+        "output path is inside a protected comparison input:"
+        if alias in ("definition", "git-metadata")
+        else "output path is also a comparison input:"
+    )
+    assert captured.err == f"minotaur: error: {message} {target.resolve()}\n"
     assert target.read_bytes() == original
 
 
