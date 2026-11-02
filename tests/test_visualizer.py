@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from hashlib import sha256
 from pathlib import Path
 
@@ -166,8 +167,66 @@ def test_captured_excerpts_decode_declarations_only_for_python_paths(tmp_path: P
     assert python_bom == {"status": "available", "spans": [{"start": 0, "lines": ["value = 1"]}]}
     assert javascript_bom == {
         "status": "available",
-        "spans": [{"start": 0, "lines": ["\ufeffvalue = 1"]}],
+        "spans": [{"start": 0, "lines": ["value = 1"]}],
     }
+
+
+@pytest.mark.parametrize("path", ["a.py", "a.js"])
+@pytest.mark.parametrize(
+    "separator", ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+def test_excerpt_lines_do_not_split_on_extra_unicode_separators(path: str, separator: str) -> None:
+    content = f"a{separator}b\nc\n".encode()
+    assert read_source_bytes(path, content, [(0, 5)]) == {
+        "status": "available",
+        "spans": [{"start": 0, "lines": [f"a{separator}b", "c"]}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("content", "lines"),
+    [
+        (b"a\n", ["a"]),
+        (b"a\n\n", ["a", ""]),
+        (b"a\r\nb\rc", ["a", "b", "c"]),
+        (b"a\r", ["a"]),
+        (b"a", ["a"]),
+    ],
+)
+def test_excerpt_final_terminator_adds_no_phantom_line(content: bytes, lines: list[str]) -> None:
+    assert read_source_bytes("a.js", content, [(0, 5)]) == {
+        "status": "available",
+        "spans": [{"start": 0, "lines": lines}],
+    }
+
+
+def test_excerpt_of_an_empty_file_has_no_lines() -> None:
+    assert read_source_bytes("a.js", b"", [(0, 5)]) == {"status": "available", "spans": []}
+
+
+def test_non_regular_source_paths_are_unavailable_without_blocking(tmp_path: Path) -> None:
+    unavailable = {"status": "unavailable", "reason": "source path is not a regular file"}
+    kinds = ["directory"] + (["pipe"] if hasattr(os, "mkfifo") else [])
+    for kind in kinds:
+        root = tmp_path / kind
+        target = root / "src" / "checkout.py"
+        target.parent.mkdir(parents=True)
+        if kind == "directory":
+            target.mkdir()
+        else:
+            os.mkfifo(target)
+        result: dict[str, object] = {}
+
+        def run(root: Path = root, result: dict[str, object] = result) -> None:
+            result.update(prepare_excerpts(_graph(), root))
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), kind
+        paths = result["paths"]
+        assert isinstance(paths, dict)
+        assert paths["src/checkout.py"] == unavailable, kind
 
 
 def test_captured_excerpt_of_an_unknown_declaration_is_unavailable() -> None:

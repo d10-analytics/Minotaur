@@ -46,7 +46,8 @@ through composition rather than a direct static edge.
   captured-bytes reader that comparison acquisition calls before its captures
   are released.
 - `source-presentation` points to `analysis-platform` for the shared Python
-  source-encoding policy.
+  source-encoding policy and the UTF-8 decoding, with a leading byte-order
+  mark removed, that non-Python source excerpts use.
 - `source-presentation` points to `graph-contract` for the canonical graph
   payload, source locations, and the shared path guard.
 - `source-presentation` points to `query-and-system-reporting` for the

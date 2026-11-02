@@ -9,7 +9,9 @@ TOML declaration in `system.toml`.
 
 This boundary includes the shared language-interpreter platform files listed
 in `system.toml` and the shared Python source-encoding policy that every
-component decoding Python source bytes uses. It excludes Python and
+component decoding Python source bytes uses, together with the shared UTF-8
+decoding, with a leading byte-order mark removed, that JavaScript and SQL
+analysis and non-Python source excerpts use. It excludes Python and
 JavaScript language semantics, command-line ownership, UI and query policy,
 graph persistence, and browser assets.
 
