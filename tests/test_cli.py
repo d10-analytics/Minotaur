@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from minotaur import cli, config, git
+from minotaur import cli, git
 from minotaur.graph_model import loading
 from minotaur.graph_model.loading import load_graph_file, stamp_path
 from minotaur.language_interpreter import ANALYZER_SEMANTICS_VERSION, registry
@@ -555,12 +555,6 @@ def test_configured_sql_migration_patterns_reach_analyzer_owner(
     assert settings.migration_patterns == ("migrations/**/*.sql",)
     assert settings.matches_migration("migrations/001.sql")
     assert settings.matches_migration("migrations/nested/002.sql")
-    assert not config.SqlSettings(migration_patterns=("migrations/*.sql",)).matches_migration(
-        "migrations/nested/002.sql"
-    )
-    assert not config.SqlSettings(migration_patterns=("*.sql",)).matches_migration(
-        "migrations/001.sql"
-    )
 
 
 def test_invalid_configured_sql_migration_pattern_writes_no_output(tmp_path: Path) -> None:

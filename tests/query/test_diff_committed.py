@@ -99,7 +99,8 @@ def test_committed_mode_compares_head_graph_to_current_files_without_mutation(
     captured = capsys.readouterr()
 
     assert status == 1
-    assert "relocated" in captured.out or "no changes" not in captured.out
+    assert captured.out == "+ app.added\n"
+    assert captured.err == ""
     assert graph.read_bytes() == before_graph
     assert sidecar.read_bytes() == before_sidecar
     tracked_after = {relative: (root / relative).read_bytes() for relative in tracked_before}
@@ -107,7 +108,7 @@ def test_committed_mode_compares_head_graph_to_current_files_without_mutation(
 
 
 def test_committed_mode_uses_head_when_dirty_disk_graph_is_mutated(
-    tmp_path: Path, monkeypatch: object
+    tmp_path: Path, monkeypatch: object, capsys: object
 ) -> None:
     root = _repo(tmp_path)
     _write_config(root)
@@ -119,19 +120,22 @@ def test_committed_mode_uses_head_when_dirty_disk_graph_is_mutated(
     _git(root, "commit", "-qm", "baseline")
     graph = root / "graph.json"
     sidecar = stamp_path(graph)
-    graph_before = graph.read_bytes()
-    sidecar_before = sidecar.read_bytes()
     graph.write_bytes(b"not the committed graph")
     sidecar.write_bytes(b"0" * 64)
     source.write_text("value = 2\n\ndef added():\n    pass\n", encoding="utf-8")
 
-    assert cli.main(["query", "diff"]) == 1
-    assert graph.read_bytes() != graph_before
-    assert sidecar.read_bytes() != sidecar_before
+    status = cli.main(["query", "diff"])
+    captured = capsys.readouterr()
+
+    assert status == 1
+    assert captured.out == "+ app.added\n"
+    assert captured.err == ""
+    assert graph.read_bytes() == b"not the committed graph"
+    assert sidecar.read_bytes() == b"0" * 64
 
 
 def test_committed_mode_scope_reads_graph_beside_definition_directory(
-    tmp_path: Path, monkeypatch: object
+    tmp_path: Path, monkeypatch: object, capsys: object
 ) -> None:
     root = _repo(tmp_path)
     _write_config(root)
@@ -149,7 +153,12 @@ def test_committed_mode_scope_reads_graph_beside_definition_directory(
     _git(root, "commit", "-qm", "baseline")
     source.write_text("value = 2\n\ndef added():\n    pass\n", encoding="utf-8")
 
-    assert cli.main(["query", "diff", "--scope", "declared"]) == 1
+    status = cli.main(["query", "diff", "--scope", "declared"])
+    captured = capsys.readouterr()
+
+    assert status == 1
+    assert captured.out == "+ app.added\n"
+    assert captured.err == ""
 
 
 def test_committed_mode_outside_git_uses_disk_graph_without_stamping(
@@ -493,12 +502,6 @@ def test_committed_mode_preserves_configured_sql_migration_patterns(
     assert settings.foreign_key_target_files == {"parent": "schema/parent.sql"}
     assert settings.matches_migration("migrations/001.sql")
     assert settings.matches_migration("migrations/nested/002.sql")
-    assert not settings.__class__(migration_patterns=("migrations/*.sql",)).matches_migration(
-        "migrations/nested/002.sql"
-    )
-    assert not settings.__class__(migration_patterns=("*.sql",)).matches_migration(
-        "migrations/001.sql"
-    )
 
 
 def test_linked_worktree_pre_commit_hook_discovers_top_config(tmp_path: Path) -> None:

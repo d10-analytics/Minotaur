@@ -1057,11 +1057,29 @@ def test_absent_warning_is_computed_against_the_final_index_after_refresh(
 def test_system_cli_composes_coverage_and_details_for_each_query(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """AC-03: all system siblings expose one composed report contract."""
     root = _repo(tmp_path)
     _orders_with_consumer(root)
+    _write(root, "billing/__init__.py", "")
+    _write(root, "billing/mod.py", "def charge():\n    return 1\n")
+    _write(
+        root,
+        "orders/mod.py",
+        "from billing.mod import charge\n\ndef order():\n    return charge()\n",
+    )
+    _declare(root, "billing", ["billing/mod.py"])
     graph = _analyze(root)
     monkeypatch.chdir(root)
+    expected_relationships = {
+        "surface": {("use.caller", "orders.mod.order", "calls")},
+        "consumers": {
+            ("use.caller", "orders.mod.order", "calls"),
+            ("use", "orders.mod.order", "imports"),
+        },
+        "system-deps": {
+            ("orders.mod.order", "billing.mod.charge", "calls"),
+            ("orders.mod", "billing.mod.charge", "imports"),
+        },
+    }
 
     for name in ("surface", "consumers", "system-deps"):
         status, default_out, err = _query(capsys, graph, root, name, "orders", "--json")
@@ -1087,7 +1105,12 @@ def test_system_cli_composes_coverage_and_details_for_each_query(
         assert err == ""
         details_payload = json.loads(details_out)
         assert details_payload["coverage"] == default_payload["coverage"]
-        assert isinstance(details_payload["relationships"], list)
+        projected = {
+            (rel["source"]["label"], rel["target"]["label"], rel["kind"])
+            for rel in details_payload["relationships"]
+        }
+        assert projected == expected_relationships[name]
+        assert len(details_payload["relationships"]) == len(expected_relationships[name])
 
         status, details_text, err = _query(capsys, graph, root, name, "orders", "--details")
         assert status == 0

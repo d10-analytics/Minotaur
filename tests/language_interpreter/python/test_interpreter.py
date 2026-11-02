@@ -188,7 +188,30 @@ def test_python_call_observations_preserve_multiplicity_and_literal_structure(
     }
 
 
-def test_python_call_observations_preserve_nested_keyword_and_spread_structure(
+def test_python_call_fingerprints_distinguish_keyword_values_and_spread_arguments(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def helper(*args, **kwargs):\n    return args\n"
+        "def run(x):\n"
+        "    helper(1, option=1)\n"
+        "    helper(1, option=2)\n"
+        "    helper(*x)\n"
+        "    helper(x)\n",
+    )
+
+    observations = analyze_python_workspace(tmp_path).call_expressions
+
+    assert len(observations) == 4
+    fingerprints = [item.fingerprint for item in observations]
+    assert len(set(fingerprints)) == 4
+    assert fingerprints[0] != fingerprints[1]
+    assert fingerprints[2] != fingerprints[3]
+
+
+def test_nested_calls_in_one_expression_are_observed_separately(
     tmp_path: Path,
 ) -> None:
     _write(
@@ -205,7 +228,6 @@ def test_python_call_observations_preserve_nested_keyword_and_spread_structure(
     assert len(observations) == 2
     assert observations[0].expression_location.range.start.line == 5
     assert observations[1].expression_location.range.start.line == 5
-    assert observations[0].fingerprint != observations[1].fingerprint
 
 
 def test_public_python_analysis_runs_without_retired_kernel(
@@ -299,7 +321,9 @@ def test_public_python_analysis_observes_shared_file_constructor_without_output_
     ]
 
 
-def test_dynamic_and_missing_imports_are_explicit_unresolved_references(tmp_path: Path) -> None:
+def test_missing_import_is_the_only_located_unresolved_reference_and_attribute_call_adds_none(
+    tmp_path: Path,
+) -> None:
     _write(
         tmp_path,
         "app.py",
@@ -2871,7 +2895,8 @@ def test_a_scopes_own_assignment_outranks_its_own_import(tmp_path: Path) -> None
     result = analyze_python_workspace(tmp_path)
 
     # One scope binds ``list`` twice. The assignment makes it a dynamic local,
-    # which nothing static can claim, so the call reports nothing at all.
+    # which nothing static can claim, so the call reports both ``build`` and
+    # ``list`` as unresolved.
     assert _unresolved_by_source(result)["app.outer"] == {"build", "list"}
 
 
@@ -6799,13 +6824,12 @@ def test_try_handler_blocks_import_replaced_before_exception(
     )
 
     result = analyze_python_workspace(tmp_path)
-    library_helper = _node_id(result, "library.helper")
-    assert _unresolved_sites(result) == {("app.outer", "helper", 7)}
     assert (
         "app.outer",
-        library_helper,
+        "library.helper",
         RelationshipKind.CALLS.value,
     ) not in _edge_labels(result)
+    assert _unresolved_sites(result) == {("app.outer", "helper", 7)}
 
 
 @pytest.mark.parametrize(

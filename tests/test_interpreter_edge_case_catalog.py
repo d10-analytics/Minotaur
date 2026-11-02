@@ -392,6 +392,23 @@ def test_catalog_rejects_marker_outside_qualified_owner_scope(tmp_path: Path) ->
         _validate_owner_marker(source, "_ScopeCallVisitor.visit_ImportFrom", marker)
 
 
+def test_catalog_rejects_marker_repeated_inside_owner(tmp_path: Path) -> None:
+    marker = (
+        "# EDGE-BIND-001: supports direct function-body named-import source-position resolution."
+    )
+    source = tmp_path / "owner.py"
+    source.write_text(
+        "class _ScopeCallVisitor:\n"
+        "    def visit_ImportFrom(self):\n"
+        f"        {marker}\n"
+        f"        {marker}\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CatalogError, match="must occur exactly once"):
+        _validate_owner_marker(source, "_ScopeCallVisitor.visit_ImportFrom", marker)
+
+
 def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
     text = re.sub(
         r"\s+",
@@ -411,22 +428,35 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
     assert positions == tuple(sorted(positions))
 
 
+def _heading_line(text: str, heading: str) -> int:
+    for index, line in enumerate(text.splitlines()):
+        if line.startswith(heading):
+            return index + 1
+    raise AssertionError(f"heading not found: {heading}")
+
+
+_CATEGORY_HEADING_LINE = _heading_line(CATALOG.read_text(encoding="utf-8"), "### EDGE-BIND-001 —")
+
+
 @pytest.mark.parametrize(
-    ("label", "mutate"),
+    ("label", "mutate", "message"),
     [
         (
             "duplicate ID",
             lambda text: text.replace("### EDGE-BIND-002 —", "### EDGE-BIND-001 —", 1),
+            "duplicate case identifier: EDGE-BIND-001",
         ),
         (
             "category outside grammar",
             lambda text: text.replace("### EDGE-BIND-001 —", "### EDGE-bind-001 —", 1),
+            f"invalid case heading at line {_CATEGORY_HEADING_LINE}",
         ),
         (
             "duplicate language row",
             lambda text: text.replace(
                 "#### JavaScript — minotaur-javascript", "#### Python — minotaur-python", 1
             ),
+            "duplicate language row: EDGE-BIND-001/minotaur-python",
         ),
         (
             "missing question",
@@ -436,10 +466,12 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
                 "",
                 1,
             ),
+            "case requires exactly one Question field: EDGE-BIND-001",
         ),
         (
             "malformed status",
             lambda text: text.replace("Status: SUPPORTED", "Status: MAYBE", 1),
+            "invalid or missing status: EDGE-BIND-001/minotaur-python",
         ),
         (
             "missing registered namespace",
@@ -451,6 +483,7 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
                 "",
                 1,
             ),
+            "language matrix differs from registry: EDGE-BIND-001",
         ),
         (
             "NA row marker",
@@ -462,6 +495,7 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
                 "Marker: # EDGE-BIND-001: supports invalid NA marker.",
                 1,
             ),
+            "NOT_APPLICABLE row must contain only Reason: EDGE-BIND-001/minotaur-javascript",
         ),
         (
             "missing proof",
@@ -474,6 +508,7 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
                 "",
                 1,
             ),
+            "applicable row has incomplete fields: EDGE-BIND-001/minotaur-python",
         ),
         (
             "wrong owner path",
@@ -484,15 +519,17 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
                 "the direct import visitor",
                 1,
             ),
+            "owner path is not unique: _ScopeCallVisitor.visit_ImportFrom (0 definitions)",
         ),
         (
-            "duplicate source marker",
+            "marker naming another case",
             lambda text: text.replace(
                 "# EDGE-BIND-003: supports conservative unresolved divergent or omitted "
                 "conditional routes.",
                 "# EDGE-BIND-002: supports agreeing conditional import routes after a flow join.",
                 1,
             ),
+            "marker lacks exact ID or status clause: EDGE-BIND-003/minotaur-python",
         ),
         (
             "statusless marker",
@@ -501,6 +538,7 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
                 "# EDGE-BIND-002: helper",
                 1,
             ),
+            "marker lacks exact ID or status clause: EDGE-BIND-002/minotaur-python",
         ),
         (
             "absent test function",
@@ -509,13 +547,16 @@ def test_create_guide_preserves_ordered_catalog_maintenance() -> None:
                 "[`test_missing_catalog_proof_function`]",
                 1,
             ),
+            "proof test function is not defined: EDGE-BIND-001/minotaur-python",
         ),
     ],
 )
-def test_catalog_rejects_mutated_contract(label: str, mutate: Callable[[str], str]) -> None:
+def test_catalog_rejects_mutated_contract(
+    label: str, mutate: Callable[[str], str], message: str
+) -> None:
     original = CATALOG.read_text(encoding="utf-8")
     mutated = mutate(original)
-    with pytest.raises(CatalogError):
+    with pytest.raises(CatalogError, match=re.escape(message)):
         _validate_catalog(mutated)
 
 

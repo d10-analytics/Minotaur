@@ -251,7 +251,7 @@ def test_unrelated_table_reference_is_not_a_view_depth_hop(tmp_path: Path) -> No
     )
 
 
-def test_runtime_dependency_is_exact_and_parser_is_real() -> None:
+def test_sqlglot_version_is_pinned_to_exact_release() -> None:
     assert sqlglot.__version__ == "30.18.0"
 
 

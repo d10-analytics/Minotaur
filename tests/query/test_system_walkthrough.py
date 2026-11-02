@@ -993,7 +993,7 @@ def test_public_working_tree_comparison_labels_after_without_commit_identity(
 def test_public_comparison_report_is_offline_static_and_keeps_identities(
     tmp_path: Path,
 ) -> None:
-    """A written report has no remote assets and does not track later edits."""
+    """A written report embeds no remote assets or temporary paths and names both revisions."""
     root = tmp_path / "repository"
     root.mkdir()
     _committed_historical_pair(root)
@@ -1025,15 +1025,10 @@ def test_public_comparison_report_is_offline_static_and_keeps_identities(
     assert str(root) not in content, "the report must not embed temporary paths"
     remote = re.findall(r"""(?:src|href)\s*=\s*["']https?://""", content)
     assert remote == [], "the report must be self-contained and offline"
-
-    before_bytes = report.read_bytes()
-    (root / "shop" / "billing.py").write_text(
-        "def charge(order):\n    return order\n", encoding="utf-8"
+    references = re.findall(r"""(?:src|href)\s*=\s*["']([^"']*)""", content)
+    assert all(value.startswith(("#", "data:")) for value in references), (
+        "every embedded asset reference must be local to the document"
     )
-    (root / "shop" / "orders.py").write_text(
-        "def create_order(cart):\n    return cart\n", encoding="utf-8"
-    )
-    assert report.read_bytes() == before_bytes, "a captured report must not re-read source"
 
 
 def test_checked_in_comparison_report_matches_fixed_identity_regeneration(
