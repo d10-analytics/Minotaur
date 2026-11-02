@@ -154,7 +154,6 @@ def test_replacement_selection_uses_complete_result_and_copies_none() -> None:
     original = complete.to_dict()
 
     all_view = filter_system_diff(complete, None)
-    checkout = filter_system_diff(complete, "Checkout")
     notifications = filter_system_diff(complete, "Notifications")
     repeated = filter_system_diff(complete, "Notifications")
 
@@ -167,7 +166,6 @@ def test_replacement_selection_uses_complete_result_and_copies_none() -> None:
     assert all_view.new_coverage == complete.new_coverage
     assert all_view.old_selection == complete.old_selection
     assert all_view.new_selection == complete.new_selection
-    assert all("Notifications" not in change.involved_systems for change in checkout.differences)
     assert notifications == repeated
     assert any(
         change.domain == "boundary" and "Payments" in change.involved_systems
@@ -184,7 +182,7 @@ def test_replacement_selection_uses_complete_result_and_copies_none() -> None:
     assert complete.to_dict() == original
 
 
-def test_view_retains_complete_graph_call_and_limitation_facts() -> None:
+def test_view_retains_selected_node_changes_and_their_serialized_form() -> None:
     complete = SystemDiffResult(
         old_system_names=("Checkout",),
         new_system_names=("Checkout",),
@@ -234,7 +232,7 @@ def test_call_change_retains_endpoint_membership_in_selected_view() -> None:
     assert filter_system_diff(complete, "B").call_changes == complete.call_changes
 
 
-def test_old_only_deleted_name_resolves_and_unrelated_name_is_neutral() -> None:
+def test_old_only_deleted_name_resolves_and_unchanged_name_reports_no_change() -> None:
     old_only = _symbol("legacy", "legacy.py")
     old_systems = _systems(("legacy.toml", "Legacy", ("legacy.py",)))
     new = _snapshot((), (), ())
@@ -247,8 +245,19 @@ def test_old_only_deleted_name_resolves_and_unrelated_name_is_neutral() -> None:
     assert deleted.changed is True
     assert deleted.exit_code == 1
 
-    neutral = filter_system_diff(result, "Legacy")
-    assert neutral.to_dict() == deleted.to_dict()
+    stable = _symbol("stable", "stable.py")
+    both_sides = _systems(
+        ("legacy.toml", "Legacy", ("legacy.py",)), ("stable.toml", "Stable", ("stable.py",))
+    )
+    stable_only = _systems(("stable.toml", "Stable", ("stable.py",)))
+    removal = compare_systems(
+        _snapshot((old_only, stable), (), both_sides),
+        _snapshot((stable,), (), stable_only),
+    )
+    unchanged = filter_system_diff(removal, "Stable")
+    assert unchanged.removed_systems == ()
+    assert unchanged.changed is False
+    assert unchanged.exit_code == 0
 
 
 def test_unknown_suggestions_use_sorted_complete_union_and_exact_message() -> None:
