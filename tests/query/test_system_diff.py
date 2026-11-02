@@ -618,7 +618,10 @@ def test_membership_and_endpoint_aspects_are_separate() -> None:
         assert aspect.new["relationships"][0].source.label == "source"  # type: ignore[index]
 
 
-@pytest.mark.parametrize("kind", ("calls", "references", "imports"))
+@pytest.mark.parametrize(
+    "kind",
+    ("calls", "references", "imports", "sql:reads-from", "sql:foreign-key-to", "sql:calls"),
+)
 def test_each_supported_relationship_kind_is_considered(kind: str) -> None:
     source = _symbol("source", "a.py")
     target = _symbol("target", "b.py")
@@ -631,7 +634,11 @@ def test_each_supported_relationship_kind_is_considered(kind: str) -> None:
     )
 
     assert len(result.boundary_changes) == 1
+    assert result.boundary_changes[0].kind == "added"
     assert result.boundary_changes[0].new["kind"] == kind  # type: ignore[index]
+    assert result.boundary_changes[0].new["categories"] == ("system: A", "system: B")  # type: ignore[index]
+    assert result.boundary_changes[0].involved_systems == ("A", "B")
+    assert result.boundary_changes[0].new["relationships"][0].kind == kind  # type: ignore[index]
     if kind == "imports":
         assert not result.surface_changes
     else:
