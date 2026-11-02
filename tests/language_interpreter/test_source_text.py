@@ -17,7 +17,7 @@ CORPUS = [
     ("trail\r", (0, 6)),
     ("a\nb\n", (0, 2, 4)),
     ("a\r\nb\rc\nd", (0, 3, 5, 7)),
-    ("x\fy\x85z w v", (0,)),
+    ("x\fy\x85z\u2028w\u2029v", (0,)),
     ("é\n😀a\r\n€", (0, 2, 6)),
     ("a\ud800b\nc", (0, 4)),
     ("abc" + MIXED_WIDTHS + "def", (0,)),
