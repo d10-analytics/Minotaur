@@ -95,6 +95,58 @@ def test_context_json_contains_same_bounded_lines_and_stale_state(
     assert result[0]["lines"][1] == {"line": 4, "target": True, "text": "changed = 4"}
 
 
+def _calls_start_line(graph: Path) -> int:
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    calls = [r for r in document["relationships"] if r["kind"] == "calls"]
+    assert len(calls) == 1
+    return int(calls[0]["evidence"][0]["locations"][0]["range"]["start"]["line"])
+
+
+def _context_json(
+    capsys: pytest.CaptureFixture[str], graph: Path, root: Path, site: str, before: int, after: int
+) -> dict[str, object]:
+    capsys.readouterr()
+    argv = ["query", "context", "--graph", str(graph), "--root", str(root), "--site", site]
+    argv += ["--before", str(before), "--after", str(after), "--json"]
+    assert cli.main(argv) == 0
+    results = json.loads(capsys.readouterr().out)["results"]
+    assert len(results) == 1
+    return dict(results[0])
+
+
+def test_context_numbers_lines_on_lf_crlf_cr_only_and_removes_a_leading_bom(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    python_root = tmp_path / "python"
+    _write(
+        python_root,
+        "ff.py",
+        'def target():\n    return 1\n\f\nx = "\u2028"\ndef caller():\n    return target()\n',
+    )
+    javascript_root = tmp_path / "javascript"
+    javascript_root.mkdir()
+    (javascript_root / "ls.js").write_bytes(
+        "\ufeff// a\u2028// b\x85c\nfunction f() {}\nf();\n".encode()
+    )
+    python_graph = tmp_path / "python.json"
+    javascript_graph = tmp_path / "javascript.json"
+    assert _analyze(python_root, python_graph) == 0
+    assert _analyze(javascript_root, javascript_graph) == 0
+    assert _calls_start_line(python_graph) == 5
+    assert _calls_start_line(javascript_graph) == 2
+
+    python_result = _context_json(capsys, python_graph, python_root, "ff.py:6", 0, 0)
+    assert python_result["lines"] == [{"line": 6, "target": True, "text": "    return target()"}]
+
+    javascript_result = _context_json(capsys, javascript_graph, javascript_root, "ls.js:3", 2, 0)
+    assert javascript_result["lines"] == [
+        {"line": 1, "target": False, "text": "// a\u2028// b\x85c"},
+        {"line": 2, "target": False, "text": "function f() {}"},
+        {"line": 3, "target": True, "text": "f();"},
+    ]
+    assert javascript_result["stale"] is False
+
+
 def test_javascript_context_reports_fresh_then_stale(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
