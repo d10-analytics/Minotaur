@@ -808,18 +808,21 @@ def test_excluded_object_methods_this_and_class_fields_emit_no_facts(tmp_path):
             )
         },
     )
-    excluded = {"method", "field", "staticField", "objectTarget", "fieldTarget", "staticTarget"}
-    assert not any(any(name in node.label for name in excluded) for node in result.document.nodes)
-    assert not any(
-        any(name in endpoint for name in excluded)
+    labels = {node.id: node.label for node in result.document.nodes}
+    assert {node.label for node in result.document.nodes} == {
+        "app",
+        "app.Thing",
+        "app.Thing.run",
+        "app.js",
+    }
+    assert {
+        (labels[edge.source], labels[edge.target], edge.kind)
         for edge in result.document.relationships
-        for endpoint in (edge.source, edge.target)
-    )
-    assert not any(
-        node.reference_text in excluded
-        for node in result.document.nodes
-        if node.reference_text is not None
-    )
+    } == {
+        ("app.js", "app", RelationshipKind.CONTAINS.value),
+        ("app", "app.Thing", RelationshipKind.CONTAINS.value),
+        ("app.Thing", "app.Thing.run", RelationshipKind.CONTAINS.value),
+    }
 
 
 def test_utf8_ranges_validate_and_serialization_is_order_independent(tmp_path):
@@ -1459,6 +1462,23 @@ def test_relative_parent_imports_resolve_and_root_escape_is_unresolved(tmp_path)
         edge.source == app.id and edge.target == outside.id
         for edge in result.document.relationships
     )
+
+
+def test_stepwise_relative_import_resolves_through_the_public_path(tmp_path):
+    result = _analyze(
+        tmp_path,
+        {
+            "pkg/mod.js": "import { helper } from '../x/../leaf.js';\nhelper();\n",
+            "leaf.js": "export function helper() {}\n",
+        },
+    )
+    labels = {node.id: node.label for node in result.document.nodes}
+    triples = {
+        (labels[edge.source], labels[edge.target], edge.kind)
+        for edge in result.document.relationships
+    }
+    assert ("pkg/mod", "leaf", RelationshipKind.IMPORTS.value) in triples
+    assert ("pkg/mod", "leaf.helper", RelationshipKind.CALLS.value) in triples
 
 
 def test_import_alias_binds_the_local_name_and_calls_the_imported_symbol(tmp_path):
