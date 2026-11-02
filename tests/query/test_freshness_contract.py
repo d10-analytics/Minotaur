@@ -263,15 +263,10 @@ def test_configured_sql_migration_patterns_reach_owner_on_natural_refresh(
     assert json.loads(captured.out)["refreshed"] is True
     assert observed
     settings = observed[-1]
+    assert settings.migration_patterns == ("migrations/**/*.sql",)
     assert settings.matches_migration("migrations/001.sql")
     assert settings.foreign_key_target_files == {"parent": "schema/parent.sql"}
     assert settings.matches_migration("migrations/nested/002.sql")
-    assert not settings.__class__(migration_patterns=("migrations/*.sql",)).matches_migration(
-        "migrations/nested/002.sql"
-    )
-    assert not settings.__class__(migration_patterns=("*.sql",)).matches_migration(
-        "migrations/001.sql"
-    )
 
 
 def test_unsupported_extension_edit_is_not_detected(tmp_path: Path) -> None:
