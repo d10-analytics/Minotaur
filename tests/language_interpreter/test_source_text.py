@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import tracemalloc
 
 import pytest
@@ -112,3 +113,31 @@ def test_retained_memory_stays_within_four_bytes_per_character() -> None:
     for source in (ascii_source, mixed_source):
         assert len(source) >= 99_000
         assert _retained_growth(source) <= 4 * len(source)
+
+
+@pytest.mark.slow
+def test_position_cost_does_not_grow_with_non_ascii_line_length() -> None:
+    """A column at the end of a long non-ASCII line costs what one near its start does.
+
+    The slice-count test rejects re-encoding a slice of the line; this ratio also
+    rejects scanning the line without slicing it on every call.
+    """
+    source = "a€" * 25_000
+    index = LineIndex(source)
+    near = range(1, 501)
+    far = range(len(source) - 500, len(source))
+
+    def fastest(offsets: range) -> float:
+        best = float("inf")
+        for _ in range(5):
+            started = time.perf_counter()
+            for offset in offsets:
+                index.position(offset)
+            best = min(best, time.perf_counter() - started)
+        return best
+
+    near_cost = fastest(near)
+    far_cost = fastest(far)
+
+    assert index.position(len(source)) == Position(0, 4 * 25_000)
+    assert far_cost <= 20 * near_cost, (near_cost, far_cost)
