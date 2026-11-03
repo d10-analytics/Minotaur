@@ -2512,3 +2512,80 @@ def test_repeated_parentheses_unwrap_and_non_query_scopes_reject(tmp_path: Path)
         (DiagnosticCode.UNSUPPORTED_SYNTAX, lines.index(f"CREATE VIEW {name} AS {views[name]}"))
         for name in ("v_cte_values", "v_derived_values")
     ]
+
+
+_PAGED_UNION = (
+    "SELECT x FROM dbo.a UNION SELECT x FROM dbo.b ORDER BY x OFFSET (SELECT COUNT(*) FROM {}) ROWS"
+)
+_PAGED_WRAPPER = "(SELECT x FROM dbo.a) ORDER BY x OFFSET (SELECT COUNT(*) FROM {}) ROWS"
+
+
+@pytest.mark.parametrize(
+    ("view", "tables"),
+    [
+        ("SELECT d.x FROM (" + _PAGED_UNION + ") AS d", {"a", "b", "p"}),
+        ("WITH c AS (" + _PAGED_UNION + ") SELECT x FROM c", {"a", "b", "p"}),
+        ("SELECT x FROM dbo.a WHERE x IN (" + _PAGED_UNION + ")", {"a", "b", "p"}),
+        ("SELECT d.x FROM (" + _PAGED_WRAPPER + ") AS d", {"a", "p"}),
+        (_PAGED_UNION, {"a", "b", "p"}),
+        (
+            "WITH r AS (SELECT x FROM dbo.a) SELECT x FROM r UNION SELECT x FROM r "
+            "ORDER BY x OFFSET (SELECT COUNT(*) FROM r) ROWS",
+            {"a"},
+        ),
+    ],
+)
+def test_paging_clause_queries_of_set_operations_and_wrappers_contribute_reads(
+    tmp_path: Path, view: str, tables: set[str]
+) -> None:
+    source = _go(
+        *(f"CREATE TABLE dbo.{name} (x int)" for name in "abp"),
+        "CREATE VIEW v AS " + view.format("dbo.p"),
+    )
+    result = _analyze(tmp_path, **{"paging.sql": source})
+
+    assert _edges(result, "sql:reads-from") == {("v", f"dbo.{name}") for name in tables}
+    assert result.diagnostics == ()
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
+def test_paging_clause_queries_in_a_procedure_derived_table_contribute_reads(
+    tmp_path: Path,
+) -> None:
+    source = _go(
+        *(f"CREATE TABLE dbo.{name} (x int)" for name in "abp"),
+        "CREATE PROCEDURE q AS BEGIN\nSELECT d.x FROM ("
+        + _PAGED_UNION.format("dbo.p")
+        + ") AS d;\nEND",
+    )
+    result = _analyze(tmp_path, **{"proc.sql": source})
+
+    assert _edges(result, "sql:reads-from") == {("q", f"dbo.{name}") for name in "abp"}
+    assert result.diagnostics == ()
+
+
+@pytest.mark.parametrize(
+    "view",
+    [
+        "SELECT d.x FROM (" + _PAGED_UNION + ") AS d",
+        "WITH c AS (" + _PAGED_UNION + ") SELECT x FROM c",
+        "SELECT x FROM dbo.a WHERE x IN (" + _PAGED_UNION + ")",
+        "SELECT d.x FROM (" + _PAGED_WRAPPER + ") AS d",
+        _PAGED_WRAPPER,
+        _PAGED_UNION,
+    ],
+)
+def test_temporary_table_in_a_paging_clause_rejects_the_statement(
+    tmp_path: Path, view: str
+) -> None:
+    source = _go(
+        *(f"CREATE TABLE dbo.{name} (x int)" for name in "ab"),
+        "CREATE VIEW v AS " + view.format("#t"),
+    )
+    result = _analyze(tmp_path, **{"paging.sql": source})
+
+    assert "v" not in _symbols(result)
+    assert _edges(result, "sql:reads-from") == set()
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
