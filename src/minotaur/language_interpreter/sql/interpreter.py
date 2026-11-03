@@ -12,6 +12,7 @@ import re
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Any
 
@@ -799,29 +800,30 @@ def _procedural_query_roots(
     return roots
 
 
-def _nested_query_roots(expression: exp.Expression | None) -> list[exp.Expression]:
-    """Return query roots nested in an expression without revisiting query scopes."""
+def _nested_query_roots(
+    expression: exp.Expression | None, skip: frozenset[int] = frozenset()
+) -> list[exp.Expression]:
+    """Return query roots nested in an expression without revisiting query scopes.
+
+    Nodes whose identity is in ``skip`` are neither entered nor reported.
+    """
     if expression is None:
         return []
 
     roots: list[exp.Expression] = []
 
-    def visit(candidate: exp.Expression) -> None:
-        if isinstance(candidate, exp.Subquery):
-            nested = candidate.this
-            if isinstance(nested, exp.Expression):
-                visit(nested)
-            return
-        if isinstance(candidate, _QUERY_ROOT_TYPES):
-            roots.append(candidate)
-            return
-        if isinstance(candidate, (_DML_ROOT_TYPES, exp.Execute, exp.ExecuteSql, exp.Command)):
-            return
-        for nested in candidate.iter_expressions():
-            if isinstance(nested, exp.Expression):
-                visit(nested)
+    def stop(candidate: Any) -> bool:
+        return (
+            isinstance(
+                candidate,
+                (*_QUERY_ROOT_TYPES, *_DML_ROOT_TYPES, exp.Execute, exp.ExecuteSql, exp.Command),
+            )
+            or id(candidate) in skip
+        )
 
-    visit(expression)
+    for candidate in expression.walk(bfs=False, prune=stop):
+        if id(candidate) not in skip and isinstance(candidate, _QUERY_ROOT_TYPES):
+            roots.append(candidate)
     return roots
 
 
@@ -1228,58 +1230,81 @@ def _query_calls(
     return result
 
 
+_QUERY_TYPES = (exp.Query, exp.Select, exp.Union, exp.Intersect, exp.Except)
+_SET_OPERATION_TYPES = (exp.Union, exp.Intersect, exp.Except)
+_ReadRow = tuple[tuple[str, ...], str, Location]
+
+
+def _cte_dependencies_cyclic(with_expr: exp.With, aliases: set[str]) -> bool:
+    """Return whether the CTEs of one ``WITH`` depend on each other cyclically."""
+    dependencies: dict[str, set[str]] = {alias: set() for alias in aliases}
+    for cte in with_expr.expressions:
+        alias = cte.alias_or_name.casefold()
+        for table in _tables_outside_nested_with(cte.this):
+            parts = _parts(table)
+            if parts is not None and len(parts) == 1 and parts[0].casefold() in aliases:
+                dependencies[alias].add(parts[0].casefold())
+    try:
+        TopologicalSorter(dependencies).prepare()
+    except CycleError:
+        return True
+    return False
+
+
+def _push_scope(
+    scopes: list[tuple[Any, frozenset[str], list[Any]]],
+    slot: list[Any],
+    child: Any,
+    names: frozenset[str],
+) -> None:
+    child_slot: list[Any] = []
+    slot.append(child_slot)
+    scopes.append((child, names, child_slot))
+
+
 def _query_reads(
     expression: Any,
     item: _File,
     batch: _Batch,
     diagnostics: list[Diagnostic],
-) -> list[tuple[tuple[str, ...], str, Location]] | None:
+) -> list[_ReadRow] | None:
     if expression is None:
         return None
-    if not isinstance(expression, (exp.Query, exp.Select, exp.Union, exp.Intersect, exp.Except)):
+    if not isinstance(expression, _QUERY_TYPES):
         return None
-    result: list[tuple[tuple[str, ...], str, Location]] = []
+    # Each scope owns an output slot; child scopes are nested slots, so the
+    # flattened order follows the scope tree regardless of processing order.
+    root_slot: list[Any] = []
+    pending: list[tuple[Any, frozenset[str], list[Any]]] = [(expression, frozenset(), root_slot)]
 
-    def visit_query(query: Any, cte_names: frozenset[str]) -> bool:
-        if not isinstance(query, (exp.Query, exp.Select, exp.Union, exp.Intersect, exp.Except)):
-            return False
-        with_expr = query.args.get("with_") if isinstance(query, exp.Expression) else None
+    while pending:
+        query, cte_names, slot = pending.pop()
+        while isinstance(query, exp.Subquery):
+            query = query.this
+        if not isinstance(query, (exp.Select, *_SET_OPERATION_TYPES)):
+            return None
+        scopes: list[tuple[Any, frozenset[str], list[Any]]] = []
+
         local = set(cte_names)
+        with_expr = query.args.get("with_")
         if isinstance(with_expr, exp.With):
             if with_expr.args.get("recursive"):
-                return False
+                return None
             aliases = {cte.alias_or_name.casefold() for cte in with_expr.expressions}
-            dependencies: dict[str, set[str]] = {alias: set() for alias in aliases}
+            if _cte_dependencies_cyclic(with_expr, aliases):
+                return None
             for cte in with_expr.expressions:
-                alias = cte.alias_or_name.casefold()
-                for table in _tables_outside_nested_with(cte.this):
-                    parts = _parts(table)
-                    if parts is not None and len(parts) == 1 and parts[0].casefold() in aliases:
-                        dependencies[alias].add(parts[0].casefold())
-
-            def cyclic(name: str, trail: frozenset[str]) -> bool:
-                if name in trail:
-                    return True
-                return any(cyclic(child, trail | {name}) for child in dependencies[name])
-
-            if any(cyclic(alias, frozenset()) for alias in aliases):
-                return False
-            for cte in with_expr.expressions:
-                alias = cte.alias_or_name.casefold()
-                if not isinstance(
-                    cte.this, (exp.Query, exp.Select, exp.Union, exp.Intersect, exp.Except)
-                ):
-                    return False
-                if not visit_query(cte.this, frozenset(local)):
-                    return False
-                local.add(alias)
-        if isinstance(query, (exp.Union, exp.Intersect, exp.Except)):
-            return visit_query(query.left, frozenset(local)) and visit_query(
-                query.right, frozenset(local)
-            )
-        if isinstance(query, exp.Select):
+                if not isinstance(cte.this, _QUERY_TYPES):
+                    return None
+                _push_scope(scopes, slot, cte.this, frozenset(local))
+                local.add(cte.alias_or_name.casefold())
+        visible = frozenset(local)
+        if isinstance(query, _SET_OPERATION_TYPES):
+            _push_scope(scopes, slot, query.left, visible)
+            _push_scope(scopes, slot, query.right, visible)
+        else:
             if query.args.get("into") is not None:
-                return False
+                return None
             sources: list[exp.Expression] = []
             from_clause = query.args.get("from_")
             if isinstance(from_clause, exp.From) and from_clause.this is not None:
@@ -1288,6 +1313,7 @@ def _query_reads(
             sources.extend(
                 join.this for join in query.args.get("joins") or () if isinstance(join, exp.Join)
             )
+            derived: set[int] = set()
             for source in sources:
                 if isinstance(source, exp.Table):
                     if _table_function_parts(source) is not None:
@@ -1295,41 +1321,57 @@ def _query_reads(
                     parts = _parts(source)
                     location = _table_location(source, item, batch)
                     if parts is None or len(parts) not in {1, 2} or _nonpersistent_table(source):
-                        return False
-                    if len(parts) == 1 and parts[0].casefold() in local:
+                        return None
+                    if len(parts) == 1 and parts[0].casefold() in visible:
                         continue
                     if location is None:
-                        return False
-                    result.append(
+                        return None
+                    slot.append(
                         (tuple(part.casefold() for part in parts), ".".join(parts), location)
                     )
                 elif isinstance(source, exp.Subquery):
-                    if not visit_query(source.this, frozenset(local)):
-                        return False
+                    derived.add(id(source))
+                    _push_scope(scopes, slot, source, visible)
                 else:
-                    return False
-            # Nested subqueries in projections/filters are still query scopes.
-            for nested in query.find_all(exp.Subquery):
-                if not visit_query(nested.this, frozenset(local)):
-                    return False
-        return True
+                    return None
+            # Queries nested in any other part of the SELECT are scopes too.
+            skip = frozenset(derived)
+            for key, value in query.args.items():
+                if key == "with_":
+                    continue
+                parts_of_select = value if isinstance(value, list) else [value]
+                for part in parts_of_select:
+                    if isinstance(part, exp.Expression):
+                        for nested in _nested_query_roots(part, skip):
+                            _push_scope(scopes, slot, nested, visible)
+        pending.extend(reversed(scopes))
 
-    if not visit_query(expression, frozenset()):
-        return None
+    result: list[_ReadRow] = []
+    stack: list[Any] = [iter(root_slot)]
+    while stack:
+        for entry in stack[-1]:
+            if isinstance(entry, list):
+                stack.append(iter(entry))
+                break
+            result.append(entry)
+        else:
+            stack.pop()
     return result
 
 
 def _tables_outside_nested_with(expression: Any) -> Iterable[exp.Table]:
     """Yield table references in one CTE scope without entering nested scopes."""
-    if isinstance(expression, exp.Query) and expression.args.get("with_") is not None:
-        return
-    if isinstance(expression, exp.Table):
-        yield expression
-        return
     if not isinstance(expression, exp.Expression):
         return
-    for child in expression.iter_expressions():
-        yield from _tables_outside_nested_with(child)
+
+    def stop(candidate: Any) -> bool:
+        return isinstance(candidate, exp.Table) or (
+            isinstance(candidate, exp.Query) and candidate.args.get("with_") is not None
+        )
+
+    for candidate in expression.walk(bfs=False, prune=stop):
+        if isinstance(candidate, exp.Table):
+            yield candidate
 
 
 def _valid_index(tree: Any) -> bool:
