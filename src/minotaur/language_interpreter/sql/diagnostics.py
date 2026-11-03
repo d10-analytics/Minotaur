@@ -65,6 +65,7 @@ def analyze_view_warnings(
     # view with another complete terminal branch can still report the longest
     # valid path on that other branch.
     excluded = cyclic
+    memo: dict[str, tuple[int, tuple[str, ...]] | None] = {}
     for root_id in sorted(views):
         if root_id in excluded:
             continue
@@ -75,7 +76,7 @@ def analyze_view_warnings(
             terminal_edges,
             unresolved_edges,
             excluded,
-            set(),
+            memo,
         )
         if candidate is None:
             continue
@@ -108,28 +109,90 @@ def analyze_view_warnings(
     )
 
 
+def _cyclic_components(
+    edges: Mapping[str, tuple[str, ...]], views: Mapping[str, Node]
+) -> list[frozenset[str]]:
+    """Return view groups that can contain a cycle (Tarjan, iterative)."""
+    index_of: dict[str, int] = {}
+    low: dict[str, int] = {}
+    on_stack: set[str] = set()
+    stack: list[str] = []
+    components: list[frozenset[str]] = []
+    counter = 0
+    for root in sorted(views):
+        if root in index_of:
+            continue
+        index_of[root] = low[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        work: list[tuple[str, int]] = [(root, 0)]
+        while work:
+            node, position = work.pop()
+            targets = edges.get(node, ())
+            descended = False
+            while position < len(targets):
+                target = targets[position]
+                position += 1
+                if target not in views:
+                    continue
+                if target not in index_of:
+                    work.append((node, position))
+                    index_of[target] = low[target] = counter
+                    counter += 1
+                    stack.append(target)
+                    on_stack.add(target)
+                    work.append((target, 0))
+                    descended = True
+                    break
+                if target in on_stack:
+                    low[node] = min(low[node], index_of[target])
+            if descended:
+                continue
+            if low[node] == index_of[node]:
+                members: set[str] = set()
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    members.add(member)
+                    if member == node:
+                        break
+                if len(members) > 1 or node in edges.get(node, ()):
+                    components.append(frozenset(members))
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+    return components
+
+
 def _elementary_cycles(
     edges: Mapping[str, tuple[str, ...]], views: Mapping[str, Node]
 ) -> tuple[tuple[str, ...], ...]:
     """Enumerate directed simple cycles, canonicalized by node ID rotation."""
     found: set[tuple[str, ...]] = set()
-    for start in sorted(views):
+    for component in _cyclic_components(edges, views):
+        for start in sorted(component):
 
-        def visit(current: str, path: tuple[str, ...], cycle_start: str = start) -> None:
-            for target in edges.get(current, ()):
-                if target == cycle_start:
-                    cycle = path + (cycle_start,)
-                    body = cycle[:-1]
-                    minimum = min(
-                        range(len(body)),
-                        key=lambda index: (views[body[index]].label.casefold(), body[index]),
-                    )
-                    rotated = body[minimum:] + body[:minimum] + (body[minimum],)
-                    found.add(rotated)
-                elif target in views and target not in path and target >= cycle_start:
-                    visit(target, path + (target,))
+            def visit(
+                current: str,
+                path: tuple[str, ...],
+                cycle_start: str = start,
+                members: frozenset[str] = component,
+            ) -> None:
+                for target in edges.get(current, ()):
+                    if target == cycle_start:
+                        cycle = path + (cycle_start,)
+                        body = cycle[:-1]
+                        minimum = min(
+                            range(len(body)),
+                            key=lambda index: (views[body[index]].label.casefold(), body[index]),
+                        )
+                        rotated = body[minimum:] + body[:minimum] + (body[minimum],)
+                        found.add(rotated)
+                    elif target in members and target not in path and target >= cycle_start:
+                        visit(target, path + (target,))
 
-        visit(start, (start,))
+            visit(start, (start,))
     return tuple(sorted(found))
 
 
@@ -140,11 +203,12 @@ def _longest_path(
     terminal_edges: Mapping[str, tuple[str, ...]],
     unresolved_edges: Mapping[str, tuple[str, ...]],
     excluded: set[str],
-    active: set[str],
+    memo: dict[str, tuple[int, tuple[str, ...]] | None],
 ) -> tuple[int, tuple[str, ...]] | None:
-    if current in active or current in excluded:
+    if current in excluded:
         return None
-    active = active | {current}
+    if current in memo:
+        return memo[current]
     candidates: list[tuple[int, tuple[str, ...]]] = []
     for target in terminal_edges.get(current, ()):
         candidates.append((1, (current, target)))
@@ -158,16 +222,20 @@ def _longest_path(
             terminal_edges,
             unresolved_edges,
             excluded,
-            active,
+            memo,
         )
         if nested is not None:
             candidates.append((nested[0] + 1, (current, *nested[1])))
-    if not candidates:
-        return None
-    return max(
-        candidates,
-        key=lambda item: (
-            item[0],
-            tuple(views[node].label if node in views else node for node in item[1]),
-        ),
+    best = (
+        max(
+            candidates,
+            key=lambda item: (
+                item[0],
+                tuple(views[node].label if node in views else node for node in item[1]),
+            ),
+        )
+        if candidates
+        else None
     )
+    memo[current] = best
+    return best

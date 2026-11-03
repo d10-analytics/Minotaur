@@ -137,3 +137,9 @@ def test_sql_guide_documents_foreign_key_column_evidence_with_format_owner() -> 
     ) in text
     # The old wrong claim must never return.
     assert "column mappings or ordering" not in text
+
+
+def test_sql_guide_documents_nested_query_reads_and_rejection() -> None:
+    text = _text()
+    assert "`EXISTS`, `IN`, `ALL`, `SOME`, or `ANY` body" in text
+    assert "rejects the whole view or the enclosing procedure or function query root" in text

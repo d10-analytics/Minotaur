@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
+import sys
+from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
 
 import pytest
 import sqlglot
 
 from minotaur.config import SqlSettings
+from minotaur.graph_model.identity import NodeIdentity
+from minotaur.graph_model.location import Location, Position, Range
+from minotaur.graph_model.node import Node
+from minotaur.graph_model.provenance import IdentityBasis, NodeClass
 from minotaur.language_interpreter.contract import DiagnosticCode, DiagnosticSeverity
-from minotaur.language_interpreter.sql import analyze_sql_files
+from minotaur.language_interpreter.sql import analyze_sql_files, diagnostics
 from minotaur.language_interpreter.sql import interpreter as sql_interpreter
 from minotaur.language_interpreter.workspace import Workspace
 
@@ -168,6 +176,123 @@ def test_cyclic_views_and_branches_entering_cycles_have_no_depth_warning(
         if item.code is DiagnosticCode.CIRCULAR_DEPENDENCY
     ] == [("cycle_a", "cycle_b", "cycle_a")]
     assert not [item for item in result.warnings if item.code is DiagnosticCode.VIEW_DEPTH_WARNING]
+
+
+def _count_module_calls(module_file: str, action: Callable[[], object]) -> tuple[object, int]:
+    """Run action, counting Python calls whose code lives in module_file."""
+    calls = 0
+
+    def profiler(frame: object, event: str, _arg: object) -> None:
+        nonlocal calls
+        if event == "call" and frame.f_code.co_filename == module_file:  # type: ignore[attr-defined]
+            calls += 1
+
+    sys.setprofile(profiler)
+    try:
+        result = action()
+    finally:
+        sys.setprofile(None)
+    return result, calls
+
+
+def test_layered_views_report_depth_warnings_in_bounded_calls(tmp_path: Path) -> None:
+    statements = ["CREATE TABLE dbo.base (x int)"]
+    statements += [f"CREATE VIEW v0_{j} AS SELECT x FROM dbo.base" for j in (0, 1)]
+    for layer in range(1, 14):
+        for j in (0, 1):
+            statements.append(
+                f"CREATE VIEW v{layer}_{j} AS SELECT x FROM v{layer - 1}_0 "
+                f"UNION ALL SELECT x FROM v{layer - 1}_1"
+            )
+    source = tmp_path / "layers.sql"
+    source.write_text("\nGO\n".join(statements) + "\n", encoding="utf-8")
+
+    result, calls = _count_module_calls(
+        diagnostics.__file__,
+        lambda: analyze_sql_files(
+            Workspace(tmp_path), (source,), SqlSettings(view_depth_threshold=13)
+        ),
+    )
+
+    tail = " -> v12_1 -> v11_1 -> v10_1 -> v9_1 -> v8_1 -> v7_1 -> v6_1 -> v5_1 -> v4_1"
+    tail += " -> v3_1 -> v2_1 -> v1_1 -> v0_1 -> dbo.base"
+    assert sorted(
+        (item.code, item.message)
+        for item in result.warnings  # type: ignore[attr-defined]
+    ) == sorted(
+        (
+            DiagnosticCode.VIEW_DEPTH_WARNING,
+            f"view dependency depth 14 exceeds threshold 13: {first}{tail}",
+        )
+        for first in ("v13_0", "v13_1")
+    )
+    # Measured 697 calls on Python 3.12.3; bound is 3x rounded up to 1,000.
+    assert calls <= 3_000
+
+
+def test_cycle_search_over_acyclic_layers_is_bounded() -> None:
+    ids = [f"{layer:02d}_{j}" for layer in range(16) for j in (0, 1)]
+    identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, "minotaur-sql")
+    location = Location("views.sql", Range(Position(1, 0), Position(1, 1)))
+    views = {
+        node_id: Node(
+            id="node:sha256:" + hashlib.sha256(node_id.encode()).hexdigest(),
+            identity=identity,
+            node_class=NodeClass.SYMBOL,
+            label=node_id,
+            symbol_kind="sql:view",
+            location=location,
+        )
+        for node_id in ids
+    }
+    edges = {
+        f"{layer:02d}_{j}": (f"{layer + 1:02d}_0", f"{layer + 1:02d}_1")
+        for layer in range(15)
+        for j in (0, 1)
+    }
+
+    result, calls = _count_module_calls(
+        diagnostics.__file__, lambda: diagnostics._elementary_cycles(edges, views)
+    )
+
+    assert result == ()
+    # Measured 2 calls on Python 3.12.3; bound is 3x rounded up to 1,000.
+    assert calls <= 1_000
+
+
+def test_cycle_and_branch_view_warnings_keep_literal_output(tmp_path: Path) -> None:
+    source = tmp_path / "parity.sql"
+    source.write_text(
+        "CREATE TABLE dbo.base (x int)\nGO\n"
+        "CREATE VIEW cycle_a AS SELECT x FROM cycle_b\nGO\n"
+        "CREATE VIEW cycle_b AS SELECT x FROM cycle_a\nGO\n"
+        "CREATE VIEW leaf AS SELECT x FROM dbo.base\nGO\n"
+        "CREATE VIEW mixed AS SELECT x FROM cycle_a UNION ALL SELECT x FROM leaf\nGO\n"
+        "CREATE VIEW enters AS SELECT x FROM cycle_b\nGO\n"
+        "CREATE VIEW root_view AS SELECT x FROM mixed UNION ALL SELECT x FROM enters\n",
+        encoding="utf-8",
+    )
+    result = analyze_sql_files(Workspace(tmp_path), (source,), SqlSettings(view_depth_threshold=1))
+
+    assert [
+        (item.code, item.message, item.extensions["minotaur-sql"]) for item in result.warnings
+    ] == [
+        (
+            DiagnosticCode.CIRCULAR_DEPENDENCY,
+            "circular view dependency: cycle_a -> cycle_b -> cycle_a",
+            {"path": ("cycle_a", "cycle_b", "cycle_a")},
+        ),
+        (
+            DiagnosticCode.VIEW_DEPTH_WARNING,
+            "view dependency depth 2 exceeds threshold 1: mixed -> leaf -> dbo.base",
+            {"depth": 2, "path": ("mixed", "leaf", "dbo.base")},
+        ),
+        (
+            DiagnosticCode.VIEW_DEPTH_WARNING,
+            "view dependency depth 3 exceeds threshold 1: root_view -> mixed -> leaf -> dbo.base",
+            {"depth": 3, "path": ("root_view", "mixed", "leaf", "dbo.base")},
+        ),
+    ]
 
 
 def test_view_depth_warning_keeps_fk_and_path_metadata(tmp_path: Path) -> None:
@@ -506,6 +631,69 @@ CREATE VIEW S.TVRead AS SELECT * FROM S.TVFn(1) JOIN S.Base ON 1 = 1
         for source, target, _edge in _sql_edges(result, "sql:reads-from")
         if target.label == "S.TVFn"
     }
+
+
+def test_ordered_parenthesized_query_roots_record_order_clause_calls(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE FUNCTION dbo.gfn(@v int) RETURNS int AS RETURN @v
+GO
+CREATE FUNCTION f(@id int) RETURNS TABLE AS
+RETURN (SELECT x FROM dbo.a) ORDER BY dbo.gfn(x) OFFSET 0 ROWS
+GO
+CREATE PROCEDURE p AS BEGIN
+IF 1 IN ((SELECT x FROM dbo.a) ORDER BY dbo.gfn(x) OFFSET 0 ROWS) BEGIN SELECT x FROM dbo.a; END
+END
+"""
+    result = _analyze(tmp_path, **{"calls.sql": sql})
+    call_edges = {
+        (source.label, target.label): edge
+        for source, target, edge in _sql_edges(result, "sql:calls")
+    }
+    expected_calls = {
+        ("f", "calls.sql", line, character, line, character + len("gfn"))
+        for line, character in _reference_positions(sql, "CREATE FUNCTION f", "gfn")
+    } | {
+        ("p", "calls.sql", line, character, line, character + len("gfn"))
+        for line, character in _reference_positions(sql, "CREATE PROCEDURE p", "gfn")
+    }
+    expected_reads = {
+        ("f", "calls.sql", line, character)
+        for line, character in _reference_positions(sql, "CREATE FUNCTION f", "dbo.a")
+    } | {
+        ("p", "calls.sql", line, character)
+        for line, character in _reference_positions(sql, "CREATE PROCEDURE p", "dbo.a")
+    }
+
+    assert set(_symbols(result)) == {"dbo.a", "dbo.gfn", "f", "p"}
+    assert set(call_edges) == {("f", "dbo.gfn"), ("p", "dbo.gfn")}
+    assert {
+        (
+            source.label,
+            location.path,
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        )
+        for source, _target, edge in _sql_edges(result, "sql:calls")
+        for item in edge.evidence
+        for location in item.locations
+    } == expected_calls
+    assert _edges(result, "sql:reads-from") == {("f", "dbo.a"), ("p", "dbo.a")}
+    assert {
+        (source.label, location.path, location.range.start.line, location.range.start.character)
+        for source, _target, edge in _sql_edges(result, "sql:reads-from")
+        for item in edge.evidence
+        for location in item.locations
+    } == expected_reads
+    assert not result.diagnostics
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
 
 
 def test_rejected_query_root_drops_calls_and_reads_but_keeps_sibling(
@@ -1170,6 +1358,227 @@ SELECT * FROM changed
     assert _edges(result, "sql:reads-from") == {("V", "T")}
     assert len(result.diagnostics) == 4
     assert all(item.code == DiagnosticCode.UNSUPPORTED_SYNTAX for item in result.diagnostics)
+
+
+def test_ordered_parenthesized_view_cte_reads_body_and_rejects_variants(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE VIEW v AS
+WITH q AS (SELECT x FROM dbo.a) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+GO
+CREATE VIEW self_ref AS
+WITH q AS (SELECT x FROM dbo.a UNION ALL SELECT x FROM q) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+GO
+CREATE VIEW mutual_ref AS
+WITH q AS (SELECT x FROM r), r AS (SELECT x FROM q) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+GO
+CREATE VIEW temporary_ref AS
+WITH q AS (SELECT x FROM #t) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+"""
+    result = _analyze(tmp_path, **{"ordered.sql": sql})
+
+    assert set(_symbols(result)) == {"dbo.a", "v"}
+    assert _edges(result, "sql:reads-from") == {("v", "dbo.a")}
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+    assert [item.code for item in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+    ]
+
+
+def test_ordered_parenthesized_function_return_cte_reads_body_once(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE FUNCTION f(@id int) RETURNS TABLE AS
+RETURN WITH q AS (SELECT x FROM dbo.a) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+"""
+    result = _analyze(tmp_path, **{"function.sql": sql})
+
+    assert not result.diagnostics
+    assert _edges(result, "sql:reads-from") == {("f", "dbo.a")}
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
+def test_ordered_parenthesized_cte_join_sources_are_read(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE TABLE dbo.b (x int)
+GO
+CREATE VIEW v AS
+WITH q AS (SELECT x FROM dbo.a) (SELECT x FROM q JOIN dbo.b ON 1 = 1)
+ORDER BY x OFFSET 0 ROWS
+"""
+    result = _analyze(tmp_path, **{"join.sql": sql})
+
+    assert not result.diagnostics
+    assert _edges(result, "sql:reads-from") == {("v", "dbo.a"), ("v", "dbo.b")}
+
+
+def test_ordered_parenthesized_cte_is_visible_to_wrapper_order_clause(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE VIEW v AS
+WITH q AS (SELECT x FROM dbo.a) (SELECT x FROM q)
+ORDER BY (SELECT MAX(x) FROM q) OFFSET 0 ROWS
+"""
+    result = _analyze(tmp_path, **{"order.sql": sql})
+
+    assert not result.diagnostics
+    assert _edges(result, "sql:reads-from") == {("v", "dbo.a")}
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
+def test_parenthesized_nested_join_rejects_view_and_existence_forms(tmp_path: Path) -> None:
+    forms = {
+        "view": (
+            "CREATE VIEW v AS SELECT a.x\n"
+            "FROM dbo.a\n"
+            "JOIN dbo.b\n"
+            "JOIN (dbo.c c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x\n"
+        ),
+        "temporary": (
+            "CREATE VIEW v AS SELECT a.x\n"
+            "FROM dbo.a\n"
+            "JOIN dbo.b\n"
+            "JOIN (#t c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x\n"
+        ),
+        "existence": (
+            "CREATE VIEW v AS SELECT 1 AS marker\n"
+            "WHERE EXISTS (\n"
+            " SELECT a.x FROM dbo.a\n"
+            " JOIN dbo.b\n"
+            " JOIN (dbo.c c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x\n"
+            ")\n"
+        ),
+    }
+    for name, sql in forms.items():
+        result = _analyze(tmp_path / name, **{"parenthesized.sql": sql})
+        assert not _symbols(result), name
+        assert not _edges(result, "sql:reads-from"), name
+        assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX], (
+            name
+        )
+
+
+def test_parenthesized_nested_join_drops_only_the_affected_query_roots(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.keep (x int)
+GO
+CREATE PROCEDURE p AS BEGIN
+SELECT * FROM dbo.keep;
+SELECT a.x FROM dbo.a JOIN dbo.b JOIN (dbo.c c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x;
+END
+GO
+CREATE FUNCTION f(@id int) RETURNS TABLE AS RETURN (
+ SELECT a.x FROM dbo.a JOIN dbo.b JOIN (dbo.c c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x
+)
+"""
+    result = _analyze(tmp_path, **{"roots.sql": sql})
+
+    assert set(_symbols(result)) == {"dbo.keep", "p", "f"}
+    assert _edges(result, "sql:reads-from") == {("p", "dbo.keep")}
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX] * 2
+
+
+def test_nested_join_sources_are_read_at_their_own_locations(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE TABLE dbo.b (x int)
+GO
+CREATE TABLE dbo.c (x int)
+GO
+CREATE VIEW v AS
+SELECT a.x FROM dbo.a
+JOIN dbo.b
+JOIN dbo.c ON b.x = c.x ON a.x = b.x
+"""
+    result = _analyze(tmp_path, **{"nested.sql": sql})
+    edges = {
+        (source.label, target.label): edge
+        for source, target, edge in _sql_edges(result, "sql:reads-from")
+    }
+    lines = sql.splitlines()
+    written = {
+        "dbo.a": next(text for text in lines if "FROM dbo.a" in text),
+        "dbo.b": next(text for text in lines if text.startswith("JOIN dbo.b")),
+        "dbo.c": next(text for text in lines if text.startswith("JOIN dbo.c")),
+    }
+
+    assert not result.diagnostics
+    assert set(edges) == {("v", "dbo.a"), ("v", "dbo.b"), ("v", "dbo.c")}
+    for name, text in written.items():
+        line = lines.index(text)
+        assert _evidence_locations(edges[("v", name)]) == {("nested.sql", line, text.index(name))}
+    assert [target.label for _source, target, _edge in _sql_edges(result, "sql:reads-from")] == [
+        "dbo.a",
+        "dbo.b",
+        "dbo.c",
+    ]
+
+
+def test_nested_join_temporary_source_rejects_whole_view(tmp_path: Path) -> None:
+    sql = """\
+CREATE VIEW v AS
+SELECT a.x FROM dbo.a
+JOIN dbo.b
+JOIN #t ON b.x = #t.x ON a.x = b.x
+"""
+    result = _analyze(tmp_path, **{"temporary.sql": sql})
+
+    assert not _symbols(result)
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_exists_body_nested_join_reads_sources_and_rejects_temporary(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE TABLE dbo.b (x int)
+GO
+CREATE TABLE dbo.c (x int)
+GO
+CREATE VIEW v AS SELECT 1 AS marker
+WHERE EXISTS (
+ SELECT a.x FROM dbo.a
+ JOIN dbo.b
+ JOIN dbo.c ON b.x = c.x ON a.x = b.x
+)
+GO
+CREATE VIEW temporary_v AS SELECT 1 AS marker
+WHERE EXISTS (
+ SELECT a.x FROM dbo.a
+ JOIN dbo.b
+ JOIN #t ON b.x = #t.x ON a.x = b.x
+)
+"""
+    result = _analyze(tmp_path, **{"exists.sql": sql})
+
+    assert set(_symbols(result)) == {"dbo.a", "dbo.b", "dbo.c", "v"}
+    assert _edges(result, "sql:reads-from") == {
+        ("v", "dbo.a"),
+        ("v", "dbo.b"),
+        ("v", "dbo.c"),
+    }
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
 
 
 def test_unsupported_query_and_near_miss_do_not_emit_partial_facts(tmp_path: Path) -> None:
@@ -2056,3 +2465,640 @@ def test_declaration_final_identifier_survives_graph_serialization(
         expected["minotaur-sql"]["fk_component"] = 0
     assert restored.extensions == expected
     assert restored.id == node.id
+
+
+def _go(*statements: str) -> str:
+    return "\nGO\n".join(statements) + "\n"
+
+
+def _reference_positions(sql: str, owner: str, target: str) -> list[tuple[int, int]]:
+    """Return (line, character) of each ``target`` reference in ``owner``'s statement."""
+    start = sql.index(owner)
+    end = sql.find("\nGO\n", start)
+    end = len(sql) if end < 0 else end
+    positions = []
+    for match in re.finditer(rf"{re.escape(target)}\b", sql[start:end]):
+        offset = start + match.start()
+        line = sql.count("\n", 0, offset)
+        positions.append((line, offset - (sql.rfind("\n", 0, offset) + 1)))
+    return positions
+
+
+def _read_locations(result, kind: str = "sql:reads-from"):
+    return {
+        (source.label, target.label, line, character)
+        for source, target, edge in _sql_edges(result, kind)
+        for (_path, line, character) in _evidence_locations(edge)
+    }
+
+
+def test_each_nested_reference_is_read_once_and_keeps_every_self_join_location(
+    tmp_path: Path,
+) -> None:
+    view = """\
+CREATE VIEW v AS
+SELECT (SELECT MAX(x) FROM dbo.Dup) AS s
+FROM (SELECT x FROM (SELECT x FROM (SELECT x FROM
+dbo.Dup) AS d3) AS d2) AS d1
+WHERE x IN (SELECT x FROM (SELECT x FROM dbo.Dup) AS d4)
+AND EXISTS (SELECT 1 FROM dbo.Dup)
+AND x > ALL (SELECT x FROM dbo.Dup)
+AND x = SOME (SELECT x FROM dbo.Dup)"""
+    sql = _go("CREATE TABLE dbo.Dup (x int)", "CREATE TABLE dbo.Dup (x int)", view)
+    result = _analyze(tmp_path, **{"dup.sql": sql})
+
+    ambiguous = sorted(
+        (item.location.range.start.line, item.location.range.start.character)
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.AMBIGUOUS_REFERENCE
+    )
+    assert ambiguous == _reference_positions(sql, "CREATE VIEW v AS", "dbo.Dup")
+    assert len(ambiguous) == 6
+
+    self_join = _analyze(
+        tmp_path / "self",
+        **{
+            "self.sql": _go(
+                "CREATE TABLE dbo.a (x int)",
+                "CREATE VIEW v_self AS SELECT a1.x FROM dbo.a AS a1 "
+                "JOIN dbo.a AS a2 ON a1.x = a2.x",
+            )
+        },
+    )
+    [(_, _, edge)] = _sql_edges(self_join, "sql:reads-from")
+    self_sql = (tmp_path / "self" / "self.sql").read_text(encoding="utf-8")
+    assert sorted(
+        (line, character) for (_path, line, character) in _evidence_locations(edge)
+    ) == _reference_positions(self_sql, "CREATE VIEW v_self", "dbo.a")
+    assert len(_evidence_locations(edge)) == 2
+    assert _edges(self_join, "sql:reads-from") == {("v_self", "dbo.a")}
+
+
+@pytest.mark.parametrize("references", [2, 10])
+def test_chained_join_derived_tables_report_each_ambiguity_once(
+    tmp_path: Path, references: int
+) -> None:
+    joins = " ".join(f"JOIN (SELECT x FROM dbo.Dup) t{index}" for index in range(1, references + 1))
+    conditions = " ".join("ON 1 = 1" for _ in range(references))
+    view = f"CREATE VIEW v AS SELECT 1 AS y FROM dbo.a {joins} {conditions}"
+    sql = _go(
+        "CREATE TABLE dbo.a (x int)",
+        "CREATE TABLE dbo.Dup (x int)",
+        "CREATE TABLE dbo.Dup (x int)",
+        view,
+    )
+    result = _analyze(tmp_path / str(references), **{"chain.sql": sql})
+
+    ambiguous = sorted(
+        (item.location.range.start.line, item.location.range.start.character)
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.AMBIGUOUS_REFERENCE
+    )
+    assert ambiguous == _reference_positions(sql, "CREATE VIEW v AS", "dbo.Dup")
+    assert len(ambiguous) == references
+
+
+def test_derived_table_join_chain_collects_each_attached_source(tmp_path: Path) -> None:
+    declared = _analyze(
+        tmp_path / "declared",
+        **{
+            "chain.sql": _go(
+                "CREATE TABLE dbo.a (x int)",
+                "CREATE TABLE dbo.b (x int)",
+                "CREATE TABLE dbo.c (x int)",
+                "CREATE VIEW v AS SELECT a.x FROM dbo.a "
+                "JOIN (SELECT x FROM dbo.b) b1 JOIN dbo.c c1 ON 1 = 1 ON 1 = 1",
+            )
+        },
+    )
+    assert not declared.diagnostics
+    assert _edges(declared, "sql:reads-from") == {
+        ("v", "dbo.a"),
+        ("v", "dbo.b"),
+        ("v", "dbo.c"),
+    }
+
+    temporary = _analyze(
+        tmp_path / "temporary",
+        **{
+            "chain.sql": "CREATE VIEW v AS SELECT a.x FROM dbo.a "
+            "JOIN (SELECT x FROM dbo.b) b1 JOIN #t t ON 1 = 1 ON 1 = 1"
+        },
+    )
+    assert not _symbols(temporary)
+    assert not _edges(temporary, "sql:reads-from")
+    assert [item.code for item in temporary.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_wrapper_join_position_rejects_a_non_query_body(tmp_path: Path) -> None:
+    body = (
+        "SELECT a.x FROM ((SELECT x FROM dbo.a) a1 "
+        "JOIN (dbo.b b1 JOIN dbo.c c1 ON 1 = 1) ON a1.x = b1.x)"
+    )
+    view = _analyze(tmp_path / "view", **{"wrapper.sql": f"CREATE VIEW v AS {body}"})
+    assert not _symbols(view)
+    assert not _edges(view, "sql:reads-from")
+    assert [item.code for item in view.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+    procedure = _analyze(
+        tmp_path / "procedure",
+        **{"wrapper.sql": f"CREATE PROCEDURE p AS BEGIN {body}; END"},
+    )
+    assert set(_symbols(procedure)) == {"p"}
+    assert not _edges(procedure, "sql:reads-from")
+    assert [item.code for item in procedure.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_grouped_wrapper_sources_are_read_and_temporary_sources_reject(
+    tmp_path: Path,
+) -> None:
+    declared = _analyze(
+        tmp_path / "declared",
+        **{
+            "grouped.sql": _go(
+                "CREATE TABLE dbo.a (x int)",
+                "CREATE TABLE dbo.t (x int)",
+                "CREATE VIEW v AS SELECT * FROM ((SELECT x FROM dbo.a) AS s JOIN dbo.t ON 1 = 1)",
+            )
+        },
+    )
+    assert not declared.diagnostics
+    assert _edges(declared, "sql:reads-from") == {("v", "dbo.a"), ("v", "dbo.t")}
+
+    temporary = _analyze(
+        tmp_path / "temporary",
+        **{
+            "grouped.sql": "CREATE VIEW v AS SELECT * FROM "
+            "((SELECT x FROM dbo.a) AS s JOIN #t ON 1 = 1)"
+        },
+    )
+    assert not _symbols(temporary)
+    assert [item.code for item in temporary.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+    existence = _analyze(
+        tmp_path / "existence",
+        **{
+            "grouped.sql": "CREATE VIEW v AS SELECT 1 AS y FROM dbo.a WHERE EXISTS "
+            "(SELECT 1 AS y FROM ((SELECT x FROM dbo.a) a1 JOIN #t ON 1 = 1))"
+        },
+    )
+    assert not _symbols(existence)
+    assert [item.code for item in existence.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_deep_grouped_join_sources_are_read_at_their_locations(tmp_path: Path) -> None:
+    sql = _go(
+        "CREATE TABLE dbo.a (x int)",
+        "CREATE TABLE dbo.t (x int)",
+        "CREATE TABLE dbo.u (x int)",
+        "CREATE VIEW v AS SELECT * FROM "
+        "(((SELECT x FROM dbo.a) AS s JOIN dbo.t ON 1 = 1) JOIN dbo.u ON 1 = 1)",
+    )
+    result = _analyze(tmp_path, **{"deep.sql": sql})
+    edges = {
+        (source.label, target.label): edge
+        for source, target, edge in _sql_edges(result, "sql:reads-from")
+    }
+
+    assert not result.diagnostics
+    assert set(edges) == {("v", "dbo.a"), ("v", "dbo.t"), ("v", "dbo.u")}
+    for name in ("dbo.a", "dbo.t", "dbo.u"):
+        assert _evidence_locations(edges[("v", name)]) == {
+            ("deep.sql", *position)
+            for position in _reference_positions(sql, "CREATE VIEW v AS", name)
+        }
+
+
+def test_deep_grouped_join_temporary_source_rejects(tmp_path: Path) -> None:
+    view = _analyze(
+        tmp_path / "view",
+        **{
+            "deep.sql": "CREATE VIEW v AS SELECT * FROM "
+            "(((SELECT x FROM dbo.a) AS s JOIN #t ON 1 = 1) JOIN dbo.u ON 1 = 1)"
+        },
+    )
+    assert not _symbols(view)
+    assert not _edges(view, "sql:reads-from")
+    assert [item.code for item in view.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+    existence = _analyze(
+        tmp_path / "existence",
+        **{
+            "deep.sql": "CREATE VIEW v AS SELECT 1 AS y FROM dbo.a WHERE EXISTS "
+            "(SELECT 1 AS y FROM (((SELECT x FROM dbo.a) AS s JOIN #t ON 1 = 1) "
+            "JOIN dbo.u ON 1 = 1))"
+        },
+    )
+    assert not _symbols(existence)
+    assert [item.code for item in existence.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_from_prefixed_grouped_join_chain_reads_every_source(tmp_path: Path) -> None:
+    declared = _analyze(
+        tmp_path / "declared",
+        **{
+            "prefixed.sql": _go(
+                "CREATE TABLE dbo.g (x int)",
+                "CREATE TABLE dbo.a (x int)",
+                "CREATE TABLE dbo.t (x int)",
+                "CREATE TABLE dbo.u (x int)",
+                "CREATE VIEW v AS SELECT * FROM dbo.g "
+                "JOIN ((SELECT x FROM dbo.a) AS s JOIN dbo.t ON 1 = 1) "
+                "JOIN dbo.u ON 1 = 1 ON 1 = 1",
+            )
+        },
+    )
+    assert not declared.diagnostics
+    assert _edges(declared, "sql:reads-from") == {
+        ("v", "dbo.g"),
+        ("v", "dbo.a"),
+        ("v", "dbo.t"),
+        ("v", "dbo.u"),
+    }
+
+    temporary = _analyze(
+        tmp_path / "temporary",
+        **{
+            "prefixed.sql": "CREATE VIEW v AS SELECT * FROM dbo.g "
+            "JOIN ((SELECT x FROM dbo.a) AS s JOIN #t ON 1 = 1) "
+            "JOIN dbo.u ON 1 = 1 ON 1 = 1"
+        },
+    )
+    assert not _symbols(temporary)
+    assert not _edges(temporary, "sql:reads-from")
+    assert [item.code for item in temporary.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_grouped_wrapper_body_is_read_once(tmp_path: Path) -> None:
+    sql = _go(
+        "CREATE TABLE dbo.Dup (x int)",
+        "CREATE TABLE dbo.Dup (x int)",
+        "CREATE VIEW v AS SELECT * FROM ((SELECT x FROM dbo.Dup) AS s)",
+    )
+    result = _analyze(tmp_path, **{"grouped.sql": sql})
+
+    ambiguous = sorted(
+        (item.location.range.start.line, item.location.range.start.character)
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.AMBIGUOUS_REFERENCE
+    )
+    assert ambiguous == _reference_positions(sql, "CREATE VIEW v AS", "dbo.Dup")
+    assert len(ambiguous) == 1
+
+
+def test_ordered_parenthesized_with_clauses_read_outermost_first(tmp_path: Path) -> None:
+    sql = _go(
+        "CREATE TABLE dbo.o (x int)",
+        "CREATE TABLE dbo.i (x int)",
+        "CREATE VIEW v AS WITH o AS (SELECT x FROM dbo.o) "
+        "(WITH i AS (SELECT x FROM dbo.i) SELECT * FROM o JOIN i ON 1 = 1) "
+        "ORDER BY x OFFSET 0 ROWS",
+    )
+    result = _analyze(tmp_path, **{"nested_with.sql": sql})
+
+    assert not result.diagnostics
+    assert [target.label for _source, target, _edge in _sql_edges(result, "sql:reads-from")] == [
+        "dbo.o",
+        "dbo.i",
+    ]
+
+
+def test_nested_with_and_discovered_scopes_see_enclosing_cte_names(tmp_path: Path) -> None:
+    sql = _go(
+        "CREATE TABLE dbo.a (x int)",
+        "CREATE TABLE dbo.b (x int)",
+        "CREATE VIEW v_nested AS SELECT x FROM (WITH c AS (SELECT x FROM dbo.a) "
+        "SELECT x FROM (SELECT x FROM c) AS e) AS d",
+        "CREATE VIEW v_recent AS WITH recent AS (SELECT x FROM dbo.a) SELECT x FROM dbo.b "
+        "WHERE x IN (SELECT x FROM recent) AND EXISTS (SELECT 1 FROM recent)",
+    )
+    result = _analyze(tmp_path, **{"cte.sql": sql})
+
+    assert _edges(result, "sql:reads-from") == {
+        ("v_nested", "dbo.a"),
+        ("v_recent", "dbo.a"),
+        ("v_recent", "dbo.b"),
+    }
+    assert _edges(result, "references") == set()
+    assert {
+        node.label
+        for node in result.document.nodes
+        if node.node_class.value == "unresolved-reference"
+    } == set()
+    assert result.diagnostics == ()
+
+
+# Measured 1,750 calls on Python 3.12.3; bound is 3x rounded up to 1,000.
+_CTE_CHAIN_CALL_BOUND = 6_000
+
+
+def test_cte_chain_analysis_is_linear_in_calls(tmp_path: Path) -> None:
+    ctes = ["c0 AS (SELECT x FROM dbo.a)", "c1 AS (SELECT x FROM c0)"]
+    ctes += [
+        f"c{i} AS (SELECT x FROM c{i - 1} UNION ALL SELECT x FROM c{i - 2})" for i in range(2, 24)
+    ]
+    sql = _go(
+        "CREATE TABLE dbo.a (x int)",
+        "CREATE VIEW v AS WITH " + ", ".join(ctes) + " SELECT x FROM c23",
+    )
+    path = tmp_path / "chain.sql"
+    path.write_text(sql, encoding="utf-8")
+
+    result, calls = _count_module_calls(
+        sql_interpreter.__file__, lambda: analyze_sql_files(Workspace(tmp_path), (path,))
+    )
+
+    assert _edges(result, "sql:reads-from") == {("v", "dbo.a")}  # type: ignore[attr-defined]
+    assert result.diagnostics == ()  # type: ignore[attr-defined]
+    assert calls <= _CTE_CHAIN_CALL_BOUND
+
+
+_CALLER_BUDGET = 800
+_CHAIN_TERMS = 2_000
+
+
+def _frame_depth() -> int:
+    depth = 0
+    frame: FrameType | None = sys._getframe(1)
+    while frame is not None:
+        depth += 1
+        frame = frame.f_back
+    return depth
+
+
+def test_long_boolean_and_set_operation_chains_read_under_a_caller_budget(tmp_path: Path) -> None:
+    def or_chain(table: str) -> str:
+        return f"SELECT x FROM dbo.{table} WHERE " + " OR ".join(
+            f"x = {i}" for i in range(_CHAIN_TERMS)
+        )
+
+    def union_chain(table: str) -> str:
+        return " UNION ALL ".join(f"SELECT x FROM dbo.{table}" for _ in range(_CHAIN_TERMS))
+
+    condition = " OR ".join(f"x = {i}" for i in range(_CHAIN_TERMS))
+    sql = _go(
+        *(f"CREATE TABLE dbo.t{i} (x int)" for i in range(1, 6)),
+        f"CREATE VIEW v1 AS WITH c AS ({or_chain('t1')}) SELECT x FROM c",
+        f"CREATE PROCEDURE p2 AS BEGIN\nIF {condition}\nSELECT x FROM dbo.t2;\nEND",
+        f"CREATE VIEW v3 AS {union_chain('t3')}",
+        f"CREATE VIEW v4 AS WITH c AS ({union_chain('t4')}) SELECT x FROM c",
+        f"CREATE VIEW v5 AS SELECT 1 AS y WHERE EXISTS ({union_chain('t5')})",
+    )
+    path = tmp_path / "chains.sql"
+    path.write_text(sql, encoding="utf-8")
+
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(_frame_depth() + _CALLER_BUDGET)
+    try:
+        result = analyze_sql_files(Workspace(tmp_path), (path,))
+    finally:
+        sys.setrecursionlimit(previous)
+
+    assert result.diagnostics == ()
+    edges = {(s.label, t.label): e for s, t, e in _sql_edges(result, "sql:reads-from")}
+    assert set(edges) == {
+        ("v1", "dbo.t1"),
+        ("p2", "dbo.t2"),
+        ("v3", "dbo.t3"),
+        ("v4", "dbo.t4"),
+        ("v5", "dbo.t5"),
+    }
+    for owner in ("v3", "v4", "v5"):
+        [target] = [key for key in edges if key[0] == owner]
+        assert len(_evidence_locations(edges[target])) == _CHAIN_TERMS
+
+
+def test_nested_parenthesized_and_table_function_argument_queries_contribute_reads(
+    tmp_path: Path,
+) -> None:
+    statements = [
+        "CREATE TABLE dbo.a (x int)",
+        "CREATE TABLE dbo.b (x int)",
+        "CREATE TABLE dbo.c (x int)",
+        "CREATE FUNCTION dbo.tf(@v int) RETURNS TABLE AS RETURN SELECT @v AS x",
+        "CREATE VIEW v_exists AS SELECT x FROM dbo.a WHERE EXISTS (SELECT 1 FROM dbo.b)",
+        "CREATE VIEW v_all AS SELECT x FROM dbo.a WHERE x > ALL (SELECT x FROM dbo.b)",
+        "CREATE VIEW v_some AS SELECT x FROM dbo.a WHERE x = SOME (SELECT x FROM dbo.b)",
+        "CREATE VIEW v_any AS SELECT x FROM dbo.a WHERE x = ANY (SELECT x FROM dbo.b)",
+        "CREATE VIEW v_join AS SELECT a.x FROM dbo.a JOIN dbo.b ON a.x IN (SELECT x FROM dbo.c)",
+        "CREATE VIEW v_paren AS (SELECT x FROM dbo.a)",
+        "CREATE VIEW v_paren_union AS (SELECT x FROM dbo.a) UNION (SELECT x FROM dbo.b)",
+        "CREATE VIEW v_cte_union AS WITH u AS ((SELECT x FROM dbo.a) UNION (SELECT x FROM dbo.b)) "
+        "SELECT x FROM u",
+        "CREATE VIEW v_tvf_from AS SELECT t.x FROM dbo.tf((SELECT MAX(x) FROM dbo.c)) AS t",
+        "CREATE VIEW v_tvf_join AS SELECT a.x FROM dbo.a JOIN dbo.tf((SELECT MAX(x) FROM dbo.c)) "
+        "AS t ON a.x = t.x",
+        "CREATE VIEW v_split AS SELECT value FROM "
+        "STRING_SPLIT((SELECT MAX(CAST(x AS varchar(10))) FROM dbo.c), ',')",
+        "CREATE PROCEDURE p AS BEGIN\n(SELECT x FROM dbo.a) UNION (SELECT x FROM dbo.b);\n"
+        "SELECT x FROM dbo.c;\nEND",
+    ]
+    sql = _go(*statements)
+    result = _analyze(tmp_path, **{"nested.sql": sql})
+
+    expected_reads = {
+        (owner, target, line, character)
+        for owner, tables in {
+            "v_exists": ("a", "b"),
+            "v_all": ("a", "b"),
+            "v_some": ("a", "b"),
+            "v_any": ("a", "b"),
+            "v_join": ("a", "b", "c"),
+            "v_paren": ("a",),
+            "v_paren_union": ("a", "b"),
+            "v_cte_union": ("a", "b"),
+            "v_tvf_from": ("c",),
+            "v_tvf_join": ("a", "c"),
+            "v_split": ("c",),
+            "p": ("a", "b", "c"),
+        }.items()
+        for table in tables
+        for target in [f"dbo.{table}"]
+        for line, character in _reference_positions(
+            sql, f"CREATE {'PROCEDURE' if owner == 'p' else 'VIEW'} {owner} AS", target
+        )
+    }
+    assert _read_locations(result) == expected_reads
+    expected_calls = {
+        (owner, "dbo.tf", line, character)
+        for owner in ("v_tvf_from", "v_tvf_join")
+        for line, character in _reference_positions(sql, f"CREATE VIEW {owner} AS", "tf")
+    }
+    assert _read_locations(result, "sql:calls") == expected_calls
+    assert _edges(result, "sql:calls") == {("v_tvf_from", "dbo.tf"), ("v_tvf_join", "dbo.tf")}
+    assert result.diagnostics == ()
+
+
+def test_nested_exists_read_composes_into_view_depth_warning(tmp_path: Path) -> None:
+    sql = _go(
+        "CREATE TABLE dbo.a (x int)",
+        "CREATE VIEW mid AS SELECT x FROM dbo.a",
+        "CREATE VIEW top_v AS SELECT 1 AS y WHERE EXISTS (SELECT 1 FROM mid)",
+    )
+    result = _analyze(tmp_path, settings=SqlSettings(view_depth_threshold=1), **{"depth.sql": sql})
+
+    [warning] = result.warnings
+    assert warning.code is DiagnosticCode.VIEW_DEPTH_WARNING
+    assert warning.message == "view dependency depth 2 exceeds threshold 1: top_v -> mid -> dbo.a"
+
+
+def test_nested_queries_follow_the_same_rejection_rule_in_every_position(tmp_path: Path) -> None:
+    views = {
+        "v_exists_temp": "SELECT x FROM dbo.a WHERE EXISTS (SELECT 1 FROM #t)",
+        "v_all_temp": "SELECT x FROM dbo.a WHERE x > ALL (SELECT x FROM #t)",
+        "v_some_temp": "SELECT x FROM dbo.a WHERE x = SOME (SELECT x FROM #t)",
+        "v_exists_values": "SELECT x FROM dbo.a WHERE EXISTS "
+        "(SELECT t.x FROM (VALUES (1)) AS t(x))",
+        "v_exists_apply": "SELECT x FROM dbo.a WHERE EXISTS "
+        "(SELECT b.x FROM dbo.b CROSS APPLY (SELECT x FROM dbo.c) AS t)",
+        "v_exists_into": "SELECT x FROM dbo.a WHERE EXISTS (SELECT x INTO #z FROM dbo.b)",
+        "v_from_values": "SELECT x FROM (VALUES (1)) AS t(x)",
+        "v_cross_apply": "SELECT a.x FROM dbo.a CROSS APPLY (SELECT x FROM dbo.b) AS t",
+        "v_in_temp": "SELECT x FROM dbo.a WHERE x IN (SELECT x FROM #t)",
+        "v_tvf_temp": "SELECT t.x FROM dbo.tf((SELECT MAX(x) FROM #t)) AS t",
+        "v_tvf_join_temp": "SELECT a.x FROM dbo.a JOIN dbo.tf((SELECT MAX(x) FROM #t)) AS t "
+        "ON a.x = t.x",
+    }
+    procedure = """\
+CREATE PROCEDURE p AS BEGIN
+SELECT dbo.f(x) FROM dbo.a WHERE EXISTS (SELECT 1 FROM #t);
+SELECT x FROM dbo.b WHERE x > ALL (SELECT x FROM #t);
+SELECT x FROM dbo.c WHERE x = SOME (SELECT x FROM #t);
+(SELECT x FROM dbo.a);
+SELECT x FROM dbo.d WHERE x IN (SELECT x FROM #t);
+SELECT x FROM dbo.d;
+END"""
+    sql = _go(
+        *(f"CREATE TABLE dbo.{name} (x int)" for name in "abcd"),
+        "CREATE FUNCTION dbo.f(@v int) RETURNS int AS RETURN @v",
+        "CREATE FUNCTION dbo.tf(@v int) RETURNS TABLE AS RETURN SELECT @v AS x",
+        procedure,
+        *(f"CREATE VIEW {name} AS {body}" for name, body in views.items()),
+    )
+    result = _analyze(tmp_path, **{"reject.sql": sql})
+
+    lines = sql.split("\n")
+    last_root_line = max(i for i, text in enumerate(lines) if text == "SELECT x FROM dbo.d;")
+    assert _read_locations(result) == {("p", "dbo.d", last_root_line, 14)}
+    assert _edges(result, "sql:calls") == set()
+    assert not [label for label in _symbols(result) if label.startswith("v_")]
+    procedure_start = lines.index("CREATE PROCEDURE p AS BEGIN")
+    expected_lines = sorted(
+        [procedure_start + offset for offset in range(1, 6)]
+        + [lines.index(f"CREATE VIEW {name} AS {body}") for name, body in views.items()]
+    )
+    assert (
+        sorted(
+            item.location.range.start.line
+            for item in result.diagnostics
+            if item.code is DiagnosticCode.UNSUPPORTED_SYNTAX
+        )
+        == expected_lines
+    )
+    assert len(result.diagnostics) == 16
+
+
+def test_repeated_parentheses_unwrap_and_non_query_scopes_reject(tmp_path: Path) -> None:
+    views = {
+        "v_double": "((SELECT x FROM dbo.a))",
+        "v_cte_triple": "WITH c AS (((SELECT x FROM dbo.a))) SELECT x FROM c",
+        "v_cte_values": "WITH c AS ((VALUES (1))) SELECT x FROM c",
+        "v_derived_values": "SELECT t.x FROM ((VALUES (1))) AS t(x)",
+    }
+    sql = _go(
+        "CREATE TABLE dbo.a (x int)",
+        *(f"CREATE VIEW {name} AS {body}" for name, body in views.items()),
+    )
+    result = _analyze(tmp_path, **{"paren.sql": sql})
+
+    assert _read_locations(result) == {
+        (owner, "dbo.a", line, character)
+        for owner in ("v_double", "v_cte_triple")
+        for line, character in _reference_positions(sql, f"CREATE VIEW {owner} AS", "dbo.a")
+    }
+    assert {label for label in _symbols(result) if label.startswith("v_")} == {
+        "v_double",
+        "v_cte_triple",
+    }
+    lines = sql.split("\n")
+    assert [(item.code, item.location.range.start.line) for item in result.diagnostics] == [
+        (DiagnosticCode.UNSUPPORTED_SYNTAX, lines.index(f"CREATE VIEW {name} AS {views[name]}"))
+        for name in ("v_cte_values", "v_derived_values")
+    ]
+
+
+_PAGED_UNION = (
+    "SELECT x FROM dbo.a UNION SELECT x FROM dbo.b ORDER BY x OFFSET (SELECT COUNT(*) FROM {}) ROWS"
+)
+_PAGED_WRAPPER = "(SELECT x FROM dbo.a) ORDER BY x OFFSET (SELECT COUNT(*) FROM {}) ROWS"
+
+
+@pytest.mark.parametrize(
+    ("view", "tables"),
+    [
+        ("SELECT d.x FROM (" + _PAGED_UNION + ") AS d", {"a", "b", "p"}),
+        ("WITH c AS (" + _PAGED_UNION + ") SELECT x FROM c", {"a", "b", "p"}),
+        ("SELECT x FROM dbo.a WHERE x IN (" + _PAGED_UNION + ")", {"a", "b", "p"}),
+        ("SELECT d.x FROM (" + _PAGED_WRAPPER + ") AS d", {"a", "p"}),
+        (_PAGED_UNION, {"a", "b", "p"}),
+        (
+            "WITH r AS (SELECT x FROM dbo.a) SELECT x FROM r UNION SELECT x FROM r "
+            "ORDER BY x OFFSET (SELECT COUNT(*) FROM r) ROWS",
+            {"a"},
+        ),
+    ],
+)
+def test_paging_clause_queries_of_set_operations_and_wrappers_contribute_reads(
+    tmp_path: Path, view: str, tables: set[str]
+) -> None:
+    source = _go(
+        *(f"CREATE TABLE dbo.{name} (x int)" for name in "abp"),
+        "CREATE VIEW v AS " + view.format("dbo.p"),
+    )
+    result = _analyze(tmp_path, **{"paging.sql": source})
+
+    assert _edges(result, "sql:reads-from") == {("v", f"dbo.{name}") for name in tables}
+    assert result.diagnostics == ()
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
+def test_paging_clause_queries_in_a_procedure_derived_table_contribute_reads(
+    tmp_path: Path,
+) -> None:
+    source = _go(
+        *(f"CREATE TABLE dbo.{name} (x int)" for name in "abp"),
+        "CREATE PROCEDURE q AS BEGIN\nSELECT d.x FROM ("
+        + _PAGED_UNION.format("dbo.p")
+        + ") AS d;\nEND",
+    )
+    result = _analyze(tmp_path, **{"proc.sql": source})
+
+    assert _edges(result, "sql:reads-from") == {("q", f"dbo.{name}") for name in "abp"}
+    assert result.diagnostics == ()
+
+
+@pytest.mark.parametrize(
+    "view",
+    [
+        "SELECT d.x FROM (" + _PAGED_UNION + ") AS d",
+        "WITH c AS (" + _PAGED_UNION + ") SELECT x FROM c",
+        "SELECT x FROM dbo.a WHERE x IN (" + _PAGED_UNION + ")",
+        "SELECT d.x FROM (" + _PAGED_WRAPPER + ") AS d",
+        _PAGED_WRAPPER,
+        _PAGED_UNION,
+    ],
+)
+def test_temporary_table_in_a_paging_clause_rejects_the_statement(
+    tmp_path: Path, view: str
+) -> None:
+    source = _go(
+        *(f"CREATE TABLE dbo.{name} (x int)" for name in "ab"),
+        "CREATE VIEW v AS " + view.format("#t"),
+    )
+    result = _analyze(tmp_path, **{"paging.sql": source})
+
+    assert "v" not in _symbols(result)
+    assert _edges(result, "sql:reads-from") == set()
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
