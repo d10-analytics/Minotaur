@@ -1541,6 +1541,179 @@ def test_unrepresentable_function_body_extent_ends_at_a_declaration_boundary(
     assert _edges(result, "sql:foreign-key-to") == ({("dbo.C", "dbo.P")} if foreign_key else set())
 
 
+_CALC_READ = "SELECT @r = dbo.Calc(id) FROM dbo.Items"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"DECLARE @r int;\nBEGIN\n{_CALC_READ};\nEND;\nRETURN @r;\nEND;",
+        f"DECLARE @r int;\n{_CALC_READ}; -- done\nRETURN @r;\nEND;",
+        f"DECLARE @r int;\n{_CALC_READ}\nEND;",
+    ],
+    ids=["nested-block", "comment-after-member", "no-end-statement"],
+)
+def test_unrepresentable_function_body_member_calls_produce_no_edges(
+    tmp_path: Path, body: str
+) -> None:
+    sql = (
+        f"{_ITEMS_DECLARATION}\nGO\n"
+        "CREATE FUNCTION dbo.Calc(@x int) RETURNS int AS RETURN @x\nGO\n"
+        f"{_FUNCTION_HEADER}{body}\n{_AFTER_DECLARATION}"
+    )
+    result = _analyze(tmp_path, **{"bodies.sql": sql})
+    symbols = _symbols(result)
+
+    assert symbols["dbo.Calc"].symbol_kind == "sql:function"
+    assert not _sql_edges(result, "sql:calls")
+    _assert_one_function_diagnostic(result, symbols["dbo.M3"])
+    assert symbols["dbo.After"].symbol_kind == "sql:table"
+
+
+@pytest.mark.parametrize(
+    ("body", "separated"),
+    [
+        ("DECLARE @r int;\nWHILE @f > 0 SELECT @f = @f - 1;\nRETURN @r;\nEND;", False),
+        ("DECLARE @r int;\nWHILE @f > 0 SELECT @f = @f - 1;\nRETURN @r;\nEND;", True),
+        ("WHILE @f > 0 SELECT @f = @f - 1;\nRETURN @f;\nEND;", False),
+        ("WHILE @f > 0 SELECT @f = @f - 1;\nRETURN @f;\nEND;", True),
+    ],
+    ids=["later-member", "later-member-separated", "first-member", "first-member-separated"],
+)
+def test_while_function_body_folds_a_later_declaration_unless_separated(
+    tmp_path: Path, body: str, separated: bool
+) -> None:
+    result = _analyze(tmp_path, **{"bodies.sql": _function_fixture(body, separated=separated)})
+    symbols = _symbols(result)
+
+    _assert_one_function_diagnostic(result, symbols["dbo.M3"])
+    assert ("dbo.After" in symbols) is separated
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "foo(1);",
+        "foo((SELECT COUNT(*) FROM dbo.Items));",
+        "foo;",
+        "foo @r;",
+        "dbo.[RETURN];",
+        "[RETURN];",
+        "[RETURN](SELECT COUNT(*) FROM dbo.Items);",
+    ],
+    ids=[
+        "function-call",
+        "function-call-query",
+        "column",
+        "column-alias",
+        "qualified-return",
+        "quoted-return",
+        "quoted-return-call",
+    ],
+)
+def test_function_member_that_is_not_a_return_form_is_not_flat(tmp_path: Path, member: str) -> None:
+    fixture = _function_fixture(_body_with_variant(member), separated=False)
+    result = _analyze(tmp_path, **{"bodies.sql": fixture})
+    symbols = _symbols(result)
+
+    _assert_one_function_diagnostic(result, symbols["dbo.M3"])
+    assert symbols["dbo.After"].symbol_kind == "sql:table"
+
+
+@pytest.mark.parametrize(
+    ("header", "body", "survives"),
+    [
+        (
+            "CREATE FUNCTION IF NOT EXISTS dbo.M3() RETURNS int AS",
+            _body_with_variant(_FUNCTION_BLOCK),
+            True,
+        ),
+        (
+            "CREATE FUNCTION IF NOT EXISTS dbo.M3() RETURNS int AS",
+            f"DECLARE @r int;\n{_ITEMS_COUNT}\nEND;",
+            True,
+        ),
+        (
+            "CREATE FUNCTION IF NOT EXISTS dbo.M3() RETURNS int AS",
+            f"DECLARE @r int;\nIF 1 = 1 {_ITEMS_COUNT};\nRETURN @r;\nEND;",
+            False,
+        ),
+        ("CREATE FUNCTION a.b.c.M3() RETURNS int AS", _body_with_variant(_FUNCTION_BLOCK), True),
+    ],
+    ids=[
+        "exists-nested-block",
+        "exists-no-end-statement",
+        "exists-folded",
+        "long-name-nested-block",
+    ],
+)
+def test_rejected_header_consumes_an_unrepresentable_body_with_one_diagnostic(
+    tmp_path: Path, header: str, body: str, survives: bool
+) -> None:
+    sql = f"{_ITEMS_DECLARATION}\nGO\n{header}\nBEGIN\n{body}\n{_AFTER_DECLARATION}"
+    result = _analyze(tmp_path, **{"bodies.sql": sql})
+
+    assert set(_symbols(result)) == ({"dbo.Items", "dbo.After"} if survives else {"dbo.Items"})
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+    assert not _sql_edges(result, "sql:reads-from")
+    assert not _sql_edges(result, "sql:calls")
+
+
+def test_unrepresentable_table_valued_function_keeps_one_declaration_diagnostic(
+    tmp_path: Path,
+) -> None:
+    sql = (
+        f"{_ITEMS_DECLARATION}\nGO\n"
+        "CREATE FUNCTION dbo.T(@x int) RETURNS @t TABLE (id int) AS\nBEGIN\n"
+        f"BEGIN\nSELECT @x = COUNT(*) FROM dbo.Items;\nEND;\nRETURN;\nEND;\n{_AFTER_DECLARATION}"
+    )
+    result = _analyze(tmp_path, **{"table-valued.sql": sql})
+    symbols = _symbols(result)
+
+    assert symbols["dbo.T"].symbol_kind == "sql:function"
+    _assert_one_function_diagnostic(result, symbols["dbo.T"])
+    assert symbols["dbo.After"].symbol_kind == "sql:table"
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "kept", "reader"),
+    [
+        (
+            _body_with_variant(_FUNCTION_BLOCK),
+            _body_with_variant(f"{_ITEMS_COUNT};"),
+            "dbo.M3",
+            "dbo.N",
+        ),
+        (
+            _body_with_variant(f"{_ITEMS_COUNT};"),
+            _body_with_variant(_FUNCTION_BLOCK),
+            "dbo.N",
+            "dbo.M3",
+        ),
+    ],
+    ids=["unrepresentable-first", "representable-first"],
+)
+def test_each_function_in_one_batch_owns_only_its_own_body(
+    tmp_path: Path, first: str, second: str, kept: str, reader: str
+) -> None:
+    sql = (
+        f"{_ITEMS_DECLARATION}\nGO\n"
+        f"{_FUNCTION_HEADER}{first}\n"
+        f"CREATE FUNCTION dbo.N() RETURNS int AS\nBEGIN\n{second}\n"
+        f"{_AFTER_DECLARATION}"
+    )
+    result = _analyze(tmp_path, **{"bodies.sql": sql})
+    symbols = _symbols(result)
+
+    assert [(item.code, item.location) for item in result.diagnostics] == [
+        (DiagnosticCode.UNSUPPORTED_SYNTAX, symbols[kept].location)
+    ]
+    assert {(edge[0].label, edge[1].label) for edge in _sql_edges(result, "sql:reads-from")} == {
+        (reader, "dbo.Items")
+    }
+    assert symbols["dbo.After"].symbol_kind == "sql:table"
+
+
 def test_unsupported_declarations_and_parse_batches_remain_atomic(tmp_path: Path) -> None:
     sql = """\
 CREATE FUNCTION S.Clr() RETURNS int AS EXTERNAL NAME a.b
