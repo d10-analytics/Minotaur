@@ -227,7 +227,7 @@ def analyze_sql_files(
                 )
 
     emitter = NodeEmitter(NAMESPACE, "sql")
-    unresolved_fk_nodes: dict[tuple[str, str], str] = {}
+    unresolved_fk_nodes: dict[tuple[str, tuple[str, ...], str], str] = {}
     for observation in observations:
         owner = observation.owner
         if observation.source is not None:
@@ -244,6 +244,29 @@ def analyze_sql_files(
                         )
                     )
                 emitter.unresolved(file_id, source_text, source_location, nodes, relationships)
+                for foreign_key in observation.foreign_keys:
+                    targets = table_index.get(foreign_key.key, [])
+                    if len(targets) == 1:
+                        # A typed foreign-key edge needs a declared table on both
+                        # ends, so only the unresolved altered-table reference
+                        # records this statement.
+                        continue
+                    _emit_orphaned_foreign_key(
+                        file_id,
+                        source_key,
+                        source_text,
+                        foreign_key.key,
+                        foreign_key.text,
+                        foreign_key.location,
+                        foreign_key.constraint_name,
+                        targets,
+                        effective_settings,
+                        readable_paths,
+                        relationships,
+                        nodes,
+                        diagnostics,
+                        unresolved_fk_nodes,
+                    )
                 continue
             owner = candidates[0]
         assert owner is not None
@@ -276,7 +299,9 @@ def analyze_sql_files(
             )
         for foreign_key in observation.foreign_keys:
             _resolve_foreign_key(
-                owner,
+                owner.node.id,
+                owner.key,
+                owner.label,
                 foreign_key.key,
                 foreign_key.text,
                 foreign_key.location,
@@ -284,9 +309,7 @@ def analyze_sql_files(
                 relationships,
                 nodes,
                 diagnostics,
-                emitter,
                 "sql:foreign-key-to",
-                "foreign-key",
                 _foreign_key_extensions(foreign_key),
                 effective_settings,
                 readable_paths,
@@ -484,7 +507,9 @@ def _resolve_function(
 
 
 def _resolve_foreign_key(
-    owner: _Declaration,
+    origin: str,
+    source_key: tuple[str, ...],
+    source_label: str,
     key: tuple[str, ...],
     text: str,
     location: Location,
@@ -492,31 +517,59 @@ def _resolve_foreign_key(
     relationships: RelationshipAccumulator,
     nodes: list[Node],
     diagnostics: list[Diagnostic],
-    emitter: NodeEmitter,
     relationship_kind: str,
-    relation: str,
     extensions: dict[str, dict[str, object]] | None,
     settings: SqlSettings,
     readable_paths: frozenset[str],
     constraint_name: str,
-    unresolved_fk_nodes: dict[tuple[str, str], str],
+    unresolved_fk_nodes: dict[tuple[str, tuple[str, ...], str], str],
 ) -> None:
-    """Resolve one FK while retaining a per-observation orphan diagnostic."""
+    """Resolve one FK from a declared source table while retaining its orphan diagnostic."""
     candidates = primary.get(key, [])
     if len(candidates) == 1:
         relationships.add(
-            owner.node.id,
+            origin,
             candidates[0].node.id,
             relationship_kind,
             location,
             extensions,
         )
         return
-    reason = "ambiguous" if len(candidates) > 1 else "undeclared"
-    if reason == "undeclared":
-        mapped_path = settings.foreign_key_target_files.get(".".join(key))
-        if mapped_path in readable_paths:
-            reason = "extraction-gap"
+    _emit_orphaned_foreign_key(
+        origin,
+        source_key,
+        source_label,
+        key,
+        text,
+        location,
+        constraint_name,
+        candidates,
+        settings,
+        readable_paths,
+        relationships,
+        nodes,
+        diagnostics,
+        unresolved_fk_nodes,
+    )
+
+
+def _emit_orphaned_foreign_key(
+    origin: str,
+    source_key: tuple[str, ...],
+    source_label: str,
+    key: tuple[str, ...],
+    text: str,
+    location: Location,
+    constraint_name: str,
+    candidates: list[_Declaration],
+    settings: SqlSettings,
+    readable_paths: frozenset[str],
+    relationships: RelationshipAccumulator,
+    nodes: list[Node],
+    diagnostics: list[Diagnostic],
+    unresolved_fk_nodes: dict[tuple[str, tuple[str, ...], str], str],
+) -> None:
+    """Record one orphaned-FK warning plus its coalesced unresolved target."""
     diagnostics.append(
         Diagnostic(
             DiagnosticCode.ORPHANED_FOREIGN_KEY,
@@ -526,34 +579,51 @@ def _resolve_foreign_key(
             DiagnosticSeverity.WARNING,
             {
                 NAMESPACE: {
-                    "source_table": owner.label,
+                    "source_table": source_label,
                     "constraint_name": constraint_name,
                     "target": text,
-                    "reason": reason,
+                    "reason": _foreign_key_orphan_reason(key, candidates, settings, readable_paths),
                 }
             },
         )
     )
-    _emit_coalesced_fk_unresolved(owner, text, location, nodes, relationships, unresolved_fk_nodes)
-    _ = relation
+    _emit_coalesced_fk_unresolved(
+        origin, source_key, text, location, nodes, relationships, unresolved_fk_nodes
+    )
+
+
+def _foreign_key_orphan_reason(
+    key: tuple[str, ...],
+    candidates: list[_Declaration],
+    settings: SqlSettings,
+    readable_paths: frozenset[str],
+) -> str:
+    """Classify why one FK target has no single table to point at."""
+    reason = "ambiguous" if len(candidates) > 1 else "undeclared"
+    if reason == "undeclared":
+        mapped_path = settings.foreign_key_target_files.get(".".join(key))
+        if mapped_path in readable_paths:
+            reason = "extraction-gap"
+    return reason
 
 
 def _emit_coalesced_fk_unresolved(
-    owner: _Declaration,
+    origin: str,
+    source_key: tuple[str, ...],
     text: str,
     location: Location,
     nodes: list[Node],
     relationships: RelationshipAccumulator,
-    unresolved_nodes: dict[tuple[str, str], str],
+    unresolved_nodes: dict[tuple[str, tuple[str, ...], str], str],
 ) -> None:
-    """Keep one generic unresolved FK target per source and target text."""
-    key = (owner.node.id, text)
+    """Keep one generic unresolved FK target per origin, source table, and target."""
+    key = (origin, source_key, text)
     node_id = unresolved_nodes.get(key)
     if node_id is None:
         identity = NodeIdentity(
             IdentityBasis.UNRESOLVED_REFERENCE,
             NAMESPACE,
-            originating_node=owner.node.id,
+            originating_node=origin,
         )
         node_id = compute_node_id(
             identity,
@@ -573,7 +643,7 @@ def _emit_coalesced_fk_unresolved(
                 location=location,
             )
         )
-    relationships.add(owner.node.id, node_id, RelationshipKind.REFERENCES.value, location)
+    relationships.add(origin, node_id, RelationshipKind.REFERENCES.value, location)
 
 
 def _interpret_statement(
