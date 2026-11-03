@@ -18,6 +18,18 @@ _READS = "sql:reads-from"
 _REFERENCES = "references"
 
 
+def diagnostic_sort_key(
+    diagnostic: Diagnostic,
+) -> tuple[str, tuple[str, int, int, int, int], str, str]:
+    """Return the canonical ordering key for one SQL diagnostic.
+
+    Path first, then the location span, then the code and message keep the
+    reported list deterministic whatever order generation produced it.
+    """
+    location_key = diagnostic.location.sort_key if diagnostic.location else ("", 0, 0, 0, 0)
+    return (diagnostic.path, location_key, diagnostic.code.value, diagnostic.message)
+
+
 def analyze_view_warnings(
     document: GraphDocument, settings: SqlSettings | None = None
 ) -> tuple[Diagnostic, ...]:
@@ -96,17 +108,7 @@ def analyze_view_warnings(
                 {NAMESPACE: {"depth": depth, "path": list(labels)}},
             )
         )
-    return tuple(
-        sorted(
-            warnings,
-            key=lambda item: (
-                item.path,
-                item.location.sort_key if item.location else ("", 0, 0, 0, 0),
-                item.code.value,
-                item.message,
-            ),
-        )
-    )
+    return tuple(sorted(warnings, key=diagnostic_sort_key))
 
 
 def _cyclic_components(

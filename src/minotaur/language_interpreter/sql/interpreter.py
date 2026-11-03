@@ -42,10 +42,13 @@ from minotaur.language_interpreter.contract import (
 from minotaur.language_interpreter.emission import NodeEmitter, file_node
 from minotaur.language_interpreter.reading import RawSource, read_sources
 from minotaur.language_interpreter.source_text import LineIndex
-from minotaur.language_interpreter.sql.diagnostics import analyze_view_warnings
+from minotaur.language_interpreter.sql.diagnostics import NAMESPACE as NAMESPACE
+from minotaur.language_interpreter.sql.diagnostics import (
+    analyze_view_warnings,
+    diagnostic_sort_key,
+)
 from minotaur.language_interpreter.workspace import Workspace
 
-NAMESPACE = "minotaur-sql"
 _PRODUCER = Producer(name=NAMESPACE)
 _GO_RE = re.compile(r"[ \t]*GO(?:[ \t]+([0-9]+))?[ \t]*(?:--[^\r\n]*)?\Z", re.IGNORECASE)
 _FK_ACTION_RE = re.compile(
@@ -73,7 +76,6 @@ class _Batch:
     text: str
     start: int
     end: int
-    unsupported_count: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,7 +305,6 @@ def analyze_sql_files(
                 diagnostics,
                 emitter,
                 "sql:reads-from",
-                "read",
             )
         for key, text, location in observation.calls:
             _resolve_function(
@@ -340,9 +341,6 @@ def analyze_sql_files(
     relationship_documents = relationships.documents(_PRODUCER)
     nodes, fk_components = _with_fk_components(nodes, relationship_documents)
 
-    # Replace the generic references kind for reads with the SQL extension.
-    # Resolution above uses the shared emitter only for unresolved nodes; the
-    # successful edge is written directly with the requested SQL meaning.
     document = GraphDocument(
         coordinate_encoding=CoordinateEncoding.UTF_8,
         nodes=tuple(nodes),
@@ -350,23 +348,8 @@ def analyze_sql_files(
         generated_by=_PRODUCER,
         extensions={NAMESPACE: {"fk_components": fk_components}},
     )
-    diagnostics.sort(
-        key=lambda item: (
-            item.path,
-            item.location.sort_key if item.location else ("", 0, 0, 0, 0),
-            item.code.value,
-            item.message,
-        )
-    )
     diagnostics.extend(analyze_view_warnings(document, sql_settings))
-    diagnostics.sort(
-        key=lambda item: (
-            item.path,
-            item.location.sort_key if item.location else ("", 0, 0, 0, 0),
-            item.code.value,
-            item.message,
-        )
-    )
+    diagnostics.sort(key=diagnostic_sort_key)
     return AnalysisResult(document, tuple(diagnostics))
 
 
@@ -468,18 +451,10 @@ def _resolve(
     diagnostics: list[Diagnostic],
     emitter: NodeEmitter,
     relationship_kind: str,
-    relation: str,
-    extensions: dict[str, dict[str, object]] | None = None,
 ) -> None:
     candidates = primary.get(key, []) + secondary.get(key, [])
     if len(candidates) == 1:
-        relationships.add(
-            owner.node.id,
-            candidates[0].node.id,
-            relationship_kind,
-            location,
-            extensions,
-        )
+        relationships.add(owner.node.id, candidates[0].node.id, relationship_kind, location)
         return
     if len(candidates) > 1:
         diagnostics.append(
@@ -490,10 +465,9 @@ def _resolve(
                 location,
             )
         )
-    unresolved = emitter.unresolved(owner.node.id, text, location, nodes, relationships)
     # ``NodeEmitter`` always uses core references, which is exactly the
     # unresolved-target contract; successful SQL relationships remain typed.
-    _ = unresolved, relation
+    emitter.unresolved(owner.node.id, text, location, nodes, relationships)
 
 
 def _resolve_function(
@@ -1144,32 +1118,37 @@ def _nonpersistent_table(table: exp.Table) -> bool:
 def _identifier_location(
     expression: exp.Expression, path: str, line_index: LineIndex, batch_start: int
 ) -> Location | None:
-    identifiers = [node for node in expression.walk() if isinstance(node, exp.Identifier)]
-    spans: list[tuple[int, int]] = []
-    for node in identifiers:
-        start = node.meta.get("start")
-        end = node.meta.get("end")
-        if isinstance(start, int) and isinstance(end, int):
-            spans.append((start, end))
-    if not spans:
-        return None
-    start = batch_start + min(span[0] for span in spans)
-    end = batch_start + max(span[1] for span in spans) + 1
-    if start < 0 or end > len(line_index.source) or line_index.source[start:end] == "":
-        return None
-    return Location(path, Range(line_index.position(start), line_index.position(end)))
+    """Locate an expression by the source span of every identifier in it."""
+    return _identifiers_location(
+        (node for node in expression.walk() if isinstance(node, exp.Identifier)),
+        path,
+        line_index,
+        batch_start,
+    )
 
 
 def _table_location(table: exp.Table, item: _File, batch: _Batch) -> Location | None:
-    identifiers = [
-        value
-        for value in (
-            table.args.get("catalog"),
-            table.args.get("db"),
-            table.args.get("this"),
-        )
-        if isinstance(value, exp.Identifier)
-    ]
+    """Locate a table by the source span of the parts that name it."""
+    return _identifiers_location(
+        (
+            value
+            for value in (
+                table.args.get("catalog"),
+                table.args.get("db"),
+                table.args.get("this"),
+            )
+            if isinstance(value, exp.Identifier)
+        ),
+        item.raw.relative,
+        item.line_index,
+        batch.start,
+    )
+
+
+def _identifiers_location(
+    identifiers: Iterable[exp.Identifier], path: str, line_index: LineIndex, offset: int
+) -> Location | None:
+    """Return the location covering every identifier that records a source span."""
     spans: list[tuple[int, int]] = []
     for identifier in identifiers:
         start = identifier.meta.get("start")
@@ -1178,14 +1157,11 @@ def _table_location(table: exp.Table, item: _File, batch: _Batch) -> Location | 
             spans.append((start, end))
     if not spans:
         return None
-    start = batch.start + min(span[0] for span in spans)
-    end = batch.start + max(span[1] for span in spans) + 1
-    if start < 0 or end > len(item.line_index.source):
+    start = offset + min(span[0] for span in spans)
+    end = offset + max(span[1] for span in spans) + 1
+    if start < 0 or end > len(line_index.source) or line_index.source[start:end] == "":
         return None
-    return Location(
-        item.raw.relative,
-        Range(item.line_index.position(start), item.line_index.position(end)),
-    )
+    return Location(path, Range(line_index.position(start), line_index.position(end)))
 
 
 def _foreign_keys(
@@ -1804,7 +1780,6 @@ def _scan_batches(
                         source[batch_start:line_start],
                         batch_start,
                         line_start,
-                        match.group(1) is not None,
                     )
                 )
                 if match.group(1) is not None:
