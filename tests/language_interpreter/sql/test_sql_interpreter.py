@@ -230,7 +230,7 @@ def test_layered_views_report_depth_warnings_in_bounded_calls(tmp_path: Path) ->
     assert calls <= 3_000
 
 
-def test_cycle_search_over_acyclic_layers_is_bounded(tmp_path: Path) -> None:
+def test_cycle_search_over_acyclic_layers_is_bounded() -> None:
     ids = [f"{layer:02d}_{j}" for layer in range(16) for j in (0, 1)]
     identity = NodeIdentity(IdentityBasis.SOURCE_LOCATION, "minotaur-sql")
     location = Location("views.sql", Range(Position(1, 0), Position(1, 1)))
@@ -2266,7 +2266,7 @@ def test_nested_with_and_discovered_scopes_see_enclosing_cte_names(tmp_path: Pat
         ("v_recent", "dbo.a"),
         ("v_recent", "dbo.b"),
     }
-    assert _edges(result, "sql:references") == set()
+    assert _edges(result, "references") == set()
     assert {
         node.label
         for node in result.document.nodes
@@ -2275,7 +2275,7 @@ def test_nested_with_and_discovered_scopes_see_enclosing_cte_names(tmp_path: Pat
     assert result.diagnostics == ()
 
 
-# Measured 1,633 calls on Python 3.12.3; bound is 3x rounded up to 1,000.
+# Measured 1,655 calls on Python 3.12.3; bound is 3x rounded up to 1,000.
 _CTE_CHAIN_CALL_BOUND = 5_000
 
 
