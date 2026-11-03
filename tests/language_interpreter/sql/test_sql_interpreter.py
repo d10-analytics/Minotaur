@@ -2583,6 +2583,89 @@ def test_grouped_wrapper_sources_are_read_and_temporary_sources_reject(
     assert [item.code for item in existence.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
 
 
+def test_deep_grouped_join_sources_are_read_at_their_locations(tmp_path: Path) -> None:
+    sql = _go(
+        "CREATE TABLE dbo.a (x int)",
+        "CREATE TABLE dbo.t (x int)",
+        "CREATE TABLE dbo.u (x int)",
+        "CREATE VIEW v AS SELECT * FROM "
+        "(((SELECT x FROM dbo.a) AS s JOIN dbo.t ON 1 = 1) JOIN dbo.u ON 1 = 1)",
+    )
+    result = _analyze(tmp_path, **{"deep.sql": sql})
+    edges = {
+        (source.label, target.label): edge
+        for source, target, edge in _sql_edges(result, "sql:reads-from")
+    }
+
+    assert not result.diagnostics
+    assert set(edges) == {("v", "dbo.a"), ("v", "dbo.t"), ("v", "dbo.u")}
+    for name in ("dbo.a", "dbo.t", "dbo.u"):
+        assert _evidence_locations(edges[("v", name)]) == {
+            ("deep.sql", *position)
+            for position in _reference_positions(sql, "CREATE VIEW v AS", name)
+        }
+
+
+def test_deep_grouped_join_temporary_source_rejects(tmp_path: Path) -> None:
+    view = _analyze(
+        tmp_path / "view",
+        **{
+            "deep.sql": "CREATE VIEW v AS SELECT * FROM "
+            "(((SELECT x FROM dbo.a) AS s JOIN #t ON 1 = 1) JOIN dbo.u ON 1 = 1)"
+        },
+    )
+    assert not _symbols(view)
+    assert not _edges(view, "sql:reads-from")
+    assert [item.code for item in view.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+    existence = _analyze(
+        tmp_path / "existence",
+        **{
+            "deep.sql": "CREATE VIEW v AS SELECT 1 AS y FROM dbo.a WHERE EXISTS "
+            "(SELECT 1 AS y FROM (((SELECT x FROM dbo.a) AS s JOIN #t ON 1 = 1) "
+            "JOIN dbo.u ON 1 = 1))"
+        },
+    )
+    assert not _symbols(existence)
+    assert [item.code for item in existence.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_from_prefixed_grouped_join_chain_reads_every_source(tmp_path: Path) -> None:
+    declared = _analyze(
+        tmp_path / "declared",
+        **{
+            "prefixed.sql": _go(
+                "CREATE TABLE dbo.g (x int)",
+                "CREATE TABLE dbo.a (x int)",
+                "CREATE TABLE dbo.t (x int)",
+                "CREATE TABLE dbo.u (x int)",
+                "CREATE VIEW v AS SELECT * FROM dbo.g "
+                "JOIN ((SELECT x FROM dbo.a) AS s JOIN dbo.t ON 1 = 1) "
+                "JOIN dbo.u ON 1 = 1 ON 1 = 1",
+            )
+        },
+    )
+    assert not declared.diagnostics
+    assert _edges(declared, "sql:reads-from") == {
+        ("v", "dbo.g"),
+        ("v", "dbo.a"),
+        ("v", "dbo.t"),
+        ("v", "dbo.u"),
+    }
+
+    temporary = _analyze(
+        tmp_path / "temporary",
+        **{
+            "prefixed.sql": "CREATE VIEW v AS SELECT * FROM dbo.g "
+            "JOIN ((SELECT x FROM dbo.a) AS s JOIN #t ON 1 = 1) "
+            "JOIN dbo.u ON 1 = 1 ON 1 = 1"
+        },
+    )
+    assert not _symbols(temporary)
+    assert not _edges(temporary, "sql:reads-from")
+    assert [item.code for item in temporary.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
 def test_grouped_wrapper_body_is_read_once(tmp_path: Path) -> None:
     sql = _go(
         "CREATE TABLE dbo.Dup (x int)",
