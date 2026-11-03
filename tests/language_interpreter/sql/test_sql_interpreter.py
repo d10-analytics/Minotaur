@@ -785,17 +785,17 @@ def test_function_resolution_is_forward_casefolded_and_preserves_fallbacks(
 
 
 @pytest.mark.parametrize(
-    ("member", "diagnostic_location"),
+    ("member", "supported"),
     [
-        ("SET NOCOUNT ON;", (3, 4, 3, 11)),
-        ("COMMIT TRANSACTION;", None),
-        ("DECLARE @n int;", None),
-        ("ROLLBACK TRANSACTION;", None),
-        ("END CONVERSATION S.Hidden;", None),
+        ("SET NOCOUNT ON;", True),
+        ("COMMIT TRANSACTION;", False),
+        ("DECLARE @n int;", True),
+        ("ROLLBACK TRANSACTION;", False),
+        ("END CONVERSATION S.Hidden;", False),
     ],
 )
-def test_unsupported_procedure_members_keep_separate_procedure_read_root(
-    tmp_path: Path, member: str, diagnostic_location: tuple[int, int, int, int] | None
+def test_procedure_members_keep_separate_procedure_read_root(
+    tmp_path: Path, member: str, supported: bool
 ) -> None:
     sql = f"""\
 CREATE TABLE S.Base (id int)
@@ -819,19 +819,105 @@ END
     assert not [
         node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
     ]
-    assert len(result.diagnostics) == 1
-    diagnostic = result.diagnostics[0]
-    assert diagnostic.code is DiagnosticCode.UNSUPPORTED_SYNTAX
-    if diagnostic_location is None:
-        assert diagnostic.location is None
+    if supported:
+        assert not result.diagnostics
     else:
-        start_line, start_character, end_line, end_character = diagnostic_location
-        assert diagnostic.location is not None
-        assert diagnostic.location.path == "members.sql"
-        assert diagnostic.location.range.start.line == start_line
-        assert diagnostic.location.range.start.character == start_character
-        assert diagnostic.location.range.end.line == end_line
-        assert diagnostic.location.range.end.character == end_character
+        assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+        assert result.diagnostics[0].location is None
+
+
+def test_declare_set_and_return_members_contribute_nested_query_reads_and_calls(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE dbo.Items (id int);
+GO
+CREATE TABLE dbo.Other (id int);
+GO
+CREATE FUNCTION dbo.Calc(@id int) RETURNS int AS RETURN @id;
+GO
+CREATE PROCEDURE dbo.P AS
+BEGIN
+  DECLARE @r int = (SELECT COUNT(*) FROM dbo.Items);
+  SET @r = (SELECT dbo.Calc(id) FROM dbo.Other);
+  SET @r = dbo.Calc(1);
+  RETURN @r;
+END;
+"""
+    result = _analyze(tmp_path, **{"declarations.sql": sql})
+
+    symbols = _symbols(result)
+    assert {"dbo.Items", "dbo.Other", "dbo.Calc", "dbo.P"} <= symbols.keys()
+    assert symbols["dbo.P"].symbol_kind == "sql:procedure"
+    assert symbols["dbo.Calc"].symbol_kind == "sql:function"
+    assert not result.diagnostics
+    reads = _sql_edges(result, "sql:reads-from")
+    assert {(edge[0].label, edge[1].label) for edge in reads} == {
+        ("dbo.P", "dbo.Items"),
+        ("dbo.P", "dbo.Other"),
+    }
+    assert {location for edge in reads for location in _evidence_locations(edge[2])} == {
+        ("declarations.sql", 8, 41),
+        ("declarations.sql", 9, 37),
+    }
+    calls = _sql_edges(result, "sql:calls")
+    assert [(edge[0].label, edge[1].label) for edge in calls] == [("dbo.P", "dbo.Calc")]
+    assert _evidence_locations(calls[0][2]) == {("declarations.sql", 9, 23)}
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
+def test_return_subquery_member_contributes_its_read_without_diagnostics(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.Items (id int);
+GO
+CREATE PROCEDURE dbo.Q AS
+BEGIN
+  DECLARE @r int;
+  RETURN (SELECT COUNT(*) FROM dbo.Items);
+END;
+"""
+    result = _analyze(tmp_path, **{"returned.sql": sql})
+
+    assert {"dbo.Items", "dbo.Q"} <= _symbols(result).keys()
+    assert not result.diagnostics
+    edges = _sql_edges(result, "sql:reads-from")
+    assert [(edge[0].label, edge[1].label) for edge in edges] == [("dbo.Q", "dbo.Items")]
+    assert _evidence_locations(edges[0][2]) == {("returned.sql", 5, 31)}
+
+
+def test_bare_return_members_keep_procedure_reads_without_diagnostics(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.Items (id int);
+GO
+CREATE PROCEDURE dbo.R AS
+BEGIN
+  SELECT id FROM dbo.Items;
+  RETURN;
+END;
+GO
+CREATE PROCEDURE dbo.S @x int AS
+BEGIN
+  IF @x IS NULL RETURN;
+  SELECT id FROM dbo.Items;
+END;
+"""
+    result = _analyze(tmp_path, **{"returns.sql": sql})
+
+    assert {"dbo.R", "dbo.S"} <= _symbols(result).keys()
+    assert not result.diagnostics
+    edges = _sql_edges(result, "sql:reads-from")
+    assert {(edge[0].label, edge[1].label) for edge in edges} == {
+        ("dbo.R", "dbo.Items"),
+        ("dbo.S", "dbo.Items"),
+    }
+    assert {
+        (edge[0].label, *location) for edge in edges for location in _evidence_locations(edge[2])
+    } == {
+        ("dbo.R", "returns.sql", 4, 17),
+        ("dbo.S", "returns.sql", 11, 17),
+    }
 
 
 def test_procedure_roots_exclude_dml_and_temporary_sources_locally(tmp_path: Path) -> None:
