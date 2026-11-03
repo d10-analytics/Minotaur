@@ -718,7 +718,7 @@ def _function_body(
         for offset, candidate in enumerate(following):
             if not _flat_body_member(candidate):
                 break
-            if _end_statement(candidate):
+            if isinstance(candidate, exp.EndStatement):
                 return _FunctionBody(True, (expression, *following[: offset + 1])), offset + 1
     consumed = 0
     while consumed < len(following) and not _declaration_boundary(following[consumed]):
@@ -929,6 +929,13 @@ def _body_query_roots(
     roots: list[exp.Expression] = []
 
     def visit(statement: exp.Expression) -> None:
+        if isinstance(statement, exp.Return) and isinstance(
+            statement.this, (exp.Execute, exp.ExecuteSql)
+        ):
+            # ``RETURN EXEC …`` holds the opaque invocation as the return's
+            # payload, so it takes the same path as a standalone ``EXEC`` member.
+            visit(statement.this)
+            return
         if isinstance(statement, _LEAF_BODY_MEMBERS):
             if isinstance(statement, _QUERY_ROOT_TYPES):
                 roots.append(statement)
@@ -995,13 +1002,6 @@ def _flat_body_member(statement: exp.Expression | None) -> bool:
     if isinstance(statement, exp.Alias):
         return _bare_return_column(statement.this)
     return _bare_return_column(statement)
-
-
-def _end_statement(tree: exp.Expression) -> bool:
-    """Return whether a tree closes a multi-statement function body."""
-    if isinstance(tree, exp.EndStatement):
-        return True
-    return isinstance(tree, exp.Command) and str(tree.this or "").upper() == "END"
 
 
 def _declaration_boundary(tree: exp.Expression) -> bool:
