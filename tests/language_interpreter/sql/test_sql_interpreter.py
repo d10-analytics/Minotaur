@@ -2512,6 +2512,8 @@ def test_standalone_fk_undeclared_source_coalesces_targets_by_source_table(
         "ALTER TABLE sales.Ghost ADD CONSTRAINT fk1 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)",
         "ALTER TABLE sales.Ghost ADD CONSTRAINT fk2 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)",
         "ALTER TABLE sales.Ghost2 ADD CONSTRAINT fk3 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)",
+        "ALTER TABLE sales.Ghost ADD CONSTRAINT fk4 "
+        "FOREIGN KEY (x) REFERENCES sales.Elsewhere (id)",
     )
     result = _analyze(tmp_path, **{"a.sql": sql})
     file_id = next(node.id for node in result.document.nodes if node.path == "a.sql")
@@ -2520,28 +2522,80 @@ def test_standalone_fk_undeclared_source_coalesces_targets_by_source_table(
         (
             item.extensions["minotaur-sql"]["source_table"],
             item.extensions["minotaur-sql"]["constraint_name"],
+            item.extensions["minotaur-sql"]["target"],
         )
         for item in result.diagnostics
         if item.code is DiagnosticCode.ORPHANED_FOREIGN_KEY
-    ] == [("sales.Ghost", "fk1"), ("sales.Ghost", "fk2"), ("sales.Ghost2", "fk3")]
-    nowhere_nodes = [node for node in result.document.nodes if node.label == "sales.Nowhere"]
+    ] == [
+        ("sales.Ghost", "fk1", "sales.Nowhere"),
+        ("sales.Ghost", "fk2", "sales.Nowhere"),
+        ("sales.Ghost2", "fk3", "sales.Nowhere"),
+        ("sales.Ghost", "fk4", "sales.Elsewhere"),
+    ]
+    unresolved = [
+        node for node in result.document.nodes if node.node_class is NodeClass.UNRESOLVED_REFERENCE
+    ]
+    assert {node.identity.originating_node for node in unresolved} == {file_id}
+    nowhere_nodes = [node for node in unresolved if node.label == "sales.Nowhere"]
+    elsewhere_nodes = [node for node in unresolved if node.label == "sales.Elsewhere"]
     assert len(nowhere_nodes) == 2
-    assert {node.identity.originating_node for node in nowhere_nodes} == {file_id}
     assert len({node.id for node in nowhere_nodes}) == 2
-    target_locations = [
-        sorted(_evidence_locations(edge))
+    assert len(elsewhere_nodes) == 1
+    target_edges = [
+        (target.label, sorted(_evidence_locations(edge)))
         for _source, target, edge in _sql_edges(result, "references")
-        if target.label == "sales.Nowhere"
+        if target.label in {"sales.Nowhere", "sales.Elsewhere"}
     ]
     ghost1 = _reference_positions(sql, "CONSTRAINT fk1", "sales.Nowhere")
     ghost2 = _reference_positions(sql, "CONSTRAINT fk2", "sales.Nowhere")
     other = _reference_positions(sql, "CONSTRAINT fk3", "sales.Nowhere")
-    assert sorted(target_locations) == sorted(
+    missing = _reference_positions(sql, "CONSTRAINT fk4", "sales.Elsewhere")
+    assert sorted(target_edges) == sorted(
         [
-            [("a.sql", *position) for position in ghost1 + ghost2],
-            [("a.sql", *position) for position in other],
+            ("sales.Nowhere", [("a.sql", *position) for position in ghost1 + ghost2]),
+            ("sales.Nowhere", [("a.sql", *position) for position in other]),
+            ("sales.Elsewhere", [("a.sql", *position) for position in missing]),
         ]
     )
+
+
+def test_standalone_fk_undeclared_source_keeps_mapped_target_reason(tmp_path: Path) -> None:
+    result = _analyze(
+        tmp_path,
+        settings=SqlSettings(foreign_key_target_files={"sales.Nowhere": "mapped.sql"}),
+        **{
+            "a.sql": _go(
+                "CREATE TABLE sales.Real (id int)",
+                "ALTER TABLE sales.Ghost ADD CONSTRAINT fk1 "
+                "FOREIGN KEY (x) REFERENCES sales.Nowhere (id)",
+            ),
+            "mapped.sql": "CREATE TABLE sales.Wrong (id int)",
+        },
+    )
+    file_id = next(node.id for node in result.document.nodes if node.path == "a.sql")
+
+    assert [
+        (item.code, dict(item.extensions["minotaur-sql"]))
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.ORPHANED_FOREIGN_KEY
+    ] == [
+        (
+            DiagnosticCode.ORPHANED_FOREIGN_KEY,
+            {
+                "source_table": "sales.Ghost",
+                "constraint_name": "fk1",
+                "target": "sales.Nowhere",
+                "reason": "extraction-gap",
+            },
+        )
+    ]
+    nowhere, _edge = next(
+        (target, edge)
+        for _source, target, edge in _sql_edges(result, "references")
+        if target.label == "sales.Nowhere"
+    )
+    assert nowhere.identity.originating_node == file_id
+    assert not _sql_edges(result, "sql:foreign-key-to")
 
 
 @pytest.mark.parametrize(
