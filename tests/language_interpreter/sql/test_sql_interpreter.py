@@ -1617,9 +1617,18 @@ def test_unsupported_query_and_near_miss_do_not_emit_partial_facts(tmp_path: Pat
         },
     )
     assert not _symbols(result)
-    assert len(result.diagnostics) == 2
-    assert all(d.code == DiagnosticCode.UNSUPPORTED_SYNTAX for d in result.diagnostics)
-    assert _edges(result, "references") == {("unsupported.sql", "T")}
+    assert [(d.code, d.location.range.start.line) for d in result.diagnostics] == [
+        (DiagnosticCode.UNSUPPORTED_SYNTAX, 0),
+        (DiagnosticCode.UNSUPPORTED_SYNTAX, 2),
+        (DiagnosticCode.ORPHANED_FOREIGN_KEY, 4),
+    ]
+    assert dict(result.diagnostics[-1].extensions["minotaur-sql"]) == {
+        "source_table": "T",
+        "constraint_name": "fk",
+        "target": "U",
+        "reason": "undeclared",
+    }
+    assert _edges(result, "references") == {("unsupported.sql", "T"), ("unsupported.sql", "U")}
 
 
 def test_recursive_and_temporary_ctes_are_rejected_whole(tmp_path: Path) -> None:
@@ -2359,6 +2368,7 @@ def test_standalone_fk_missing_or_ambiguous_source_is_file_origin(
     assert unresolved[0][1].label == "Child"
     assert _evidence_locations(unresolved[0][2]) == {("alter.sql", 0, 12)}
     assert not _sql_edges(result, "sql:foreign-key-to")
+    assert not [d for d in result.diagnostics if d.code is DiagnosticCode.ORPHANED_FOREIGN_KEY]
     assert [d.code for d in result.diagnostics].count(DiagnosticCode.AMBIGUOUS_REFERENCE) == int(
         ambiguous
     )
@@ -2380,6 +2390,158 @@ def test_standalone_fk_missing_or_ambiguous_target_is_table_origin(
     assert _evidence_locations(unresolved[0][2]) == {("alter.sql", 0, sql.index("Parent"))}
     assert not _sql_edges(result, "sql:foreign-key-to")
     assert [d.code for d in result.diagnostics].count(DiagnosticCode.ORPHANED_FOREIGN_KEY) == 1
+
+
+def test_standalone_fk_undeclared_source_records_orphan_and_file_origin_target(
+    tmp_path: Path,
+) -> None:
+    sql = _go(
+        "CREATE TABLE sales.Real (id int)",
+        "ALTER TABLE sales.Ghost ADD CONSTRAINT fk1 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)",
+    )
+    result = _analyze(tmp_path, **{"a.sql": sql})
+    file_id = next(node.id for node in result.document.nodes if node.path == "a.sql")
+
+    assert [(item.code, item.severity, item.path) for item in result.diagnostics] == [
+        (DiagnosticCode.ORPHANED_FOREIGN_KEY, DiagnosticSeverity.WARNING, "a.sql")
+    ]
+    [warning] = result.diagnostics
+    assert dict(warning.extensions["minotaur-sql"]) == {
+        "source_table": "sales.Ghost",
+        "constraint_name": "fk1",
+        "target": "sales.Nowhere",
+        "reason": "undeclared",
+    }
+    [(line, character)] = _reference_positions(sql, "ALTER TABLE sales.Ghost", "sales.Nowhere")
+    assert (warning.location.range.start.line, warning.location.range.start.character) == (
+        line,
+        character,
+    )
+    references = _sql_edges(result, "references")
+    assert all(source.id == file_id for source, _target, _edge in references)
+    assert {target.label for _source, target, _edge in references} == {
+        "sales.Ghost",
+        "sales.Nowhere",
+    }
+    nowhere, nowhere_edge = next(
+        (target, edge) for _source, target, edge in references if target.label == "sales.Nowhere"
+    )
+    assert nowhere.identity.basis is IdentityBasis.UNRESOLVED_REFERENCE
+    assert nowhere.identity.originating_node == file_id
+    assert _evidence_locations(nowhere_edge) == {("a.sql", line, character)}
+    assert not _sql_edges(result, "sql:foreign-key-to")
+    assert {node.label for node in result.document.nodes if node.symbol_kind} == {"sales.Real"}
+
+
+def test_standalone_fk_ambiguous_source_keeps_diagnostic_and_orphan(tmp_path: Path) -> None:
+    declarations = _go(
+        "CREATE TABLE sales.Real (id int)",
+        "CREATE TABLE sales.Ghost (x int)",
+        "CREATE TABLE sales.Ghost (x int)",
+    )
+    sql = _go(
+        "ALTER TABLE sales.Ghost ADD CONSTRAINT fk1 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)"
+    )
+    result = _analyze(tmp_path, **{"tables.sql": declarations, "a.sql": sql})
+    file_id = next(node.id for node in result.document.nodes if node.path == "a.sql")
+
+    references = _sql_edges(result, "references")
+    assert {(source.id, target.label) for source, target, _edge in references} == {
+        (file_id, "sales.Ghost"),
+        (file_id, "sales.Nowhere"),
+    }
+    assert not _sql_edges(result, "sql:foreign-key-to")
+    [(line, character)] = _reference_positions(sql, "ALTER TABLE", "sales.Ghost")
+    assert [
+        (item.path, item.location.range.start.line, item.location.range.start.character)
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.AMBIGUOUS_REFERENCE
+    ] == [("a.sql", line, character)]
+    assert [
+        dict(item.extensions["minotaur-sql"])
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.ORPHANED_FOREIGN_KEY
+    ] == [
+        {
+            "source_table": "sales.Ghost",
+            "constraint_name": "fk1",
+            "target": "sales.Nowhere",
+            "reason": "undeclared",
+        }
+    ]
+
+
+def test_standalone_fk_undeclared_source_ambiguous_target_keeps_ambiguous_reason(
+    tmp_path: Path,
+) -> None:
+    sql = _go(
+        "CREATE TABLE sales.Nowhere (id int)",
+        "CREATE TABLE sales.Nowhere (id int)",
+        "ALTER TABLE sales.Ghost ADD CONSTRAINT fk1 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)",
+    )
+    result = _analyze(tmp_path, **{"a.sql": sql})
+    file_id = next(node.id for node in result.document.nodes if node.path == "a.sql")
+
+    assert [
+        dict(item.extensions["minotaur-sql"])
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.ORPHANED_FOREIGN_KEY
+    ] == [
+        {
+            "source_table": "sales.Ghost",
+            "constraint_name": "fk1",
+            "target": "sales.Nowhere",
+            "reason": "ambiguous",
+        }
+    ]
+    nowhere, nowhere_edge = next(
+        (target, edge)
+        for _source, target, edge in _sql_edges(result, "references")
+        if target.label == "sales.Nowhere"
+    )
+    assert nowhere.identity.originating_node == file_id
+    assert len(_evidence_locations(nowhere_edge)) == 1
+    assert not _sql_edges(result, "sql:foreign-key-to")
+
+
+def test_standalone_fk_undeclared_source_coalesces_targets_by_source_table(
+    tmp_path: Path,
+) -> None:
+    sql = _go(
+        "CREATE TABLE sales.Real (id int)",
+        "ALTER TABLE sales.Ghost ADD CONSTRAINT fk1 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)",
+        "ALTER TABLE sales.Ghost ADD CONSTRAINT fk2 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)",
+        "ALTER TABLE sales.Ghost2 ADD CONSTRAINT fk3 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)",
+    )
+    result = _analyze(tmp_path, **{"a.sql": sql})
+    file_id = next(node.id for node in result.document.nodes if node.path == "a.sql")
+
+    assert [
+        (
+            item.extensions["minotaur-sql"]["source_table"],
+            item.extensions["minotaur-sql"]["constraint_name"],
+        )
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.ORPHANED_FOREIGN_KEY
+    ] == [("sales.Ghost", "fk1"), ("sales.Ghost", "fk2"), ("sales.Ghost2", "fk3")]
+    nowhere_nodes = [node for node in result.document.nodes if node.label == "sales.Nowhere"]
+    assert len(nowhere_nodes) == 2
+    assert {node.identity.originating_node for node in nowhere_nodes} == {file_id}
+    assert len({node.id for node in nowhere_nodes}) == 2
+    target_locations = [
+        sorted(_evidence_locations(edge))
+        for _source, target, edge in _sql_edges(result, "references")
+        if target.label == "sales.Nowhere"
+    ]
+    ghost1 = _reference_positions(sql, "CONSTRAINT fk1", "sales.Nowhere")
+    ghost2 = _reference_positions(sql, "CONSTRAINT fk2", "sales.Nowhere")
+    other = _reference_positions(sql, "CONSTRAINT fk3", "sales.Nowhere")
+    assert sorted(target_locations) == sorted(
+        [
+            [("a.sql", *position) for position in ghost1 + ghost2],
+            [("a.sql", *position) for position in other],
+        ]
+    )
 
 
 @pytest.mark.parametrize(

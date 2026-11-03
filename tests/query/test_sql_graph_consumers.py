@@ -13,6 +13,7 @@ from minotaur.language_interpreter.contract import DiagnosticCode
 from minotaur.language_interpreter.sql import analyze_sql_files
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.diff import diff
+from minotaur.query.graph_comparison import compare_graphs
 from minotaur.query.impact import ImpactRecord, impact
 from minotaur.query.index import AmbiguousSymbol, GraphIndex
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
@@ -393,3 +394,43 @@ ALTER TABLE Child ADD CONSTRAINT FK_child_parent FOREIGN KEY (a,b) REFERENCES Pa
     changes = diff(old_document, new_document)
     assert changes.relationships_added == ()
     assert changes.relationships_removed == ()
+
+
+def test_undeclared_alter_source_roundtrips_with_a_file_origin_unresolved_target(
+    tmp_path: Path,
+) -> None:
+    content = """\
+CREATE TABLE sales.Real (id int)
+GO
+ALTER TABLE sales.Ghost ADD CONSTRAINT fk1 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)
+"""
+
+    def analyzed(root: Path) -> GraphDocument:
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "a.sql"
+        path.write_text(content, encoding="utf-8")
+        result = analyze_sql_files(Workspace(root), (path,))
+        assert [item.code for item in result.diagnostics] == [DiagnosticCode.ORPHANED_FOREIGN_KEY]
+        encoded = serialize(result.document)
+        loaded = load_graph_blob(encoded)
+        assert serialize(loaded.document) == encoded
+        return loaded.document
+
+    first = analyzed(tmp_path / "first")
+    second = analyzed(tmp_path / "second")
+
+    file_id = next(node.id for node in first.nodes if node.path == "a.sql")
+    nowhere = next(node for node in first.nodes if node.label == "sales.Nowhere")
+    assert nowhere.identity.originating_node == file_id
+    assert [
+        (relationship.source, relationship.target)
+        for relationship in first.relationships
+        if relationship.kind == "references" and relationship.target == nowhere.id
+    ] == [(file_id, nowhere.id)]
+
+    comparison = compare_graphs(first, second)
+    assert comparison.changed is False
+
+    changes = diff(first, second)
+    assert changes.added == changes.removed == changes.relocated == ()
+    assert changes.relationships_added == changes.relationships_removed == ()
