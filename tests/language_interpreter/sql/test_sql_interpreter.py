@@ -633,6 +633,69 @@ CREATE VIEW S.TVRead AS SELECT * FROM S.TVFn(1) JOIN S.Base ON 1 = 1
     }
 
 
+def test_ordered_parenthesized_query_roots_record_order_clause_calls(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE FUNCTION dbo.gfn(@v int) RETURNS int AS RETURN @v
+GO
+CREATE FUNCTION f(@id int) RETURNS TABLE AS
+RETURN (SELECT x FROM dbo.a) ORDER BY dbo.gfn(x) OFFSET 0 ROWS
+GO
+CREATE PROCEDURE p AS BEGIN
+IF 1 IN ((SELECT x FROM dbo.a) ORDER BY dbo.gfn(x) OFFSET 0 ROWS) BEGIN SELECT x FROM dbo.a; END
+END
+"""
+    result = _analyze(tmp_path, **{"calls.sql": sql})
+    call_edges = {
+        (source.label, target.label): edge
+        for source, target, edge in _sql_edges(result, "sql:calls")
+    }
+    expected_calls = {
+        ("f", "calls.sql", line, character, line, character + len("gfn"))
+        for line, character in _reference_positions(sql, "CREATE FUNCTION f", "gfn")
+    } | {
+        ("p", "calls.sql", line, character, line, character + len("gfn"))
+        for line, character in _reference_positions(sql, "CREATE PROCEDURE p", "gfn")
+    }
+    expected_reads = {
+        ("f", "calls.sql", line, character)
+        for line, character in _reference_positions(sql, "CREATE FUNCTION f", "dbo.a")
+    } | {
+        ("p", "calls.sql", line, character)
+        for line, character in _reference_positions(sql, "CREATE PROCEDURE p", "dbo.a")
+    }
+
+    assert set(_symbols(result)) == {"dbo.a", "dbo.gfn", "f", "p"}
+    assert set(call_edges) == {("f", "dbo.gfn"), ("p", "dbo.gfn")}
+    assert {
+        (
+            source.label,
+            location.path,
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        )
+        for source, _target, edge in _sql_edges(result, "sql:calls")
+        for item in edge.evidence
+        for location in item.locations
+    } == expected_calls
+    assert _edges(result, "sql:reads-from") == {("f", "dbo.a"), ("p", "dbo.a")}
+    assert {
+        (source.label, location.path, location.range.start.line, location.range.start.character)
+        for source, _target, edge in _sql_edges(result, "sql:reads-from")
+        for item in edge.evidence
+        for location in item.locations
+    } == expected_reads
+    assert not result.diagnostics
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
 def test_rejected_query_root_drops_calls_and_reads_but_keeps_sibling(
     tmp_path: Path,
 ) -> None:
@@ -2725,8 +2788,8 @@ def test_nested_with_and_discovered_scopes_see_enclosing_cte_names(tmp_path: Pat
     assert result.diagnostics == ()
 
 
-# Measured 1,655 calls on Python 3.12.3; bound is 3x rounded up to 1,000.
-_CTE_CHAIN_CALL_BOUND = 5_000
+# Measured 1,750 calls on Python 3.12.3; bound is 3x rounded up to 1,000.
+_CTE_CHAIN_CALL_BOUND = 6_000
 
 
 def test_cte_chain_analysis_is_linear_in_calls(tmp_path: Path) -> None:
