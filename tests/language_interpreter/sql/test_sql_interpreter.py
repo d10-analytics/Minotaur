@@ -2483,3 +2483,32 @@ END"""
         == expected_lines
     )
     assert len(result.diagnostics) == 16
+
+
+def test_repeated_parentheses_unwrap_and_non_query_scopes_reject(tmp_path: Path) -> None:
+    views = {
+        "v_double": "((SELECT x FROM dbo.a))",
+        "v_cte_triple": "WITH c AS (((SELECT x FROM dbo.a))) SELECT x FROM c",
+        "v_cte_values": "WITH c AS ((VALUES (1))) SELECT x FROM c",
+        "v_derived_values": "SELECT t.x FROM ((VALUES (1))) AS t(x)",
+    }
+    sql = _go(
+        "CREATE TABLE dbo.a (x int)",
+        *(f"CREATE VIEW {name} AS {body}" for name, body in views.items()),
+    )
+    result = _analyze(tmp_path, **{"paren.sql": sql})
+
+    assert _read_locations(result) == {
+        (owner, "dbo.a", line, character)
+        for owner in ("v_double", "v_cte_triple")
+        for line, character in _reference_positions(sql, f"CREATE VIEW {owner} AS", "dbo.a")
+    }
+    assert {label for label in _symbols(result) if label.startswith("v_")} == {
+        "v_double",
+        "v_cte_triple",
+    }
+    lines = sql.split("\n")
+    assert [(item.code, item.location.range.start.line) for item in result.diagnostics] == [
+        (DiagnosticCode.UNSUPPORTED_SYNTAX, lines.index(f"CREATE VIEW {name} AS {views[name]}"))
+        for name in ("v_cte_values", "v_derived_values")
+    ]
