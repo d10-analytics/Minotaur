@@ -143,3 +143,142 @@ def test_sql_guide_documents_nested_query_reads_and_rejection() -> None:
     text = _text()
     assert "`EXISTS`, `IN`, `ALL`, `SOME`, or `ANY` body" in text
     assert "rejects the whole view or the enclosing procedure or function query root" in text
+
+
+def test_sql_guide_documents_proc_spelling_and_column_less_references() -> None:
+    text = _text()
+    assert "`CREATE PROC` and `CREATE PROCEDURE` are equivalent" in text
+    # A column-less REFERENCES keeps the table-level edge and adds no mapping.
+    assert (
+        "`REFERENCES` form that omits the referenced columns records the table-level edge "
+        "without a column mapping in all three accepted forms"
+    ) in text
+    assert "an inline column constraint, a table `FOREIGN KEY` constraint" in text
+    assert "a named `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY (…) REFERENCES …` clause" in text
+
+
+def test_sql_guide_documents_named_alter_foreign_key_limits() -> None:
+    text = _text()
+    # An ALTER whose altered table is undeclared or ambiguous warns and adds no edge.
+    assert (
+        "reports `orphaned-foreign-key` against the altered table's name whenever the target "
+        "is not exactly one declared table"
+    ) in text
+    assert "keeps the existing unresolved and ambiguous-reference facts unchanged" in text
+    # A declared target records nothing new: the stated limit, not a recovery.
+    assert "When the target is a declared table, that same statement records nothing new" in text
+    assert "foreign-key components count table nodes only" in text
+    assert "this is a documented limit" in text
+
+
+def test_sql_guide_documents_function_body_representability_and_limits() -> None:
+    text = _text()
+    # Multi-statement scalar and table-valued bodies read and call through roots.
+    assert (
+        "A multi-statement scalar function and a table-valued function contribute reads and "
+        "calls from the parser-represented static query roots of their bodies" in text
+    )
+    assert (
+        "statements after the body's end statement in the same batch are analyzed normally" in text
+    )
+    assert (
+        "a table-valued function's `INSERT` contributes no read even when it selects from a "
+        "declared table" in text
+    )
+    # An unrepresentable body keeps the declaration and one located diagnostic.
+    assert (
+        "An `IF`, a `WHILE`, a nested `BEGIN … END` block in any spelling case or at any "
+        "depth, an opaque statement, or a missing end statement makes the body unrepresentable"
+    ) in text
+    assert (
+        "the declaration is kept with no reads or calls and exactly one `unsupported-syntax` "
+        "located at the function name" in text
+    )
+    assert (
+        "Top-level statements the parser keeps between such a body and the next declaration "
+        "in the same batch are consumed with the function, while every later declaration it "
+        "keeps as its own statement in the same batch is still analyzed" in text
+    )
+    # A statement folded into the body is a stated limit, never a recovery.
+    assert (
+        "A later statement that the parser folds into the body, after a top-level `IF` or "
+        "`WHILE` or after an outer `END` without `;`, is deliberately not recovered" in text
+    )
+    assert "the statement yields no facts, and it belongs in a later `GO` batch" in text
+    # A body the parser rejects is a batch error, not a kept declaration.
+    assert (
+        "make the parser reject the whole batch, so the batch is one `parse-error` with no "
+        "procedure or function facts" in text
+    )
+
+
+def test_sql_guide_documents_return_members_and_unsupported_arrangements() -> None:
+    text = _text()
+    # Accepted members, their subquery reads and calls, and their direct-call limit.
+    assert (
+        "`DECLARE`, `SET` and `RETURN` members, including a bare `RETURN;`, are accepted in "
+        "procedure and function bodies rather than reported as unsupported syntax" in text
+    )
+    assert (
+        "A subquery inside one of them is an ordinary query root, so it contributes reads and "
+        "calls by the nested-query rule above" in text
+    )
+    assert "an unsupported source inside it rejects that root rather than the declaration" in text
+    assert (
+        "A direct call in one of them contributes no call: `SET @r = dbo.F(1)` produces no "
+        "`sql:calls`" in text
+    )
+    # The first unsupported arrangement: a whole-batch rejection.
+    assert (
+        "After an earlier member of a procedure or function body, `RETURN 0;` and `RETURN @r` "
+        "directly before `END` make the parser reject the whole batch" in text
+    )
+    # The second: a sole-member procedure keeps no declaration, with its own pin.
+    assert (
+        "As the sole member of a procedure, `RETURN 0;`, with or without `BEGIN`/`END`, keeps "
+        "no procedure and reports one located `unsupported-syntax`" in text
+    )
+    # The bare RETURN sole-member shape behaves the same way and has its own pin.
+    assert (
+        "A procedure whose sole member is a bare `RETURN;` behaves the same way: one located "
+        "`unsupported-syntax` and no procedure symbol" in text
+    )
+
+
+def test_sql_guide_documents_whole_statement_command_limit() -> None:
+    text = _text()
+    # No function tree or parsed name exists to keep without re-parsing text.
+    assert (
+        "When SQLGlot parses a whole `CREATE FUNCTION` as one opaque `Command`, there is no "
+        "function tree and no parsed name to keep without re-parsing its text" in text
+    )
+    assert (
+        "The statement and each following body tree in the batch report `unsupported-syntax`, "
+        "and later declarations in the batch are still analyzed" in text
+    )
+    assert (
+        "A declaration with no `;` before it is part of that `Command`'s text, not a tree of "
+        "its own, so it yields no facts" in text
+    )
+    # The guide states the limit and promises no recovery.
+    assert "This is a stated limit and not a recovery promise" in text
+    # Internal decision identifiers never reach a user-facing guide.
+    for identifier in ("AR-04", "D-00", "F-04"):
+        assert identifier not in text
+
+
+def test_sql_guide_documents_diagnostic_locations() -> None:
+    text = _text()
+    assert (
+        "Every SQL diagnostic carries a location except file-level source-read and decoding "
+        "failures and `interpreter-error`" in text
+    )
+    assert (
+        "A diagnostic that reports a statement spans the statement's identifiers when it has "
+        "any" in text
+    )
+    assert (
+        "the location falls back to the line holding the first non-whitespace character of "
+        "its batch" in text
+    )
+    assert "An unterminated lexical state is located on its opening line" in text
