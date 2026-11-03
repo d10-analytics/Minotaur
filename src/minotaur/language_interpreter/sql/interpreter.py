@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
@@ -85,6 +85,19 @@ class _File:
 
 
 @dataclass(frozen=True, slots=True)
+class _FunctionBody:
+    """The top-level trees one multi-statement function body owns.
+
+    ``representable`` says whether the parser exposed the body as flat
+    statements. ``statements`` holds those trees for the shared walker; an
+    unrepresentable body contributes none of them.
+    """
+
+    representable: bool
+    statements: tuple[exp.Expression, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class _Declaration:
     kind: str
     key: tuple[str, ...]
@@ -154,22 +167,26 @@ def analyze_sql_files(
                     )
                 )
                 continue
-            function_continuation = False
-            for tree in trees:
-                if tree is None:
-                    continue
-                if function_continuation:
-                    function_continuation = False
-                    if isinstance(tree, exp.EndStatement):
-                        continue
-                result = _interpret_statement(tree, item, batch, diagnostics, declarations, nodes)
+            parsed: list[Any] = [tree for tree in trees if tree is not None]
+            index = 0
+            while index < len(parsed):
+                tree = parsed[index]
+                index += 1
+                function_body: _FunctionBody | None = None
+                if _multi_statement_function(tree):
+                    function_body, consumed = _function_body(tree, parsed[index:])
+                    index += consumed
+                result = _interpret_statement(
+                    tree,
+                    item,
+                    batch,
+                    diagnostics,
+                    declarations,
+                    nodes,
+                    function_body=function_body,
+                )
                 if result is not None:
                     observations.append(result)
-                function_continuation = (
-                    isinstance(tree, exp.Create)
-                    and str(tree.args.get("kind") or "").upper() == "FUNCTION"
-                    and bool(tree.args.get("begin"))
-                )
 
     by_key: dict[tuple[str, ...], list[_Declaration]] = {}
     for declaration in declarations:
@@ -653,9 +670,13 @@ def _interpret_statement(
     diagnostics: list[Diagnostic],
     declarations: list[_Declaration],
     nodes: list[Node],
+    *,
+    function_body: _FunctionBody | None = None,
 ) -> _Observation | None:
     if isinstance(tree, exp.Create):
-        return _interpret_create(tree, item, batch, diagnostics, declarations, nodes)
+        return _interpret_create(
+            tree, item, batch, diagnostics, declarations, nodes, function_body=function_body
+        )
     if isinstance(tree, exp.Alter):
         observation = _interpret_alter(tree, item, batch)
         if observation is not None:
@@ -672,6 +693,39 @@ def _create_kind(tree: exp.Create) -> str:
     return "PROCEDURE" if kind == "PROC" else kind
 
 
+def _multi_statement_function(tree: Any) -> bool:
+    """Return whether a tree declares a function whose body spans the batch."""
+    return (
+        isinstance(tree, exp.Create)
+        and _create_kind(tree) == "FUNCTION"
+        and bool(tree.args.get("begin"))
+    )
+
+
+def _function_body(
+    tree: exp.Create, following: Sequence[exp.Expression]
+) -> tuple[_FunctionBody, int]:
+    """Return the body a multi-statement function owns and the trees it consumes.
+
+    The body is representable only when the declaration's own expression and
+    every following tree through the first end statement are flat statements.
+    An unrepresentable body owns every tree up to, but excluding, the next
+    declaration boundary or the batch end, so a later declaration that the
+    parser keeps as its own tree is still analyzed.
+    """
+    expression = tree.args.get("expression")
+    if isinstance(expression, exp.Expression) and _flat_body_member(expression):
+        for offset, candidate in enumerate(following):
+            if not _flat_body_member(candidate):
+                break
+            if _end_statement(candidate):
+                return _FunctionBody(True, (expression, *following[: offset + 1])), offset + 1
+    consumed = 0
+    while consumed < len(following) and not _declaration_boundary(following[consumed]):
+        consumed += 1
+    return _FunctionBody(False), consumed
+
+
 def _interpret_create(
     tree: Any,
     item: _File,
@@ -679,6 +733,8 @@ def _interpret_create(
     diagnostics: list[Diagnostic],
     declarations: list[_Declaration],
     nodes: list[Node],
+    *,
+    function_body: _FunctionBody | None = None,
 ) -> _Observation | None:
     kind = _create_kind(tree)
     target = tree.this
@@ -719,9 +775,19 @@ def _interpret_create(
         )
         declarations.append(declaration)
         nodes.append(node)
+        if function_body is not None and not function_body.representable:
+            # The body is not parser-represented: keep the declaration without
+            # body facts and report the whole function once, at its name.
+            _unsupported_at(location, item, diagnostics)
+            return None
         body_reads: list[tuple[tuple[str, ...], str, Location]] = []
         body_calls: list[tuple[tuple[str, ...], str, Location]] = []
-        for root in _procedural_query_roots(tree, kind, item, batch, diagnostics):
+        roots = (
+            _body_query_roots(function_body.statements, item, batch, diagnostics)
+            if function_body is not None
+            else _procedural_query_roots(tree, kind, item, batch, diagnostics)
+        )
+        for root in roots:
             root_reads = _query_reads(root, item, batch, diagnostics)
             if root_reads is None:
                 _unsupported(root, item, batch, diagnostics)
@@ -806,6 +872,18 @@ def _declaration_has_body(tree: exp.Create, kind: str) -> bool:
 
 _QUERY_ROOT_TYPES = (exp.Select, exp.Union, exp.Intersect, exp.Except)
 _DML_ROOT_TYPES = (exp.Insert, exp.Update, exp.Delete, exp.Merge)
+_LEAF_BODY_MEMBERS = (
+    exp.EndStatement,
+    *_QUERY_ROOT_TYPES,
+    *_DML_ROOT_TYPES,
+    exp.Execute,
+    exp.ExecuteSql,
+    exp.Declare,
+    exp.Set,
+    exp.Return,
+)
+_FLAT_REJECTED_NODES = (exp.Command, exp.Block, exp.IfBlock, exp.WhileBlock)
+_DECLARATION_NAMES = frozenset({"CREATE", "ALTER", "DROP"})
 
 
 def _procedural_query_roots(
@@ -844,20 +922,22 @@ def _body_query_roots(
     either would revisit nested queries or model DML source reads. ``DECLARE``,
     ``SET`` and ``RETURN`` statements contribute the queries nested in their
     expressions; the return forms the parser spells as an identifier alias
-    contribute nothing.
+    contribute nothing. The leaf members are accepted unchanged; every other
+    tree is either walked as a block, a control block or a ``RETURN`` form, or
+    reported unsupported.
     """
     roots: list[exp.Expression] = []
 
     def visit(statement: exp.Expression) -> None:
-        if isinstance(statement, exp.EndStatement):
-            return
-        if isinstance(statement, _QUERY_ROOT_TYPES):
-            roots.append(statement)
-            return
-        if isinstance(statement, _DML_ROOT_TYPES):
-            return
-        if isinstance(statement, (exp.Execute, exp.ExecuteSql)):
-            _unsupported_unlocated(item, diagnostics)
+        if isinstance(statement, _LEAF_BODY_MEMBERS):
+            if isinstance(statement, _QUERY_ROOT_TYPES):
+                roots.append(statement)
+            elif isinstance(statement, (exp.Execute, exp.ExecuteSql)):
+                _unsupported_unlocated(item, diagnostics)
+            elif isinstance(statement, (exp.Declare, exp.Set)):
+                roots.extend(_nested_query_roots(statement))
+            elif isinstance(statement, exp.Return):
+                roots.extend(_nested_query_roots(statement.this))
             return
         if isinstance(statement, exp.Command):
             if _is_structural_end_marker(statement):
@@ -880,12 +960,6 @@ def _body_query_roots(
             if isinstance(loop_body, exp.Expression):
                 visit(loop_body)
             return
-        if isinstance(statement, (exp.Declare, exp.Set)):
-            roots.extend(_nested_query_roots(statement))
-            return
-        if isinstance(statement, exp.Return):
-            roots.extend(_nested_query_roots(statement.this))
-            return
         if isinstance(statement, exp.Anonymous) and _unquoted_identifier(statement.this, "RETURN"):
             for argument in statement.expressions:
                 roots.extend(_nested_query_roots(argument))
@@ -900,6 +974,41 @@ def _body_query_roots(
         if statement is not None:
             visit(statement)
     return roots
+
+
+def _flat_body_member(statement: exp.Expression | None) -> bool:
+    """Return whether the shared walker consumes one tree as a flat statement.
+
+    A flat statement is a query root, DML, ``EXEC``, ``DECLARE``, ``SET``, a
+    ``RETURN`` form or an end statement, and its own tree holds no ``Command``,
+    ``Block``, ``IfBlock`` or ``WhileBlock`` node. The parser hides an opener or
+    an end statement inside such a node, so any of them makes the tree opaque.
+    """
+    if statement is None or any(
+        isinstance(node, _FLAT_REJECTED_NODES) for node in statement.walk()
+    ):
+        return False
+    if isinstance(statement, _LEAF_BODY_MEMBERS):
+        return True
+    if isinstance(statement, exp.Anonymous):
+        return _unquoted_identifier(statement.this, "RETURN")
+    if isinstance(statement, exp.Alias):
+        return _bare_return_column(statement.this)
+    return _bare_return_column(statement)
+
+
+def _end_statement(tree: exp.Expression) -> bool:
+    """Return whether a tree closes a multi-statement function body."""
+    if isinstance(tree, exp.EndStatement):
+        return True
+    return isinstance(tree, exp.Command) and str(tree.this or "").upper() == "END"
+
+
+def _declaration_boundary(tree: exp.Expression) -> bool:
+    """Return whether a tree opens the next declaration in the batch."""
+    if isinstance(tree, (exp.Create, exp.Alter, exp.Drop)):
+        return True
+    return isinstance(tree, exp.Command) and str(tree.this or "").upper() in _DECLARATION_NAMES
 
 
 def _unquoted_identifier(expression: object, name: str) -> bool:
@@ -1642,6 +1751,18 @@ def _unsupported(
     tree: exp.Expression, item: _File, batch: _Batch, diagnostics: list[Diagnostic]
 ) -> None:
     location = _identifier_location(tree, item.raw.relative, item.line_index, batch.start)
+    diagnostics.append(
+        Diagnostic(
+            DiagnosticCode.UNSUPPORTED_SYNTAX,
+            item.raw.relative,
+            "unsupported T-SQL syntax",
+            location,
+        )
+    )
+
+
+def _unsupported_at(location: Location, item: _File, diagnostics: list[Diagnostic]) -> None:
+    """Report one unsupported statement at an already resolved location."""
     diagnostics.append(
         Diagnostic(
             DiagnosticCode.UNSUPPORTED_SYNTAX,
