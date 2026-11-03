@@ -163,7 +163,10 @@ def analyze_sql_files(
             except Exception:
                 diagnostics.append(
                     Diagnostic(
-                        DiagnosticCode.PARSE_ERROR, item.raw.relative, "unable to parse T-SQL batch"
+                        DiagnosticCode.PARSE_ERROR,
+                        item.raw.relative,
+                        "unable to parse T-SQL batch",
+                        _batch_line_location(batch, item.raw.relative, item.line_index),
                     )
                 )
                 continue
@@ -900,7 +903,7 @@ def _procedural_query_roots(
             return []
         expression = body.this
         if isinstance(expression, (exp.Execute, exp.ExecuteSql)):
-            _unsupported_unlocated(item, diagnostics)
+            _unsupported(expression, item, batch, diagnostics)
             return []
         return _nested_query_roots(expression)
     if not isinstance(body, exp.Block):
@@ -940,7 +943,7 @@ def _body_query_roots(
             if isinstance(statement, _QUERY_ROOT_TYPES):
                 roots.append(statement)
             elif isinstance(statement, (exp.Execute, exp.ExecuteSql)):
-                _unsupported_unlocated(item, diagnostics)
+                _unsupported(statement, item, batch, diagnostics)
             elif isinstance(statement, (exp.Declare, exp.Set)):
                 roots.extend(_nested_query_roots(statement))
             elif isinstance(statement, exp.Return):
@@ -1750,7 +1753,15 @@ def _property_execute_target(target: exp.Expression) -> bool:
 def _unsupported(
     tree: exp.Expression, item: _File, batch: _Batch, diagnostics: list[Diagnostic]
 ) -> None:
+    """Report one unsupported statement, spanning its identifier when it has one.
+
+    Statements the parser keeps as opaque text have no identifier span, so the
+    diagnostic falls back to the batch's first line rather than staying
+    path-only.
+    """
     location = _identifier_location(tree, item.raw.relative, item.line_index, batch.start)
+    if location is None:
+        location = _batch_line_location(batch, item.raw.relative, item.line_index)
     diagnostics.append(
         Diagnostic(
             DiagnosticCode.UNSUPPORTED_SYNTAX,
@@ -1773,16 +1784,6 @@ def _unsupported_at(location: Location, item: _File, diagnostics: list[Diagnosti
     )
 
 
-def _unsupported_unlocated(item: _File, diagnostics: list[Diagnostic]) -> None:
-    diagnostics.append(
-        Diagnostic(
-            DiagnosticCode.UNSUPPORTED_SYNTAX,
-            item.raw.relative,
-            "unsupported T-SQL syntax",
-        )
-    )
-
-
 def _scan_batches(
     source: str, path: str, line_index: LineIndex
 ) -> tuple[list[_Batch], list[Diagnostic], bool]:
@@ -1792,6 +1793,7 @@ def _scan_batches(
     line_start = 0
     state = "normal"
     block_depth = 0
+    opened_at: int | None = None
     while line_start <= len(source):
         line_end = source.find("\n", line_start)
         if line_end < 0:
@@ -1835,14 +1837,18 @@ def _scan_batches(
                 if char == "/" and nxt == "*":
                     state = "block"
                     block_depth = 1
+                    opened_at = i
                     i += 2
                     continue
                 if char == "'":
                     state = "single"
+                    opened_at = i
                 elif char == '"':
                     state = "double"
+                    opened_at = i
                 elif char == "[":
                     state = "bracket"
+                    opened_at = i
             elif state == "single":
                 if char == "'":
                     if nxt == "'":
@@ -1876,13 +1882,41 @@ def _scan_batches(
             break
         line_start = next_start
     if state != "normal":
+        assert opened_at is not None  # every state transition records its opener
         diagnostics.append(
-            Diagnostic(DiagnosticCode.PARSE_ERROR, path, "unterminated SQL lexical state")
+            Diagnostic(
+                DiagnosticCode.PARSE_ERROR,
+                path,
+                "unterminated SQL lexical state",
+                _line_location(path, line_index, *_line_bounds(source, opened_at)),
+            )
         )
         return [], diagnostics, False
     if batch_start <= len(source):
         batches.append(_Batch(source[batch_start:], batch_start, len(source)))
     return batches, diagnostics, True
+
+
+def _line_bounds(source: str, offset: int) -> tuple[int, int]:
+    """Return the source offsets bounding the line that holds ``offset``."""
+    start = source.rfind("\n", 0, offset) + 1
+    end = source.find("\n", offset)
+    return start, len(source) if end < 0 else end
+
+
+def _batch_line_location(batch: _Batch, path: str, line_index: LineIndex) -> Location:
+    """Locate a batch-level diagnostic on the line where the batch's text starts.
+
+    A batch may open with blank lines after a ``GO`` boundary, so its raw start
+    can be an empty line ahead of the first statement character.
+    """
+    offset = 0
+    text = batch.text
+    while offset < len(text) and text[offset].isspace():
+        offset += 1
+    first = batch.start + offset if offset < len(text) else batch.start
+    start, end = _line_bounds(line_index.source, first)
+    return _line_location(path, line_index, start, end)
 
 
 def _line_location(path: str, line_index: LineIndex, start: int, end: int) -> Location:
