@@ -822,8 +822,35 @@ END
     if supported:
         assert not result.diagnostics
     else:
-        assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
-        assert result.diagnostics[0].location is None
+        # An opaque member carries no identifier, so the diagnostic spans the
+        # batch's first line rather than the member's own line.
+        assert _diagnostic_spans(result) == [
+            (
+                "members.sql",
+                DiagnosticCode.UNSUPPORTED_SYNTAX,
+                (2, 0, 2, len(sql.split("\n")[2])),
+            )
+        ]
+
+
+def test_procedure_exec_member_is_unsupported_at_the_invoked_procedure(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE PROCEDURE S.P AS BEGIN
+EXEC dbo.Other;
+END
+"""
+    result = _analyze(tmp_path, **{"exec-member.sql": sql})
+
+    start = sql.split("\n")[1].index("dbo.Other")
+    assert _diagnostic_spans(result) == [
+        (
+            "exec-member.sql",
+            DiagnosticCode.UNSUPPORTED_SYNTAX,
+            (1, start, 1, start + len("dbo.Other")),
+        )
+    ]
 
 
 def test_declare_set_and_return_members_contribute_nested_query_reads_and_calls(
@@ -1005,9 +1032,9 @@ END
     edges = _sql_edges(result, "sql:reads-from")
 
     assert {(edge[0].label, edge[1].label) for edge in edges} == {("S.Read", "S.Base")}
-    assert len(result.diagnostics) == 1
-    assert result.diagnostics[0].code is DiagnosticCode.UNSUPPORTED_SYNTAX
-    assert result.diagnostics[0].location is None
+    assert _diagnostic_spans(result) == [
+        ("dynamic.sql", DiagnosticCode.UNSUPPORTED_SYNTAX, (2, 0, 2, len(sql.split("\n")[2])))
+    ]
 
 
 def test_opaque_cursor_and_try_members_do_not_infer_text_reads(tmp_path: Path) -> None:
@@ -1422,7 +1449,11 @@ END;
     result = _analyze(tmp_path, **{"unparseable.sql": sql})
 
     assert set(_symbols(result)) == {"dbo.Items"}
-    assert [item.code for item in result.diagnostics] == [DiagnosticCode.PARSE_ERROR]
+    # The batch opens with a blank line after its boundary, so the location is
+    # the line that holds the batch's first statement character.
+    assert _diagnostic_spans(result) == [
+        ("unparseable.sql", DiagnosticCode.PARSE_ERROR, (3, 0, 3, len(sql.split("\n")[3])))
+    ]
     assert not _sql_edges(result, "sql:reads-from")
     assert not _sql_edges(result, "sql:calls")
 
@@ -1487,6 +1518,16 @@ CREATE TABLE dbo.After (id int)
     assert result.diagnostics[0].location != symbols["dbo.E"].location
     assert symbols["dbo.After"].symbol_kind == "sql:table"
     assert ("exec-member.sql", "dbo.After") in _edges(result, "contains")
+
+
+def test_returned_exec_is_unsupported_at_the_invoked_procedure(tmp_path: Path) -> None:
+    sql = "CREATE FUNCTION S.F() RETURNS int AS RETURN EXEC dbo.P"
+    result = _analyze(tmp_path, **{"return-exec.sql": sql})
+
+    start = sql.index("dbo.P")
+    assert _diagnostic_spans(result) == [
+        ("return-exec.sql", DiagnosticCode.UNSUPPORTED_SYNTAX, (0, start, 0, start + len("dbo.P")))
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1764,10 +1805,11 @@ CREATE TABLE S.After (id int)
     result = _analyze(tmp_path, **{"recovery.sql": sql})
 
     assert set(_symbols(result)) == {"S.After"}
-    assert [diagnostic.code for diagnostic in result.diagnostics] == [
-        DiagnosticCode.PARSE_ERROR,
-        DiagnosticCode.UNSUPPORTED_SYNTAX,
-        DiagnosticCode.UNSUPPORTED_SYNTAX,
+    lines = sql.split("\n")
+    assert _diagnostic_spans(result) == [
+        ("recovery.sql", DiagnosticCode.UNSUPPORTED_SYNTAX, (0, 0, 0, len(lines[0]))),
+        ("recovery.sql", DiagnosticCode.UNSUPPORTED_SYNTAX, (2, 0, 2, len(lines[2]))),
+        ("recovery.sql", DiagnosticCode.PARSE_ERROR, (4, 0, 4, len(lines[4]))),
     ]
 
 
@@ -2019,10 +2061,17 @@ CREATE TABLE FinalGo (id int)
 
 
 def test_unterminated_scanner_is_file_atomic(tmp_path: Path) -> None:
-    result = _analyze(tmp_path, **{"bad.sql": "CREATE TABLE Lost (id int) /* unterminated"})
+    sql = """\
+CREATE TABLE A (id int)
+GO
+CREATE TABLE B (id int)
+/* unterminated
+more"""
+    result = _analyze(tmp_path, **{"bad.sql": sql})
     assert [node.label for node in result.document.nodes] == ["bad.sql"]
-    assert len(result.diagnostics) == 1
-    assert result.diagnostics[0].code == DiagnosticCode.PARSE_ERROR
+    assert _diagnostic_spans(result) == [
+        ("bad.sql", DiagnosticCode.PARSE_ERROR, (3, 0, 3, len(sql.split("\n")[3])))
+    ]
 
 
 def test_batch_and_statement_recovery_keeps_supported_siblings(tmp_path: Path) -> None:
@@ -2777,12 +2826,18 @@ def test_parse_and_fallback_diagnostics_are_ordered_and_sanitized(tmp_path: Path
 
     def diagnostics(result):
         return tuple(
-            (item.path, item.code, item.message, item.location) for item in result.diagnostics
+            (item.path, item.code, item.message, _diagnostic_span(item))
+            for item in result.diagnostics
         )
 
     expected = (
-        ("a_fallback.sql", DiagnosticCode.UNSUPPORTED_SYNTAX, "unsupported T-SQL syntax", None),
-        ("b_parse.sql", DiagnosticCode.PARSE_ERROR, "unable to parse T-SQL batch", None),
+        (
+            "a_fallback.sql",
+            DiagnosticCode.UNSUPPORTED_SYNTAX,
+            "unsupported T-SQL syntax",
+            (0, 0, 0, 44),
+        ),
+        ("b_parse.sql", DiagnosticCode.PARSE_ERROR, "unable to parse T-SQL batch", (0, 0, 0, 20)),
     )
     assert diagnostics(first) == diagnostics(second) == expected
     assert all(
@@ -2815,6 +2870,19 @@ def _evidence_locations(edge):
         for item in edge.evidence
         for location in item.locations
     }
+
+
+def _diagnostic_span(diagnostic):
+    """Return a diagnostic's start and end line-character span, or ``None``."""
+    if diagnostic.location is None:
+        return None
+    span = diagnostic.location.range
+    return (span.start.line, span.start.character, span.end.line, span.end.character)
+
+
+def _diagnostic_spans(result):
+    """Return each diagnostic's path, code and start/end line-character span."""
+    return [(item.path, item.code, _diagnostic_span(item)) for item in result.diagnostics]
 
 
 def test_fk_column_details_preserve_ast_forms_order_and_irregular_locations(
