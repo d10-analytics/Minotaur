@@ -218,6 +218,47 @@ CREATE FUNCTION S.Func() RETURNS TABLE AS RETURN (SELECT * FROM S.Base)
     ]
 
 
+def test_persisted_multi_statement_function_reads_and_calls_feed_callers_and_impact(
+    tmp_path: Path,
+) -> None:
+    content = """\
+CREATE SCHEMA S
+GO
+CREATE TABLE S.Base (id int)
+GO
+CREATE FUNCTION S.Callee(@id int) RETURNS int AS RETURN @id
+GO
+CREATE FUNCTION S.Total() RETURNS int AS
+BEGIN
+DECLARE @r int;
+SELECT @r = S.Callee(COUNT(*)) FROM S.Base;
+RETURN @r;
+END;
+"""
+    index = _persisted_index(tmp_path / "current", content)
+
+    assert [
+        (record.path, record.line, record.column, record.caller, record.kind, record.unresolved)
+        for record in callers(index, "s.base")
+    ] == [
+        (
+            "catalog.sql",
+            10,
+            content.splitlines()[9].index("S.Base") + 1,
+            "S.Total",
+            "sql:reads-from",
+            False,
+        )
+    ]
+    assert impact(index, "s.base") == (
+        ImpactRecord(depth=0, symbol="S.Base", kind="sql:table"),
+        ImpactRecord(depth=1, symbol="S.Total", kind="sql:function"),
+    )
+    assert [
+        (record.caller, record.kind, record.unresolved) for record in callers(index, "s.callee")
+    ] == [("S.Total", "sql:calls", False)]
+
+
 def test_persisted_sql_calls_survive_roundtrip_and_feed_callers_and_impact(
     tmp_path: Path,
 ) -> None:
