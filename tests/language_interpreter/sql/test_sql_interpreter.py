@@ -1489,6 +1489,36 @@ CREATE TABLE dbo.After (id int)
     assert ("exec-member.sql", "dbo.After") in _edges(result, "contains")
 
 
+@pytest.mark.parametrize(
+    "member",
+    [
+        "RETURN EXEC dbo.Q;",
+        "RETURN EXEC('SELECT 1');",
+        "RETURN\nEXEC dbo.Q;",
+        "RETURN EXEC('SELECT COUNT(*) FROM dbo.Items');",
+    ],
+    ids=["exec-procedure", "exec-string", "return-then-exec", "exec-string-read"],
+)
+def test_return_exec_member_reports_one_diagnostic_and_no_facts(
+    tmp_path: Path, member: str
+) -> None:
+    sql = (
+        f"{_ITEMS_DECLARATION}\nGO\n"
+        "CREATE PROCEDURE dbo.Q AS SELECT 1\nGO\n"
+        f"{_FUNCTION_HEADER}{member}\nEND;\n{_AFTER_DECLARATION}"
+    )
+    result = _analyze(tmp_path, **{"return-exec.sql": sql})
+    symbols = _symbols(result)
+
+    assert symbols["dbo.M3"].symbol_kind == "sql:function"
+    assert symbols["dbo.After"].symbol_kind == "sql:table"
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+    assert result.diagnostics[0].location != symbols["dbo.M3"].location
+    assert not _sql_edges(result, "sql:reads-from")
+    assert not _sql_edges(result, "sql:calls")
+    assert ("return-exec.sql", "dbo.After") in _edges(result, "contains")
+
+
 _TAIL_PREAMBLE = (
     f"{_ITEMS_DECLARATION}\nGO\n"
     "CREATE TABLE dbo.P (id int)\nGO\n"
