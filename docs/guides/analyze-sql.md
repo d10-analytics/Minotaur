@@ -28,7 +28,10 @@ relationships described by its AST-authoritative implementation:
   `sql:reads-from` relationships to persistent tables and views and
   `sql:calls` relationships to declared user-defined functions; parameters
   and return syntax do not become graph symbols;
-- table and view reads become the namespaced `sql:reads-from` relationship;
+- table and view reads become the namespaced `sql:reads-from` relationship. A nested query, including an `EXISTS`, `IN`, `ALL`, `SOME`, or `ANY` body or a
+  parenthesized query, contributes reads under the same rules as any other query
+  scope, and a temporary or otherwise unsupported source inside it rejects the
+  whole view or the enclosing procedure or function query root;
 - user-defined function calls in an accepted query root become the namespaced
   `sql:calls` relationship. A schema-qualified call is a candidate for the
   typed function resolver; an unqualified call is a candidate only when it
