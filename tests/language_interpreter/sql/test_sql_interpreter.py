@@ -1250,8 +1250,10 @@ _SEPARATED_FOLDED_ROWS = frozenset({"B15", "B17", "B18", "N21", "N22"})
 
 def _assert_one_function_diagnostic(result, function) -> None:
     """Assert exactly one located unsupported declaration and no body edges."""
-    assert not [edge for edge in _sql_edges(result, "sql:reads-from") if edge[0].label == "dbo.M3"]
-    assert not [edge for edge in _sql_edges(result, "sql:calls") if edge[0].label == "dbo.M3"]
+    assert not [
+        edge for edge in _sql_edges(result, "sql:reads-from") if edge[0].label == function.label
+    ]
+    assert not [edge for edge in _sql_edges(result, "sql:calls") if edge[0].label == function.label]
     assert [(item.code, item.location) for item in result.diagnostics] == [
         (DiagnosticCode.UNSUPPORTED_SYNTAX, function.location)
     ]
@@ -1293,20 +1295,19 @@ def test_separated_declaration_after_an_unrepresentable_body_is_analyzed(
 
 
 @pytest.mark.parametrize(
-    ("body", "read"),
+    ("body", "read", "separated"),
     [
-        (f"DECLARE @r int;\n{_ITEMS_COUNT};\nRETURN @r;\nEND", True),
-        ("INSERT INTO @t SELECT id FROM dbo.Other;\nRETURN;\nEND;", False),
-        ("RETURN (SELECT COUNT(*) FROM dbo.Items);\nEND;", True),
-        ("SET NOCOUNT ON;\nDECLARE @r int;\nRETURN @r;\nEND;", False),
-        (f"{_ITEMS_COUNT}\nRETURN;\nEND;", True),
+        (f"DECLARE @r int;\n{_ITEMS_COUNT};\nRETURN @r;\nEND", True, True),
+        ("INSERT INTO @t SELECT id FROM dbo.Other;\nRETURN;\nEND;", False, False),
+        ("RETURN (SELECT COUNT(*) FROM dbo.Items);\nEND;", True, False),
+        ("SET NOCOUNT ON;\nDECLARE @r int;\nRETURN @r;\nEND;", False, False),
+        (f"{_ITEMS_COUNT}\nRETURN;\nEND;", True, False),
     ],
     ids=["R7", "R3", "R5", "R6", "R8"],
 )
 def test_flat_function_body_query_roots_are_read_without_diagnostics(
-    tmp_path: Path, body: str, read: bool
+    tmp_path: Path, body: str, read: bool, separated: bool
 ) -> None:
-    separated = body.startswith("DECLARE @r int;\nSELECT")
     result = _analyze(tmp_path, **{"bodies.sql": _function_fixture(body, separated=separated)})
     symbols = _symbols(result)
 
