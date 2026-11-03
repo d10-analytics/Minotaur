@@ -886,7 +886,7 @@ def _body_query_roots(
         if isinstance(statement, exp.Return):
             roots.extend(_nested_query_roots(statement.this))
             return
-        if isinstance(statement, exp.Anonymous) and statement.name.upper() == "RETURN":
+        if isinstance(statement, exp.Anonymous) and _unquoted_identifier(statement.this, "RETURN"):
             for argument in statement.expressions:
                 roots.extend(_nested_query_roots(argument))
             return
@@ -902,9 +902,21 @@ def _body_query_roots(
     return roots
 
 
+def _unquoted_identifier(expression: object, name: str) -> bool:
+    """Return whether an identifier spells ``name`` without quoting it."""
+    if isinstance(expression, str):
+        return expression.upper() == name
+    if not isinstance(expression, exp.Identifier):
+        return False
+    return not expression.args.get("quoted") and str(expression.this).upper() == name
+
+
 def _bare_return_column(expression: exp.Expression | None) -> bool:
-    """Return whether a misparsed member is the bare ``RETURN`` identifier."""
-    return isinstance(expression, exp.Column) and expression.name.upper() == "RETURN"
+    """Return whether a misparsed member is the bare, unquoted ``RETURN`` column."""
+    if not isinstance(expression, exp.Column):
+        return False
+    qualified = any(expression.args.get(part) is not None for part in ("catalog", "db", "table"))
+    return not qualified and _unquoted_identifier(expression.this, "RETURN")
 
 
 def _nested_query_roots(
