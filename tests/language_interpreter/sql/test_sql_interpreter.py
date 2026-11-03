@@ -1496,15 +1496,22 @@ CREATE TABLE dbo.After (id int)
         "RETURN EXEC('SELECT 1');",
         "RETURN\nEXEC dbo.Q;",
         "RETURN EXEC('SELECT COUNT(*) FROM dbo.Items');",
+        "RETURN EXEC sp_executesql @sql;",
     ],
-    ids=["exec-procedure", "exec-string", "return-then-exec", "exec-string-read"],
+    ids=[
+        "exec-function",
+        "exec-string",
+        "return-then-exec",
+        "exec-string-read",
+        "exec-system-procedure",
+    ],
 )
 def test_return_exec_member_reports_one_diagnostic_and_no_facts(
     tmp_path: Path, member: str
 ) -> None:
     sql = (
         f"{_ITEMS_DECLARATION}\nGO\n"
-        "CREATE PROCEDURE dbo.Q AS SELECT 1\nGO\n"
+        "CREATE FUNCTION dbo.Q() RETURNS int AS RETURN 1\nGO\n"
         f"{_FUNCTION_HEADER}{member}\nEND;\n{_AFTER_DECLARATION}"
     )
     result = _analyze(tmp_path, **{"return-exec.sql": sql})
