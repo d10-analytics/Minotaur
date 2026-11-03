@@ -805,24 +805,33 @@ def _nested_query_roots(
 ) -> list[exp.Expression]:
     """Return query roots nested in an expression without revisiting query scopes.
 
-    Nodes whose identity is in ``skip`` are neither entered nor reported.
+    A parenthesized query is reported as its ``Subquery`` wrapper so the caller
+    sees the wrapper's own ``WITH``, ordering, and paging clauses. Nodes whose
+    identity is in ``skip`` are neither entered nor reported.
     """
     if expression is None:
         return []
 
     roots: list[exp.Expression] = []
+    root_types = (*_QUERY_ROOT_TYPES, exp.Subquery)
 
     def stop(candidate: Any) -> bool:
         return (
             isinstance(
                 candidate,
-                (*_QUERY_ROOT_TYPES, *_DML_ROOT_TYPES, exp.Execute, exp.ExecuteSql, exp.Command),
+                (
+                    *root_types,
+                    *_DML_ROOT_TYPES,
+                    exp.Execute,
+                    exp.ExecuteSql,
+                    exp.Command,
+                ),
             )
             or id(candidate) in skip
         )
 
     for candidate in expression.walk(bfs=False, prune=stop):
-        if id(candidate) not in skip and isinstance(candidate, _QUERY_ROOT_TYPES):
+        if id(candidate) not in skip and isinstance(candidate, root_types):
             roots.append(candidate)
     return roots
 
@@ -1262,6 +1271,46 @@ def _push_scope(
     scopes.append((child, names, child_slot))
 
 
+def _push_ctes(
+    with_expr: exp.With,
+    scopes: list[tuple[Any, frozenset[str], list[Any]]],
+    slot: list[Any],
+    local: set[str],
+) -> bool:
+    """Add one ``WITH`` clause's scopes and names; return whether it is accepted."""
+    if with_expr.args.get("recursive"):
+        return False
+    aliases = {cte.alias_or_name.casefold() for cte in with_expr.expressions}
+    if _cte_dependencies_cyclic(with_expr, aliases):
+        return False
+    for cte in with_expr.expressions:
+        if not isinstance(cte.this, _QUERY_TYPES):
+            return False
+        _push_scope(scopes, slot, cte.this, frozenset(local))
+        local.add(cte.alias_or_name.casefold())
+    return True
+
+
+def _query_sources(term: exp.Expression) -> Iterable[exp.Expression]:
+    """Yield one source term and the sources attached to it, in written order.
+
+    sqlglot attaches a chained join to the term it follows, so a nested join is
+    a term's own ``joins`` argument rather than the outer query's.
+    """
+    if isinstance(term, exp.Join):
+        if term.this is not None:
+            yield from _query_sources(term.this)
+        for nested in term.args.get("joins") or ():
+            if isinstance(nested, exp.Join):
+                yield from _query_sources(nested)
+        return
+    yield term
+    if isinstance(term, (exp.Table, exp.Subquery)):
+        for nested in term.args.get("joins") or ():
+            if isinstance(nested, exp.Join):
+                yield from _query_sources(nested)
+
+
 def _push_clause_scopes(
     scopes: list[tuple[Any, frozenset[str], list[Any]]],
     slot: list[Any],
@@ -1304,18 +1353,10 @@ def _query_reads(
         scopes: list[tuple[Any, frozenset[str], list[Any]]] = []
 
         local = set(cte_names)
-        with_expr = query.args.get("with_")
-        if isinstance(with_expr, exp.With):
-            if with_expr.args.get("recursive"):
+        for holder in (*wrappers, query):
+            with_expr = holder.args.get("with_")
+            if isinstance(with_expr, exp.With) and not _push_ctes(with_expr, scopes, slot, local):
                 return None
-            aliases = {cte.alias_or_name.casefold() for cte in with_expr.expressions}
-            if _cte_dependencies_cyclic(with_expr, aliases):
-                return None
-            for cte in with_expr.expressions:
-                if not isinstance(cte.this, _QUERY_TYPES):
-                    return None
-                _push_scope(scopes, slot, cte.this, frozenset(local))
-                local.add(cte.alias_or_name.casefold())
         visible = frozenset(local)
         if isinstance(query, _SET_OPERATION_TYPES):
             _push_scope(scopes, slot, query.left, visible)
@@ -1327,11 +1368,12 @@ def _query_reads(
             sources: list[exp.Expression] = []
             from_clause = query.args.get("from_")
             if isinstance(from_clause, exp.From) and from_clause.this is not None:
-                sources.append(from_clause.this)
-                sources.extend(from_clause.expressions)
-            sources.extend(
-                join.this for join in query.args.get("joins") or () if isinstance(join, exp.Join)
-            )
+                sources.extend(_query_sources(from_clause.this))
+                for extra in from_clause.expressions:
+                    sources.extend(_query_sources(extra))
+            for join in query.args.get("joins") or ():
+                if isinstance(join, exp.Join):
+                    sources.extend(_query_sources(join))
             derived: set[int] = set()
             for source in sources:
                 if isinstance(source, exp.Table):
