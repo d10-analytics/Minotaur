@@ -500,7 +500,6 @@ def _expressions(
                 nodes,
                 emitter,
                 shadows=program_shadows,
-                skip_declaration=True,
             )
             for member in getattr(getattr(declaration, "body", None), "body", ()):
                 method_node = getattr(member, "_minotaur_node", None)
@@ -514,7 +513,6 @@ def _expressions(
                         nodes,
                         emitter,
                         shadows=program_shadows,
-                        skip_declaration=True,
                     )
                 elif getattr(member, "type", None) == "MethodDefinition":
                     # A computed-key method has no emitted symbol, so its key
@@ -528,7 +526,6 @@ def _expressions(
                         nodes,
                         emitter,
                         shadows=program_shadows,
-                        skip_declaration=True,
                     )
         elif getattr(declaration, "type", None) == "VariableDeclaration":
             # Each callable declarator is an emitted owner of its initializer
@@ -561,7 +558,6 @@ def _expressions(
                     nodes,
                     emitter,
                     shadows=program_shadows,
-                    skip_declaration=True,
                 )
         elif node is not None and getattr(declaration, "type", None) == "FunctionDeclaration":
             _walk(
@@ -573,7 +569,6 @@ def _expressions(
                 nodes,
                 emitter,
                 shadows=program_shadows,
-                skip_declaration=True,
             )
         elif getattr(statement, "type", None) not in {
             "ImportDeclaration",
@@ -683,7 +678,6 @@ def _walk(
     nodes: list[Node],
     seen: NodeEmitter,
     shadows: set[str] | None = None,
-    skip_declaration: bool = False,
     member_fact: bool = True,
 ) -> None:
     # Nodes without a dedicated branch, member expressions, and calls whose
@@ -692,10 +686,10 @@ def _walk(
     # stack depth per element.  Each pending entry holds a node, the shadow set it
     # inherits, and whether a member expression there records its member text.
     # Children of the classified fallback inherit the owner and shadows and
-    # always record member text, so ``skip_declaration`` and ``member_fact``
-    # apply to the root node only.  A ``_MemberFactStep`` entry records a member
-    # expression's text after its object and computed property, which are pushed
-    # above it, have been walked.
+    # always record member text, so ``member_fact`` applies to the root node
+    # only.  A ``_MemberFactStep`` entry records a member expression's text after
+    # its object and computed property, which are pushed above it, have been
+    # walked.
     pending: list[tuple[Any, set[str] | None, bool]] = [(node, shadows, member_fact)]
     while pending:
         node, shadows, member_fact = pending.pop()
