@@ -2082,8 +2082,20 @@ more"""
         ("SELECT [unterminated\nmore\n", 2),
         ("SELECT 1 /* outer\nstill /* inner\nopen\n", 2),
         ("SELECT 'closed'\nSELECT 'unterminated\nmore\n", 3),
+        ("/* closed */\nSELECT 1 /* open\nmore\n", 3),
+        ('SELECT "closed"\nSELECT "open\nmore\n', 3),
+        ("SELECT [closed]\nSELECT [open\nmore\n", 3),
     ],
-    ids=["quote", "double-quote", "bracket", "nested-comment", "reopened-quote"],
+    ids=[
+        "quote",
+        "double-quote",
+        "bracket",
+        "nested-comment",
+        "reopened-quote",
+        "reopened-comment",
+        "reopened-double-quote",
+        "reopened-bracket",
+    ],
 )
 def test_unterminated_lexical_state_is_located_on_its_opening_line(
     tmp_path: Path, body: str, opener_line: int
@@ -2125,6 +2137,16 @@ def test_bare_carriage_return_line_starts_match_the_line_index(tmp_path: Path) -
     assert [node.label for node in scanned.document.nodes] == ["cr.sql"]
     assert _diagnostic_spans(scanned) == [
         ("cr.sql", DiagnosticCode.PARSE_ERROR, (1, 0, 1, len("/* open")))
+    ]
+
+
+def test_crlf_line_span_ends_at_the_line_feed(tmp_path: Path) -> None:
+    sql = "CREATE TABLE A (id int)\r\nGO\r\nCREATE TABLE Broken(\r\n"
+    result = _analyze(tmp_path, **{"crlf.sql": sql})
+
+    # The range ends at the line feed, so the carriage return stays inside it.
+    assert _diagnostic_spans(result) == [
+        ("crlf.sql", DiagnosticCode.PARSE_ERROR, (2, 0, 2, len("CREATE TABLE Broken(\r")))
     ]
 
 
