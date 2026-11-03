@@ -2471,6 +2471,152 @@ AND x = SOME (SELECT x FROM dbo.Dup)"""
     assert _edges(self_join, "sql:reads-from") == {("v_self", "dbo.a")}
 
 
+@pytest.mark.parametrize("references", [2, 10])
+def test_chained_join_derived_tables_report_each_ambiguity_once(
+    tmp_path: Path, references: int
+) -> None:
+    joins = " ".join(f"JOIN (SELECT x FROM dbo.Dup) t{index}" for index in range(1, references + 1))
+    conditions = " ".join("ON 1 = 1" for _ in range(references))
+    view = f"CREATE VIEW v AS SELECT 1 AS y FROM dbo.a {joins} {conditions}"
+    sql = _go(
+        "CREATE TABLE dbo.a (x int)",
+        "CREATE TABLE dbo.Dup (x int)",
+        "CREATE TABLE dbo.Dup (x int)",
+        view,
+    )
+    result = _analyze(tmp_path / str(references), **{"chain.sql": sql})
+
+    ambiguous = sorted(
+        (item.location.range.start.line, item.location.range.start.character)
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.AMBIGUOUS_REFERENCE
+    )
+    assert ambiguous == _reference_positions(sql, "CREATE VIEW v AS", "dbo.Dup")
+    assert len(ambiguous) == references
+
+
+def test_derived_table_join_chain_collects_each_attached_source(tmp_path: Path) -> None:
+    declared = _analyze(
+        tmp_path / "declared",
+        **{
+            "chain.sql": _go(
+                "CREATE TABLE dbo.a (x int)",
+                "CREATE TABLE dbo.b (x int)",
+                "CREATE TABLE dbo.c (x int)",
+                "CREATE VIEW v AS SELECT a.x FROM dbo.a "
+                "JOIN (SELECT x FROM dbo.b) b1 JOIN dbo.c c1 ON 1 = 1 ON 1 = 1",
+            )
+        },
+    )
+    assert not declared.diagnostics
+    assert _edges(declared, "sql:reads-from") == {
+        ("v", "dbo.a"),
+        ("v", "dbo.b"),
+        ("v", "dbo.c"),
+    }
+
+    temporary = _analyze(
+        tmp_path / "temporary",
+        **{
+            "chain.sql": "CREATE VIEW v AS SELECT a.x FROM dbo.a "
+            "JOIN (SELECT x FROM dbo.b) b1 JOIN #t t ON 1 = 1 ON 1 = 1"
+        },
+    )
+    assert not _symbols(temporary)
+    assert not _edges(temporary, "sql:reads-from")
+    assert [item.code for item in temporary.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_wrapper_join_position_rejects_a_non_query_body(tmp_path: Path) -> None:
+    body = (
+        "SELECT a.x FROM ((SELECT x FROM dbo.a) a1 "
+        "JOIN (dbo.b b1 JOIN dbo.c c1 ON 1 = 1) ON a1.x = b1.x)"
+    )
+    view = _analyze(tmp_path / "view", **{"wrapper.sql": f"CREATE VIEW v AS {body}"})
+    assert not _symbols(view)
+    assert not _edges(view, "sql:reads-from")
+    assert [item.code for item in view.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+    procedure = _analyze(
+        tmp_path / "procedure",
+        **{"wrapper.sql": f"CREATE PROCEDURE p AS BEGIN {body}; END"},
+    )
+    assert set(_symbols(procedure)) == {"p"}
+    assert not _edges(procedure, "sql:reads-from")
+    assert [item.code for item in procedure.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_grouped_wrapper_sources_are_read_and_temporary_sources_reject(
+    tmp_path: Path,
+) -> None:
+    declared = _analyze(
+        tmp_path / "declared",
+        **{
+            "grouped.sql": _go(
+                "CREATE TABLE dbo.a (x int)",
+                "CREATE TABLE dbo.t (x int)",
+                "CREATE VIEW v AS SELECT * FROM ((SELECT x FROM dbo.a) AS s JOIN dbo.t ON 1 = 1)",
+            )
+        },
+    )
+    assert not declared.diagnostics
+    assert _edges(declared, "sql:reads-from") == {("v", "dbo.a"), ("v", "dbo.t")}
+
+    temporary = _analyze(
+        tmp_path / "temporary",
+        **{
+            "grouped.sql": "CREATE VIEW v AS SELECT * FROM "
+            "((SELECT x FROM dbo.a) AS s JOIN #t ON 1 = 1)"
+        },
+    )
+    assert not _symbols(temporary)
+    assert [item.code for item in temporary.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+    existence = _analyze(
+        tmp_path / "existence",
+        **{
+            "grouped.sql": "CREATE VIEW v AS SELECT 1 AS y FROM dbo.a WHERE EXISTS "
+            "(SELECT 1 AS y FROM ((SELECT x FROM dbo.a) a1 JOIN #t ON 1 = 1))"
+        },
+    )
+    assert not _symbols(existence)
+    assert [item.code for item in existence.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_grouped_wrapper_body_is_read_once(tmp_path: Path) -> None:
+    sql = _go(
+        "CREATE TABLE dbo.Dup (x int)",
+        "CREATE TABLE dbo.Dup (x int)",
+        "CREATE VIEW v AS SELECT * FROM ((SELECT x FROM dbo.Dup) AS s)",
+    )
+    result = _analyze(tmp_path, **{"grouped.sql": sql})
+
+    ambiguous = sorted(
+        (item.location.range.start.line, item.location.range.start.character)
+        for item in result.diagnostics
+        if item.code is DiagnosticCode.AMBIGUOUS_REFERENCE
+    )
+    assert ambiguous == _reference_positions(sql, "CREATE VIEW v AS", "dbo.Dup")
+    assert len(ambiguous) == 1
+
+
+def test_ordered_parenthesized_with_clauses_read_outermost_first(tmp_path: Path) -> None:
+    sql = _go(
+        "CREATE TABLE dbo.o (x int)",
+        "CREATE TABLE dbo.i (x int)",
+        "CREATE VIEW v AS WITH o AS (SELECT x FROM dbo.o) "
+        "(WITH i AS (SELECT x FROM dbo.i) SELECT * FROM o JOIN i ON 1 = 1) "
+        "ORDER BY x OFFSET 0 ROWS",
+    )
+    result = _analyze(tmp_path, **{"nested_with.sql": sql})
+
+    assert not result.diagnostics
+    assert [target.label for _source, target, _edge in _sql_edges(result, "sql:reads-from")] == [
+        "dbo.o",
+        "dbo.i",
+    ]
+
+
 def test_nested_with_and_discovered_scopes_see_enclosing_cte_names(tmp_path: Path) -> None:
     sql = _go(
         "CREATE TABLE dbo.a (x int)",
