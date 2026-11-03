@@ -815,13 +815,7 @@ def _procedural_query_roots(
     batch: _Batch,
     diagnostics: list[Diagnostic],
 ) -> list[exp.Expression]:
-    """Select parser-exposed query roots from one declaration body.
-
-    Query roots are handed to ``_query_reads`` as complete expressions so its
-    CTE, subquery, join, and set-operation handling remains shared with views.
-    Traversal deliberately stops at query and DML boundaries: walking into
-    either would revisit nested queries or model DML source reads.
-    """
+    """Select parser-exposed query roots from one declaration body."""
     body = tree.args.get("expression")
     if kind == "FUNCTION":
         if not isinstance(body, exp.Return):
@@ -833,7 +827,25 @@ def _procedural_query_roots(
         return _nested_query_roots(expression)
     if not isinstance(body, exp.Block):
         return []
+    return _body_query_roots(body.expressions, item, batch, diagnostics)
 
+
+def _body_query_roots(
+    statements: Iterable[exp.Expression | None],
+    item: _File,
+    batch: _Batch,
+    diagnostics: list[Diagnostic],
+) -> list[exp.Expression]:
+    """Select the static query roots of one flat sequence of body statements.
+
+    Query roots are handed to ``_query_reads`` as complete expressions so its
+    CTE, subquery, join, and set-operation handling remains shared with views.
+    Traversal deliberately stops at query and DML boundaries: walking into
+    either would revisit nested queries or model DML source reads. ``DECLARE``,
+    ``SET`` and ``RETURN`` statements contribute the queries nested in their
+    expressions; the return forms the parser spells as an identifier alias
+    contribute nothing.
+    """
     roots: list[exp.Expression] = []
 
     def visit(statement: exp.Expression) -> None:
@@ -868,12 +880,31 @@ def _procedural_query_roots(
             if isinstance(loop_body, exp.Expression):
                 visit(loop_body)
             return
+        if isinstance(statement, (exp.Declare, exp.Set)):
+            roots.extend(_nested_query_roots(statement))
+            return
+        if isinstance(statement, exp.Return):
+            roots.extend(_nested_query_roots(statement.this))
+            return
+        if isinstance(statement, exp.Anonymous) and statement.name.upper() == "RETURN":
+            for argument in statement.expressions:
+                roots.extend(_nested_query_roots(argument))
+            return
+        if isinstance(statement, exp.Alias) and _bare_return_column(statement.this):
+            return
+        if _bare_return_column(statement):
+            return
         _unsupported(statement, item, batch, diagnostics)
 
-    for statement in body.expressions:
+    for statement in statements:
         if statement is not None:
             visit(statement)
     return roots
+
+
+def _bare_return_column(expression: exp.Expression | None) -> bool:
+    """Return whether a misparsed member is the bare ``RETURN`` identifier."""
+    return isinstance(expression, exp.Column) and expression.name.upper() == "RETURN"
 
 
 def _nested_query_roots(
