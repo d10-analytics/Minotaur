@@ -920,6 +920,53 @@ END;
     }
 
 
+@pytest.mark.parametrize(
+    ("member", "supported", "inferred"),
+    [
+        ("RETURN;", True, False),
+        ("return;", True, False),
+        ("Return;", True, False),
+        ("RETURN @r;", True, False),
+        ("RETURN (SELECT COUNT(*) FROM S.Hidden);", True, True),
+        ("return (SELECT COUNT(*) FROM S.Hidden);", True, True),
+        ("[RETURN];", False, False),
+        ('"RETURN";', False, False),
+        ("[RETURN] @r;", False, False),
+        ("[RETURN] (SELECT COUNT(*) FROM S.Hidden);", False, False),
+        ("dbo.RETURN;", False, False),
+        ("a.b.RETURN;", False, False),
+        ("dbo.RETURN @r;", False, False),
+        ("dbo.RETURN (SELECT COUNT(*) FROM S.Hidden);", False, False),
+        ("THROW;", False, False),
+        ("RESULT @r;", False, False),
+        ("RAISEERROR (SELECT COUNT(*) FROM S.Hidden);", False, False),
+    ],
+)
+def test_return_member_match_requires_the_bare_unquoted_identifier(
+    tmp_path: Path, member: str, supported: bool, inferred: bool
+) -> None:
+    sql = f"""\
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE S.Hidden (id int)
+GO
+CREATE PROCEDURE S.Read AS BEGIN
+SELECT * FROM S.Base;
+{member}
+END
+"""
+    result = _analyze(tmp_path, **{"members.sql": sql})
+
+    reads = {(edge[0].label, edge[1].label) for edge in _sql_edges(result, "sql:reads-from")}
+    assert ("S.Read", "S.Base") in reads
+    assert (("S.Read", "S.Hidden") in reads) == inferred
+    if supported:
+        assert not result.diagnostics
+    else:
+        assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+        assert result.diagnostics[0].location is not None
+
+
 def test_procedure_roots_exclude_dml_and_temporary_sources_locally(tmp_path: Path) -> None:
     sql = """\
 CREATE TABLE S.Base (id int)
