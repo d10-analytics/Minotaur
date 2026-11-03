@@ -921,10 +921,33 @@ CREATE PROCEDURE S.Read AS BEGIN SELECT * FROM S.Base; END
     assert [item.code for item in result.diagnostics] == [DiagnosticCode.PARSE_ERROR]
 
 
+def test_proc_spelling_records_the_same_procedure_facts_as_procedure(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.T (id int)
+GO
+CREATE FUNCTION dbo.F(@x int) RETURNS int AS RETURN @x
+GO
+CREATE PROC dbo.P2 AS SELECT dbo.F(id) FROM dbo.T
+GO
+CREATE PROCEDURE dbo.P3 AS SELECT dbo.F(id) FROM dbo.T
+"""
+    result = _analyze(tmp_path, **{"procedures.sql": sql})
+
+    assert not result.diagnostics
+    symbols = _symbols(result)
+    assert {label: symbols[label].symbol_kind for label in ("dbo.P2", "dbo.P3")} == {
+        "dbo.P2": "sql:procedure",
+        "dbo.P3": "sql:procedure",
+    }
+    assert _edges(result, "sql:reads-from") == {("dbo.P2", "dbo.T"), ("dbo.P3", "dbo.T")}
+    assert _edges(result, "sql:calls") == {("dbo.P2", "dbo.F"), ("dbo.P3", "dbo.F")}
+
+
 @pytest.mark.parametrize(
     "statement",
     [
         "CREATE OR REPLACE PROCEDURE S.P AS SELECT 1",
+        "CREATE OR REPLACE PROC S.P AS SELECT 1",
         "CREATE OR REPLACE FUNCTION S.F() RETURNS int AS RETURN 1",
         "-- leading comment\nCREATE OR REPLACE PROCEDURE S.P AS SELECT 1",
         (
@@ -959,6 +982,8 @@ CREATE FUNCTION S.F() RETURNS int AS RETURN 1
     [
         "CREATE PROCEDURE S.P",
         "CREATE PROCEDURE S.P AS",
+        "CREATE PROC S.P",
+        "CREATE PROC S.P AS",
         "CREATE FUNCTION S.F() RETURNS int",
         "CREATE FUNCTION S.F() RETURNS int AS",
     ],
@@ -2229,6 +2254,49 @@ ALTER TABLE Child ADD CONSTRAINT fk_missing_target FOREIGN KEY (a) REFERENCES Mi
     unresolved_edges = _sql_edges(result, "references")
     assert len(unresolved_edges) == 2
     assert all(item.extensions is None for _, _, edge in unresolved_edges for item in edge.evidence)
+
+
+def test_column_less_references_keep_statements_and_record_no_column_payload(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE dbo.Parent (id int PRIMARY KEY)
+GO
+CREATE TABLE dbo.Child (id int, pid int REFERENCES dbo.Parent)
+GO
+CREATE TABLE dbo.Child2 (id int, pid int, FOREIGN KEY (pid) REFERENCES dbo.Parent)
+GO
+CREATE TABLE dbo.Child3 (id int, pid int)
+GO
+ALTER TABLE dbo.Child3 ADD CONSTRAINT fk3 FOREIGN KEY (pid) REFERENCES dbo.Parent
+GO
+CREATE VIEW dbo.V AS SELECT id FROM dbo.Child
+"""
+    result = _analyze(tmp_path, **{"columnless.sql": sql})
+
+    assert not result.diagnostics
+    symbols = _symbols(result)
+    assert {
+        label: symbols[label].symbol_kind for label in ("dbo.Child", "dbo.Child2", "dbo.Child3")
+    } == {
+        "dbo.Child": "sql:table",
+        "dbo.Child2": "sql:table",
+        "dbo.Child3": "sql:table",
+    }
+    edges = _sql_edges(result, "sql:foreign-key-to")
+    assert {(source.label, target.label) for source, target, _edge in edges} == {
+        ("dbo.Child", "dbo.Parent"),
+        ("dbo.Child2", "dbo.Parent"),
+        ("dbo.Child3", "dbo.Parent"),
+    }
+    for _source, _target, edge in edges:
+        assert all(record.extensions is None for record in edge.evidence)
+        assert "foreign_key_columns" not in str(edge.to_dict())
+    assert [component["size"] for component in _fk_components(result)] == [4]
+    assert ("dbo.V", "dbo.Child") in _edges(result, "sql:reads-from")
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
 
 
 @pytest.mark.parametrize("qualified", [False, True])
