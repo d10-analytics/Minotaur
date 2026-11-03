@@ -1242,6 +1242,9 @@ def _query_calls(
 _QUERY_TYPES = (exp.Query, exp.Select, exp.Union, exp.Intersect, exp.Except)
 _SET_OPERATION_TYPES = (exp.Union, exp.Intersect, exp.Except)
 _ReadRow = tuple[tuple[str, ...], str, Location]
+# One pending query scope: its expression, visible CTE names, output slot, and
+# the ids of the subqueries already collected from its own attached joins.
+_Scope = tuple[Any, frozenset[str], list[Any], frozenset[int]]
 
 
 def _cte_dependencies_cyclic(with_expr: exp.With, aliases: set[str]) -> bool:
@@ -1261,19 +1264,20 @@ def _cte_dependencies_cyclic(with_expr: exp.With, aliases: set[str]) -> bool:
 
 
 def _push_scope(
-    scopes: list[tuple[Any, frozenset[str], list[Any]]],
+    scopes: list[_Scope],
     slot: list[Any],
     child: Any,
     names: frozenset[str],
+    collected: frozenset[int] = frozenset(),
 ) -> None:
     child_slot: list[Any] = []
     slot.append(child_slot)
-    scopes.append((child, names, child_slot))
+    scopes.append((child, names, child_slot, collected))
 
 
 def _push_ctes(
     with_expr: exp.With,
-    scopes: list[tuple[Any, frozenset[str], list[Any]]],
+    scopes: list[_Scope],
     slot: list[Any],
     local: set[str],
 ) -> bool:
@@ -1291,40 +1295,69 @@ def _push_ctes(
     return True
 
 
-def _query_sources(term: exp.Expression) -> Iterable[exp.Expression]:
+def _grouping_wrapper(term: exp.Subquery) -> exp.Subquery | None:
+    """Return the inner wrapper when ``term`` only adds grouping parentheses."""
+    inner = term.this
+    if not isinstance(inner, exp.Subquery):
+        return None
+    if any(value for key, value in term.args.items() if key != "this"):
+        return None
+    return inner
+
+
+def _query_sources(
+    term: exp.Expression,
+) -> Iterable[tuple[exp.Expression, frozenset[int]]]:
     """Yield one source term and the sources attached to it, in written order.
 
     sqlglot attaches a chained join to the term it follows, so a nested join is
-    a term's own ``joins`` argument rather than the outer query's.
+    a term's own ``joins`` argument rather than the outer query's. A grouping
+    wrapper is kept as the source so its body is read once, but the sources
+    chained to the wrapper it groups are collected as well. Each source carries
+    the ids of the subqueries collected beneath it so a later clause walk can
+    skip exactly those instead of visiting them a second time.
     """
     if isinstance(term, exp.Join):
         if term.this is not None:
             yield from _query_sources(term.this)
-        for nested in term.args.get("joins") or ():
-            if isinstance(nested, exp.Join):
-                yield from _query_sources(nested)
         return
-    yield term
-    if isinstance(term, (exp.Table, exp.Subquery)):
-        for nested in term.args.get("joins") or ():
-            if isinstance(nested, exp.Join):
-                yield from _query_sources(nested)
+    effective: exp.Expression = term
+    while isinstance(effective, exp.Subquery):
+        grouping = _grouping_wrapper(effective)
+        if grouping is None:
+            break
+        effective = grouping
+    nested: list[tuple[exp.Expression, frozenset[int]]] = []
+    if isinstance(effective, (exp.Table, exp.Subquery)):
+        for join in effective.args.get("joins") or ():
+            if isinstance(join, exp.Join):
+                nested.extend(_query_sources(join))
+    collected = frozenset(
+        id(child) for child, _child_collected in nested if isinstance(child, exp.Subquery)
+    )
+    yield term, collected
+    yield from nested
 
 
 def _push_clause_scopes(
-    scopes: list[tuple[Any, frozenset[str], list[Any]]],
+    scopes: list[_Scope],
     slot: list[Any],
     node: exp.Expression,
     names: frozenset[str],
+    collected: frozenset[int] = frozenset(),
 ) -> None:
-    """Push queries nested in the ordering and paging clauses of a wrapper or set operation."""
+    """Push queries nested in the ordering and paging clauses of a wrapper or set operation.
+
+    Subqueries in ``collected`` were already gathered as sources of this scope.
+    """
     for key, value in node.args.items():
         if key in {"this", "expression", "with_"}:
             continue
         for part in value if isinstance(value, list) else [value]:
             if isinstance(part, exp.Expression):
                 for nested in _nested_query_roots(part):
-                    _push_scope(scopes, slot, nested, names)
+                    if id(nested) not in collected:
+                        _push_scope(scopes, slot, nested, names)
 
 
 def _query_reads(
@@ -1340,17 +1373,17 @@ def _query_reads(
     # Each scope owns an output slot; child scopes are nested slots, so the
     # flattened order follows the scope tree regardless of processing order.
     root_slot: list[Any] = []
-    pending: list[tuple[Any, frozenset[str], list[Any]]] = [(expression, frozenset(), root_slot)]
+    pending: list[_Scope] = [(expression, frozenset(), root_slot, frozenset())]
 
     while pending:
-        query, cte_names, slot = pending.pop()
+        query, cte_names, slot, collected = pending.pop()
         wrappers: list[exp.Subquery] = []
         while isinstance(query, exp.Subquery):
             wrappers.append(query)
             query = query.this
         if not isinstance(query, (exp.Select, *_SET_OPERATION_TYPES)):
             return None
-        scopes: list[tuple[Any, frozenset[str], list[Any]]] = []
+        scopes: list[_Scope] = []
 
         local = set(cte_names)
         for holder in (*wrappers, query):
@@ -1365,7 +1398,7 @@ def _query_reads(
         else:
             if query.args.get("into") is not None:
                 return None
-            sources: list[exp.Expression] = []
+            sources: list[tuple[exp.Expression, frozenset[int]]] = []
             from_clause = query.args.get("from_")
             if isinstance(from_clause, exp.From) and from_clause.this is not None:
                 sources.extend(_query_sources(from_clause.this))
@@ -1375,7 +1408,7 @@ def _query_reads(
                 if isinstance(join, exp.Join):
                     sources.extend(_query_sources(join))
             derived: set[int] = set()
-            for source in sources:
+            for source, source_collected in sources:
                 if isinstance(source, exp.Table):
                     if _table_function_parts(source) is not None:
                         continue
@@ -1392,7 +1425,7 @@ def _query_reads(
                     )
                 elif isinstance(source, exp.Subquery):
                     derived.add(id(source))
-                    _push_scope(scopes, slot, source, visible)
+                    _push_scope(scopes, slot, source, visible, source_collected)
                 else:
                     return None
             # Queries nested in any other part of the SELECT are scopes too.
@@ -1406,7 +1439,7 @@ def _query_reads(
                         for nested in _nested_query_roots(part, skip):
                             _push_scope(scopes, slot, nested, visible)
         for wrapper in wrappers:
-            _push_clause_scopes(scopes, slot, wrapper, visible)
+            _push_clause_scopes(scopes, slot, wrapper, visible, collected)
         pending.extend(reversed(scopes))
 
     result: list[_ReadRow] = []
