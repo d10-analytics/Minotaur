@@ -178,6 +178,31 @@ def test_cyclic_views_and_branches_entering_cycles_have_no_depth_warning(
     assert not [item for item in result.warnings if item.code is DiagnosticCode.VIEW_DEPTH_WARNING]
 
 
+def test_view_diamond_reads_both_branches_without_a_finding(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE VIEW S.L AS SELECT id FROM S.Base
+GO
+CREATE VIEW S.R AS SELECT id FROM S.Base
+GO
+CREATE VIEW S.Top AS SELECT l.id FROM S.L l JOIN S.R r ON l.id = r.id
+"""
+    result = _analyze(tmp_path, **{"diamond.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+
+    # A cycle or depth pass that treats the repeated S.Base as a finding would
+    # add a warning here.
+    assert not result.warnings
+    assert len(edges) == 4
+    assert {(source.label, target.label) for source, target, _ in edges} == {
+        ("S.L", "S.Base"),
+        ("S.R", "S.Base"),
+        ("S.Top", "S.L"),
+        ("S.Top", "S.R"),
+    }
+
+
 def _count_module_calls(module_file: str, action: Callable[[], object]) -> tuple[object, int]:
     """Run action, counting Python calls whose code lives in module_file."""
     calls = 0
@@ -526,6 +551,36 @@ END
     assert {location for edge in edges for location in _evidence_locations(edge[2])} == {
         ("condition.sql", 5, sql.splitlines()[5].index("S.Base")),
         ("condition.sql", 5, sql.splitlines()[5].index("S.Other")),
+    }
+
+
+def test_procedure_if_else_reads_both_branches_on_the_if_line(tmp_path: Path) -> None:
+    # The `IF … BEGIN … END ELSE BEGIN … END` form is a known parser limit, so
+    # it is deliberately not asserted here; only the single-statement branch
+    # form below is.
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE S.Other (id int)
+GO
+CREATE PROCEDURE dbo.P @f int AS BEGIN
+IF @f = 1 SELECT id FROM S.Base ELSE SELECT id FROM S.Other
+END
+"""
+    result = _analyze(tmp_path, **{"else.sql": sql})
+    edges = _sql_edges(result, "sql:reads-from")
+    if_line = sql.splitlines()[5]
+
+    # Dropping the false branch from the body walker would leave only S.Base.
+    assert not result.diagnostics
+    assert len(edges) == 2
+    assert {(source.label, target.label) for source, target, _ in edges} == {
+        ("dbo.P", "S.Base"),
+        ("dbo.P", "S.Other"),
+    }
+    assert {location for _, _, edge in edges for location in _evidence_locations(edge)} == {
+        ("else.sql", 5, if_line.index("S.Base")),
+        ("else.sql", 5, if_line.index("S.Other")),
     }
 
 
@@ -892,6 +947,58 @@ END;
     assert _evidence_locations(calls[0][2]) == {("declarations.sql", 9, 23)}
     assert not [
         node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
+def test_documented_call_boundaries_keep_declarations_without_call_facts(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE S.Base (id int)
+GO
+CREATE TABLE S.T (id int DEFAULT dbo.F(1))
+GO
+CREATE TABLE S.T2 (id int, c AS dbo.F(id))
+GO
+CREATE FUNCTION S.G(@x int) RETURNS int AS RETURN dbo.F(@x)
+GO
+CREATE PROCEDURE S.P AS BEGIN SET @r = dbo.F(1); END
+GO
+CREATE PROCEDURE S.E AS BEGIN EXEC dbo.Q; END
+GO
+CREATE FUNCTION dbo.F(@x int) RETURNS int AS RETURN @x
+GO
+CREATE PROCEDURE dbo.Q AS BEGIN SELECT 1; END
+GO
+CREATE VIEW S.V AS SELECT dbo.F(id) AS v FROM S.Base
+"""
+    result = _analyze(tmp_path, **{"boundaries.sql": sql})
+
+    assert {label: node.symbol_kind for label, node in _symbols(result).items()} == {
+        "S.Base": "sql:table",
+        "S.T": "sql:table",
+        "S.T2": "sql:table",
+        "S.G": "sql:function",
+        "S.P": "sql:procedure",
+        "S.E": "sql:procedure",
+        "dbo.F": "sql:function",
+        "dbo.Q": "sql:procedure",
+        "S.V": "sql:view",
+    }
+    # Recording a call at a DEFAULT, computed column, RETURN, SET or EXEC
+    # boundary would add an edge beside the control's pair; a broken control
+    # resolution would empty the list, so neither claim is vacuous.
+    assert [
+        (source.label, target.label) for source, target, _ in _sql_edges(result, "sql:calls")
+    ] == [("S.V", "dbo.F")]
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+    # EXEC is the one documented unsupported member here; the SET direct call
+    # and every other boundary statement stay diagnostic-free.
+    exec_line = sql.splitlines().index("CREATE PROCEDURE S.E AS BEGIN EXEC dbo.Q; END")
+    assert [(item.code, item.location.range.start.line) for item in result.diagnostics] == [
+        (DiagnosticCode.UNSUPPORTED_SYNTAX, exec_line)
     ]
 
 
@@ -3491,7 +3598,9 @@ def test_rejected_standalone_alter_is_atomic(tmp_path: Path, alter: str) -> None
         "on delete cascade on update set null not for replication",
     ],
 )
-def test_decorated_standalone_fk_emits_payload_free_edge(tmp_path: Path, options: str) -> None:
+def test_decorated_standalone_fk_records_the_column_payload_per_evidence(
+    tmp_path: Path, options: str
+) -> None:
     sql = (
         "CREATE TABLE Parent (Id int)\nGO\nCREATE TABLE Child (Id int)\nGO\n"
         "ALTER TABLE Child ADD CONSTRAINT FK FOREIGN KEY (Id) REFERENCES Parent(Id) "
@@ -3502,7 +3611,10 @@ def test_decorated_standalone_fk_emits_payload_free_edge(tmp_path: Path, options
     assert not result.diagnostics
     assert len(edges) == 1
     assert (edges[0][0].label, edges[0][1].label) == ("Child", "Parent")
-    assert edges[0][2].extensions is None
+    # Dropping the payload or changing either column mapping fails here.
+    assert [item.to_dict()["extensions"] for item in edges[0][2].evidence] == [
+        {"minotaur-sql": {"foreign_key_columns": [{"local": "Id", "referenced": "Id"}]}}
+    ]
     assert _evidence_locations(edges[0][2]) == {
         ("decorated.sql", 4, sql.splitlines()[4].index("Parent"))
     }
