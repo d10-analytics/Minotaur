@@ -596,6 +596,12 @@ def _interpret_statement(
     return None
 
 
+def _create_kind(tree: exp.Create) -> str:
+    """Return the upper-cased declaration kind with parser spellings unified."""
+    kind = str(tree.args.get("kind") or "").upper()
+    return "PROCEDURE" if kind == "PROC" else kind
+
+
 def _interpret_create(
     tree: Any,
     item: _File,
@@ -604,7 +610,7 @@ def _interpret_create(
     declarations: list[_Declaration],
     nodes: list[Node],
 ) -> _Observation | None:
-    kind = str(tree.args.get("kind") or "").upper()
+    kind = _create_kind(tree)
     target = tree.this
     if kind in {"PROCEDURE", "FUNCTION"}:
         if tree.args.get("exists") or tree.args.get("clone") or tree.args.get("refresh"):
@@ -1000,7 +1006,9 @@ def _foreign_keys(
 def _reference_target(
     reference: exp.Reference, item: _File, batch: _Batch
 ) -> tuple[tuple[str, ...], str, Location] | None:
-    referenced = reference.this.this if isinstance(reference.this, exp.Schema) else None
+    referenced = reference.this
+    if isinstance(referenced, exp.Schema):
+        referenced = referenced.this
     if not isinstance(referenced, exp.Table):
         return None
     parts = _parts(referenced)
