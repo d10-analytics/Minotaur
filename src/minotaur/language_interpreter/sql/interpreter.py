@@ -1262,6 +1262,22 @@ def _push_scope(
     scopes.append((child, names, child_slot))
 
 
+def _push_clause_scopes(
+    scopes: list[tuple[Any, frozenset[str], list[Any]]],
+    slot: list[Any],
+    node: exp.Expression,
+    names: frozenset[str],
+) -> None:
+    """Push queries nested in the ordering and paging clauses of a wrapper or set operation."""
+    for key, value in node.args.items():
+        if key in {"this", "expression", "with_"}:
+            continue
+        for part in value if isinstance(value, list) else [value]:
+            if isinstance(part, exp.Expression):
+                for nested in _nested_query_roots(part):
+                    _push_scope(scopes, slot, nested, names)
+
+
 def _query_reads(
     expression: Any,
     item: _File,
@@ -1279,7 +1295,9 @@ def _query_reads(
 
     while pending:
         query, cte_names, slot = pending.pop()
+        wrappers: list[exp.Subquery] = []
         while isinstance(query, exp.Subquery):
+            wrappers.append(query)
             query = query.this
         if not isinstance(query, (exp.Select, *_SET_OPERATION_TYPES)):
             return None
@@ -1302,6 +1320,7 @@ def _query_reads(
         if isinstance(query, _SET_OPERATION_TYPES):
             _push_scope(scopes, slot, query.left, visible)
             _push_scope(scopes, slot, query.right, visible)
+            _push_clause_scopes(scopes, slot, query, visible)
         else:
             if query.args.get("into") is not None:
                 return None
@@ -1344,6 +1363,8 @@ def _query_reads(
                     if isinstance(part, exp.Expression):
                         for nested in _nested_query_roots(part, skip):
                             _push_scope(scopes, slot, nested, visible)
+        for wrapper in wrappers:
+            _push_clause_scopes(scopes, slot, wrapper, visible)
         pending.extend(reversed(scopes))
 
     result: list[_ReadRow] = []
