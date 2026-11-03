@@ -1295,43 +1295,33 @@ def _push_ctes(
     return True
 
 
-def _grouping_wrapper(term: exp.Subquery) -> exp.Subquery | None:
-    """Return the inner wrapper when ``term`` only adds grouping parentheses."""
-    inner = term.this
-    if not isinstance(inner, exp.Subquery):
-        return None
-    if any(value for key, value in term.args.items() if key != "this"):
-        return None
-    return inner
-
-
 def _query_sources(
     term: exp.Expression,
 ) -> Iterable[tuple[exp.Expression, frozenset[int]]]:
     """Yield one source term and the sources attached to it, in written order.
 
     sqlglot attaches a chained join to the term it follows, so a nested join is
-    a term's own ``joins`` argument rather than the outer query's. A grouping
-    wrapper is kept as the source so its body is read once, but the sources
-    chained to the wrapper it groups are collected as well. Each source carries
-    the ids of the subqueries collected beneath it so a later clause walk can
-    skip exactly those instead of visiting them a second time.
+    a term's own ``joins`` argument rather than the outer query's. A chain of
+    ``Subquery`` wrappers is walked whole so joins attached at every level are
+    collected, while only the outer wrapper is yielded so its body is read
+    once. Each source carries the ids of the subqueries collected beneath it
+    so a later clause walk can skip exactly those instead of visiting them a
+    second time.
     """
     if isinstance(term, exp.Join):
         if term.this is not None:
             yield from _query_sources(term.this)
         return
-    effective: exp.Expression = term
-    while isinstance(effective, exp.Subquery):
-        grouping = _grouping_wrapper(effective)
-        if grouping is None:
-            break
-        effective = grouping
     nested: list[tuple[exp.Expression, frozenset[int]]] = []
-    if isinstance(effective, (exp.Table, exp.Subquery)):
-        for join in effective.args.get("joins") or ():
-            if isinstance(join, exp.Join):
-                nested.extend(_query_sources(join))
+    node: exp.Expression = term
+    while True:
+        if isinstance(node, (exp.Table, exp.Subquery)):
+            for join in node.args.get("joins") or ():
+                if isinstance(join, exp.Join):
+                    nested.extend(_query_sources(join))
+        if not isinstance(node, exp.Subquery):
+            break
+        node = node.this
     collected = frozenset(
         id(child) for child, _child_collected in nested if isinstance(child, exp.Subquery)
     )
