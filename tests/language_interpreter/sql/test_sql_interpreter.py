@@ -1297,6 +1297,227 @@ SELECT * FROM changed
     assert all(item.code == DiagnosticCode.UNSUPPORTED_SYNTAX for item in result.diagnostics)
 
 
+def test_ordered_parenthesized_view_cte_reads_body_and_rejects_variants(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE VIEW v AS
+WITH q AS (SELECT x FROM dbo.a) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+GO
+CREATE VIEW self_ref AS
+WITH q AS (SELECT x FROM dbo.a UNION ALL SELECT x FROM q) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+GO
+CREATE VIEW mutual_ref AS
+WITH q AS (SELECT x FROM r), r AS (SELECT x FROM q) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+GO
+CREATE VIEW temporary_ref AS
+WITH q AS (SELECT x FROM #t) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+"""
+    result = _analyze(tmp_path, **{"ordered.sql": sql})
+
+    assert set(_symbols(result)) == {"dbo.a", "v"}
+    assert _edges(result, "sql:reads-from") == {("v", "dbo.a")}
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+    assert [item.code for item in result.diagnostics] == [
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+        DiagnosticCode.UNSUPPORTED_SYNTAX,
+    ]
+
+
+def test_ordered_parenthesized_function_return_cte_reads_body_once(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE FUNCTION f(@id int) RETURNS TABLE AS
+RETURN WITH q AS (SELECT x FROM dbo.a) (SELECT x FROM q)
+ORDER BY x OFFSET 0 ROWS
+"""
+    result = _analyze(tmp_path, **{"function.sql": sql})
+
+    assert not result.diagnostics
+    assert _edges(result, "sql:reads-from") == {("f", "dbo.a")}
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
+def test_ordered_parenthesized_cte_join_sources_are_read(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE TABLE dbo.b (x int)
+GO
+CREATE VIEW v AS
+WITH q AS (SELECT x FROM dbo.a) (SELECT x FROM q JOIN dbo.b ON 1 = 1)
+ORDER BY x OFFSET 0 ROWS
+"""
+    result = _analyze(tmp_path, **{"join.sql": sql})
+
+    assert not result.diagnostics
+    assert _edges(result, "sql:reads-from") == {("v", "dbo.a"), ("v", "dbo.b")}
+
+
+def test_ordered_parenthesized_cte_is_visible_to_wrapper_order_clause(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE VIEW v AS
+WITH q AS (SELECT x FROM dbo.a) (SELECT x FROM q)
+ORDER BY (SELECT MAX(x) FROM q) OFFSET 0 ROWS
+"""
+    result = _analyze(tmp_path, **{"order.sql": sql})
+
+    assert not result.diagnostics
+    assert _edges(result, "sql:reads-from") == {("v", "dbo.a")}
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
+def test_parenthesized_nested_join_rejects_view_and_existence_forms(tmp_path: Path) -> None:
+    forms = {
+        "view": (
+            "CREATE VIEW v AS SELECT a.x\n"
+            "FROM dbo.a\n"
+            "JOIN dbo.b\n"
+            "JOIN (dbo.c c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x\n"
+        ),
+        "temporary": (
+            "CREATE VIEW v AS SELECT a.x\n"
+            "FROM dbo.a\n"
+            "JOIN dbo.b\n"
+            "JOIN (#t c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x\n"
+        ),
+        "existence": (
+            "CREATE VIEW v AS SELECT 1 AS marker\n"
+            "WHERE EXISTS (\n"
+            " SELECT a.x FROM dbo.a\n"
+            " JOIN dbo.b\n"
+            " JOIN (dbo.c c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x\n"
+            ")\n"
+        ),
+    }
+    for name, sql in forms.items():
+        result = _analyze(tmp_path / name, **{"parenthesized.sql": sql})
+        assert not _symbols(result), name
+        assert not _edges(result, "sql:reads-from"), name
+        assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX], (
+            name
+        )
+
+
+def test_parenthesized_nested_join_drops_only_the_affected_query_roots(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.keep (x int)
+GO
+CREATE PROCEDURE p AS BEGIN
+SELECT * FROM dbo.keep;
+SELECT a.x FROM dbo.a JOIN dbo.b JOIN (dbo.c c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x;
+END
+GO
+CREATE FUNCTION f(@id int) RETURNS TABLE AS RETURN (
+ SELECT a.x FROM dbo.a JOIN dbo.b JOIN (dbo.c c JOIN dbo.d d ON c.x = d.x) ON b.x = c.x ON a.x = b.x
+)
+"""
+    result = _analyze(tmp_path, **{"roots.sql": sql})
+
+    assert set(_symbols(result)) == {"dbo.keep", "p", "f"}
+    assert _edges(result, "sql:reads-from") == {("p", "dbo.keep")}
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX] * 2
+
+
+def test_nested_join_sources_are_read_at_their_own_locations(tmp_path: Path) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE TABLE dbo.b (x int)
+GO
+CREATE TABLE dbo.c (x int)
+GO
+CREATE VIEW v AS
+SELECT a.x FROM dbo.a
+JOIN dbo.b
+JOIN dbo.c ON b.x = c.x ON a.x = b.x
+"""
+    result = _analyze(tmp_path, **{"nested.sql": sql})
+    edges = {
+        (source.label, target.label): edge
+        for source, target, edge in _sql_edges(result, "sql:reads-from")
+    }
+    lines = sql.splitlines()
+    written = {
+        "dbo.a": next(text for text in lines if "FROM dbo.a" in text),
+        "dbo.b": next(text for text in lines if text.startswith("JOIN dbo.b")),
+        "dbo.c": next(text for text in lines if text.startswith("JOIN dbo.c")),
+    }
+
+    assert not result.diagnostics
+    assert set(edges) == {("v", "dbo.a"), ("v", "dbo.b"), ("v", "dbo.c")}
+    for name, text in written.items():
+        line = lines.index(text)
+        assert _evidence_locations(edges[("v", name)]) == {("nested.sql", line, text.index(name))}
+    assert [target.label for _source, target, _edge in _sql_edges(result, "sql:reads-from")] == [
+        "dbo.a",
+        "dbo.b",
+        "dbo.c",
+    ]
+
+
+def test_nested_join_temporary_source_rejects_whole_view(tmp_path: Path) -> None:
+    sql = """\
+CREATE VIEW v AS
+SELECT a.x FROM dbo.a
+JOIN dbo.b
+JOIN #t ON b.x = #t.x ON a.x = b.x
+"""
+    result = _analyze(tmp_path, **{"temporary.sql": sql})
+
+    assert not _symbols(result)
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
+def test_exists_body_nested_join_reads_sources_and_rejects_temporary(
+    tmp_path: Path,
+) -> None:
+    sql = """\
+CREATE TABLE dbo.a (x int)
+GO
+CREATE TABLE dbo.b (x int)
+GO
+CREATE TABLE dbo.c (x int)
+GO
+CREATE VIEW v AS SELECT 1 AS marker
+WHERE EXISTS (
+ SELECT a.x FROM dbo.a
+ JOIN dbo.b
+ JOIN dbo.c ON b.x = c.x ON a.x = b.x
+)
+GO
+CREATE VIEW temporary_v AS SELECT 1 AS marker
+WHERE EXISTS (
+ SELECT a.x FROM dbo.a
+ JOIN dbo.b
+ JOIN #t ON b.x = #t.x ON a.x = b.x
+)
+"""
+    result = _analyze(tmp_path, **{"exists.sql": sql})
+
+    assert set(_symbols(result)) == {"dbo.a", "dbo.b", "dbo.c", "v"}
+    assert _edges(result, "sql:reads-from") == {
+        ("v", "dbo.a"),
+        ("v", "dbo.b"),
+        ("v", "dbo.c"),
+    }
+    assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
+
+
 def test_unsupported_query_and_near_miss_do_not_emit_partial_facts(tmp_path: Path) -> None:
     result = _analyze(
         tmp_path,
