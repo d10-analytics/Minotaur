@@ -2074,6 +2074,60 @@ more"""
     ]
 
 
+@pytest.mark.parametrize(
+    ("body", "opener_line"),
+    [
+        ("SELECT 'unterminated\nmore\n", 2),
+        ('SELECT "unterminated\nmore\n', 2),
+        ("SELECT [unterminated\nmore\n", 2),
+        ("SELECT 1 /* outer\nstill /* inner\nopen\n", 2),
+        ("SELECT 'closed'\nSELECT 'unterminated\nmore\n", 3),
+    ],
+    ids=["quote", "double-quote", "bracket", "nested-comment", "reopened-quote"],
+)
+def test_unterminated_lexical_state_is_located_on_its_opening_line(
+    tmp_path: Path, body: str, opener_line: int
+) -> None:
+    sql = f"CREATE TABLE A (id int)\nGO\n{body}"
+    result = _analyze(tmp_path, **{"open.sql": sql})
+
+    assert [node.label for node in result.document.nodes] == ["open.sql"]
+    assert _diagnostic_spans(result) == [
+        (
+            "open.sql",
+            DiagnosticCode.PARSE_ERROR,
+            (opener_line, 0, opener_line, len(sql.split("\n")[opener_line])),
+        )
+    ]
+
+
+def test_unsupported_fallback_covers_the_first_statement_line(tmp_path: Path) -> None:
+    # The batch opens with an empty line and a spaces-only line, and the opaque
+    # member is indented, so only the first statement line is at column 0.
+    sql = "CREATE TABLE S.Base (id int)\nGO\n\n   \n  COMMIT TRANSACTION;\n"
+    result = _analyze(tmp_path, **{"opaque.sql": sql})
+
+    assert _diagnostic_spans(result) == [
+        ("opaque.sql", DiagnosticCode.UNSUPPORTED_SYNTAX, (4, 0, 4, len(sql.split("\n")[4])))
+    ]
+
+
+def test_bare_carriage_return_line_starts_match_the_line_index(tmp_path: Path) -> None:
+    parse = "CREATE TABLE A (id int)\nGO\n\r\rCREATE TABLE Broken(\n"
+    parsed = _analyze(tmp_path / "parse", **{"cr.sql": parse})
+    assert "Broken" not in _symbols(parsed)
+    assert _diagnostic_spans(parsed) == [
+        ("cr.sql", DiagnosticCode.PARSE_ERROR, (4, 0, 4, len("CREATE TABLE Broken(")))
+    ]
+
+    lexical = "SELECT 1\r/* open\nmore\n"
+    scanned = _analyze(tmp_path / "scan", **{"cr.sql": lexical})
+    assert [node.label for node in scanned.document.nodes] == ["cr.sql"]
+    assert _diagnostic_spans(scanned) == [
+        ("cr.sql", DiagnosticCode.PARSE_ERROR, (1, 0, 1, len("/* open")))
+    ]
+
+
 def test_batch_and_statement_recovery_keeps_supported_siblings(tmp_path: Path) -> None:
     result = _analyze(
         tmp_path,
