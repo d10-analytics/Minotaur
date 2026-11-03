@@ -1762,14 +1762,7 @@ def _unsupported(
     location = _identifier_location(tree, item.raw.relative, item.line_index, batch.start)
     if location is None:
         location = _batch_line_location(batch, item.raw.relative, item.line_index)
-    diagnostics.append(
-        Diagnostic(
-            DiagnosticCode.UNSUPPORTED_SYNTAX,
-            item.raw.relative,
-            "unsupported T-SQL syntax",
-            location,
-        )
-    )
+    _unsupported_at(location, item, diagnostics)
 
 
 def _unsupported_at(location: Location, item: _File, diagnostics: list[Diagnostic]) -> None:
@@ -1888,7 +1881,7 @@ def _scan_batches(
                 DiagnosticCode.PARSE_ERROR,
                 path,
                 "unterminated SQL lexical state",
-                _line_location(path, line_index, *_line_bounds(source, opened_at)),
+                _line_location(path, line_index, *_line_bounds(line_index, opened_at)),
             )
         )
         return [], diagnostics, False
@@ -1897,11 +1890,16 @@ def _scan_batches(
     return batches, diagnostics, True
 
 
-def _line_bounds(source: str, offset: int) -> tuple[int, int]:
-    """Return the source offsets bounding the line that holds ``offset``."""
-    start = source.rfind("\n", 0, offset) + 1
-    end = source.find("\n", offset)
-    return start, len(source) if end < 0 else end
+def _line_bounds(line_index: LineIndex, offset: int) -> tuple[int, int]:
+    """Return the source offsets bounding the line that holds ``offset``.
+
+    The start comes from the shared line model, so a lone carriage return also
+    begins a line; the end keeps the batch rule of stopping at the next line
+    feed or the end of the source.
+    """
+    start = line_index.line_starts[line_index.position(offset).line]
+    end = line_index.source.find("\n", offset)
+    return start, len(line_index.source) if end < 0 else end
 
 
 def _batch_line_location(batch: _Batch, path: str, line_index: LineIndex) -> Location:
@@ -1910,12 +1908,9 @@ def _batch_line_location(batch: _Batch, path: str, line_index: LineIndex) -> Loc
     A batch may open with blank lines after a ``GO`` boundary, so its raw start
     can be an empty line ahead of the first statement character.
     """
-    offset = 0
     text = batch.text
-    while offset < len(text) and text[offset].isspace():
-        offset += 1
-    first = batch.start + offset if offset < len(text) else batch.start
-    start, end = _line_bounds(line_index.source, first)
+    first = batch.start + len(text) - len(text.lstrip())
+    start, end = _line_bounds(line_index, first)
     return _line_location(path, line_index, start, end)
 
 
