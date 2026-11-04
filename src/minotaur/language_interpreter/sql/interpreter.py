@@ -91,8 +91,9 @@ class _FunctionBody:
     """The top-level trees one multi-statement function body owns.
 
     ``representable`` says whether the parser exposed the body as flat
-    statements. ``statements`` holds those trees for the shared walker; an
-    unrepresentable body contributes none of them.
+    statements, or folded a sole ``RETURN`` body's closing ``END`` into the
+    declaration's own return tree. ``statements`` holds those trees for the
+    shared walker; an unrepresentable body contributes none of them.
     """
 
     representable: bool
@@ -686,11 +687,17 @@ def _function_body(
 
     The body is representable only when the declaration's own expression and
     every following tree through the first end statement are flat statements.
+    A sole ``RETURN`` body without ``;`` before ``END`` is the one exception:
+    the parser folds the closing ``END`` into the return tree, so that tree
+    closes the body at the declaration and no following tree belongs to it.
     An unrepresentable body owns every tree up to, but excluding, the next
     declaration boundary or the batch end, so a later declaration that the
     parser keeps as its own tree is still analyzed.
     """
     expression = tree.args.get("expression")
+    if _return_hides_end_marker(expression):
+        assert isinstance(expression, exp.Expression)
+        return _FunctionBody(True, (expression,)), 0
     if isinstance(expression, exp.Expression) and _flat_body_member(expression):
         for offset, candidate in enumerate(following):
             if not _flat_body_member(candidate):
@@ -1003,6 +1010,27 @@ def _bare_return_column(expression: exp.Expression | None) -> bool:
         return False
     qualified = any(expression.args.get(part) is not None for part in ("catalog", "db", "table"))
     return not qualified and _unquoted_identifier(expression.this, "RETURN")
+
+
+def _return_hides_end_marker(expression: object) -> bool:
+    """Return whether a declaration-owned ``Return`` tree hides the closing ``END``.
+
+    Without ``;`` before ``END``, the parser folds the body's closing delimiter
+    into the return: ``RETURN <expression> END`` becomes
+    ``Return(Alias(..., alias=Identifier(END)))`` and a bare ``RETURN END``
+    becomes ``Return(Command(END))``. Only an unquoted ``END`` alias and a
+    ``Command`` holding exactly ``END`` close the body; a quoted ``[END]``
+    alias or any other command text does not.
+    """
+    if not isinstance(expression, exp.Return):
+        return False
+    inner = expression.this
+    if isinstance(inner, exp.Command):
+        command = inner.this
+        return isinstance(command, str) and command == "END"
+    if isinstance(inner, exp.Alias):
+        return _unquoted_identifier(inner.args.get("alias"), "END")
+    return False
 
 
 def _nested_query_roots(
