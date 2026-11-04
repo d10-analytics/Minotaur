@@ -112,12 +112,13 @@ declarations found in the selected source files.
 
 ### Procedure and function bodies
 
-`DECLARE`, `SET` and `RETURN` members that the parser represents are accepted
-in procedure and function bodies rather than reported as unsupported syntax. A
-subquery inside one of them is an ordinary query root, so it contributes reads
-and calls by the nested-query rule above, and an unsupported source inside it
-rejects that root rather than the declaration. A direct call in an accepted
-`SET` member contributes no call: `SET @r = dbo.F(1)` produces no `sql:calls`.
+`DECLARE`, `SET` and `RETURN` members that the parser represents, including a
+bare `RETURN;`, are accepted in procedure and function bodies rather than
+reported as unsupported syntax. A subquery inside one of them is an ordinary
+query root, so it contributes reads and calls by the nested-query rule above,
+and an unsupported source inside it rejects that root rather than the
+declaration. A direct call in an accepted `SET` member contributes no call:
+`SET @r = dbo.F(1)` produces no `sql:calls`.
 
 A member a procedure body keeps in another form still reports one
 `unsupported-syntax`:
@@ -212,8 +213,8 @@ The mapping is an exact target-to-file association. It does not change the
 resolved `sql:foreign-key-to` edge, generic unresolved identity, source
 selection, or graph schema. An orphaned observation keeps the existing generic
 unresolved `references` relationship, coalesced to one unresolved target per
-source table and target text; the warning adds finding details without turning
-that generic graph fact into a typed edge.
+source table, target text and originating file or declaring table; the warning
+adds finding details without turning that generic graph fact into a typed edge.
 
 A named `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` clause cannot carry a typed
 edge when its altered table is undeclared or ambiguous. The analyzer then

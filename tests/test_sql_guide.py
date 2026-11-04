@@ -113,7 +113,12 @@ def test_sql_guide_documents_orphan_fk_warning_boundaries() -> None:
     assert "A filename, directory name, Git history" in text
     assert "does not establish that an extraction gap exists" in text
     assert "does not change the resolved `sql:foreign-key-to` edge" in text
-    assert "coalesced to one unresolved target per source table and target text" in text
+    assert (
+        "An orphaned observation keeps the existing generic unresolved `references` relationship, "
+        "coalesced to one unresolved target per source table, target text and originating file or "
+        "declaring table; the warning adds finding details without turning that generic graph fact "
+        "into a typed edge."
+    ) in text
 
 
 def test_sql_guide_documents_foreign_key_column_evidence_with_format_owner() -> None:
@@ -181,8 +186,9 @@ def test_sql_guide_documents_accepted_body_members() -> None:
     """Accepted body members keep the parser qualifier and their query-root rule."""
     text = _text()
     assert (
-        "`DECLARE`, `SET` and `RETURN` members that the parser represents are accepted in "
-        "procedure and function bodies rather than reported as unsupported syntax."
+        "`DECLARE`, `SET` and `RETURN` members that the parser represents, including a bare "
+        "`RETURN;`, are accepted in procedure and function bodies rather than reported as "
+        "unsupported syntax."
     ) in text
     assert (
         "A subquery inside one of them is an ordinary query root, so it contributes reads and "
