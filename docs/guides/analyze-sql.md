@@ -24,7 +24,8 @@ relationships described by its AST-authoritative implementation:
 - schemas, persistent tables, and views become `sql:schema`, `sql:table`, and
   `sql:view` symbols;
 - persistent procedures and functions become `sql:procedure` and `sql:function`
-  symbols. Parser-represented static query roots in their bodies can add
+  symbols, and `CREATE PROC` and `CREATE PROCEDURE` are equivalent.
+  Parser-represented static query roots in their bodies can add
   `sql:reads-from` relationships to persistent tables and views and
   `sql:calls` relationships to declared user-defined functions; parameters
   and return syntax do not become graph symbols;
@@ -44,7 +45,11 @@ relationships described by its AST-authoritative implementation:
   each location spans the function name. A table-valued function used as a
   `FROM` or `JOIN` source produces `sql:calls` only; persistent table and view
   sources retain `sql:reads-from`;
-- foreign-key references become `sql:foreign-key-to` relationships;
+- foreign-key references become `sql:foreign-key-to` relationships. A
+  `REFERENCES` form that omits the referenced columns records the table-level
+  edge without a column mapping in all three accepted forms: an inline column
+  constraint, a table `FOREIGN KEY` constraint, and a named
+  `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY (…) REFERENCES …` clause;
 - a top-level, unconditional `ALTER TABLE` can add one or more named
   `CONSTRAINT ... FOREIGN KEY (...) REFERENCES ...` clauses when the entire
   statement contains only those additions. The altered and referenced tables
@@ -69,6 +74,13 @@ decoding, and unterminated-batch failures are file-atomic. A failure in one
 file, batch, or statement therefore does not discard eligible facts from its
 sibling scope. Diagnostics distinguish source-read, parse, unsupported,
 duplicate-declaration, and ambiguous-reference conditions.
+
+Every SQL diagnostic carries a location except file-level source-read and
+decoding failures and `interpreter-error`. A diagnostic that reports a statement
+spans the statement's identifiers when it has any; when it has none, the
+location falls back to the line holding the first non-whitespace character of
+its batch. A batch `parse-error` is located on the batch's first non-whitespace
+line. An unterminated lexical state is located on its opening line.
 
 Existing source diagnostics are errors by default. Completed SQL graphs also
 emit warning diagnostics for view cycles (`circular-dependency`) and overlong
@@ -97,6 +109,111 @@ path.
 This classification does not inspect Git history or timestamps, query a live
 catalog, execute SQL, or replay migrations. It describes only duplicate
 declarations found in the selected source files.
+
+### Procedure and function bodies
+
+`DECLARE`, `SET` and `RETURN` members that the parser represents, including a
+bare `RETURN;`, are accepted in procedure and function bodies rather than
+reported as unsupported syntax. For a `RETURN` member, position decides: a
+procedure accepts `RETURN` only after an earlier member, and a function accepts
+a bare `RETURN;` only after an earlier member; the paragraphs below give the
+other outcomes. A subquery inside one of them is an ordinary query root, so it
+contributes reads and calls by the nested-query rule above, and an unsupported
+source inside it rejects that root rather than the declaration. A direct call in
+an accepted `DECLARE`, `SET` or `RETURN` member contributes no call:
+`SET @r = dbo.F(1)` produces no `sql:calls`.
+
+An `EXEC` or `EXECUTE` member of a procedure or function body, such as
+`EXEC dbo.Q;`, keeps the declaration and its sibling query roots but reports one
+error-severity `unsupported-syntax` at the invoked procedure, so `analyze` exits
+`1`; `EXEC(@sql)` names no procedure and reports on the batch's first line.
+`RETURN EXEC dbo.Q;` depends on its position: as a function's sole member or an
+inline function's return it behaves as an `EXEC` member, as a procedure's sole
+member it keeps no procedure and reports one located `unsupported-syntax`, and
+after an earlier member it rejects the whole batch.
+
+A member a procedure body keeps in another form still reports one
+`unsupported-syntax`:
+
+* a body without `BEGIN`/`END` whose first statement is `SET NOCOUNT ON;`
+  reports at `NOCOUNT`, while one whose first statement is `SET @x = 1;` reports
+  on the batch's first line, and the declaration and the reads after the
+  statement survive;
+* `IF @x = 1 SET @x = 2;` inside a `BEGIN`/`END` body, and a `;`-terminated
+  cursor `DECLARE`, report on the batch's first line, and the read after the
+  member survives, in the `IF` case because the parser folds it into the branch;
+* a `SET`, `DECLARE` or `IF @x = 1 SET @x = 2` member missing its `;` followed by
+  a read reports on the batch's first line and loses that read. Inside
+  `BEGIN`/`END` the procedure is kept. Without `BEGIN`/`END`, a `DECLARE` keeps
+  the procedure, while a `SET` or `IF … SET` first statement keeps no procedure;
+* `RETURN (SELECT …) + 1` after an earlier member reports one
+  `unsupported-syntax` and loses the read inside it, while `IF @x = 1 RETURN
+  (SELECT …);` reports the same with or without an earlier member.
+
+A multi-statement scalar function and a table-valued function contribute reads
+and calls from the parser-represented static query roots of their bodies, and
+statements after the body's end statement in the same batch are analyzed
+normally. DML is not a query root, so a table-valued function's `INSERT`
+contributes no read even when it selects from a declared table.
+
+A multi-statement function body is representable when the statement the
+declaration itself keeps and every following statement up to an end statement are
+plain query, DML, `DECLARE`, `SET`, `EXEC` or `RETURN` statements with no
+`BEGIN … END` block, `IF`, `WHILE` or opaque form in them. A sole `RETURN` with no
+`;` before `END` is representable too: the parser folds that `END` into the
+return, so the return closes the body and contributes its query roots with no
+diagnostic, and statements after `END;` in the same batch are analyzed normally.
+A quoted `[END]` or any other alias does not close the body. An `IF`, a `WHILE`, a
+nested `BEGIN … END` block in any spelling case or at any depth, an opaque
+statement, a `RETURN (SELECT …) + 1` that follows an earlier member (a function's
+sole member keeps it as its own return and its read survives), or a missing end
+statement therefore makes the body unrepresentable: the declaration is kept with
+no reads or calls and exactly one `unsupported-syntax` located at the function
+name, and no body statement before the next declaration boundary reaches
+top-level interpretation. Top-level
+statements the parser keeps between such a body and the next declaration in the
+same batch are consumed with the function,
+while every later declaration it keeps as its own statement in the same batch is
+still analyzed. A `CREATE`, `ALTER` or `DROP` statement the parser keeps as its
+own statement inside the body is such a boundary, so it and everything after it
+are interpreted at top level: a body containing `CREATE TABLE dbo.Inner1 (…)`
+keeps that table, and the statements after it report their own
+`unsupported-syntax` beside the one at the function name.
+
+A later statement that the parser folds into the body, after a top-level `IF` or
+`WHILE` or after an outer `END` without `;`, is deliberately not recovered: the
+body reports its one diagnostic, the statement yields no facts, and it belongs
+in a later `GO` batch. Recovery would require walking into a parsed block or
+re-parsing raw statement text.
+
+When SQLGlot parses a whole `CREATE FUNCTION` as one opaque `Command`, there is
+no function tree and no parsed name to keep without re-parsing its text. The
+statement and each following body tree in the batch report
+`unsupported-syntax`, and later declarations in the batch are still analyzed. A
+declaration with no `;` before it is part of that `Command`'s text, not a tree
+of its own, so it yields no facts. This is a stated limit and not a recovery
+promise.
+
+A body the parser rejects is a batch `parse-error`: the batch records one
+`parse-error` at its first non-whitespace line and keeps no facts from any of its
+statements, so an earlier `CREATE TABLE` in the same batch is lost too. After an
+earlier member of a procedure or function body, `RETURN dbo.Calc(1);`,
+`RETURN dbo.Calc(1) + 1;`, and `RETURN @x + 1;` reject the whole batch, and a
+bare `RETURN;` as a function's first member, whether sole or followed by other
+statements, rejects it the same way. After such
+an earlier member, `RETURN 0;` and `RETURN @r` directly before `END` reject the
+whole batch too.
+
+As the sole member of a procedure, `RETURN 0;`, with or without `BEGIN`/`END`,
+keeps no procedure and reports one located `unsupported-syntax`. A procedure
+whose sole member is a bare `RETURN;` behaves the same way: one located
+`unsupported-syntax` and no procedure symbol. Any other `RETURN` form as a
+procedure's first member behaves the same way, whether it is the sole member or
+statements follow it: a sole `RETURN (SELECT …);` or `RETURN @x;`, and `RETURN 0;`
+or `RETURN;` followed by a read, keep no procedure and lose their reads. A
+function's first-member `RETURN (SELECT …);`, `RETURN @x;` or `RETURN 0;` is
+instead its own return: the function is kept, the subquery's read survives, and a
+read after the return survives too.
 
 ### Orphaned foreign-key findings
 
@@ -127,8 +244,17 @@ The mapping is an exact target-to-file association. It does not change the
 resolved `sql:foreign-key-to` edge, generic unresolved identity, source
 selection, or graph schema. An orphaned observation keeps the existing generic
 unresolved `references` relationship, coalesced to one unresolved target per
-source table and target text; the warning adds finding details without turning
-that generic graph fact into a typed edge.
+source table, target text and originating file or declaring table; the warning
+adds finding details without turning that generic graph fact into a typed edge.
+
+A named `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` clause cannot carry a typed
+edge when its altered table is undeclared or ambiguous. The analyzer then
+reports `orphaned-foreign-key` against the altered table's name whenever the
+target is not exactly one declared table, and keeps the existing unresolved and
+ambiguous-reference facts unchanged. When the target is a declared table, that
+same statement records nothing new, because a typed `sql:foreign-key-to` edge
+needs a table source and foreign-key components count table nodes only; this is
+a documented limit.
 
 The optional SQL setting `view_depth_threshold` in `[minotaur.sql]` controls the maximum
 view path depth before a `view-depth-warning` is emitted. The default is `3`.

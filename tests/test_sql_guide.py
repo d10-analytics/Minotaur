@@ -113,7 +113,12 @@ def test_sql_guide_documents_orphan_fk_warning_boundaries() -> None:
     assert "A filename, directory name, Git history" in text
     assert "does not establish that an extraction gap exists" in text
     assert "does not change the resolved `sql:foreign-key-to` edge" in text
-    assert "coalesced to one unresolved target per source table and target text" in text
+    assert (
+        "An orphaned observation keeps the existing generic unresolved `references` relationship, "
+        "coalesced to one unresolved target per source table, target text and originating file or "
+        "declaring table; the warning adds finding details without turning that generic graph fact "
+        "into a typed edge."
+    ) in text
 
 
 def test_sql_guide_documents_foreign_key_column_evidence_with_format_owner() -> None:
@@ -143,3 +148,253 @@ def test_sql_guide_documents_nested_query_reads_and_rejection() -> None:
     text = _text()
     assert "`EXISTS`, `IN`, `ALL`, `SOME`, or `ANY` body" in text
     assert "rejects the whole view or the enclosing procedure or function query root" in text
+
+
+def test_sql_guide_documents_proc_spelling_and_column_less_references() -> None:
+    """PROC spelling and column-less REFERENCES claims are pinned in full."""
+    text = _text()
+    assert "`CREATE PROC` and `CREATE PROCEDURE` are equivalent." in text
+    assert (
+        "A `REFERENCES` form that omits the referenced columns records the table-level edge "
+        "without a column mapping in all three accepted forms: an inline column constraint, a "
+        "table `FOREIGN KEY` constraint, and a named `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY "
+        "(…) REFERENCES …` clause;"
+    ) in text
+
+
+def test_sql_guide_documents_named_alter_foreign_key_limits() -> None:
+    """Each named-ALTER foreign-key claim is pinned as a whole sentence."""
+    text = _text()
+    assert (
+        "A named `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` clause cannot carry a typed edge "
+        "when its altered table is undeclared or ambiguous."
+    ) in text
+    assert (
+        "The analyzer then reports `orphaned-foreign-key` against the altered table's name "
+        "whenever the target is not exactly one declared table, and keeps the existing unresolved "
+        "and ambiguous-reference facts unchanged."
+    ) in text
+    assert (
+        "When the target is a declared table, that same statement records nothing new, because a "
+        "typed `sql:foreign-key-to` edge needs a table source and foreign-key components count "
+        "table nodes only;"
+    ) in text
+    assert "this is a documented limit." in text
+
+
+def test_sql_guide_documents_accepted_body_members() -> None:
+    """Accepted body members keep the parser qualifier and their query-root rule."""
+    text = _text()
+    assert (
+        "`DECLARE`, `SET` and `RETURN` members that the parser represents, including a bare "
+        "`RETURN;`, are accepted in procedure and function bodies rather than reported as "
+        "unsupported syntax."
+    ) in text
+    assert (
+        "For a `RETURN` member, position decides: a procedure accepts `RETURN` only after an "
+        "earlier member, and a function accepts a bare `RETURN;` only after an earlier member; "
+        "the paragraphs below give the other outcomes."
+    ) in text
+    assert (
+        "A subquery inside one of them is an ordinary query root, so it contributes reads and "
+        "calls by the nested-query rule above, and an unsupported source inside it rejects that "
+        "root rather than the declaration."
+    ) in text
+    assert (
+        "A direct call in an accepted `DECLARE`, `SET` or `RETURN` member contributes no call: "
+        "`SET @r = dbo.F(1)` produces no `sql:calls`."
+    ) in text
+    assert (
+        "A member a procedure body keeps in another form still reports one `unsupported-syntax`:"
+        in text
+    )
+
+
+def test_sql_guide_documents_exec_members_and_return_exec_positions() -> None:
+    """The EXEC member's diagnostic and each RETURN EXEC position are pinned whole."""
+    text = _text()
+    assert (
+        "An `EXEC` or `EXECUTE` member of a procedure or function body, such as `EXEC dbo.Q;`, "
+        "keeps the declaration and its sibling query roots but reports one error-severity "
+        "`unsupported-syntax` at the invoked procedure, so `analyze` exits `1`; `EXEC(@sql)` names "
+        "no procedure and reports on the batch's first line."
+    ) in text
+    assert (
+        "`RETURN EXEC dbo.Q;` depends on its position: as a function's sole member or an inline "
+        "function's return it behaves as an `EXEC` member, as a procedure's sole member it keeps "
+        "no procedure and reports one located `unsupported-syntax`, and after an earlier member "
+        "it rejects the whole batch."
+    ) in text
+
+
+def test_sql_guide_documents_excluded_member_shapes() -> None:
+    """Member shapes that still report unsupported syntax are named and pinned."""
+    text = _text()
+    assert (
+        "a body without `BEGIN`/`END` whose first statement is `SET NOCOUNT ON;` reports at "
+        "`NOCOUNT`, while one whose first statement is `SET @x = 1;` reports on the batch's first "
+        "line, and the declaration and the reads after the statement survive;"
+    ) in text
+    assert (
+        "`IF @x = 1 SET @x = 2;` inside a `BEGIN`/`END` body, and a `;`-terminated cursor "
+        "`DECLARE`, report on the batch's first line, and the read after the member survives, in "
+        "the `IF` case because the parser folds it into the branch;"
+    ) in text
+    assert (
+        "a `SET`, `DECLARE` or `IF @x = 1 SET @x = 2` member missing its `;` followed by a read "
+        "reports on the batch's first line and loses that read."
+    ) in text
+    assert (
+        "Inside `BEGIN`/`END` the procedure is kept. Without `BEGIN`/`END`, a `DECLARE` keeps the "
+        "procedure, while a `SET` or `IF … SET` first statement keeps no procedure;"
+    ) in text
+    assert (
+        "`RETURN (SELECT …) + 1` after an earlier member reports one `unsupported-syntax` and "
+        "loses the read inside it, while `IF @x = 1 RETURN (SELECT …);` reports the same with or "
+        "without an earlier member."
+    ) in text
+
+
+def test_sql_guide_documents_function_body_roots_and_representability() -> None:
+    """Function body roots, the representable rule and the extent are pinned."""
+    text = _text()
+    assert (
+        "A multi-statement scalar function and a table-valued function contribute reads and calls "
+        "from the parser-represented static query roots of their bodies, and statements after the "
+        "body's end statement in the same batch are analyzed normally."
+    ) in text
+    assert (
+        "DML is not a query root, so a table-valued function's `INSERT` contributes no read even "
+        "when it selects from a declared table."
+    ) in text
+    assert (
+        "A multi-statement function body is representable when the statement the declaration "
+        "itself keeps and every following statement up to an end statement are plain query, "
+        "DML, `DECLARE`, `SET`, `EXEC` or `RETURN` statements with no `BEGIN … END` block, `IF`, "
+        "`WHILE` or opaque form in them."
+    ) in text
+    assert (
+        "A sole `RETURN` with no `;` before `END` is representable too: the parser folds that "
+        "`END` into the return, so the return closes the body and contributes its query roots "
+        "with no diagnostic, and statements after `END;` in the same batch are analyzed normally."
+    ) in text
+    assert "A quoted `[END]` or any other alias does not close the body." in text
+    assert (
+        "An `IF`, a `WHILE`, a nested `BEGIN … END` block in any spelling case or at any depth, "
+        "an opaque statement, a `RETURN (SELECT …) + 1` that follows an earlier member (a "
+        "function's sole member keeps it as its own return and its read survives), or a missing "
+        "end statement therefore makes the body unrepresentable: the declaration is kept with no "
+        "reads or calls and exactly one `unsupported-syntax` located at the function name, and no "
+        "body statement before the next declaration boundary reaches top-level interpretation."
+    ) in text
+    assert (
+        "Top-level statements the parser keeps between such a body and the next declaration in "
+        "the same batch are consumed with the function, while every later declaration it keeps as "
+        "its own statement in the same batch is still analyzed."
+    ) in text
+    assert (
+        "A `CREATE`, `ALTER` or `DROP` statement the parser keeps as its own statement inside the "
+        "body is such a boundary, so it and everything after it are interpreted at top level: a "
+        "body containing `CREATE TABLE dbo.Inner1 (…)` keeps that table, and the statements after "
+        "it report their own `unsupported-syntax` beside the one at the function name."
+    ) in text
+    # The rule above is exhaustive: no broader representability test may return.
+    assert "representable only when the parser exposes every statement" not in text
+
+
+def test_sql_guide_documents_folded_and_command_limits() -> None:
+    """The folded-statement and whole-statement Command limits are pinned."""
+    text = _text()
+    assert (
+        "A later statement that the parser folds into the body, after a top-level `IF` or `WHILE` "
+        "or after an outer `END` without `;`, is deliberately not recovered: the body reports its "
+        "one diagnostic, the statement yields no facts, and it belongs in a later `GO` batch."
+    ) in text
+    assert (
+        "Recovery would require walking into a parsed block or re-parsing raw statement text."
+        in text
+    )
+    assert (
+        "When SQLGlot parses a whole `CREATE FUNCTION` as one opaque `Command`, there is no "
+        "function tree and no parsed name to keep without re-parsing its text."
+    ) in text
+    assert (
+        "The statement and each following body tree in the batch report `unsupported-syntax`, and "
+        "later declarations in the batch are still analyzed."
+    ) in text
+    assert (
+        "A declaration with no `;` before it is part of that `Command`'s text, not a tree of its "
+        "own, so it yields no facts."
+    ) in text
+    assert "This is a stated limit and not a recovery promise." in text
+    # Internal decision identifiers never reach a user-facing guide.
+    for identifier in ("AR-04", "D-00", "F-04"):
+        assert identifier not in text
+
+
+def test_sql_guide_documents_rejected_bodies() -> None:
+    """A rejected body is a whole-batch parse error with the named forms."""
+    text = _text()
+    assert (
+        "A body the parser rejects is a batch `parse-error`: the batch records one `parse-error` "
+        "at its first non-whitespace line and keeps no facts from any of its statements, so an "
+        "earlier `CREATE TABLE` in the same batch is lost too."
+    ) in text
+    assert (
+        "After an earlier member of a procedure or function body, `RETURN dbo.Calc(1);`, `RETURN "
+        "dbo.Calc(1) + 1;`, and `RETURN @x + 1;` reject the whole batch, and a bare `RETURN;` as "
+        "a function's first member, whether sole or followed by other statements, rejects it the "
+        "same way."
+    ) in text
+    assert (
+        "After such an earlier member, `RETURN 0;` and `RETURN @r` directly before `END` reject "
+        "the whole batch too."
+    ) in text
+
+
+def test_sql_guide_documents_sole_member_return_arrangements() -> None:
+    """Each first-member RETURN arrangement has its own pin."""
+    text = _text()
+    assert (
+        "As the sole member of a procedure, `RETURN 0;`, with or without `BEGIN`/`END`, keeps no "
+        "procedure and reports one located `unsupported-syntax`."
+    ) in text
+    assert (
+        "A procedure whose sole member is a bare `RETURN;` behaves the same way: one located "
+        "`unsupported-syntax` and no procedure symbol."
+    ) in text
+    assert (
+        "Any other `RETURN` form as a procedure's first member behaves the same way, whether it "
+        "is the sole member or statements follow it: a sole `RETURN (SELECT …);` or `RETURN @x;`, "
+        "and `RETURN 0;` or `RETURN;` followed by a read, keep no procedure and lose their reads."
+    ) in text
+    assert (
+        "A function's first-member `RETURN (SELECT …);`, `RETURN @x;` or `RETURN 0;` is instead "
+        "its own return: the function is kept, the subquery's read survives, and a read after the "
+        "return survives too."
+    ) in text
+
+
+def test_sql_guide_documents_diagnostic_locations() -> None:
+    """The location rule, the batch error location and the lexical case are pinned."""
+    text = _text()
+    assert (
+        "Every SQL diagnostic carries a location except file-level source-read and decoding "
+        "failures and `interpreter-error`."
+    ) in text
+    assert (
+        "A diagnostic that reports a statement spans the statement's identifiers when it has any; "
+        "when it has none, the location falls back to the line holding the first non-whitespace "
+        "character of its batch."
+    ) in text
+    assert "A batch `parse-error` is located on the batch's first non-whitespace line." in text
+    assert "An unterminated lexical state is located on its opening line." in text
+
+
+def test_sql_guide_orders_the_body_section_before_foreign_keys() -> None:
+    """The body subsection follows the diagnostics paragraphs (structure pin)."""
+    text = _text()
+    diagnostics = text.index("Duplicate declarations are warning-only diagnostics.")
+    bodies = text.index("### Procedure and function bodies")
+    foreign_keys = text.index("### Orphaned foreign-key findings")
+    assert diagnostics < bodies < foreign_keys

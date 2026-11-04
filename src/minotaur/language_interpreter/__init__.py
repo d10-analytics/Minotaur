@@ -3,7 +3,7 @@
 from minotaur.language_interpreter.contract import AnalysisResult, Diagnostic, DiagnosticCode
 from minotaur.language_interpreter.registry import InterpreterRegistry, default_registry
 
-ANALYZER_SEMANTICS_VERSION = "468266579ec82f3e"
+ANALYZER_SEMANTICS_VERSION = "b409034d288fb75a"
 
 __all__ = [
     "ANALYZER_SEMANTICS_VERSION",

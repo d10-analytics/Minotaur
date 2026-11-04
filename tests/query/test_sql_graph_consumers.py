@@ -13,6 +13,7 @@ from minotaur.language_interpreter.contract import DiagnosticCode
 from minotaur.language_interpreter.sql import analyze_sql_files
 from minotaur.language_interpreter.workspace import Workspace
 from minotaur.query.diff import diff
+from minotaur.query.graph_comparison import compare_graphs
 from minotaur.query.impact import ImpactRecord, impact
 from minotaur.query.index import AmbiguousSymbol, GraphIndex
 from minotaur.query.sql import CURRENT_SQL_DEPENDENCY_KINDS
@@ -217,6 +218,47 @@ CREATE FUNCTION S.Func() RETURNS TABLE AS RETURN (SELECT * FROM S.Base)
     ]
 
 
+def test_persisted_multi_statement_function_reads_and_calls_feed_callers_and_impact(
+    tmp_path: Path,
+) -> None:
+    content = """\
+CREATE SCHEMA S
+GO
+CREATE TABLE S.Base (id int)
+GO
+CREATE FUNCTION S.Callee(@id int) RETURNS int AS RETURN @id
+GO
+CREATE FUNCTION S.Total() RETURNS int AS
+BEGIN
+DECLARE @r int;
+SELECT @r = S.Callee(COUNT(*)) FROM S.Base;
+RETURN @r;
+END;
+"""
+    index = _persisted_index(tmp_path / "current", content)
+
+    assert [
+        (record.path, record.line, record.column, record.caller, record.kind, record.unresolved)
+        for record in callers(index, "s.base")
+    ] == [
+        (
+            "catalog.sql",
+            10,
+            content.splitlines()[9].index("S.Base") + 1,
+            "S.Total",
+            "sql:reads-from",
+            False,
+        )
+    ]
+    assert impact(index, "s.base") == (
+        ImpactRecord(depth=0, symbol="S.Base", kind="sql:table"),
+        ImpactRecord(depth=1, symbol="S.Total", kind="sql:function"),
+    )
+    assert [
+        (record.caller, record.kind, record.unresolved) for record in callers(index, "s.callee")
+    ] == [("S.Total", "sql:calls", False)]
+
+
 def test_persisted_sql_calls_survive_roundtrip_and_feed_callers_and_impact(
     tmp_path: Path,
 ) -> None:
@@ -393,3 +435,43 @@ ALTER TABLE Child ADD CONSTRAINT FK_child_parent FOREIGN KEY (a,b) REFERENCES Pa
     changes = diff(old_document, new_document)
     assert changes.relationships_added == ()
     assert changes.relationships_removed == ()
+
+
+def test_undeclared_alter_source_roundtrips_with_a_file_origin_unresolved_target(
+    tmp_path: Path,
+) -> None:
+    content = """\
+CREATE TABLE sales.Real (id int)
+GO
+ALTER TABLE sales.Ghost ADD CONSTRAINT fk1 FOREIGN KEY (x) REFERENCES sales.Nowhere (id)
+"""
+
+    def analyzed(root: Path) -> GraphDocument:
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "a.sql"
+        path.write_text(content, encoding="utf-8")
+        result = analyze_sql_files(Workspace(root), (path,))
+        assert [item.code for item in result.diagnostics] == [DiagnosticCode.ORPHANED_FOREIGN_KEY]
+        encoded = serialize(result.document)
+        loaded = load_graph_blob(encoded)
+        assert serialize(loaded.document) == encoded
+        return loaded.document
+
+    first = analyzed(tmp_path / "first")
+    second = analyzed(tmp_path / "second")
+
+    file_id = next(node.id for node in first.nodes if node.path == "a.sql")
+    nowhere = next(node for node in first.nodes if node.label == "sales.Nowhere")
+    assert nowhere.identity.originating_node == file_id
+    assert [
+        (relationship.source, relationship.target)
+        for relationship in first.relationships
+        if relationship.kind == "references" and relationship.target == nowhere.id
+    ] == [(file_id, nowhere.id)]
+
+    comparison = compare_graphs(first, second)
+    assert comparison.changed is False
+
+    changes = diff(first, second)
+    assert changes.added == changes.removed == changes.relocated == ()
+    assert changes.relationships_added == changes.relationships_removed == ()

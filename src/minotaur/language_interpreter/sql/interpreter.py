@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
@@ -42,10 +42,13 @@ from minotaur.language_interpreter.contract import (
 from minotaur.language_interpreter.emission import NodeEmitter, file_node
 from minotaur.language_interpreter.reading import RawSource, read_sources
 from minotaur.language_interpreter.source_text import LineIndex
-from minotaur.language_interpreter.sql.diagnostics import analyze_view_warnings
+from minotaur.language_interpreter.sql.diagnostics import NAMESPACE as NAMESPACE
+from minotaur.language_interpreter.sql.diagnostics import (
+    analyze_view_warnings,
+    diagnostic_sort_key,
+)
 from minotaur.language_interpreter.workspace import Workspace
 
-NAMESPACE = "minotaur-sql"
 _PRODUCER = Producer(name=NAMESPACE)
 _GO_RE = re.compile(r"[ \t]*GO(?:[ \t]+([0-9]+))?[ \t]*(?:--[^\r\n]*)?\Z", re.IGNORECASE)
 _FK_ACTION_RE = re.compile(
@@ -73,7 +76,6 @@ class _Batch:
     text: str
     start: int
     end: int
-    unsupported_count: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +84,20 @@ class _File:
     line_index: LineIndex
     file_id: str
     node: Node
+
+
+@dataclass(frozen=True, slots=True)
+class _FunctionBody:
+    """The top-level trees one multi-statement function body owns.
+
+    ``representable`` says whether the parser exposed the body as flat
+    statements, or folded a sole ``RETURN`` body's closing ``END`` into the
+    declaration's own return tree. ``statements`` holds those trees for the
+    shared walker; an unrepresentable body contributes none of them.
+    """
+
+    representable: bool
+    statements: tuple[exp.Expression, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,26 +166,33 @@ def analyze_sql_files(
             except Exception:
                 diagnostics.append(
                     Diagnostic(
-                        DiagnosticCode.PARSE_ERROR, item.raw.relative, "unable to parse T-SQL batch"
+                        DiagnosticCode.PARSE_ERROR,
+                        item.raw.relative,
+                        "unable to parse T-SQL batch",
+                        _batch_line_location(batch, item.raw.relative, item.line_index),
                     )
                 )
                 continue
-            function_continuation = False
-            for tree in trees:
-                if tree is None:
-                    continue
-                if function_continuation:
-                    function_continuation = False
-                    if isinstance(tree, exp.EndStatement):
-                        continue
-                result = _interpret_statement(tree, item, batch, diagnostics, declarations, nodes)
+            parsed: list[Any] = [tree for tree in trees if tree is not None]
+            index = 0
+            while index < len(parsed):
+                tree = parsed[index]
+                index += 1
+                function_body: _FunctionBody | None = None
+                if _multi_statement_function(tree):
+                    function_body, consumed = _function_body(tree, parsed[index:])
+                    index += consumed
+                result = _interpret_statement(
+                    tree,
+                    item,
+                    batch,
+                    diagnostics,
+                    declarations,
+                    nodes,
+                    function_body=function_body,
+                )
                 if result is not None:
                     observations.append(result)
-                function_continuation = (
-                    isinstance(tree, exp.Create)
-                    and str(tree.args.get("kind") or "").upper() == "FUNCTION"
-                    and bool(tree.args.get("begin"))
-                )
 
     by_key: dict[tuple[str, ...], list[_Declaration]] = {}
     for declaration in declarations:
@@ -227,7 +250,7 @@ def analyze_sql_files(
                 )
 
     emitter = NodeEmitter(NAMESPACE, "sql")
-    unresolved_fk_nodes: dict[tuple[str, str], str] = {}
+    unresolved_fk_nodes: dict[tuple[str, tuple[str, ...], str], str] = {}
     for observation in observations:
         owner = observation.owner
         if observation.source is not None:
@@ -244,6 +267,29 @@ def analyze_sql_files(
                         )
                     )
                 emitter.unresolved(file_id, source_text, source_location, nodes, relationships)
+                for foreign_key in observation.foreign_keys:
+                    targets = table_index.get(foreign_key.key, [])
+                    if len(targets) == 1:
+                        # A typed foreign-key edge needs a declared table on both
+                        # ends, so only the unresolved altered-table reference
+                        # records this statement.
+                        continue
+                    _emit_orphaned_foreign_key(
+                        file_id,
+                        source_key,
+                        source_text,
+                        foreign_key.key,
+                        foreign_key.text,
+                        foreign_key.location,
+                        foreign_key.constraint_name,
+                        targets,
+                        effective_settings,
+                        readable_paths,
+                        relationships,
+                        nodes,
+                        diagnostics,
+                        unresolved_fk_nodes,
+                    )
                 continue
             owner = candidates[0]
         assert owner is not None
@@ -260,7 +306,6 @@ def analyze_sql_files(
                 diagnostics,
                 emitter,
                 "sql:reads-from",
-                "read",
             )
         for key, text, location in observation.calls:
             _resolve_function(
@@ -276,7 +321,9 @@ def analyze_sql_files(
             )
         for foreign_key in observation.foreign_keys:
             _resolve_foreign_key(
-                owner,
+                owner.node.id,
+                owner.key,
+                owner.label,
                 foreign_key.key,
                 foreign_key.text,
                 foreign_key.location,
@@ -284,9 +331,7 @@ def analyze_sql_files(
                 relationships,
                 nodes,
                 diagnostics,
-                emitter,
                 "sql:foreign-key-to",
-                "foreign-key",
                 _foreign_key_extensions(foreign_key),
                 effective_settings,
                 readable_paths,
@@ -297,9 +342,6 @@ def analyze_sql_files(
     relationship_documents = relationships.documents(_PRODUCER)
     nodes, fk_components = _with_fk_components(nodes, relationship_documents)
 
-    # Replace the generic references kind for reads with the SQL extension.
-    # Resolution above uses the shared emitter only for unresolved nodes; the
-    # successful edge is written directly with the requested SQL meaning.
     document = GraphDocument(
         coordinate_encoding=CoordinateEncoding.UTF_8,
         nodes=tuple(nodes),
@@ -307,23 +349,8 @@ def analyze_sql_files(
         generated_by=_PRODUCER,
         extensions={NAMESPACE: {"fk_components": fk_components}},
     )
-    diagnostics.sort(
-        key=lambda item: (
-            item.path,
-            item.location.sort_key if item.location else ("", 0, 0, 0, 0),
-            item.code.value,
-            item.message,
-        )
-    )
     diagnostics.extend(analyze_view_warnings(document, sql_settings))
-    diagnostics.sort(
-        key=lambda item: (
-            item.path,
-            item.location.sort_key if item.location else ("", 0, 0, 0, 0),
-            item.code.value,
-            item.message,
-        )
-    )
+    diagnostics.sort(key=diagnostic_sort_key)
     return AnalysisResult(document, tuple(diagnostics))
 
 
@@ -425,18 +452,10 @@ def _resolve(
     diagnostics: list[Diagnostic],
     emitter: NodeEmitter,
     relationship_kind: str,
-    relation: str,
-    extensions: dict[str, dict[str, object]] | None = None,
 ) -> None:
     candidates = primary.get(key, []) + secondary.get(key, [])
     if len(candidates) == 1:
-        relationships.add(
-            owner.node.id,
-            candidates[0].node.id,
-            relationship_kind,
-            location,
-            extensions,
-        )
+        relationships.add(owner.node.id, candidates[0].node.id, relationship_kind, location)
         return
     if len(candidates) > 1:
         diagnostics.append(
@@ -447,10 +466,9 @@ def _resolve(
                 location,
             )
         )
-    unresolved = emitter.unresolved(owner.node.id, text, location, nodes, relationships)
     # ``NodeEmitter`` always uses core references, which is exactly the
     # unresolved-target contract; successful SQL relationships remain typed.
-    _ = unresolved, relation
+    emitter.unresolved(owner.node.id, text, location, nodes, relationships)
 
 
 def _resolve_function(
@@ -484,7 +502,9 @@ def _resolve_function(
 
 
 def _resolve_foreign_key(
-    owner: _Declaration,
+    origin: str,
+    source_key: tuple[str, ...],
+    source_label: str,
     key: tuple[str, ...],
     text: str,
     location: Location,
@@ -492,31 +512,59 @@ def _resolve_foreign_key(
     relationships: RelationshipAccumulator,
     nodes: list[Node],
     diagnostics: list[Diagnostic],
-    emitter: NodeEmitter,
     relationship_kind: str,
-    relation: str,
     extensions: dict[str, dict[str, object]] | None,
     settings: SqlSettings,
     readable_paths: frozenset[str],
     constraint_name: str,
-    unresolved_fk_nodes: dict[tuple[str, str], str],
+    unresolved_fk_nodes: dict[tuple[str, tuple[str, ...], str], str],
 ) -> None:
-    """Resolve one FK while retaining a per-observation orphan diagnostic."""
+    """Resolve one FK from a declared source table while retaining its orphan diagnostic."""
     candidates = primary.get(key, [])
     if len(candidates) == 1:
         relationships.add(
-            owner.node.id,
+            origin,
             candidates[0].node.id,
             relationship_kind,
             location,
             extensions,
         )
         return
-    reason = "ambiguous" if len(candidates) > 1 else "undeclared"
-    if reason == "undeclared":
-        mapped_path = settings.foreign_key_target_files.get(".".join(key))
-        if mapped_path in readable_paths:
-            reason = "extraction-gap"
+    _emit_orphaned_foreign_key(
+        origin,
+        source_key,
+        source_label,
+        key,
+        text,
+        location,
+        constraint_name,
+        candidates,
+        settings,
+        readable_paths,
+        relationships,
+        nodes,
+        diagnostics,
+        unresolved_fk_nodes,
+    )
+
+
+def _emit_orphaned_foreign_key(
+    origin: str,
+    source_key: tuple[str, ...],
+    source_label: str,
+    key: tuple[str, ...],
+    text: str,
+    location: Location,
+    constraint_name: str,
+    candidates: list[_Declaration],
+    settings: SqlSettings,
+    readable_paths: frozenset[str],
+    relationships: RelationshipAccumulator,
+    nodes: list[Node],
+    diagnostics: list[Diagnostic],
+    unresolved_fk_nodes: dict[tuple[str, tuple[str, ...], str], str],
+) -> None:
+    """Record one orphaned-FK warning plus its coalesced unresolved target."""
     diagnostics.append(
         Diagnostic(
             DiagnosticCode.ORPHANED_FOREIGN_KEY,
@@ -526,34 +574,51 @@ def _resolve_foreign_key(
             DiagnosticSeverity.WARNING,
             {
                 NAMESPACE: {
-                    "source_table": owner.label,
+                    "source_table": source_label,
                     "constraint_name": constraint_name,
                     "target": text,
-                    "reason": reason,
+                    "reason": _foreign_key_orphan_reason(key, candidates, settings, readable_paths),
                 }
             },
         )
     )
-    _emit_coalesced_fk_unresolved(owner, text, location, nodes, relationships, unresolved_fk_nodes)
-    _ = relation
+    _emit_coalesced_fk_unresolved(
+        origin, source_key, text, location, nodes, relationships, unresolved_fk_nodes
+    )
+
+
+def _foreign_key_orphan_reason(
+    key: tuple[str, ...],
+    candidates: list[_Declaration],
+    settings: SqlSettings,
+    readable_paths: frozenset[str],
+) -> str:
+    """Classify why one FK target has no single table to point at."""
+    reason = "ambiguous" if len(candidates) > 1 else "undeclared"
+    if reason == "undeclared":
+        mapped_path = settings.foreign_key_target_files.get(".".join(key))
+        if mapped_path in readable_paths:
+            reason = "extraction-gap"
+    return reason
 
 
 def _emit_coalesced_fk_unresolved(
-    owner: _Declaration,
+    origin: str,
+    source_key: tuple[str, ...],
     text: str,
     location: Location,
     nodes: list[Node],
     relationships: RelationshipAccumulator,
-    unresolved_nodes: dict[tuple[str, str], str],
+    unresolved_nodes: dict[tuple[str, tuple[str, ...], str], str],
 ) -> None:
-    """Keep one generic unresolved FK target per source and target text."""
-    key = (owner.node.id, text)
+    """Keep one generic unresolved FK target per origin, source table, and target."""
+    key = (origin, source_key, text)
     node_id = unresolved_nodes.get(key)
     if node_id is None:
         identity = NodeIdentity(
             IdentityBasis.UNRESOLVED_REFERENCE,
             NAMESPACE,
-            originating_node=owner.node.id,
+            originating_node=origin,
         )
         node_id = compute_node_id(
             identity,
@@ -573,7 +638,7 @@ def _emit_coalesced_fk_unresolved(
                 location=location,
             )
         )
-    relationships.add(owner.node.id, node_id, RelationshipKind.REFERENCES.value, location)
+    relationships.add(origin, node_id, RelationshipKind.REFERENCES.value, location)
 
 
 def _interpret_statement(
@@ -583,9 +648,13 @@ def _interpret_statement(
     diagnostics: list[Diagnostic],
     declarations: list[_Declaration],
     nodes: list[Node],
+    *,
+    function_body: _FunctionBody | None = None,
 ) -> _Observation | None:
     if isinstance(tree, exp.Create):
-        return _interpret_create(tree, item, batch, diagnostics, declarations, nodes)
+        return _interpret_create(
+            tree, item, batch, diagnostics, declarations, nodes, function_body=function_body
+        )
     if isinstance(tree, exp.Alter):
         observation = _interpret_alter(tree, item, batch)
         if observation is not None:
@@ -596,6 +665,51 @@ def _interpret_statement(
     return None
 
 
+def _create_kind(tree: exp.Create) -> str:
+    """Return the upper-cased declaration kind with parser spellings unified."""
+    kind = str(tree.args.get("kind") or "").upper()
+    return "PROCEDURE" if kind == "PROC" else kind
+
+
+def _multi_statement_function(tree: Any) -> bool:
+    """Return whether a tree declares a function whose body spans the batch."""
+    return (
+        isinstance(tree, exp.Create)
+        and _create_kind(tree) == "FUNCTION"
+        and bool(tree.args.get("begin"))
+    )
+
+
+def _function_body(
+    tree: exp.Create, following: Sequence[exp.Expression]
+) -> tuple[_FunctionBody, int]:
+    """Return the body a multi-statement function owns and the trees it consumes.
+
+    The body is representable only when the declaration's own expression and
+    every following tree through the first end statement are flat statements.
+    A sole ``RETURN`` body without ``;`` before ``END`` is the one exception:
+    the parser folds the closing ``END`` into the return tree, so that tree
+    closes the body at the declaration and no following tree belongs to it.
+    An unrepresentable body owns every tree up to, but excluding, the next
+    declaration boundary or the batch end, so a later declaration that the
+    parser keeps as its own tree is still analyzed.
+    """
+    expression = tree.args.get("expression")
+    if _return_hides_end_marker(expression):
+        assert isinstance(expression, exp.Expression)
+        return _FunctionBody(True, (expression,)), 0
+    if isinstance(expression, exp.Expression) and _flat_body_member(expression):
+        for offset, candidate in enumerate(following):
+            if not _flat_body_member(candidate):
+                break
+            if isinstance(candidate, exp.EndStatement):
+                return _FunctionBody(True, (expression, *following[: offset + 1])), offset + 1
+    consumed = 0
+    while consumed < len(following) and not _declaration_boundary(following[consumed]):
+        consumed += 1
+    return _FunctionBody(False), consumed
+
+
 def _interpret_create(
     tree: Any,
     item: _File,
@@ -603,8 +717,10 @@ def _interpret_create(
     diagnostics: list[Diagnostic],
     declarations: list[_Declaration],
     nodes: list[Node],
+    *,
+    function_body: _FunctionBody | None = None,
 ) -> _Observation | None:
-    kind = str(tree.args.get("kind") or "").upper()
+    kind = _create_kind(tree)
     target = tree.this
     if kind in {"PROCEDURE", "FUNCTION"}:
         if tree.args.get("exists") or tree.args.get("clone") or tree.args.get("refresh"):
@@ -643,9 +759,19 @@ def _interpret_create(
         )
         declarations.append(declaration)
         nodes.append(node)
+        if function_body is not None and not function_body.representable:
+            # The body is not parser-represented: keep the declaration without
+            # body facts and report the whole function once, at its name.
+            _unsupported_at(location, item, diagnostics)
+            return None
         body_reads: list[tuple[tuple[str, ...], str, Location]] = []
         body_calls: list[tuple[tuple[str, ...], str, Location]] = []
-        for root in _procedural_query_roots(tree, kind, item, batch, diagnostics):
+        roots = (
+            _body_query_roots(function_body.statements, item, batch, diagnostics)
+            if function_body is not None
+            else _procedural_query_roots(tree, kind, item, batch, diagnostics)
+        )
+        for root in roots:
             root_reads = _query_reads(root, item, batch, diagnostics)
             if root_reads is None:
                 _unsupported(root, item, batch, diagnostics)
@@ -730,6 +856,18 @@ def _declaration_has_body(tree: exp.Create, kind: str) -> bool:
 
 _QUERY_ROOT_TYPES = (exp.Select, exp.Union, exp.Intersect, exp.Except)
 _DML_ROOT_TYPES = (exp.Insert, exp.Update, exp.Delete, exp.Merge)
+_LEAF_BODY_MEMBERS = (
+    exp.EndStatement,
+    *_QUERY_ROOT_TYPES,
+    *_DML_ROOT_TYPES,
+    exp.Execute,
+    exp.ExecuteSql,
+    exp.Declare,
+    exp.Set,
+    exp.Return,
+)
+_FLAT_REJECTED_NODES = (exp.Command, exp.Block, exp.IfBlock, exp.WhileBlock)
+_DECLARATION_NAMES = frozenset({"CREATE", "ALTER", "DROP"})
 
 
 def _procedural_query_roots(
@@ -739,37 +877,58 @@ def _procedural_query_roots(
     batch: _Batch,
     diagnostics: list[Diagnostic],
 ) -> list[exp.Expression]:
-    """Select parser-exposed query roots from one declaration body.
-
-    Query roots are handed to ``_query_reads`` as complete expressions so its
-    CTE, subquery, join, and set-operation handling remains shared with views.
-    Traversal deliberately stops at query and DML boundaries: walking into
-    either would revisit nested queries or model DML source reads.
-    """
+    """Select parser-exposed query roots from one declaration body."""
     body = tree.args.get("expression")
     if kind == "FUNCTION":
         if not isinstance(body, exp.Return):
             return []
         expression = body.this
         if isinstance(expression, (exp.Execute, exp.ExecuteSql)):
-            _unsupported_unlocated(item, diagnostics)
+            _unsupported(expression, item, batch, diagnostics)
             return []
         return _nested_query_roots(expression)
     if not isinstance(body, exp.Block):
         return []
+    return _body_query_roots(body.expressions, item, batch, diagnostics)
 
+
+def _body_query_roots(
+    statements: Iterable[exp.Expression | None],
+    item: _File,
+    batch: _Batch,
+    diagnostics: list[Diagnostic],
+) -> list[exp.Expression]:
+    """Select the static query roots of one flat sequence of body statements.
+
+    Query roots are handed to ``_query_reads`` as complete expressions so its
+    CTE, subquery, join, and set-operation handling remains shared with views.
+    Traversal deliberately stops at query and DML boundaries: walking into
+    either would revisit nested queries or model DML source reads. ``DECLARE``,
+    ``SET`` and ``RETURN`` statements contribute the queries nested in their
+    expressions; the return forms the parser spells as an identifier alias
+    contribute nothing. The leaf members are accepted unchanged; every other
+    tree is either walked as a block, a control block or a ``RETURN`` form, or
+    reported unsupported.
+    """
     roots: list[exp.Expression] = []
 
     def visit(statement: exp.Expression) -> None:
-        if isinstance(statement, exp.EndStatement):
+        if isinstance(statement, exp.Return) and isinstance(
+            statement.this, (exp.Execute, exp.ExecuteSql)
+        ):
+            # ``RETURN EXEC …`` holds the opaque invocation as the return's
+            # payload, so it takes the same path as a standalone ``EXEC`` member.
+            visit(statement.this)
             return
-        if isinstance(statement, _QUERY_ROOT_TYPES):
-            roots.append(statement)
-            return
-        if isinstance(statement, _DML_ROOT_TYPES):
-            return
-        if isinstance(statement, (exp.Execute, exp.ExecuteSql)):
-            _unsupported_unlocated(item, diagnostics)
+        if isinstance(statement, _LEAF_BODY_MEMBERS):
+            if isinstance(statement, _QUERY_ROOT_TYPES):
+                roots.append(statement)
+            elif isinstance(statement, (exp.Execute, exp.ExecuteSql)):
+                _unsupported(statement, item, batch, diagnostics)
+            elif isinstance(statement, (exp.Declare, exp.Set)):
+                roots.extend(_nested_query_roots(statement))
+            elif isinstance(statement, exp.Return):
+                roots.extend(_nested_query_roots(statement.this))
             return
         if isinstance(statement, exp.Command):
             if _is_structural_end_marker(statement):
@@ -792,12 +951,86 @@ def _procedural_query_roots(
             if isinstance(loop_body, exp.Expression):
                 visit(loop_body)
             return
+        if isinstance(statement, exp.Anonymous) and _unquoted_identifier(statement.this, "RETURN"):
+            for argument in statement.expressions:
+                roots.extend(_nested_query_roots(argument))
+            return
+        if isinstance(statement, exp.Alias) and _bare_return_column(statement.this):
+            return
+        if _bare_return_column(statement):
+            return
         _unsupported(statement, item, batch, diagnostics)
 
-    for statement in body.expressions:
+    for statement in statements:
         if statement is not None:
             visit(statement)
     return roots
+
+
+def _flat_body_member(statement: exp.Expression | None) -> bool:
+    """Return whether the shared walker consumes one tree as a flat statement.
+
+    A flat statement is a query root, DML, ``EXEC``, ``DECLARE``, ``SET``, a
+    ``RETURN`` form or an end statement, and its own tree holds no ``Command``,
+    ``Block``, ``IfBlock`` or ``WhileBlock`` node. The parser hides an opener or
+    an end statement inside such a node, so any of them makes the tree opaque.
+    """
+    if statement is None or any(
+        isinstance(node, _FLAT_REJECTED_NODES) for node in statement.walk()
+    ):
+        return False
+    if isinstance(statement, _LEAF_BODY_MEMBERS):
+        return True
+    if isinstance(statement, exp.Anonymous):
+        return _unquoted_identifier(statement.this, "RETURN")
+    if isinstance(statement, exp.Alias):
+        return _bare_return_column(statement.this)
+    return _bare_return_column(statement)
+
+
+def _declaration_boundary(tree: exp.Expression) -> bool:
+    """Return whether a tree opens the next declaration in the batch."""
+    if isinstance(tree, (exp.Create, exp.Alter, exp.Drop)):
+        return True
+    return isinstance(tree, exp.Command) and str(tree.this or "").upper() in _DECLARATION_NAMES
+
+
+def _unquoted_identifier(expression: object, name: str) -> bool:
+    """Return whether an identifier spells ``name`` without quoting it."""
+    if isinstance(expression, str):
+        return expression.upper() == name
+    if not isinstance(expression, exp.Identifier):
+        return False
+    return not expression.args.get("quoted") and str(expression.this).upper() == name
+
+
+def _bare_return_column(expression: exp.Expression | None) -> bool:
+    """Return whether a misparsed member is the bare, unquoted ``RETURN`` column."""
+    if not isinstance(expression, exp.Column):
+        return False
+    qualified = any(expression.args.get(part) is not None for part in ("catalog", "db", "table"))
+    return not qualified and _unquoted_identifier(expression.this, "RETURN")
+
+
+def _return_hides_end_marker(expression: object) -> bool:
+    """Return whether a declaration-owned ``Return`` tree hides the closing ``END``.
+
+    Without ``;`` before ``END``, the parser folds the body's closing delimiter
+    into the return: ``RETURN <expression> END`` becomes
+    ``Return(Alias(..., alias=Identifier(END)))`` and a bare ``RETURN END``
+    becomes ``Return(Command(END))``. Only an unquoted ``END`` alias and a
+    ``Command`` holding exactly ``END`` close the body; a quoted ``[END]``
+    alias or any other command text does not.
+    """
+    if not isinstance(expression, exp.Return):
+        return False
+    inner = expression.this
+    if isinstance(inner, exp.Command):
+        command = inner.this
+        return isinstance(command, str) and command == "END"
+    if isinstance(inner, exp.Alias):
+        return _unquoted_identifier(inner.args.get("alias"), "END")
+    return False
 
 
 def _nested_query_roots(
@@ -913,32 +1146,37 @@ def _nonpersistent_table(table: exp.Table) -> bool:
 def _identifier_location(
     expression: exp.Expression, path: str, line_index: LineIndex, batch_start: int
 ) -> Location | None:
-    identifiers = [node for node in expression.walk() if isinstance(node, exp.Identifier)]
-    spans: list[tuple[int, int]] = []
-    for node in identifiers:
-        start = node.meta.get("start")
-        end = node.meta.get("end")
-        if isinstance(start, int) and isinstance(end, int):
-            spans.append((start, end))
-    if not spans:
-        return None
-    start = batch_start + min(span[0] for span in spans)
-    end = batch_start + max(span[1] for span in spans) + 1
-    if start < 0 or end > len(line_index.source) or line_index.source[start:end] == "":
-        return None
-    return Location(path, Range(line_index.position(start), line_index.position(end)))
+    """Locate an expression by the source span of every identifier in it."""
+    return _identifiers_location(
+        (node for node in expression.walk() if isinstance(node, exp.Identifier)),
+        path,
+        line_index,
+        batch_start,
+    )
 
 
 def _table_location(table: exp.Table, item: _File, batch: _Batch) -> Location | None:
-    identifiers = [
-        value
-        for value in (
-            table.args.get("catalog"),
-            table.args.get("db"),
-            table.args.get("this"),
-        )
-        if isinstance(value, exp.Identifier)
-    ]
+    """Locate a table by the source span of the parts that name it."""
+    return _identifiers_location(
+        (
+            value
+            for value in (
+                table.args.get("catalog"),
+                table.args.get("db"),
+                table.args.get("this"),
+            )
+            if isinstance(value, exp.Identifier)
+        ),
+        item.raw.relative,
+        item.line_index,
+        batch.start,
+    )
+
+
+def _identifiers_location(
+    identifiers: Iterable[exp.Identifier], path: str, line_index: LineIndex, offset: int
+) -> Location | None:
+    """Return the location covering every identifier that records a source span."""
     spans: list[tuple[int, int]] = []
     for identifier in identifiers:
         start = identifier.meta.get("start")
@@ -947,14 +1185,11 @@ def _table_location(table: exp.Table, item: _File, batch: _Batch) -> Location | 
             spans.append((start, end))
     if not spans:
         return None
-    start = batch.start + min(span[0] for span in spans)
-    end = batch.start + max(span[1] for span in spans) + 1
-    if start < 0 or end > len(item.line_index.source):
+    start = offset + min(span[0] for span in spans)
+    end = offset + max(span[1] for span in spans) + 1
+    if start < 0 or end > len(line_index.source) or line_index.source[start:end] == "":
         return None
-    return Location(
-        item.raw.relative,
-        Range(item.line_index.position(start), item.line_index.position(end)),
-    )
+    return Location(path, Range(line_index.position(start), line_index.position(end)))
 
 
 def _foreign_keys(
@@ -1000,7 +1235,9 @@ def _foreign_keys(
 def _reference_target(
     reference: exp.Reference, item: _File, batch: _Batch
 ) -> tuple[tuple[str, ...], str, Location] | None:
-    referenced = reference.this.this if isinstance(reference.this, exp.Schema) else None
+    referenced = reference.this
+    if isinstance(referenced, exp.Schema):
+        referenced = referenced.this
     if not isinstance(referenced, exp.Table):
         return None
     parts = _parts(referenced)
@@ -1520,23 +1757,26 @@ def _property_execute_target(target: exp.Expression) -> bool:
 def _unsupported(
     tree: exp.Expression, item: _File, batch: _Batch, diagnostics: list[Diagnostic]
 ) -> None:
+    """Report one unsupported statement, spanning its identifier when it has one.
+
+    Statements the parser keeps as opaque text have no identifier span, so the
+    diagnostic falls back to the batch's first line rather than staying
+    path-only.
+    """
     location = _identifier_location(tree, item.raw.relative, item.line_index, batch.start)
+    if location is None:
+        location = _batch_line_location(batch, item.raw.relative, item.line_index)
+    _unsupported_at(location, item, diagnostics)
+
+
+def _unsupported_at(location: Location, item: _File, diagnostics: list[Diagnostic]) -> None:
+    """Report one unsupported statement at an already resolved location."""
     diagnostics.append(
         Diagnostic(
             DiagnosticCode.UNSUPPORTED_SYNTAX,
             item.raw.relative,
             "unsupported T-SQL syntax",
             location,
-        )
-    )
-
-
-def _unsupported_unlocated(item: _File, diagnostics: list[Diagnostic]) -> None:
-    diagnostics.append(
-        Diagnostic(
-            DiagnosticCode.UNSUPPORTED_SYNTAX,
-            item.raw.relative,
-            "unsupported T-SQL syntax",
         )
     )
 
@@ -1550,6 +1790,7 @@ def _scan_batches(
     line_start = 0
     state = "normal"
     block_depth = 0
+    opened_at: int | None = None
     while line_start <= len(source):
         line_end = source.find("\n", line_start)
         if line_end < 0:
@@ -1567,7 +1808,6 @@ def _scan_batches(
                         source[batch_start:line_start],
                         batch_start,
                         line_start,
-                        match.group(1) is not None,
                     )
                 )
                 if match.group(1) is not None:
@@ -1593,14 +1833,18 @@ def _scan_batches(
                 if char == "/" and nxt == "*":
                     state = "block"
                     block_depth = 1
+                    opened_at = i
                     i += 2
                     continue
                 if char == "'":
                     state = "single"
+                    opened_at = i
                 elif char == '"':
                     state = "double"
+                    opened_at = i
                 elif char == "[":
                     state = "bracket"
+                    opened_at = i
             elif state == "single":
                 if char == "'":
                     if nxt == "'":
@@ -1634,13 +1878,43 @@ def _scan_batches(
             break
         line_start = next_start
     if state != "normal":
+        assert opened_at is not None  # every state transition records its opener
         diagnostics.append(
-            Diagnostic(DiagnosticCode.PARSE_ERROR, path, "unterminated SQL lexical state")
+            Diagnostic(
+                DiagnosticCode.PARSE_ERROR,
+                path,
+                "unterminated SQL lexical state",
+                _line_location(path, line_index, *_line_bounds(line_index, opened_at)),
+            )
         )
         return [], diagnostics, False
     if batch_start <= len(source):
         batches.append(_Batch(source[batch_start:], batch_start, len(source)))
     return batches, diagnostics, True
+
+
+def _line_bounds(line_index: LineIndex, offset: int) -> tuple[int, int]:
+    """Return the source offsets bounding the line that holds ``offset``.
+
+    The start comes from the shared line model, so a lone carriage return also
+    begins a line; the end keeps the batch rule of stopping at the next line
+    feed or the end of the source.
+    """
+    start = line_index.line_starts[line_index.position(offset).line]
+    end = line_index.source.find("\n", offset)
+    return start, len(line_index.source) if end < 0 else end
+
+
+def _batch_line_location(batch: _Batch, path: str, line_index: LineIndex) -> Location:
+    """Locate a batch-level diagnostic on the line where the batch's text starts.
+
+    A batch may open with blank lines after a ``GO`` boundary, so its raw start
+    can be an empty line ahead of the first statement character.
+    """
+    text = batch.text
+    first = batch.start + len(text) - len(text.lstrip())
+    start, end = _line_bounds(line_index, first)
+    return _line_location(path, line_index, start, end)
 
 
 def _line_location(path: str, line_index: LineIndex, start: int, end: int) -> Location:
