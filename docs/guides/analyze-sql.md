@@ -128,10 +128,11 @@ A member a procedure body keeps in another form still reports one
   statement survive;
 * `IF @x = 1 SET @x = 2` inside a `BEGIN`/`END` body, and a cursor `DECLARE`,
   report on the batch's first line, and the read after the member survives;
-* a `SET` member missing its `;` reports on the batch's first line and loses the
-  read after it;
-* `RETURN (SELECT …) + 1` and `IF @x = 1 RETURN (SELECT …);` report one
-  `unsupported-syntax` and lose the read inside them.
+* a `SET` member missing its `;` followed by a read reports on the batch's
+  first line and loses that read;
+* `RETURN (SELECT …) + 1` after an earlier member reports one
+  `unsupported-syntax` and loses the read inside it, while `IF @x = 1 RETURN
+  (SELECT …);` reports the same with or without an earlier member.
 
 A multi-statement scalar function and a table-valued function contribute reads
 and calls from the parser-represented static query roots of their bodies, and
@@ -144,12 +145,13 @@ declaration itself keeps and every following statement up to an end statement ar
 plain query, DML, `DECLARE`, `SET`, `EXEC` or `RETURN` statements with no
 `BEGIN … END` block, `IF`, `WHILE` or opaque form in them. An `IF`, a `WHILE`, a
 nested `BEGIN … END` block in any spelling case or at any depth, an opaque
-statement, a `RETURN` statement the parser keeps only half-parsed such as
-`RETURN (SELECT …) + 1`, or a missing end statement therefore makes the body
-unrepresentable: the declaration is kept with no reads or calls and exactly one
-`unsupported-syntax` located at the function name, and no body statement reaches
-top-level interpretation. Top-level statements the parser keeps between such a
-body and the next declaration in the same batch are consumed with the function,
+statement, a `RETURN (SELECT …) + 1` that follows an earlier member (a function's
+sole member keeps it as its own return and its read survives), or a missing end
+statement therefore makes the body unrepresentable: the declaration is kept with
+no reads or calls and exactly one `unsupported-syntax` located at the function
+name, and no body statement reaches top-level interpretation. Top-level
+statements the parser keeps between such a body and the next declaration in the
+same batch are consumed with the function,
 while every later declaration it keeps as its own statement in the same batch is
 still analyzed.
 
@@ -169,12 +171,12 @@ promise.
 
 A body the parser rejects is a batch `parse-error`: the batch records one
 `parse-error` at its first non-whitespace line and keeps no facts from any of its
-statements, so an earlier `CREATE TABLE` in the same batch is lost too. Rejected
-forms include `RETURN dbo.Calc(1);` after an earlier member of a procedure or
-function body, `RETURN dbo.Calc(1) + 1;`, `RETURN @x + 1;`, and a bare `RETURN;`
-as a function's sole member. After an earlier member of a procedure or function
-body, `RETURN 0;` and `RETURN @r` directly before `END` reject the whole batch
-the same way.
+statements, so an earlier `CREATE TABLE` in the same batch is lost too. After an
+earlier member of a procedure or function body, `RETURN dbo.Calc(1);`,
+`RETURN dbo.Calc(1) + 1;`, and `RETURN @x + 1;` reject the whole batch, and a
+bare `RETURN;` as a function's sole member rejects it the same way. After such
+an earlier member, `RETURN 0;` and `RETURN @r` directly before `END` reject the
+whole batch too.
 
 As the sole member of a procedure, `RETURN 0;`, with or without `BEGIN`/`END`,
 keeps no procedure and reports one located `unsupported-syntax`. A procedure

@@ -212,12 +212,13 @@ def test_sql_guide_documents_excluded_member_shapes() -> None:
         "the batch's first line, and the read after the member survives;"
     ) in text
     assert (
-        "a `SET` member missing its `;` reports on the batch's first line and loses the read "
-        "after it;"
+        "a `SET` member missing its `;` followed by a read reports on the batch's first line and "
+        "loses that read;"
     ) in text
     assert (
-        "`RETURN (SELECT …) + 1` and `IF @x = 1 RETURN (SELECT …);` report one "
-        "`unsupported-syntax` and lose the read inside them."
+        "`RETURN (SELECT …) + 1` after an earlier member reports one `unsupported-syntax` and "
+        "loses the read inside it, while `IF @x = 1 RETURN (SELECT …);` reports the same with or "
+        "without an earlier member."
     ) in text
 
 
@@ -241,18 +242,18 @@ def test_sql_guide_documents_function_body_roots_and_representability() -> None:
     ) in text
     assert (
         "An `IF`, a `WHILE`, a nested `BEGIN … END` block in any spelling case or at any depth, "
-        "an opaque statement, a `RETURN` statement the parser keeps only half-parsed such as "
-        "`RETURN (SELECT …) + 1`, or a missing end statement therefore makes the body "
-        "unrepresentable: the declaration is kept with no reads or calls and exactly one "
-        "`unsupported-syntax` located at the function name, and no body statement reaches "
-        "top-level interpretation."
+        "an opaque statement, a `RETURN (SELECT …) + 1` that follows an earlier member (a "
+        "function's sole member keeps it as its own return and its read survives), or a missing "
+        "end statement therefore makes the body unrepresentable: the declaration is kept with no "
+        "reads or calls and exactly one `unsupported-syntax` located at the function name, and no "
+        "body statement reaches top-level interpretation."
     ) in text
     assert (
         "Top-level statements the parser keeps between such a body and the next declaration in "
         "the same batch are consumed with the function, while every later declaration it keeps as "
         "its own statement in the same batch is still analyzed."
     ) in text
-    # The cycle-1 gloss over "every statement as its own parsed statement" is gone.
+    # The rule above is exhaustive: no broader representability test may return.
     assert "representable only when the parser exposes every statement" not in text
 
 
@@ -295,13 +296,13 @@ def test_sql_guide_documents_rejected_bodies() -> None:
         "earlier `CREATE TABLE` in the same batch is lost too."
     ) in text
     assert (
-        "Rejected forms include `RETURN dbo.Calc(1);` after an earlier member of a procedure or "
-        "function body, `RETURN dbo.Calc(1) + 1;`, `RETURN @x + 1;`, and a bare `RETURN;` as a "
-        "function's sole member."
+        "After an earlier member of a procedure or function body, `RETURN dbo.Calc(1);`, `RETURN "
+        "dbo.Calc(1) + 1;`, and `RETURN @x + 1;` reject the whole batch, and a bare `RETURN;` as "
+        "a function's sole member rejects it the same way."
     ) in text
     assert (
-        "After an earlier member of a procedure or function body, `RETURN 0;` and `RETURN @r` "
-        "directly before `END` reject the whole batch the same way."
+        "After such an earlier member, `RETURN 0;` and `RETURN @r` directly before `END` reject "
+        "the whole batch too."
     ) in text
 
 
