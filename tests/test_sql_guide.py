@@ -191,6 +191,11 @@ def test_sql_guide_documents_accepted_body_members() -> None:
         "unsupported syntax."
     ) in text
     assert (
+        "For a `RETURN` member, position decides: a procedure accepts `RETURN` only after an "
+        "earlier member, and a function accepts a bare `RETURN;` only after an earlier member; "
+        "the paragraphs below give the other outcomes."
+    ) in text
+    assert (
         "A subquery inside one of them is an ordinary query root, so it contributes reads and "
         "calls by the nested-query rule above, and an unsupported source inside it rejects that "
         "root rather than the declaration."
@@ -205,21 +210,43 @@ def test_sql_guide_documents_accepted_body_members() -> None:
     )
 
 
+def test_sql_guide_documents_exec_members_and_return_exec_positions() -> None:
+    """The EXEC member's diagnostic and each RETURN EXEC position are pinned whole."""
+    text = _text()
+    assert (
+        "An `EXEC` or `EXECUTE` member of a procedure or function body, such as `EXEC dbo.Q;`, "
+        "keeps the declaration and its sibling query roots but reports one error-severity "
+        "`unsupported-syntax` at the invoked procedure, so `analyze` exits `1`; `EXEC(@sql)` names "
+        "no procedure and reports on the batch's first line."
+    ) in text
+    assert (
+        "`RETURN EXEC dbo.Q;` depends on its position: as a function's sole member or an inline "
+        "function's return it behaves as an `EXEC` member, as a procedure's sole member it keeps "
+        "no procedure and reports one located `unsupported-syntax`, and after an earlier member "
+        "it rejects the whole batch."
+    ) in text
+
+
 def test_sql_guide_documents_excluded_member_shapes() -> None:
     """Member shapes that still report unsupported syntax are named and pinned."""
     text = _text()
     assert (
-        "a body without `BEGIN`/`END` whose first statement is `SET NOCOUNT ON` reports at "
-        "`NOCOUNT`, while one whose first statement is `SET @x = 1` reports on the batch's first "
+        "a body without `BEGIN`/`END` whose first statement is `SET NOCOUNT ON;` reports at "
+        "`NOCOUNT`, while one whose first statement is `SET @x = 1;` reports on the batch's first "
         "line, and the declaration and the reads after the statement survive;"
     ) in text
     assert (
-        "`IF @x = 1 SET @x = 2` inside a `BEGIN`/`END` body, and a cursor `DECLARE`, report on "
-        "the batch's first line, and the read after the member survives;"
+        "`IF @x = 1 SET @x = 2;` inside a `BEGIN`/`END` body, and a `;`-terminated cursor "
+        "`DECLARE`, report on the batch's first line, and the read after the member survives, in "
+        "the `IF` case because the parser folds it into the branch;"
     ) in text
     assert (
-        "a `SET` member missing its `;` followed by a read reports on the batch's first line and "
-        "loses that read;"
+        "a `SET`, `DECLARE` or `IF @x = 1 SET @x = 2` member missing its `;` followed by a read "
+        "reports on the batch's first line and loses that read."
+    ) in text
+    assert (
+        "Inside `BEGIN`/`END` the procedure is kept. Without `BEGIN`/`END`, a `DECLARE` keeps the "
+        "procedure, while a `SET` or `IF … SET` first statement keeps no procedure;"
     ) in text
     assert (
         "`RETURN (SELECT …) + 1` after an earlier member reports one `unsupported-syntax` and "
@@ -247,17 +274,29 @@ def test_sql_guide_documents_function_body_roots_and_representability() -> None:
         "`WHILE` or opaque form in them."
     ) in text
     assert (
+        "A sole `RETURN` with no `;` before `END` is representable too: the parser folds that "
+        "`END` into the return, so the return closes the body and contributes its query roots "
+        "with no diagnostic, and statements after `END;` in the same batch are analyzed normally."
+    ) in text
+    assert "A quoted `[END]` or any other alias does not close the body." in text
+    assert (
         "An `IF`, a `WHILE`, a nested `BEGIN … END` block in any spelling case or at any depth, "
         "an opaque statement, a `RETURN (SELECT …) + 1` that follows an earlier member (a "
         "function's sole member keeps it as its own return and its read survives), or a missing "
         "end statement therefore makes the body unrepresentable: the declaration is kept with no "
         "reads or calls and exactly one `unsupported-syntax` located at the function name, and no "
-        "body statement reaches top-level interpretation."
+        "body statement before the next declaration boundary reaches top-level interpretation."
     ) in text
     assert (
         "Top-level statements the parser keeps between such a body and the next declaration in "
         "the same batch are consumed with the function, while every later declaration it keeps as "
         "its own statement in the same batch is still analyzed."
+    ) in text
+    assert (
+        "A `CREATE`, `ALTER` or `DROP` statement the parser keeps as its own statement inside the "
+        "body is such a boundary, so it and everything after it are interpreted at top level: a "
+        "body containing `CREATE TABLE dbo.Inner1 (…)` keeps that table, and the statements after "
+        "it report their own `unsupported-syntax` beside the one at the function name."
     ) in text
     # The rule above is exhaustive: no broader representability test may return.
     assert "representable only when the parser exposes every statement" not in text
@@ -304,7 +343,8 @@ def test_sql_guide_documents_rejected_bodies() -> None:
     assert (
         "After an earlier member of a procedure or function body, `RETURN dbo.Calc(1);`, `RETURN "
         "dbo.Calc(1) + 1;`, and `RETURN @x + 1;` reject the whole batch, and a bare `RETURN;` as "
-        "a function's sole member rejects it the same way."
+        "a function's first member, whether sole or followed by other statements, rejects it the "
+        "same way."
     ) in text
     assert (
         "After such an earlier member, `RETURN 0;` and `RETURN @r` directly before `END` reject "
@@ -313,7 +353,7 @@ def test_sql_guide_documents_rejected_bodies() -> None:
 
 
 def test_sql_guide_documents_sole_member_return_arrangements() -> None:
-    """Each sole-member procedure RETURN arrangement has its own pin."""
+    """Each first-member RETURN arrangement has its own pin."""
     text = _text()
     assert (
         "As the sole member of a procedure, `RETURN 0;`, with or without `BEGIN`/`END`, keeps no "
@@ -322,6 +362,16 @@ def test_sql_guide_documents_sole_member_return_arrangements() -> None:
     assert (
         "A procedure whose sole member is a bare `RETURN;` behaves the same way: one located "
         "`unsupported-syntax` and no procedure symbol."
+    ) in text
+    assert (
+        "Any other `RETURN` form as a procedure's first member behaves the same way, whether it "
+        "is the sole member or statements follow it: a sole `RETURN (SELECT …);` or `RETURN @x;`, "
+        "and `RETURN 0;` or `RETURN;` followed by a read, keep no procedure and lose their reads."
+    ) in text
+    assert (
+        "A function's first-member `RETURN (SELECT …);`, `RETURN @x;` or `RETURN 0;` is instead "
+        "its own return: the function is kept, the subquery's read survives, and a read after the "
+        "return survives too."
     ) in text
 
 

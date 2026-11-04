@@ -114,23 +114,38 @@ declarations found in the selected source files.
 
 `DECLARE`, `SET` and `RETURN` members that the parser represents, including a
 bare `RETURN;`, are accepted in procedure and function bodies rather than
-reported as unsupported syntax. A subquery inside one of them is an ordinary
-query root, so it contributes reads and calls by the nested-query rule above,
-and an unsupported source inside it rejects that root rather than the
-declaration. A direct call in an accepted `DECLARE`, `SET` or `RETURN` member
-contributes no call: `SET @r = dbo.F(1)` produces no `sql:calls`.
+reported as unsupported syntax. For a `RETURN` member, position decides: a
+procedure accepts `RETURN` only after an earlier member, and a function accepts
+a bare `RETURN;` only after an earlier member; the paragraphs below give the
+other outcomes. A subquery inside one of them is an ordinary query root, so it
+contributes reads and calls by the nested-query rule above, and an unsupported
+source inside it rejects that root rather than the declaration. A direct call in
+an accepted `DECLARE`, `SET` or `RETURN` member contributes no call:
+`SET @r = dbo.F(1)` produces no `sql:calls`.
+
+An `EXEC` or `EXECUTE` member of a procedure or function body, such as
+`EXEC dbo.Q;`, keeps the declaration and its sibling query roots but reports one
+error-severity `unsupported-syntax` at the invoked procedure, so `analyze` exits
+`1`; `EXEC(@sql)` names no procedure and reports on the batch's first line.
+`RETURN EXEC dbo.Q;` depends on its position: as a function's sole member or an
+inline function's return it behaves as an `EXEC` member, as a procedure's sole
+member it keeps no procedure and reports one located `unsupported-syntax`, and
+after an earlier member it rejects the whole batch.
 
 A member a procedure body keeps in another form still reports one
 `unsupported-syntax`:
 
-* a body without `BEGIN`/`END` whose first statement is `SET NOCOUNT ON`
-  reports at `NOCOUNT`, while one whose first statement is `SET @x = 1` reports
+* a body without `BEGIN`/`END` whose first statement is `SET NOCOUNT ON;`
+  reports at `NOCOUNT`, while one whose first statement is `SET @x = 1;` reports
   on the batch's first line, and the declaration and the reads after the
   statement survive;
-* `IF @x = 1 SET @x = 2` inside a `BEGIN`/`END` body, and a cursor `DECLARE`,
-  report on the batch's first line, and the read after the member survives;
-* a `SET` member missing its `;` followed by a read reports on the batch's
-  first line and loses that read;
+* `IF @x = 1 SET @x = 2;` inside a `BEGIN`/`END` body, and a `;`-terminated
+  cursor `DECLARE`, report on the batch's first line, and the read after the
+  member survives, in the `IF` case because the parser folds it into the branch;
+* a `SET`, `DECLARE` or `IF @x = 1 SET @x = 2` member missing its `;` followed by
+  a read reports on the batch's first line and loses that read. Inside
+  `BEGIN`/`END` the procedure is kept. Without `BEGIN`/`END`, a `DECLARE` keeps
+  the procedure, while a `SET` or `IF … SET` first statement keeps no procedure;
 * `RETURN (SELECT …) + 1` after an earlier member reports one
   `unsupported-syntax` and loses the read inside it, while `IF @x = 1 RETURN
   (SELECT …);` reports the same with or without an earlier member.
@@ -144,17 +159,26 @@ contributes no read even when it selects from a declared table.
 A multi-statement function body is representable when the statement the
 declaration itself keeps and every following statement up to an end statement are
 plain query, DML, `DECLARE`, `SET`, `EXEC` or `RETURN` statements with no
-`BEGIN … END` block, `IF`, `WHILE` or opaque form in them. An `IF`, a `WHILE`, a
+`BEGIN … END` block, `IF`, `WHILE` or opaque form in them. A sole `RETURN` with no
+`;` before `END` is representable too: the parser folds that `END` into the
+return, so the return closes the body and contributes its query roots with no
+diagnostic, and statements after `END;` in the same batch are analyzed normally.
+A quoted `[END]` or any other alias does not close the body. An `IF`, a `WHILE`, a
 nested `BEGIN … END` block in any spelling case or at any depth, an opaque
 statement, a `RETURN (SELECT …) + 1` that follows an earlier member (a function's
 sole member keeps it as its own return and its read survives), or a missing end
 statement therefore makes the body unrepresentable: the declaration is kept with
 no reads or calls and exactly one `unsupported-syntax` located at the function
-name, and no body statement reaches top-level interpretation. Top-level
+name, and no body statement before the next declaration boundary reaches
+top-level interpretation. Top-level
 statements the parser keeps between such a body and the next declaration in the
 same batch are consumed with the function,
 while every later declaration it keeps as its own statement in the same batch is
-still analyzed.
+still analyzed. A `CREATE`, `ALTER` or `DROP` statement the parser keeps as its
+own statement inside the body is such a boundary, so it and everything after it
+are interpreted at top level: a body containing `CREATE TABLE dbo.Inner1 (…)`
+keeps that table, and the statements after it report their own
+`unsupported-syntax` beside the one at the function name.
 
 A later statement that the parser folds into the body, after a top-level `IF` or
 `WHILE` or after an outer `END` without `;`, is deliberately not recovered: the
@@ -175,14 +199,21 @@ A body the parser rejects is a batch `parse-error`: the batch records one
 statements, so an earlier `CREATE TABLE` in the same batch is lost too. After an
 earlier member of a procedure or function body, `RETURN dbo.Calc(1);`,
 `RETURN dbo.Calc(1) + 1;`, and `RETURN @x + 1;` reject the whole batch, and a
-bare `RETURN;` as a function's sole member rejects it the same way. After such
+bare `RETURN;` as a function's first member, whether sole or followed by other
+statements, rejects it the same way. After such
 an earlier member, `RETURN 0;` and `RETURN @r` directly before `END` reject the
 whole batch too.
 
 As the sole member of a procedure, `RETURN 0;`, with or without `BEGIN`/`END`,
 keeps no procedure and reports one located `unsupported-syntax`. A procedure
 whose sole member is a bare `RETURN;` behaves the same way: one located
-`unsupported-syntax` and no procedure symbol.
+`unsupported-syntax` and no procedure symbol. Any other `RETURN` form as a
+procedure's first member behaves the same way, whether it is the sole member or
+statements follow it: a sole `RETURN (SELECT …);` or `RETURN @x;`, and `RETURN 0;`
+or `RETURN;` followed by a read, keep no procedure and lose their reads. A
+function's first-member `RETURN (SELECT …);`, `RETURN @x;` or `RETURN 0;` is
+instead its own return: the function is kept, the subquery's read survives, and a
+read after the return survives too.
 
 ### Orphaned foreign-key findings
 
