@@ -1763,11 +1763,11 @@ CREATE TABLE dbo.After (id int)
     assert ("flat-members.sql", "dbo.After") in _edges(result, "contains")
 
 
-def _plus_one_function_sql(body: str) -> str:
+def _plus_one_function_sql(body: str, *, terminated: bool = False) -> str:
     return (
         "CREATE TABLE dbo.Items (id int)\nGO\n"
         "CREATE FUNCTION dbo.F() RETURNS int AS\nBEGIN\n"
-        f"  {body}\nEND\n"
+        f"  {body}\nEND{';' if terminated else ''}\n"
     )
 
 
@@ -1783,6 +1783,25 @@ _RETURN_PLUS_ONE_ROWS = [
     (
         "function-after-member",
         _plus_one_function_sql("DECLARE @r int;\n  RETURN (SELECT COUNT(*) FROM dbo.Items) + 1"),
+        {"dbo.Items": "sql:table", "dbo.F": "sql:function"},
+        set(),
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (2, 16, 2, 21))],
+    ),
+    (
+        "function-sole-terminated",
+        _plus_one_function_sql("RETURN (SELECT COUNT(*) FROM dbo.Items) + 1;", terminated=True),
+        {"dbo.Items": "sql:table", "dbo.F": "sql:function"},
+        {("dbo.F", "dbo.Items")},
+        {("dbo.F", "dbo.Items"): {("return-plus-one.sql", 4, 31)}},
+        [],
+    ),
+    (
+        "function-after-member-terminated",
+        _plus_one_function_sql(
+            "DECLARE @r int;\n  RETURN (SELECT COUNT(*) FROM dbo.Items) + 1;",
+            terminated=True,
+        ),
         {"dbo.Items": "sql:table", "dbo.F": "sql:function"},
         set(),
         {},
@@ -1820,7 +1839,9 @@ def test_return_plus_one_has_three_documented_outcomes(
     A function's sole member is its own return and keeps the read with no
     diagnostic; after an earlier member the function is unrepresentable with one
     diagnostic at the function-name span; a procedure reports one diagnostic at
-    the read inside the return and keeps no read.
+    the read inside the return and keeps no read. The sole and after-member
+    function outcomes hold for both the parser-hidden ``END`` spelling and the
+    ordinary ``;``-terminated ``END;`` spelling.
     """
     result = _analyze(tmp_path, **{"return-plus-one.sql": sql})
     found = _symbols(result)
@@ -1922,13 +1943,20 @@ def _hidden_end_fixture(
     separated_declaration: bool,
     declaration: str = _FUNCTION_DECLARATION,
     end: str = "END",
+    following: str = "",
 ) -> str:
-    """Build a sole ``RETURN`` function body, closed by ``END;`` when separated."""
+    """Build a sole ``RETURN`` function body, closed by ``END;`` when separated.
+
+    ``following`` adds one top-level statement after the closing ``END;`` and
+    before the later declaration.
+    """
     sql = (
         f"{_HIDDEN_END_PREAMBLE}"
         f"{declaration}\nBEGIN\n"
         f"  {body}\n{end}{';' if separated_declaration else ''}\n"
     )
+    if following:
+        sql += f"{following}\n"
     if separated_declaration:
         sql += "CREATE TABLE dbo.After (id int)\n"
     return sql
@@ -2071,6 +2099,58 @@ def test_sole_return_body_keeps_the_parser_hidden_end_as_its_close(
 
 
 @pytest.mark.parametrize(
+    ("body", "reads"),
+    [
+        ("RETURN (SELECT COUNT(*) FROM dbo.Items)", {"dbo.Items"}),
+        ("RETURN", set()),
+    ],
+    ids=["subquery-followed", "bare-followed"],
+)
+def test_hidden_end_body_leaves_the_following_statement_its_own(
+    tmp_path: Path, body: str, reads: set[str]
+) -> None:
+    """A parser-hidden ``END`` closes the body without consuming later trees.
+
+    The statement after ``END;`` keeps its own tree, so ``SELECT 2;`` reports
+    its one ``unsupported-syntax``. That statement has no identifier to span, so
+    its diagnostic falls back to the batch's first line, the declaration. The
+    subquery body keeps its read with its evidence; the bare form has no read,
+    but the same single diagnostic proves the same no-consumption rule. The
+    later ``CREATE TABLE dbo.After`` is still a retained declaration either way.
+    """
+    sql = _hidden_end_fixture(body, separated_declaration=True, following="SELECT 2;")
+    result = _analyze(tmp_path, **{"hidden-end-followed.sql": sql})
+    symbols = _symbols(result)
+    lines = sql.splitlines()
+    declaration_line = lines.index(_FUNCTION_DECLARATION)
+
+    assert {label: node.symbol_kind for label, node in symbols.items()} == {
+        "dbo.Items": "sql:table",
+        "dbo.Calc": "sql:function",
+        "dbo.F": "sql:function",
+        "dbo.After": "sql:table",
+    }
+    assert _diagnostic_spans(result) == [
+        (
+            "hidden-end-followed.sql",
+            DiagnosticCode.UNSUPPORTED_SYNTAX,
+            (declaration_line, 0, declaration_line, len(lines[declaration_line])),
+        )
+    ]
+    read_edges = _sql_edges(result, "sql:reads-from")
+    assert [(edge[0].label, edge[1].label) for edge in read_edges] == [
+        ("dbo.F", label) for label in sorted(reads)
+    ]
+    for edge in read_edges:
+        body_line = lines.index(f"  {body}")
+        assert _evidence_locations(edge[2]) == {
+            ("hidden-end-followed.sql", body_line, lines[body_line].index("dbo.Items"))
+        }
+    assert not _sql_edges(result, "sql:calls")
+    assert ("hidden-end-followed.sql", "dbo.After") in _edges(result, "contains")
+
+
+@pytest.mark.parametrize(
     "alias",
     ["[END]", '"END"', "ENDX"],
     ids=["bracket-end", "double-quoted-end", "other-alias"],
@@ -2166,6 +2246,26 @@ _BATCH_REJECTED_RETURN_FORMS = [
     ),
     ("sole-bare-return", _FUNCTION_BODY_HEADER, "RETURN;"),
     ("procedure-return-call", _PROCEDURE_BODY_HEADER, "DECLARE @r int;\n  RETURN dbo.Calc(1);"),
+    (
+        "procedure-return-call-expression",
+        _PROCEDURE_BODY_HEADER,
+        "DECLARE @r int;\n  RETURN dbo.Calc(1) + 1;",
+    ),
+    (
+        "procedure-return-expression",
+        _PROCEDURE_BODY_HEADER,
+        "DECLARE @r int;\n  RETURN @x + 1;",
+    ),
+    (
+        "procedure-return-zero-after-member",
+        _PROCEDURE_BODY_HEADER,
+        "DECLARE @r int;\n  RETURN 0;",
+    ),
+    (
+        "procedure-return-variable-before-end",
+        _PROCEDURE_BODY_HEADER,
+        "DECLARE @r int;\n  RETURN @r",
+    ),
 ]
 
 
