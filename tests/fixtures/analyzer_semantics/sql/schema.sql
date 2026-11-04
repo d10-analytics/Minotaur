@@ -28,6 +28,11 @@ BEGIN
   RETURN @value;
 END
 GO
+CREATE FUNCTION dbo.NoteTotal() RETURNS int AS
+BEGIN
+  RETURN (SELECT COUNT(*) FROM dbo.Note)
+END
+GO
 ALTER TABLE dbo.Tag ADD CONSTRAINT fk_tag_parent FOREIGN KEY (id) REFERENCES dbo.Parent
 GO
 ALTER TABLE dbo.Audit ADD CONSTRAINT fk_audit_parent FOREIGN KEY (parent_id) REFERENCES dbo.Absent
