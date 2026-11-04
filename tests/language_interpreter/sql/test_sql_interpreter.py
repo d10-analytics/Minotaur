@@ -1124,9 +1124,11 @@ def test_direct_calls_in_declare_and_return_members_produce_no_call_facts(
 ) -> None:
     """A direct call inside an accepted member is not a ``sql:calls`` fact.
 
-    ``SELECT dbo.Calc(1)`` in a procedure is the positive control: a broken
-    control would empty the call list, so the DECLARE and RETURN negatives are
-    not vacuous.
+    A procedure's ``DECLARE``, a function's ``RETURN`` and a function's
+    ``DECLARE`` are the negative controls; the shared body walker serves
+    procedure blocks and function flat lists alike. ``SELECT dbo.Calc(1)`` in a
+    procedure is the positive control: a broken control would empty the call
+    list, so the negatives are not vacuous.
     """
     sql = """\
 CREATE TABLE dbo.Items (id int)
@@ -1148,6 +1150,13 @@ CREATE PROCEDURE dbo.Controlled AS
 BEGIN
   SELECT dbo.Calc(1);
 END;
+GO
+CREATE FUNCTION dbo.DeclaredBody() RETURNS int AS
+BEGIN
+  DECLARE @r int = dbo.Calc(1);
+  SELECT id FROM dbo.Items;
+  RETURN @r;
+END;
 """
     result = _analyze(tmp_path, **{"direct-calls.sql": sql})
     symbols = _symbols(result)
@@ -1158,11 +1167,16 @@ END;
         "dbo.Declared": "sql:procedure",
         "dbo.Returned": "sql:function",
         "dbo.Controlled": "sql:procedure",
+        "dbo.DeclaredBody": "sql:function",
     }
     assert not result.diagnostics
     reads = _sql_edges(result, "sql:reads-from")
-    assert [(edge[0].label, edge[1].label) for edge in reads] == [("dbo.Declared", "dbo.Items")]
+    assert [(edge[0].label, edge[1].label) for edge in reads] == [
+        ("dbo.Declared", "dbo.Items"),
+        ("dbo.DeclaredBody", "dbo.Items"),
+    ]
     assert _evidence_locations(reads[0][2]) == {("direct-calls.sql", 7, 17)}
+    assert _evidence_locations(reads[1][2]) == {("direct-calls.sql", 23, 17)}
     calls = _sql_edges(result, "sql:calls")
     assert [(edge[0].label, edge[1].label) for edge in calls] == [("dbo.Controlled", "dbo.Calc")]
     assert _evidence_locations(calls[0][2]) == {("direct-calls.sql", 17, 13)}
@@ -1897,14 +1911,23 @@ _HIDDEN_END_PREAMBLE = (
     "CREATE TABLE dbo.Items (id int)\nGO\n"
     "CREATE FUNCTION dbo.Calc(@x int) RETURNS int AS RETURN @x\nGO\n"
 )
+_FUNCTION_DECLARATION = "CREATE FUNCTION dbo.F(@x int) RETURNS int AS"
+_OR_ALTER_DECLARATION = "CREATE OR ALTER FUNCTION dbo.F(@x int) RETURNS int AS"
+_TABLE_VALUED_DECLARATION = "CREATE FUNCTION dbo.F(@x int) RETURNS @t TABLE (id int) AS"
 
 
-def _hidden_end_fixture(body: str, *, separated_declaration: bool) -> str:
+def _hidden_end_fixture(
+    body: str,
+    *,
+    separated_declaration: bool,
+    declaration: str = _FUNCTION_DECLARATION,
+    end: str = "END",
+) -> str:
     """Build a sole ``RETURN`` function body, closed by ``END;`` when separated."""
     sql = (
         f"{_HIDDEN_END_PREAMBLE}"
-        "CREATE FUNCTION dbo.F(@x int) RETURNS int AS\nBEGIN\n"
-        f"  {body}\nEND{';' if separated_declaration else ''}\n"
+        f"{declaration}\nBEGIN\n"
+        f"  {body}\n{end}{';' if separated_declaration else ''}\n"
     )
     if separated_declaration:
         sql += "CREATE TABLE dbo.After (id int)\n"
@@ -1912,17 +1935,79 @@ def _hidden_end_fixture(body: str, *, separated_declaration: bool) -> str:
 
 
 @pytest.mark.parametrize(
-    ("body", "separated_declaration", "reads", "calls"),
+    ("body", "separated_declaration", "reads", "calls", "declaration", "end"),
     [
-        ("RETURN (SELECT COUNT(*) FROM dbo.Items)", False, {"dbo.Items"}, set()),
-        ("RETURN (SELECT COUNT(*) FROM dbo.Items)", True, {"dbo.Items"}, set()),
-        ("RETURN (SELECT COUNT(*) FROM dbo.Items) + 1", True, {"dbo.Items"}, set()),
-        ("return (SELECT COUNT(*) FROM dbo.Items)", False, {"dbo.Items"}, set()),
-        ("RETURN (SELECT dbo.Calc(id) FROM dbo.Items)", True, {"dbo.Items"}, {"dbo.Calc"}),
-        ("RETURN 1", False, set(), set()),
-        ("RETURN @x", False, set(), set()),
-        ("RETURN", False, set(), set()),
-        ("RETURN", True, set(), set()),
+        (
+            "RETURN (SELECT COUNT(*) FROM dbo.Items)",
+            False,
+            {"dbo.Items"},
+            set(),
+            _FUNCTION_DECLARATION,
+            "END",
+        ),
+        (
+            "RETURN (SELECT COUNT(*) FROM dbo.Items)",
+            True,
+            {"dbo.Items"},
+            set(),
+            _FUNCTION_DECLARATION,
+            "END",
+        ),
+        (
+            "RETURN (SELECT COUNT(*) FROM dbo.Items) + 1",
+            True,
+            {"dbo.Items"},
+            set(),
+            _FUNCTION_DECLARATION,
+            "END",
+        ),
+        (
+            "return (SELECT COUNT(*) FROM dbo.Items)",
+            False,
+            {"dbo.Items"},
+            set(),
+            _FUNCTION_DECLARATION,
+            "END",
+        ),
+        (
+            "RETURN (SELECT dbo.Calc(id) FROM dbo.Items)",
+            True,
+            {"dbo.Items"},
+            {"dbo.Calc"},
+            _FUNCTION_DECLARATION,
+            "END",
+        ),
+        ("RETURN 1", False, set(), set(), _FUNCTION_DECLARATION, "END"),
+        ("RETURN @x", False, set(), set(), _FUNCTION_DECLARATION, "END"),
+        ("RETURN", False, set(), set(), _FUNCTION_DECLARATION, "END"),
+        ("RETURN", True, set(), set(), _FUNCTION_DECLARATION, "END"),
+        (
+            "RETURN (SELECT COUNT(*) FROM dbo.Items)",
+            False,
+            {"dbo.Items"},
+            set(),
+            _OR_ALTER_DECLARATION,
+            "END",
+        ),
+        (
+            "RETURN (SELECT COUNT(*) FROM dbo.Items)",
+            True,
+            {"dbo.Items"},
+            set(),
+            _OR_ALTER_DECLARATION,
+            "END",
+        ),
+        ("RETURN 1", True, set(), set(), _FUNCTION_DECLARATION, "END"),
+        ("RETURN @x", True, set(), set(), _FUNCTION_DECLARATION, "END"),
+        ("RETURN", True, set(), set(), _TABLE_VALUED_DECLARATION, "END"),
+        (
+            "RETURN (SELECT COUNT(*) FROM dbo.Items)",
+            True,
+            {"dbo.Items"},
+            set(),
+            _FUNCTION_DECLARATION,
+            "end",
+        ),
     ],
     ids=[
         "subquery-end",
@@ -1934,6 +2019,12 @@ def _hidden_end_fixture(body: str, *, separated_declaration: bool) -> str:
         "parameter",
         "bare-end",
         "bare-separated",
+        "or-alter-end",
+        "or-alter-separated",
+        "constant-separated",
+        "parameter-separated",
+        "table-valued-bare-separated",
+        "lowercase-end-separated",
     ],
 )
 def test_sole_return_body_keeps_the_parser_hidden_end_as_its_close(
@@ -1942,15 +2033,21 @@ def test_sole_return_body_keeps_the_parser_hidden_end_as_its_close(
     separated_declaration: bool,
     reads: set[str],
     calls: set[str],
+    declaration: str,
+    end: str,
 ) -> None:
     """A sole ``RETURN`` without ``;`` before ``END`` owns its closing delimiter.
 
     The parser folds ``END`` into the return tree, so the body is representable
     and closed at the declaration: the return's query roots contribute their
     facts, no body diagnostic is reported, and a declaration after ``END;`` in
-    the same batch is still analyzed.
+    the same batch is still analyzed. The declaration modifier, the return
+    value, the function's return type and the end marker's spelling do not
+    change that outcome.
     """
-    sql = _hidden_end_fixture(body, separated_declaration=separated_declaration)
+    sql = _hidden_end_fixture(
+        body, separated_declaration=separated_declaration, declaration=declaration, end=end
+    )
     result = _analyze(tmp_path, **{"sole-return.sql": sql})
     symbols = _symbols(result)
 
@@ -2047,33 +2144,47 @@ END;
     assert not _sql_edges(result, "sql:calls")
 
 
+_FUNCTION_BODY_HEADER = "CREATE FUNCTION dbo.M(@f int) RETURNS int AS\nBEGIN"
+_PROCEDURE_BODY_HEADER = "CREATE PROCEDURE dbo.P AS\nBEGIN"
+
 _BATCH_REJECTED_RETURN_FORMS = [
-    ("return-call", "DECLARE @r int;\n  RETURN dbo.Calc(1);"),
-    ("return-expression", "DECLARE @r int;\n  RETURN @x + 1;"),
-    ("return-zero-after-member", "DECLARE @r int;\n  RETURN 0;"),
-    ("return-variable-before-end", "DECLARE @r int;\n  RETURN @r"),
-    ("sole-bare-return", "RETURN;"),
+    ("return-call", _FUNCTION_BODY_HEADER, "DECLARE @r int;\n  RETURN dbo.Calc(1);"),
+    (
+        "return-expression",
+        _FUNCTION_BODY_HEADER,
+        "DECLARE @r int;\n  RETURN @x + 1;",
+    ),
+    (
+        "return-zero-after-member",
+        _FUNCTION_BODY_HEADER,
+        "DECLARE @r int;\n  RETURN 0;",
+    ),
+    (
+        "return-variable-before-end",
+        _FUNCTION_BODY_HEADER,
+        "DECLARE @r int;\n  RETURN @r",
+    ),
+    ("sole-bare-return", _FUNCTION_BODY_HEADER, "RETURN;"),
+    ("procedure-return-call", _PROCEDURE_BODY_HEADER, "DECLARE @r int;\n  RETURN dbo.Calc(1);"),
 ]
 
 
 @pytest.mark.parametrize(
-    "body",
-    [row[1] for row in _BATCH_REJECTED_RETURN_FORMS],
+    ("header", "body"),
+    [row[1:] for row in _BATCH_REJECTED_RETURN_FORMS],
     ids=[row[0] for row in _BATCH_REJECTED_RETURN_FORMS],
 )
 def test_documented_whole_batch_rejections_report_one_located_parse_error(
-    tmp_path: Path, body: str
+    tmp_path: Path, header: str, body: str
 ) -> None:
     """Each documented rejected ``RETURN`` form drops the whole batch.
 
-    The batch's earlier ``CREATE TABLE`` is lost with the function, and the one
-    ``parse-error`` is located on the batch's first non-whitespace line.
+    The guide states the rejection for a procedure and function body alike, so
+    the rows cover both declaration forms. The batch's earlier ``CREATE TABLE``
+    is lost with the declaration, and the one ``parse-error`` is located on the
+    batch's first non-whitespace line.
     """
-    sql = (
-        "CREATE TABLE dbo.Earlier (id int);\n"
-        "CREATE FUNCTION dbo.M(@f int) RETURNS int AS\nBEGIN\n"
-        f"  {body}\nEND;\n"
-    )
+    sql = f"CREATE TABLE dbo.Earlier (id int);\n{header}\n  {body}\nEND;\n"
     result = _analyze(tmp_path, **{"rejected.sql": sql})
 
     assert set(_symbols(result)) == set()
