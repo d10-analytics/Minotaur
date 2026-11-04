@@ -117,8 +117,8 @@ bare `RETURN;`, are accepted in procedure and function bodies rather than
 reported as unsupported syntax. A subquery inside one of them is an ordinary
 query root, so it contributes reads and calls by the nested-query rule above,
 and an unsupported source inside it rejects that root rather than the
-declaration. A direct call in an accepted `SET` member contributes no call:
-`SET @r = dbo.F(1)` produces no `sql:calls`.
+declaration. A direct call in an accepted `DECLARE`, `SET` or `RETURN` member
+contributes no call: `SET @r = dbo.F(1)` produces no `sql:calls`.
 
 A member a procedure body keeps in another form still reports one
 `unsupported-syntax`:

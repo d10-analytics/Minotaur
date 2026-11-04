@@ -196,8 +196,8 @@ def test_sql_guide_documents_accepted_body_members() -> None:
         "root rather than the declaration."
     ) in text
     assert (
-        "A direct call in an accepted `SET` member contributes no call: `SET @r = dbo.F(1)` "
-        "produces no `sql:calls`."
+        "A direct call in an accepted `DECLARE`, `SET` or `RETURN` member contributes no call: "
+        "`SET @r = dbo.F(1)` produces no `sql:calls`."
     ) in text
     assert (
         "A member a procedure body keeps in another form still reports one `unsupported-syntax`:"
