@@ -79,54 +79,8 @@ Every SQL diagnostic carries a location except file-level source-read and
 decoding failures and `interpreter-error`. A diagnostic that reports a statement
 spans the statement's identifiers when it has any; when it has none, the
 location falls back to the line holding the first non-whitespace character of
-its batch. An unterminated lexical state is located on its opening line.
-
-### Procedure and function bodies
-
-`DECLARE`, `SET` and `RETURN` members, including a bare `RETURN;`, are accepted
-in procedure and function bodies rather than reported as unsupported syntax. A
-subquery inside one of them is an ordinary query root, so it contributes reads
-and calls by the nested-query rule above, and an unsupported source inside it
-rejects that root rather than the declaration. A direct call in one of them
-contributes no call: `SET @r = dbo.F(1)` produces no `sql:calls`.
-
-A multi-statement scalar function and a table-valued function contribute reads
-and calls from the parser-represented static query roots of their bodies, and
-statements after the body's end statement in the same batch are analyzed
-normally. DML is not a query root, so a table-valued function's `INSERT`
-contributes no read even when it selects from a declared table.
-
-A function body is representable only when the parser exposes every statement of
-it as its own parsed statement. An `IF`, a `WHILE`, a nested `BEGIN … END` block
-in any spelling case or at any depth, an opaque statement, or a missing end
-statement makes the body unrepresentable: the declaration is kept with no reads
-or calls and exactly one `unsupported-syntax` located at the function name, and
-no body statement reaches top-level interpretation. Top-level statements the
-parser keeps between such a body and the next declaration in the same batch are
-consumed with the function, while every later declaration it keeps as its own
-statement in the same batch is still analyzed.
-
-A later statement that the parser folds into the body, after a top-level `IF` or
-`WHILE` or after an outer `END` without `;`, is deliberately not recovered: the
-body reports its one diagnostic, the statement yields no facts, and it belongs
-in a later `GO` batch. Recovery would require walking into a parsed block or
-re-parsing raw statement text.
-
-When SQLGlot parses a whole `CREATE FUNCTION` as one opaque `Command`, there is
-no function tree and no parsed name to keep without re-parsing its text. The
-statement and each following body tree in the batch report
-`unsupported-syntax`, and later declarations in the batch are still analyzed. A
-declaration with no `;` before it is part of that `Command`'s text, not a tree
-of its own, so it yields no facts. This is a stated limit and not a recovery
-promise.
-
-Two `RETURN` arrangements stay unsupported. After an earlier member of a
-procedure or function body, `RETURN 0;` and `RETURN @r` directly before `END`
-make the parser reject the whole batch, so the batch is one `parse-error` with
-no procedure or function facts. As the sole member of a procedure, `RETURN 0;`,
-with or without `BEGIN`/`END`, keeps no procedure and reports one located
-`unsupported-syntax`. A procedure whose sole member is a bare `RETURN;` behaves
-the same way: one located `unsupported-syntax` and no procedure symbol.
+its batch. A batch `parse-error` is located on the batch's first non-whitespace
+line. An unterminated lexical state is located on its opening line.
 
 Existing source diagnostics are errors by default. Completed SQL graphs also
 emit warning diagnostics for view cycles (`circular-dependency`) and overlong
@@ -155,6 +109,77 @@ path.
 This classification does not inspect Git history or timestamps, query a live
 catalog, execute SQL, or replay migrations. It describes only duplicate
 declarations found in the selected source files.
+
+### Procedure and function bodies
+
+`DECLARE`, `SET` and `RETURN` members that the parser represents are accepted
+in procedure and function bodies rather than reported as unsupported syntax. A
+subquery inside one of them is an ordinary query root, so it contributes reads
+and calls by the nested-query rule above, and an unsupported source inside it
+rejects that root rather than the declaration. A direct call in an accepted
+`SET` member contributes no call: `SET @r = dbo.F(1)` produces no `sql:calls`.
+
+A member a procedure body keeps in another form still reports one
+`unsupported-syntax`:
+
+* a body without `BEGIN`/`END` whose first statement is `SET NOCOUNT ON`
+  reports at `NOCOUNT`, while one whose first statement is `SET @x = 1` reports
+  on the batch's first line, and the declaration and the reads after the
+  statement survive;
+* `IF @x = 1 SET @x = 2` inside a `BEGIN`/`END` body, and a cursor `DECLARE`,
+  report on the batch's first line, and the read after the member survives;
+* a `SET` member missing its `;` reports on the batch's first line and loses the
+  read after it;
+* `RETURN (SELECT …) + 1` and `IF @x = 1 RETURN (SELECT …);` report one
+  `unsupported-syntax` and lose the read inside them.
+
+A multi-statement scalar function and a table-valued function contribute reads
+and calls from the parser-represented static query roots of their bodies, and
+statements after the body's end statement in the same batch are analyzed
+normally. DML is not a query root, so a table-valued function's `INSERT`
+contributes no read even when it selects from a declared table.
+
+A multi-statement function body is representable when the statement the
+declaration itself keeps and every following statement up to an end statement are
+plain query, DML, `DECLARE`, `SET`, `EXEC` or `RETURN` statements with no
+`BEGIN … END` block, `IF`, `WHILE` or opaque form in them. An `IF`, a `WHILE`, a
+nested `BEGIN … END` block in any spelling case or at any depth, an opaque
+statement, a `RETURN` statement the parser keeps only half-parsed such as
+`RETURN (SELECT …) + 1`, or a missing end statement therefore makes the body
+unrepresentable: the declaration is kept with no reads or calls and exactly one
+`unsupported-syntax` located at the function name, and no body statement reaches
+top-level interpretation. Top-level statements the parser keeps between such a
+body and the next declaration in the same batch are consumed with the function,
+while every later declaration it keeps as its own statement in the same batch is
+still analyzed.
+
+A later statement that the parser folds into the body, after a top-level `IF` or
+`WHILE` or after an outer `END` without `;`, is deliberately not recovered: the
+body reports its one diagnostic, the statement yields no facts, and it belongs
+in a later `GO` batch. Recovery would require walking into a parsed block or
+re-parsing raw statement text.
+
+When SQLGlot parses a whole `CREATE FUNCTION` as one opaque `Command`, there is
+no function tree and no parsed name to keep without re-parsing its text. The
+statement and each following body tree in the batch report
+`unsupported-syntax`, and later declarations in the batch are still analyzed. A
+declaration with no `;` before it is part of that `Command`'s text, not a tree
+of its own, so it yields no facts. This is a stated limit and not a recovery
+promise.
+
+A body the parser rejects is a batch `parse-error`: the batch records one
+`parse-error` at its first non-whitespace line and keeps no facts from any of its
+statements, so an earlier `CREATE TABLE` in the same batch is lost too. Rejected
+forms include `RETURN dbo.Calc(1);` after an earlier member of a procedure or
+function body, `RETURN dbo.Calc(1) + 1;`, `RETURN @x + 1;`, and a bare `RETURN;`
+as a function's sole member. After an earlier member of a procedure or function
+body, `RETURN 0;` and `RETURN @r` directly before `END` reject the whole batch
+the same way.
+
+As the sole member of a procedure, `RETURN 0;`, with or without `BEGIN`/`END`,
+keeps no procedure and reports one located `unsupported-syntax`. A procedure
+whose sole member is a bare `RETURN;` behaves the same way: one located
+`unsupported-syntax` and no procedure symbol.
 
 ### Orphaned foreign-key findings
 
