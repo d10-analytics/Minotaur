@@ -888,6 +888,123 @@ END
         ]
 
 
+_PROCEDURE_BODY_SHAPES = [
+    (
+        "set-nocount",
+        "CREATE TABLE dbo.Items (id int);\nGO\n"
+        "CREATE PROCEDURE dbo.P AS\nSET NOCOUNT ON;\nSELECT id FROM dbo.Items;\n",
+        {"dbo.Items": "sql:table", "dbo.P": "sql:procedure"},
+        {("dbo.P", "dbo.Items"): {("shapes.sql", 4, 15)}},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (3, 4, 3, 11))],
+    ),
+    (
+        "set-assignment",
+        "CREATE TABLE dbo.Items (id int);\nGO\n"
+        "CREATE PROCEDURE dbo.P AS\nSET @x = 1;\nSELECT id FROM dbo.Items;\n",
+        {"dbo.Items": "sql:table", "dbo.P": "sql:procedure"},
+        {("dbo.P", "dbo.Items"): {("shapes.sql", 4, 15)}},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (2, 0, 2, 25))],
+    ),
+    (
+        "if-set",
+        "CREATE TABLE dbo.Items (id int);\nGO\n"
+        "CREATE PROCEDURE dbo.P @x int AS\nBEGIN\n"
+        "IF @x = 1 SET @x = 2;\nSELECT id FROM dbo.Items;\nEND\n",
+        {"dbo.Items": "sql:table", "dbo.P": "sql:procedure"},
+        {("dbo.P", "dbo.Items"): {("shapes.sql", 5, 15)}},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (2, 0, 2, 32))],
+    ),
+    (
+        "set-missing-semicolon",
+        "CREATE TABLE dbo.Items (id int);\nGO\n"
+        "CREATE PROCEDURE dbo.P @x int AS\nBEGIN\n"
+        "SET @x = 1\nSELECT id FROM dbo.Items;\nEND\n",
+        {"dbo.Items": "sql:table", "dbo.P": "sql:procedure"},
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (2, 0, 2, 32))],
+    ),
+    (
+        "if-return-subquery",
+        "CREATE TABLE dbo.Items (id int);\nGO\n"
+        "CREATE PROCEDURE dbo.P @x int AS\nBEGIN\n"
+        "IF @x = 1 RETURN (SELECT COUNT(*) FROM dbo.Items);\nEND;\n",
+        {"dbo.Items": "sql:table", "dbo.P": "sql:procedure"},
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (4, 39, 4, 48))],
+    ),
+    (
+        "if-return-subquery-after-member",
+        "CREATE TABLE dbo.Items (id int);\nGO\n"
+        "CREATE PROCEDURE dbo.P @x int AS\nBEGIN\nSET @x = 2;\n"
+        "IF @x = 1 RETURN (SELECT COUNT(*) FROM dbo.Items);\nEND;\n",
+        {"dbo.Items": "sql:table", "dbo.P": "sql:procedure"},
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (5, 39, 5, 48))],
+    ),
+    (
+        "return-only",
+        "CREATE PROCEDURE dbo.P AS\nBEGIN\nRETURN;\nEND;\n",
+        {},
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (0, 17, 0, 22))],
+    ),
+    (
+        "return-only-without-begin",
+        "CREATE PROCEDURE dbo.P AS\nRETURN;\n",
+        {},
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (0, 17, 0, 22))],
+    ),
+    (
+        "return-zero",
+        "CREATE PROCEDURE dbo.P AS\nBEGIN\nRETURN 0;\nEND;\n",
+        {},
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (0, 17, 0, 22))],
+    ),
+    (
+        "return-zero-without-begin",
+        "CREATE PROCEDURE dbo.P AS\nRETURN 0;\n",
+        {},
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (0, 17, 0, 22))],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("sql", "symbols", "read_evidence", "diagnostics"),
+    [row[1:] for row in _PROCEDURE_BODY_SHAPES],
+    ids=[row[0] for row in _PROCEDURE_BODY_SHAPES],
+)
+def test_documented_procedure_body_shapes_keep_symbols_reads_and_spans(
+    tmp_path: Path,
+    sql: str,
+    symbols: dict[str, str],
+    read_evidence: dict[tuple[str, str], set[tuple[str, int, int]]],
+    diagnostics: list[tuple[DiagnosticCode, tuple[int, int, int, int]]],
+) -> None:
+    """Each documented procedure-body member reports its measured shape.
+
+    ``SET NOCOUNT ON;`` and ``SET @x = 1;`` locate their diagnostic and keep the
+    declaration read; ``IF @x = 1 SET @x = 2;`` folds the following read into the
+    true branch, which keeps it; a missing ``;`` and an ``IF … RETURN (SELECT …)``
+    lose their read; and a procedure whose only member is ``RETURN`` keeps no
+    symbol and reports one located diagnostic.
+    """
+    result = _analyze(tmp_path, **{"shapes.sql": sql})
+
+    assert {label: node.symbol_kind for label, node in _symbols(result).items()} == symbols
+    edges = {(edge[0].label, edge[1].label): edge for edge in _sql_edges(result, "sql:reads-from")}
+    assert set(edges) == set(read_evidence)
+    for pair, locations in read_evidence.items():
+        assert _evidence_locations(edges[pair][2]) == locations
+    assert [(item.code, _diagnostic_span(item)) for item in result.diagnostics] == diagnostics
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
 def test_procedure_exec_member_is_unsupported_at_the_invoked_procedure(
     tmp_path: Path,
 ) -> None:
@@ -999,6 +1116,58 @@ CREATE VIEW S.V AS SELECT dbo.F(id) AS v FROM S.Base
     exec_line = sql.splitlines().index("CREATE PROCEDURE S.E AS BEGIN EXEC dbo.Q; END")
     assert [(item.code, item.location.range.start.line) for item in result.diagnostics] == [
         (DiagnosticCode.UNSUPPORTED_SYNTAX, exec_line)
+    ]
+
+
+def test_direct_calls_in_declare_and_return_members_produce_no_call_facts(
+    tmp_path: Path,
+) -> None:
+    """A direct call inside an accepted member is not a ``sql:calls`` fact.
+
+    ``SELECT dbo.Calc(1)`` in a procedure is the positive control: a broken
+    control would empty the call list, so the DECLARE and RETURN negatives are
+    not vacuous.
+    """
+    sql = """\
+CREATE TABLE dbo.Items (id int)
+GO
+CREATE FUNCTION dbo.Calc(@x int) RETURNS int AS RETURN @x
+GO
+CREATE PROCEDURE dbo.Declared AS
+BEGIN
+  DECLARE @r int = dbo.Calc(1);
+  SELECT id FROM dbo.Items;
+END;
+GO
+CREATE FUNCTION dbo.Returned() RETURNS int AS
+BEGIN
+  RETURN dbo.Calc(1);
+END;
+GO
+CREATE PROCEDURE dbo.Controlled AS
+BEGIN
+  SELECT dbo.Calc(1);
+END;
+"""
+    result = _analyze(tmp_path, **{"direct-calls.sql": sql})
+    symbols = _symbols(result)
+
+    assert {label: node.symbol_kind for label, node in symbols.items()} == {
+        "dbo.Items": "sql:table",
+        "dbo.Calc": "sql:function",
+        "dbo.Declared": "sql:procedure",
+        "dbo.Returned": "sql:function",
+        "dbo.Controlled": "sql:procedure",
+    }
+    assert not result.diagnostics
+    reads = _sql_edges(result, "sql:reads-from")
+    assert [(edge[0].label, edge[1].label) for edge in reads] == [("dbo.Declared", "dbo.Items")]
+    assert _evidence_locations(reads[0][2]) == {("direct-calls.sql", 7, 17)}
+    calls = _sql_edges(result, "sql:calls")
+    assert [(edge[0].label, edge[1].label) for edge in calls] == [("dbo.Controlled", "dbo.Calc")]
+    assert _evidence_locations(calls[0][2]) == {("direct-calls.sql", 17, 13)}
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
     ]
 
 
@@ -1126,6 +1295,49 @@ END
     assert [item.code for item in result.diagnostics] == [DiagnosticCode.UNSUPPORTED_SYNTAX]
 
 
+@pytest.mark.parametrize(
+    "member",
+    [
+        "DECLARE @r int = (SELECT COUNT(*) FROM #tmp);",
+        "SET @r = (SELECT COUNT(*) FROM #tmp);",
+    ],
+    ids=["declare-subquery", "set-subquery"],
+)
+def test_temporary_source_in_a_member_keeps_declaration_and_sibling_read(
+    tmp_path: Path, member: str
+) -> None:
+    """A member subquery over ``#tmp`` rejects only its own root.
+
+    The procedure keeps its declaration and the sibling read, and reports one
+    located diagnostic at the temporary table's parsed identifier.
+    """
+    sql = f"""\
+CREATE TABLE dbo.Items (id int);
+GO
+CREATE PROCEDURE dbo.P AS
+BEGIN
+  {member}
+  SELECT id FROM dbo.Items;
+END;
+"""
+    result = _analyze(tmp_path, **{"temporary.sql": sql})
+
+    assert {label: node.symbol_kind for label, node in _symbols(result).items()} == {
+        "dbo.Items": "sql:table",
+        "dbo.P": "sql:procedure",
+    }
+    reads = _sql_edges(result, "sql:reads-from")
+    assert [(edge[0].label, edge[1].label) for edge in reads] == [("dbo.P", "dbo.Items")]
+    assert _evidence_locations(reads[0][2]) == {("temporary.sql", 5, 17)}
+    start = sql.splitlines()[4].index("tmp")
+    assert _diagnostic_spans(result) == [
+        ("temporary.sql", DiagnosticCode.UNSUPPORTED_SYNTAX, (4, start, 4, start + len("tmp")))
+    ]
+    assert not [
+        node for node in result.document.nodes if node.node_class.value == "unresolved-reference"
+    ]
+
+
 def test_dynamic_sql_is_opaque_but_a_separate_static_root_survives(tmp_path: Path) -> None:
     sql = """\
 CREATE TABLE S.Base (id int)
@@ -1168,8 +1380,31 @@ END
         ("S.CursorRead", "S.Base"),
         ("S.TryRead", "S.Base"),
     }
-    assert len(result.diagnostics) >= 2
-    assert all(item.code is DiagnosticCode.UNSUPPORTED_SYNTAX for item in result.diagnostics)
+    assert {
+        (edge[0].label, *location) for edge in edges for location in _evidence_locations(edge[2])
+    } == {
+        ("S.CursorRead", "opaque.sql", 4, 14),
+        ("S.TryRead", "opaque.sql", 11, 14),
+    }
+    # The cursor and TRY members report on their batch's first line; the folded
+    # ``END TRY;`` command is located at its parsed identifier.
+    assert _diagnostic_spans(result) == [
+        (
+            "opaque.sql",
+            DiagnosticCode.UNSUPPORTED_SYNTAX,
+            (2, 0, 2, len(sql.split("\n")[2])),
+        ),
+        (
+            "opaque.sql",
+            DiagnosticCode.UNSUPPORTED_SYNTAX,
+            (7, 0, 7, len(sql.split("\n")[7])),
+        ),
+        (
+            "opaque.sql",
+            DiagnosticCode.UNSUPPORTED_SYNTAX,
+            (7, sql.split("\n")[7].index("TRY"), 7, sql.split("\n")[7].index("TRY") + 3),
+        ),
+    ]
 
 
 def test_malformed_batch_is_atomic_and_later_procedure_batch_recovers(tmp_path: Path) -> None:
@@ -1454,6 +1689,139 @@ def test_flat_function_body_query_roots_are_read_without_diagnostics(
     assert ("bodies.sql", "dbo.After") in _edges(result, "contains")
 
 
+@pytest.mark.parametrize(
+    ("member", "second_read"),
+    [
+        ("UPDATE @t SET id = 1;", False),
+        ("DELETE FROM @t;", False),
+        (
+            "MERGE @t AS target USING dbo.Other AS source ON target.id = source.id "
+            "WHEN MATCHED THEN UPDATE SET id = source.id;",
+            False,
+        ),
+        ("SELECT id FROM dbo.Other UNION SELECT id FROM dbo.Items;", True),
+        ("SELECT id FROM dbo.Other INTERSECT SELECT id FROM dbo.Items;", True),
+        ("SELECT id FROM dbo.Other EXCEPT SELECT id FROM dbo.Items;", True),
+    ],
+    ids=["update", "delete", "merge", "union", "intersect", "except"],
+)
+def test_dml_and_set_operation_function_members_stay_flat(
+    tmp_path: Path, member: str, second_read: bool
+) -> None:
+    """DML on a table variable and set-operation roots are flat body members.
+
+    The body keeps its declaration, its leading read and ``dbo.After`` with zero
+    diagnostics; a set operation additionally contributes both branch reads.
+    """
+    sql = f"""\
+CREATE TABLE dbo.Items (id int)
+GO
+CREATE TABLE dbo.Other (id int)
+GO
+CREATE FUNCTION dbo.T(@x int) RETURNS @t TABLE (id int) AS
+BEGIN
+  SELECT @x = COUNT(*) FROM dbo.Items;
+  {member}
+  RETURN;
+END;
+CREATE TABLE dbo.After (id int)
+"""
+    result = _analyze(tmp_path, **{"flat-members.sql": sql})
+    symbols = _symbols(result)
+    edges = {(edge[0].label, edge[1].label): edge for edge in _sql_edges(result, "sql:reads-from")}
+
+    assert not result.diagnostics
+    assert symbols["dbo.T"].symbol_kind == "sql:function"
+    assert symbols["dbo.After"].symbol_kind == "sql:table"
+    assert set(edges) == (
+        {("dbo.T", "dbo.Items"), ("dbo.T", "dbo.Other")}
+        if second_read
+        else {("dbo.T", "dbo.Items")}
+    )
+    lines = sql.splitlines()
+    expected = {("flat-members.sql", 6, lines[6].index("dbo.Items"))}
+    if second_read:
+        expected.add(("flat-members.sql", 7, lines[7].index("dbo.Items")))
+        assert _evidence_locations(edges[("dbo.T", "dbo.Other")][2]) == {
+            ("flat-members.sql", 7, lines[7].index("dbo.Other"))
+        }
+    assert _evidence_locations(edges[("dbo.T", "dbo.Items")][2]) == expected
+    assert ("flat-members.sql", "dbo.After") in _edges(result, "contains")
+
+
+def _plus_one_function_sql(body: str) -> str:
+    return (
+        "CREATE TABLE dbo.Items (id int)\nGO\n"
+        "CREATE FUNCTION dbo.F() RETURNS int AS\nBEGIN\n"
+        f"  {body}\nEND\n"
+    )
+
+
+_RETURN_PLUS_ONE_ROWS = [
+    (
+        "function-sole",
+        _plus_one_function_sql("RETURN (SELECT COUNT(*) FROM dbo.Items) + 1"),
+        {"dbo.Items": "sql:table", "dbo.F": "sql:function"},
+        {("dbo.F", "dbo.Items")},
+        {("dbo.F", "dbo.Items"): {("return-plus-one.sql", 4, 31)}},
+        [],
+    ),
+    (
+        "function-after-member",
+        _plus_one_function_sql("DECLARE @r int;\n  RETURN (SELECT COUNT(*) FROM dbo.Items) + 1"),
+        {"dbo.Items": "sql:table", "dbo.F": "sql:function"},
+        set(),
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (2, 16, 2, 21))],
+    ),
+    (
+        "procedure-after-member",
+        "CREATE TABLE dbo.Items (id int)\nGO\n"
+        "CREATE PROCEDURE dbo.P AS\nBEGIN\n"
+        "  DECLARE @r int;\n"
+        "  RETURN (SELECT COUNT(*) FROM dbo.Items) + 1;\nEND\n",
+        {"dbo.Items": "sql:table", "dbo.P": "sql:procedure"},
+        set(),
+        {},
+        [(DiagnosticCode.UNSUPPORTED_SYNTAX, (5, 31, 5, 40))],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("sql", "symbols", "reads", "read_evidence", "diagnostics"),
+    [row[1:] for row in _RETURN_PLUS_ONE_ROWS],
+    ids=[row[0] for row in _RETURN_PLUS_ONE_ROWS],
+)
+def test_return_plus_one_has_three_documented_outcomes(
+    tmp_path: Path,
+    sql: str,
+    symbols: dict[str, str],
+    reads: set[tuple[str, str]],
+    read_evidence: dict[tuple[str, str], set[tuple[str, int, int]]],
+    diagnostics: list[tuple[DiagnosticCode, tuple[int, int, int, int]]],
+) -> None:
+    """``RETURN (SELECT …) + 1`` keeps, rejects or reports by its position.
+
+    A function's sole member is its own return and keeps the read with no
+    diagnostic; after an earlier member the function is unrepresentable with one
+    diagnostic at the function-name span; a procedure reports one diagnostic at
+    the read inside the return and keeps no read.
+    """
+    result = _analyze(tmp_path, **{"return-plus-one.sql": sql})
+    found = _symbols(result)
+
+    assert {label: node.symbol_kind for label, node in found.items()} == symbols
+    edges = {(edge[0].label, edge[1].label): edge for edge in _sql_edges(result, "sql:reads-from")}
+    assert set(edges) == reads
+    for pair, locations in read_evidence.items():
+        assert _evidence_locations(edges[pair][2]) == locations
+    assert [(item.code, _diagnostic_span(item)) for item in result.diagnostics] == diagnostics
+    if diagnostics and "dbo.F" in found:
+        # The unrepresentable function's diagnostic sits on its name span.
+        assert result.diagnostics[0].location == found["dbo.F"].location
+
+
 def test_multi_statement_function_body_reads_calls_and_keeps_a_later_declaration(
     tmp_path: Path,
 ) -> None:
@@ -1525,6 +1893,120 @@ def test_lowercase_function_return_members_keep_their_nested_query_read(
     assert ("functions.sql", "dbo.After") in _edges(result, "contains")
 
 
+_HIDDEN_END_PREAMBLE = (
+    "CREATE TABLE dbo.Items (id int)\nGO\n"
+    "CREATE FUNCTION dbo.Calc(@x int) RETURNS int AS RETURN @x\nGO\n"
+)
+
+
+def _hidden_end_fixture(body: str, *, separated_declaration: bool) -> str:
+    """Build a sole ``RETURN`` function body, closed by ``END;`` when separated."""
+    sql = (
+        f"{_HIDDEN_END_PREAMBLE}"
+        "CREATE FUNCTION dbo.F(@x int) RETURNS int AS\nBEGIN\n"
+        f"  {body}\nEND{';' if separated_declaration else ''}\n"
+    )
+    if separated_declaration:
+        sql += "CREATE TABLE dbo.After (id int)\n"
+    return sql
+
+
+@pytest.mark.parametrize(
+    ("body", "separated_declaration", "reads", "calls"),
+    [
+        ("RETURN (SELECT COUNT(*) FROM dbo.Items)", False, {"dbo.Items"}, set()),
+        ("RETURN (SELECT COUNT(*) FROM dbo.Items)", True, {"dbo.Items"}, set()),
+        ("RETURN (SELECT COUNT(*) FROM dbo.Items) + 1", True, {"dbo.Items"}, set()),
+        ("return (SELECT COUNT(*) FROM dbo.Items)", False, {"dbo.Items"}, set()),
+        ("RETURN (SELECT dbo.Calc(id) FROM dbo.Items)", True, {"dbo.Items"}, {"dbo.Calc"}),
+        ("RETURN 1", False, set(), set()),
+        ("RETURN @x", False, set(), set()),
+        ("RETURN", False, set(), set()),
+        ("RETURN", True, set(), set()),
+    ],
+    ids=[
+        "subquery-end",
+        "subquery-separated",
+        "subquery-expression-separated",
+        "lowercase-return",
+        "subquery-call",
+        "constant",
+        "parameter",
+        "bare-end",
+        "bare-separated",
+    ],
+)
+def test_sole_return_body_keeps_the_parser_hidden_end_as_its_close(
+    tmp_path: Path,
+    body: str,
+    separated_declaration: bool,
+    reads: set[str],
+    calls: set[str],
+) -> None:
+    """A sole ``RETURN`` without ``;`` before ``END`` owns its closing delimiter.
+
+    The parser folds ``END`` into the return tree, so the body is representable
+    and closed at the declaration: the return's query roots contribute their
+    facts, no body diagnostic is reported, and a declaration after ``END;`` in
+    the same batch is still analyzed.
+    """
+    sql = _hidden_end_fixture(body, separated_declaration=separated_declaration)
+    result = _analyze(tmp_path, **{"sole-return.sql": sql})
+    symbols = _symbols(result)
+
+    assert not result.diagnostics
+    assert symbols["dbo.F"].symbol_kind == "sql:function"
+    assert _edges(result, "sql:reads-from") == {("dbo.F", label) for label in reads}
+    assert _edges(result, "sql:calls") == {("dbo.F", label) for label in calls}
+    body_line = sql.splitlines().index(f"  {body}")
+    for edge in _sql_edges(result, "sql:reads-from"):
+        assert _evidence_locations(edge[2]) == {
+            ("sole-return.sql", body_line, sql.splitlines()[body_line].index("dbo.Items"))
+        }
+    for edge in _sql_edges(result, "sql:calls"):
+        assert _evidence_locations(edge[2]) == {
+            ("sole-return.sql", body_line, sql.splitlines()[body_line].index("dbo.") + 4)
+        }
+    assert ("dbo.After" in symbols) is separated_declaration
+    if separated_declaration:
+        assert symbols["dbo.After"].symbol_kind == "sql:table"
+        assert ("sole-return.sql", "dbo.After") in _edges(result, "contains")
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["[END]", '"END"', "ENDX"],
+    ids=["bracket-end", "double-quoted-end", "other-alias"],
+)
+def test_quoted_or_other_end_alias_does_not_close_a_sole_return_body(
+    tmp_path: Path, alias: str
+) -> None:
+    """Only the unquoted ``END`` alias is the hidden closing delimiter.
+
+    ``[END]``, ``"END"`` and another alias spell a return alias, not the body's
+    ``END``, so the body stays unrepresentable and keeps one diagnostic at the
+    declaration.
+    """
+    sql = (
+        "CREATE TABLE dbo.Items (id int)\nGO\n"
+        "CREATE FUNCTION dbo.F(@x int) RETURNS int AS\nBEGIN\n"
+        f"  RETURN (SELECT COUNT(*) FROM dbo.Items) {alias};\n"
+        "CREATE TABLE dbo.After (id int)\n"
+    )
+    result = _analyze(tmp_path, **{"aliases.sql": sql})
+    symbols = _symbols(result)
+    function = symbols["dbo.F"]
+
+    assert function.symbol_kind == "sql:function"
+    assert not _sql_edges(result, "sql:reads-from")
+    assert not _sql_edges(result, "sql:calls")
+    assert [(item.code, item.location) for item in result.diagnostics] == [
+        (DiagnosticCode.UNSUPPORTED_SYNTAX, function.location)
+    ]
+    assert symbols["dbo.After"].symbol_kind == "sql:table"
+    assert ("aliases.sql", "dbo.After") in _edges(result, "contains")
+
+
 def test_rejected_function_header_consumes_its_body_with_one_diagnostic(tmp_path: Path) -> None:
     sql = """\
 CREATE FUNCTION IF NOT EXISTS S.F() RETURNS int AS BEGIN
@@ -1560,6 +2042,47 @@ END;
     # the line that holds the batch's first statement character.
     assert _diagnostic_spans(result) == [
         ("unparseable.sql", DiagnosticCode.PARSE_ERROR, (3, 0, 3, len(sql.split("\n")[3])))
+    ]
+    assert not _sql_edges(result, "sql:reads-from")
+    assert not _sql_edges(result, "sql:calls")
+
+
+_BATCH_REJECTED_RETURN_FORMS = [
+    ("return-call", "DECLARE @r int;\n  RETURN dbo.Calc(1);"),
+    ("return-expression", "DECLARE @r int;\n  RETURN @x + 1;"),
+    ("return-zero-after-member", "DECLARE @r int;\n  RETURN 0;"),
+    ("return-variable-before-end", "DECLARE @r int;\n  RETURN @r"),
+    ("sole-bare-return", "RETURN;"),
+]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [row[1] for row in _BATCH_REJECTED_RETURN_FORMS],
+    ids=[row[0] for row in _BATCH_REJECTED_RETURN_FORMS],
+)
+def test_documented_whole_batch_rejections_report_one_located_parse_error(
+    tmp_path: Path, body: str
+) -> None:
+    """Each documented rejected ``RETURN`` form drops the whole batch.
+
+    The batch's earlier ``CREATE TABLE`` is lost with the function, and the one
+    ``parse-error`` is located on the batch's first non-whitespace line.
+    """
+    sql = (
+        "CREATE TABLE dbo.Earlier (id int);\n"
+        "CREATE FUNCTION dbo.M(@f int) RETURNS int AS\nBEGIN\n"
+        f"  {body}\nEND;\n"
+    )
+    result = _analyze(tmp_path, **{"rejected.sql": sql})
+
+    assert set(_symbols(result)) == set()
+    assert _diagnostic_spans(result) == [
+        (
+            "rejected.sql",
+            DiagnosticCode.PARSE_ERROR,
+            (0, 0, 0, len(sql.splitlines()[0])),
+        )
     ]
     assert not _sql_edges(result, "sql:reads-from")
     assert not _sql_edges(result, "sql:calls")
@@ -1920,6 +2443,52 @@ CREATE TABLE S.After (id int)
     ]
 
 
+@pytest.mark.parametrize(
+    ("sql", "symbols", "count"),
+    [
+        (
+            "CREATE FUNCTION dbo.Clr() RETURNS int AS EXTERNAL NAME a.b;\n"
+            "SELECT 1;\nSELECT 2;\nCREATE TABLE dbo.After (id int);\n",
+            {"dbo.After": "sql:table"},
+            3,
+        ),
+        (
+            "CREATE FUNCTION dbo.Clr() RETURNS int AS EXTERNAL NAME a.b\n"
+            "SELECT 1;\nSELECT 2;\nCREATE TABLE dbo.After (id int);\n",
+            {"dbo.After": "sql:table"},
+            2,
+        ),
+        (
+            "CREATE FUNCTION dbo.Clr() RETURNS int AS EXTERNAL NAME a.b\n"
+            "CREATE TABLE dbo.After (id int);\n",
+            {},
+            1,
+        ),
+    ],
+    ids=["semicolon", "no-semicolon-before-select", "no-semicolon-before-declaration"],
+)
+def test_whole_statement_command_function_limit_analyzes_following_trees(
+    tmp_path: Path, sql: str, symbols: dict[str, str], count: int
+) -> None:
+    """A whole-statement ``Command`` function keeps each following tree's own fate.
+
+    The statement and every following body tree report ``unsupported-syntax``
+    while a later declaration is still analyzed. Without ``;`` the declaration
+    is part of the command's text, so it yields no facts and one fewer tree
+    reports.
+    """
+    result = _analyze(tmp_path, **{"command.sql": sql})
+
+    assert {label: node.symbol_kind for label, node in _symbols(result).items()} == symbols
+    first_line = sql.splitlines()[0]
+    assert (
+        _diagnostic_spans(result)
+        == [("command.sql", DiagnosticCode.UNSUPPORTED_SYNTAX, (0, 0, 0, len(first_line)))] * count
+    )
+    assert not _sql_edges(result, "sql:reads-from")
+    assert not _sql_edges(result, "sql:calls")
+
+
 def test_declarations_fks_reads_and_raw_digest_preserve_source_coordinates(tmp_path: Path) -> None:
     content = (
         "\ufeffCREATE SCHEMA [Dø] \r\nGO\r\nCREATE TABLE [Dø].[Parent] (id int)\r\nGO\r\n"
@@ -2165,6 +2734,33 @@ CREATE TABLE FinalGo (id int)
     assert [d.code for d in result.diagnostics].count(DiagnosticCode.UNSUPPORTED_SYNTAX) == 2
     assert any("GO count" in diagnostic.message for diagnostic in result.diagnostics)
     assert _edges(result, "contains")
+
+
+@pytest.mark.parametrize(
+    ("directive", "newline", "end"),
+    [
+        ("GO 2", "\n", 4),
+        ("GO 2", "\r\n", 5),
+        ("  GO 2  -- done", "\n", 15),
+    ],
+    ids=["count", "crlf-count", "indented-with-comment"],
+)
+def test_go_count_diagnostic_spans_the_directive_line(
+    tmp_path: Path, directive: str, newline: str, end: int
+) -> None:
+    """The ``GO <count>`` diagnostic covers its directive line, CRLF included."""
+    sql = f"CREATE TABLE A (id int){newline}{directive}{newline}CREATE TABLE B (id int){newline}"
+    result = _analyze(tmp_path, **{"go-count.sql": sql})
+
+    assert {"A", "B"} <= _symbols(result).keys()
+    assert _diagnostic_spans(result) == [
+        (
+            "go-count.sql",
+            DiagnosticCode.UNSUPPORTED_SYNTAX,
+            (1, 0, 1, end),
+        )
+    ]
+    assert "GO count" in result.diagnostics[0].message
 
 
 def test_unterminated_scanner_is_file_atomic(tmp_path: Path) -> None:
