@@ -665,10 +665,17 @@
   // future graph class stays filterable even before a dedicated visual style is
   // added.
   var kindsEl = document.getElementById("kind-filters");
+  // The node filter group reports how many unresolved references the page keeps
+  // hidden. The badge is looked up here, before the initial applyFilters call
+  // below reports to it, and the count is a page property rather than a view
+  // property, so focusing a system never changes it.
+  var unresolvedBadgeEl = document.getElementById("unresolved-hidden-badge");
+  var unresolvedReferenceCount = 0;
   var kinds = [];
   cy.nodes().forEach(function (n) {
     var k = n.data("node_class");
     if (kinds.indexOf(k) === -1) kinds.push(k);
+    if (k === "unresolved-reference") unresolvedReferenceCount += 1;
   });
   kinds.sort();
   kinds.forEach(function (kind) {
@@ -832,6 +839,14 @@
     });
   }
 
+  // The badge reports only unresolved references the checked filters hide, so a
+  // page with no such node, or one showing them, renders nothing there.
+  function updateUnresolvedBadge(hiddenByFilter) {
+    var count = hiddenByFilter ? unresolvedReferenceCount : 0;
+    unresolvedBadgeEl.hidden = count === 0;
+    unresolvedBadgeEl.textContent = count === 0 ? "" : count + " unresolved hidden";
+  }
+
   function applyFilters(animate, options) {
     options = options || {};
     var shouldRelayout = options.layout !== false;
@@ -843,6 +858,7 @@
     kindsEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
       if (!cb.checked) hiddenKinds.push(cb.dataset.kind);
     });
+    updateUnresolvedBadge(hiddenKinds.indexOf("unresolved-reference") >= 0);
     var hiddenEdgeKinds = [];
     edgesEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
       if (!cb.checked) hiddenEdgeKinds.push(cb.dataset.edgekind);

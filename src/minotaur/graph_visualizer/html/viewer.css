@@ -153,6 +153,20 @@ body {
   white-space: nowrap;
 }
 
+/* The node filter group counts the unresolved references the default view
+   hides, so a filtered graph never reads as one with no such records. The
+   global [hidden] rule takes the badge out of the row while the count is zero. */
+#unresolved-hidden-badge {
+  padding: 1px 7px;
+  border-radius: 8px;
+  border: 1px solid var(--control-border);
+  background: var(--button-bg);
+  color: var(--control-text);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 #controls label {
   display: flex;
   align-items: center;
