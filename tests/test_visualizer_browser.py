@@ -4084,3 +4084,61 @@ def test_guarded_comparison_cross_system_settles_within_budget(tmp_path: Path) -
         assert state["notice"] is True
         browser.close()
     assert not errors
+
+
+def test_guarded_comparison_fit_during_animated_dagre_stores_nothing(tmp_path: Path) -> None:
+    """``AC-08``: Fit that stops an animating under-limit layout records nothing.
+
+    The view Fit interrupts must be a cache miss, so a real animated layout is
+    running when Fit stops it; a view that is already cached would make Fit a
+    no-op against the cache.
+    """
+    presentation = _guard_fit_comparison()
+    artifact = tmp_path / "comparison-fit-animated.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        page.select_option("#system-filter", "A")
+        page.check("#cross-system-connections")
+        _wait_for_settled_layout(page)
+        settled = _guard_state(page)
+        snapshot = _guard_snapshot(page)
+        assert settled["layout"] == "dagre"
+
+        # An uncached view starts an animated dagre layout that Fit stops.
+        page.evaluate(
+            """() => {
+                document.querySelector('input[data-kind="file"]').click();
+                document.getElementById('btn-fit').click();
+            }"""
+        )
+        page.wait_for_timeout(600)
+        stopped = _guard_state(page)
+        assert stopped["dagre"] == settled["dagre"] + 1
+        assert stopped["cache"] == settled["cache"]
+        assert stopped["containers"] == settled["containers"]
+
+        # The settled view is still a hit and still matches its snapshot.
+        page.check('input[data-kind="file"]')
+        _wait_for_settled_layout(page)
+        hit = _guard_state(page)
+        assert hit["dagre"] == stopped["dagre"]
+        assert hit["containers"] == settled["containers"]
+        restored = _guard_snapshot(page)
+        assert restored["positions"] == snapshot["positions"]
+        assert restored["pan"] == snapshot["pan"]
+        assert restored["zoom"] == snapshot["zoom"]
+
+        # Returning to the Fit-stopped view is a miss: nothing was recorded for it.
+        page.uncheck('input[data-kind="file"]')
+        _wait_for_settled_layout(page)
+        revisited = _guard_state(page)
+        assert revisited["dagre"] == hit["dagre"] + 1
+        assert revisited["cache"] == settled["cache"] + 1
+        browser.close()
+    assert not errors
