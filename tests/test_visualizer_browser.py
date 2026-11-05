@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import struct
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,7 @@ from minotaur.graph_visualizer.presentation import (
     build_comparison_presentation,
     build_presentation,
 )
+from minotaur.language_interpreter.emission import file_node
 from minotaur.query.call_diff import CallChange, CallLimitation
 from minotaur.query.graph_comparison import (
     GraphNodeChange,
@@ -2624,3 +2628,1459 @@ def test_comparison_real_call_sites_match_callee_evidence_and_fall_back(tmp_path
                 assert field.locator(".field-value").inner_text() == provenance
             assert _comparison_camera(page) == camera
         browser.close()
+
+
+# --- Guarded layout for large collections ---
+# The guard runs in the page thread, so only a real browser proves it: dagre's
+# stack overflow, the notice's hit testing, and an animation the quick layout
+# must not run are all invisible to a DOM-only test. Every fixture below is
+# generated from a fixed seed so a failure is reproducible.
+
+_QUICK_LAYOUT_NOTICE = "Large graph: quick layout applied; run full layout"
+_LAYOUT_FAILURE_NOTICE = "Large graph: full layout failed; showing the quick layout"
+
+
+def _guard_node(index: int, kind: str = "symbol") -> dict[str, object]:
+    """One ordinary-graph node record with a stable label and location."""
+    return {
+        "id": f"n{index}",
+        "label": f"symbol_{index}",
+        "node_class": kind,
+        "symbol_kind": "function" if kind == "symbol" else "",
+        "path": f"symbol_{index}.py",
+        "location": _comparison_location(f"symbol_{index}.py", index % 7),
+    }
+
+
+def _guard_relationship(
+    index: int, source: str, target: str, kind: str = "calls"
+) -> dict[str, object]:
+    """One ordinary-graph relationship record carrying minimal evidence."""
+    return {
+        "id": f"e{index}",
+        "source": source,
+        "target": target,
+        "kind": kind,
+        "evidence": [
+            {
+                "provenance": "static-analysis",
+                "locations": [_comparison_location("fixture.py", index % 11)],
+            }
+        ],
+    }
+
+
+def _guard_chain(
+    count: int,
+    *,
+    hidden_class_every: int | None = None,
+    file_every: int | None = None,
+) -> dict[str, object]:
+    """A natural chain; a long one overflows dagre's recursive ordering.
+
+    ``hidden_class_every`` marks every nth node with the node class the viewer
+    leaves unchecked, so the visible collection is smaller than the payload.
+    ``file_every`` adds a second checked class without breaking the chain.
+    """
+    nodes = [
+        _guard_node(
+            index,
+            "unresolved-reference"
+            if hidden_class_every and index % hidden_class_every == 0
+            else "file"
+            if file_every and index % file_every == 0
+            else "symbol",
+        )
+        for index in range(count)
+    ]
+    relationships = [
+        _guard_relationship(index, f"n{index}", f"n{index + 1}") for index in range(count - 1)
+    ]
+    return build_presentation({"nodes": nodes, "relationships": relationships})
+
+
+def _guard_ladder(
+    node_count: int, edge_count: int, *, reference_edges: int = 0
+) -> dict[str, object]:
+    """A ladder with exactly ``edge_count`` edges, two node classes, two edge kinds.
+
+    Every edge joins adjacent layers, so dagre never materialises a dummy chain
+    for it: the fixture isolates the guard from a pathological layout cost.
+    """
+    width = 20
+    nodes = [
+        _guard_node(index, "file" if index % 20 == 0 else "symbol") for index in range(node_count)
+    ]
+    candidates: list[tuple[int, int]] = []
+    for source in range(node_count):
+        start = (source // width + 1) * width
+        for target in range(start, min(node_count, start + width)):
+            candidates.append((source, target))
+    stride = max(1, len(candidates) // max(1, edge_count))
+    selected = candidates[::stride]
+    if len(selected) < edge_count:
+        selected = candidates
+    relationships = []
+    for index, (source, target) in enumerate(selected[:edge_count]):
+        kind = "references" if index >= edge_count - reference_edges else "calls"
+        relationships.append(_guard_relationship(index, f"n{source}", f"n{target}", kind))
+    return build_presentation({"nodes": nodes, "relationships": relationships})
+
+
+def _guard_random_dag(
+    node_count: int, edge_count: int, *, seed: int = 20261104
+) -> dict[str, object]:
+    """A fixed-seed forward DAG whose second node class removes about a tenth."""
+    generator = random.Random(seed)
+    nodes = [
+        _guard_node(index, "file" if index % 10 == 0 else "symbol") for index in range(node_count)
+    ]
+    relationships: list[dict[str, object]] = []
+    seen: set[tuple[int, int]] = set()
+    span = max(2, node_count // 40)
+    while len(relationships) < edge_count:
+        source = generator.randrange(node_count - 1)
+        target = generator.randrange(source + 1, min(node_count - 1, source + span) + 1)
+        if (source, target) in seen:
+            continue
+        seen.add((source, target))
+        relationships.append(_guard_relationship(len(relationships), f"n{source}", f"n{target}"))
+    return build_presentation({"nodes": nodes, "relationships": relationships})
+
+
+def _guard_system_graph() -> dict[str, object]:
+    """An over-limit graph with a small, an over-limit, and a boundary system.
+
+    ``small`` holds 20 internal nodes, ``big`` 1,600, and ``edge`` 1,400 plus 101
+    one-hop ``outer`` nodes that only the cross-system setting makes visible.
+    """
+    nodes: list[dict[str, object]] = []
+    systems: dict[str, str] = {}
+    relationships: list[dict[str, object]] = []
+
+    def add_system(name: str, count: int) -> int:
+        offset = len(nodes)
+        for _ in range(count):
+            nodes.append(_guard_node(len(nodes)))
+            systems[f"n{len(nodes) - 1}"] = name
+        for index in range(count - 1):
+            relationships.append(
+                _guard_relationship(
+                    len(relationships), f"n{offset + index}", f"n{offset + index + 1}"
+                )
+            )
+        return offset
+
+    add_system("big", 1600)
+    small_offset = add_system("small", 20)
+    edge_offset = add_system("edge", 1400)
+    outer_offset = add_system("outer", 101)
+    # One-hop joins so a selected system always has boundary groups to show.
+    for index in range(20):
+        relationships.append(
+            _guard_relationship(len(relationships), f"n{index}", f"n{outer_offset + index}")
+        )
+    for index in range(5):
+        relationships.append(
+            _guard_relationship(len(relationships), f"n{100 + index}", f"n{small_offset + index}")
+        )
+    for index in range(101):
+        relationships.append(
+            _guard_relationship(
+                len(relationships), f"n{edge_offset + index}", f"n{outer_offset + index}"
+            )
+        )
+    presentation = build_presentation({"nodes": nodes, "relationships": relationships})
+    presentation["systems"] = ["big", "edge", "outer", "small"]
+    presentation["node_systems"] = systems
+    return presentation
+
+
+def _guard_boundary_graph() -> dict[str, object]:
+    """A small ordinary graph whose selected system has two boundary groups."""
+    nodes: list[dict[str, object]] = []
+    systems: dict[str, str] = {}
+    relationships: list[dict[str, object]] = []
+    groups = {"A": 10, "B": 8, "C": 6}
+    offsets: dict[str, int] = {}
+    for name, count in groups.items():
+        offsets[name] = len(nodes)
+        for _ in range(count):
+            nodes.append(_guard_node(len(nodes)))
+            systems[f"n{len(nodes) - 1}"] = name
+        for index in range(count - 1):
+            relationships.append(
+                _guard_relationship(
+                    len(relationships),
+                    f"n{offsets[name] + index}",
+                    f"n{offsets[name] + index + 1}",
+                )
+            )
+    for name in ("B", "C"):
+        for step in range(3):
+            relationships.append(
+                _guard_relationship(
+                    len(relationships),
+                    f"n{offsets['A'] + step}",
+                    f"n{offsets[name] + step}",
+                )
+            )
+    presentation = build_presentation({"nodes": nodes, "relationships": relationships})
+    presentation["systems"] = ["A", "B", "C"]
+    presentation["node_systems"] = systems
+    return presentation
+
+
+def _guard_boundary_comparison() -> dict[str, object]:
+    """A small comparison whose selected system has boundary groups B and C."""
+    nodes = (
+        [
+            _comparison_node(f"a{index}", label=f"a{index}", before_system="A", after_system="A")
+            for index in range(1, 6)
+        ]
+        + [
+            _comparison_node(f"b{index}", label=f"b{index}", before_system="B", after_system="B")
+            for index in range(1, 4)
+        ]
+        + [
+            _comparison_node(f"c{index}", label=f"c{index}", before_system="C", after_system="C")
+            for index in range(1, 3)
+        ]
+    )
+    relationships = [
+        _comparison_edge(
+            f"a{index}-a{index + 1}",
+            f"a{index}",
+            f"a{index + 1}",
+            before_systems=("A", "A"),
+            after_systems=("A", "A"),
+        )
+        for index in range(1, 5)
+    ] + [
+        _comparison_edge("a1-b1", "a1", "b1", before_systems=("A", "B"), after_systems=("A", "B")),
+        _comparison_edge(
+            "a2-c1",
+            "a2",
+            "c1",
+            kind="references",
+            before_systems=("A", "C"),
+            after_systems=("A", "C"),
+        ),
+    ]
+    return _comparison_presentation(nodes, relationships, changed=True)
+
+
+def _guard_fit_comparison() -> dict[str, object]:
+    """A small comparison with a second node class and two boundary groups."""
+    nodes = [
+        _comparison_node(f"a{index}", label=f"a{index}", before_system="A", after_system="A")
+        for index in range(1, 5)
+    ] + [
+        _comparison_file_node("f1", "A"),
+        _comparison_file_node("f2", "A"),
+        _comparison_node("b1", label="b1", before_system="B", after_system="B"),
+        _comparison_node("c1", label="c1", before_system="C", after_system="C"),
+    ]
+    relationships = [
+        _comparison_edge(
+            f"a{index}-a{index + 1}",
+            f"a{index}",
+            f"a{index + 1}",
+            before_systems=("A", "A"),
+            after_systems=("A", "A"),
+        )
+        for index in range(1, 4)
+    ] + [
+        _comparison_edge("a1-b1", "a1", "b1", before_systems=("A", "B"), after_systems=("A", "B")),
+        _comparison_edge("a2-c1", "a2", "c1", before_systems=("A", "C"), after_systems=("A", "C")),
+        _comparison_edge("f1-b1", "f1", "b1", before_systems=("A", "B"), after_systems=("A", "B")),
+    ]
+    return _comparison_presentation(nodes, relationships, changed=True)
+
+
+def _comparison_file_node(node_id: str, system: str) -> GraphNodeChange:
+    """A comparison node whose stored payload is a file-class node.
+
+    ``_comparison_node`` always stores a symbol payload, so the second node
+    class comes from the production ``file_node`` shape.
+    """
+    payload = file_node(f"{node_id}.py", b"", "minotaur-browser-test", "python").to_dict()
+    payload["id"] = node_id
+    payload["label"] = node_id
+    payload["path"] = f"{node_id}.py"
+    side = {"node": payload, "system": system}
+    return GraphNodeChange(node_id, "unchanged", (), (system,), side, side)
+
+
+def _comparison_dag(
+    node_count: int,
+    edge_count: int,
+    *,
+    system_for: Callable[[int], str],
+    seed: int = 20261105,
+    file_every: int | None = None,
+    kinds: tuple[str, ...] = ("calls",),
+    layered: int | None = None,
+) -> dict[str, object]:
+    """A fixed-seed comparison graph whose records cross several systems.
+
+    ``layered`` keeps every edge between adjacent layers of that width, which
+    leaves dagre without dummy chains: a case that only needs a *successful*
+    full layout stays cheap.
+    """
+    generator = random.Random(seed)
+    nodes = [
+        _comparison_file_node(f"n{index}", system_for(index))
+        if file_every is not None and index % file_every == 0
+        else _comparison_node(
+            f"n{index}",
+            label=f"symbol_{index}",
+            before_system=system_for(index),
+            after_system=system_for(index),
+        )
+        for index in range(node_count)
+    ]
+    relationships: list[GraphRelationshipChange] = []
+    if layered is not None:
+        candidates: list[tuple[int, int]] = []
+        for source in range(node_count):
+            start = (source // layered + 1) * layered
+            for target in range(start, min(node_count, start + layered)):
+                candidates.append((source, target))
+        stride = max(1, len(candidates) // max(1, edge_count))
+        selected = candidates[::stride]
+        if len(selected) < edge_count:
+            selected = candidates
+        pairs = selected[:edge_count]
+    else:
+        seen: set[tuple[int, int]] = set()
+        span = max(2, node_count // 40)
+        pairs = []
+        while len(pairs) < edge_count:
+            source = generator.randrange(node_count - 1)
+            target = generator.randrange(source + 1, min(node_count - 1, source + span) + 1)
+            if (source, target) in seen:
+                continue
+            seen.add((source, target))
+            pairs.append((source, target))
+    for source, target in pairs:
+        systems = (system_for(source), system_for(target))
+        relationships.append(
+            _comparison_edge(
+                f"e{len(relationships)}",
+                f"n{source}",
+                f"n{target}",
+                kind=kinds[len(relationships) % len(kinds)],
+                before_systems=systems,
+                after_systems=systems,
+            )
+        )
+    system_names = tuple(sorted({system_for(index) for index in range(node_count)}))
+    result = SystemDiffResult(
+        old_system_names=system_names,
+        new_system_names=system_names,
+        nodes=tuple(nodes),
+        relationships=tuple(relationships),
+        old_revision="before-sha",
+        new_revision="after-sha",
+    )
+    return build_comparison_presentation(result)
+
+
+def _guard_visible_ids(
+    presentation: dict[str, object],
+    *,
+    hidden_kinds: frozenset[str] = frozenset(),
+    hidden_edge_kinds: frozenset[str] = frozenset(),
+) -> list[str]:
+    """The node and edge ids the checked filters leave visible.
+
+    The viewer names an ordinary page's edges by their payload index and a
+    comparison page's edges by their stored record id, so the expectation has to
+    follow the same rule.
+    """
+    graph = presentation["graph"]
+    assert isinstance(graph, dict)
+    comparison = "comparison" in presentation
+    visible = {str(node["id"]) for node in graph["nodes"] if node["node_class"] not in hidden_kinds}
+    edges = {
+        str(relationship["id"]) if comparison else f"edge-{index}"
+        for index, relationship in enumerate(graph["relationships"])
+        if relationship["kind"] not in hidden_edge_kinds
+        and relationship["source"] in visible
+        and relationship["target"] in visible
+    }
+    return sorted(visible | edges)
+
+
+def _guard_state(page: object) -> dict[str, object]:
+    """Read every observable the guard exposes, including the pointer hit test."""
+    return page.evaluate(
+        """() => {
+            const core = window.minotaurVisualizer;
+            const notice = document.getElementById('layout-notice');
+            const canvas = document.getElementById('cy');
+            const bounds = canvas.getBoundingClientRect();
+            const hit = document.elementFromPoint(
+                bounds.left + bounds.width / 2, bounds.top + bounds.height / 2
+            );
+            return {
+                layout: core.lastLayout(),
+                dagre: core.dagreRuns(),
+                runs: core.layoutRuns(),
+                cache: core.layoutCacheSize(),
+                notice: !notice.hidden,
+                noticeText: document.getElementById('layout-notice-text').textContent,
+                noticeButton: !document.getElementById('layout-notice-button').hidden,
+                hit: hit === null ? null
+                    : notice.contains(hit) ? 'notice'
+                    : canvas.contains(hit) ? 'canvas' : hit.nodeName,
+                animated: core.cy.nodes().some(node => node.animated()),
+                visible: core.cy.elements(':visible').map(element => element.id()).sort(),
+                containers: core.cy.nodes('.system-container').map(node => node.id()).sort(),
+            };
+        }"""
+    )
+
+
+def _guard_snapshot(page: object) -> dict[str, object]:
+    """Positions and camera, the values a comparison cache hit must reproduce."""
+    return page.evaluate(
+        """() => ({
+            zoom: window.minotaurVisualizer.cy.zoom(),
+            pan: window.minotaurVisualizer.cy.pan(),
+            positions: Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                node => [node.id(), node.position()]
+            )),
+        })"""
+    )
+
+
+def _container_membership_problems(page: object) -> list[str]:
+    """Name every visible node whose group container does not enclose it."""
+    return page.evaluate(
+        """() => {
+            const cy = window.minotaurVisualizer.cy;
+            const comparison = window.minotaurVisualizer.comparison;
+            const problems = [];
+            cy.nodes().not('.system-container').filter(node => node.visible()).forEach(node => {
+                let system = node.data('system') || '';
+                if (comparison) {
+                    const record = node.data('comparison_record') || {};
+                    const side = record.after || record.before || null;
+                    system = side && side.system ? side.system : '';
+                }
+                const id = system ? 'system-container:' + system : 'unassigned-system-container';
+                const container = cy.getElementById(id);
+                if (!container.length) {
+                    problems.push(node.id() + ':' + id + ':missing');
+                    return;
+                }
+                const bounds = container.boundingBox({includeLabels: true});
+                const point = node.position();
+                if (point.x < bounds.x1 || point.x > bounds.x2
+                    || point.y < bounds.y1 || point.y > bounds.y2) {
+                    problems.push(node.id() + ':' + id + ':outside');
+                }
+            });
+            return problems;
+        }"""
+    )
+
+
+def _wait_for_settled_layout(page: object, timeout: int = 60000) -> None:
+    """Wait until no node is animating, then let the completion callback run."""
+    page.wait_for_function(
+        "() => !window.minotaurVisualizer.cy.nodes().some(node => node.animated())",
+        timeout=timeout,
+    )
+    page.wait_for_timeout(150)
+
+
+def _open_guarded_page(page: object, artifact: Path, timeout: int = 30000) -> None:
+    """Open a generated artifact and wait for its initial guarded layout."""
+    page.goto(artifact.as_uri())
+    page.wait_for_function(
+        "() => typeof window.minotaurVisualizer !== 'undefined'", timeout=timeout
+    )
+    page.wait_for_timeout(150)
+
+
+def test_guarded_layout_notice_and_filter_toggles(tmp_path: Path) -> None:
+    """``AC-01``: an over-limit ladder opens guarded and every filter re-guards."""
+    presentation = _guard_ladder(2000, 4007, reference_edges=108)
+    artifact = tmp_path / "ladder.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _guard_state(page)
+        assert opened["layout"] == "grid"
+        assert opened["dagre"] == 0
+        assert opened["notice"] is True
+        assert opened["noticeText"] == _QUICK_LAYOUT_NOTICE
+        assert opened["noticeButton"] is True
+        assert opened["hit"] == "canvas"
+        assert opened["visible"] == _guard_visible_ids(presentation)
+
+        page.click("#layout-notice-button")
+        _wait_for_settled_layout(page)
+        full = _guard_state(page)
+        assert full["layout"] == "dagre"
+        assert full["dagre"] == 1
+        assert full["notice"] is False
+
+        # A node-class toggle re-applies the guard inside the same evaluation,
+        # and the quick layout never animates.
+        toggled = page.evaluate(
+            """() => {
+                document.querySelector('input[data-kind="file"]').click();
+                const core = window.minotaurVisualizer;
+                return {
+                    layout: core.lastLayout(),
+                    dagre: core.dagreRuns(),
+                    notice: !document.getElementById('layout-notice').hidden,
+                    animated: core.cy.nodes().some(node => node.animated()),
+                    visible: core.cy.elements(':visible').map(e => e.id()).sort(),
+                };
+            }"""
+        )
+        assert toggled["layout"] == "grid"
+        assert toggled["dagre"] == 1
+        assert toggled["notice"] is True
+        assert toggled["animated"] is False
+        assert toggled["visible"] == _guard_visible_ids(
+            presentation, hidden_kinds=frozenset({"file"})
+        )
+
+        edge_toggle = page.evaluate(
+            """() => {
+                document.querySelector('#edge-filters input[data-edgekind="references"]').click();
+                const core = window.minotaurVisualizer;
+                return {
+                    layout: core.lastLayout(),
+                    dagre: core.dagreRuns(),
+                    notice: !document.getElementById('layout-notice').hidden,
+                    animated: core.cy.nodes().some(node => node.animated()),
+                    visible: core.cy.elements(':visible').map(e => e.id()).sort(),
+                };
+            }"""
+        )
+        assert edge_toggle["layout"] == "grid"
+        assert edge_toggle["dagre"] == 1
+        assert edge_toggle["notice"] is True
+        assert edge_toggle["animated"] is False
+        assert edge_toggle["visible"] == _guard_visible_ids(
+            presentation,
+            hidden_kinds=frozenset({"file"}),
+            hidden_edge_kinds=frozenset({"references"}),
+        )
+
+        # Unchecking every visible node class leaves no layout to announce.
+        page.evaluate(
+            """() => Array.from(document.querySelectorAll('#kind-filters input'))
+                .filter(checkbox => checkbox.checked)
+                .forEach(checkbox => checkbox.click())"""
+        )
+        page.wait_for_timeout(150)
+        assert page.evaluate("() => document.getElementById('layout-notice').hidden") is True
+        browser.close()
+    assert not errors
+
+
+def test_guarded_direction_changes_only_above_the_limit(tmp_path: Path) -> None:
+    """``AC-01``: direction re-guards first and the full layout follows the new one."""
+    presentation = _guard_chain(1502)
+    artifact = tmp_path / "chain.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _guard_state(page)
+        assert opened["layout"] == "grid"
+        assert opened["dagre"] == 0
+        before = page.evaluate(
+            """() => ({
+                arrow: document.getElementById('btn-direction').textContent,
+                positions: Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                    node => [node.id(), node.position()]
+                )),
+            })"""
+        )
+        page.click("#btn-direction")
+        page.wait_for_timeout(200)
+        after = page.evaluate(
+            """() => ({
+                arrow: document.getElementById('btn-direction').textContent,
+                positions: Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                    node => [node.id(), node.position()]
+                )),
+                layout: window.minotaurVisualizer.lastLayout(),
+                dagre: window.minotaurVisualizer.dagreRuns(),
+            })"""
+        )
+        assert after["arrow"] != before["arrow"]
+        assert after["positions"] == before["positions"]
+        assert after["layout"] == "grid"
+        assert after["dagre"] == 0
+
+        # The full layout now runs for the new left-to-right direction.
+        page.click("#layout-notice-button")
+        _wait_for_settled_layout(page)
+        laid_out = _guard_state(page)
+        assert laid_out["layout"] == "dagre"
+        assert laid_out["dagre"] == 1
+        assert laid_out["notice"] is False
+        box = page.evaluate(
+            """() => {
+                const bounds = window.minotaurVisualizer.cy.nodes(':visible')
+                    .boundingBox({includeLabels: true});
+                return {width: bounds.w, height: bounds.h};
+            }"""
+        )
+        assert box["width"] > box["height"]
+
+        # The next direction change applies the guard again, once.
+        page.click("#btn-direction")
+        page.wait_for_timeout(200)
+        guarded = _guard_state(page)
+        assert guarded["layout"] == "grid"
+        assert guarded["notice"] is True
+        assert guarded["dagre"] == 1
+        browser.close()
+    assert not errors
+
+
+def test_guarded_layout_limits_stay_exact(tmp_path: Path) -> None:
+    """``AC-01``: a collection exactly at a limit stays on dagre; one more does not."""
+    cases = [
+        ("chain-at-limit", _guard_chain(1500), "dagre"),
+        ("edges-at-limit", _guard_ladder(1340, 4000), "dagre"),
+        ("chain-over-limit", _guard_chain(1501), "grid"),
+        ("edges-over-limit", _guard_ladder(1340, 4001), "grid"),
+    ]
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        for name, presentation, expected in cases:
+            artifact = tmp_path / f"{name}.html"
+            artifact.write_bytes(render_html(presentation))
+            _open_guarded_page(page, artifact)
+            state = _guard_state(page)
+            assert state["layout"] == expected, name
+            assert state["notice"] is (expected == "grid"), name
+            assert state["dagre"] == (1 if expected == "dagre" else 0), name
+        browser.close()
+    assert not errors
+
+
+def test_guarded_layout_counts_only_visible_elements(tmp_path: Path) -> None:
+    """``AC-01``: hidden node classes never count toward the limit."""
+    presentation = _guard_chain(1600, hidden_class_every=8)
+    artifact = tmp_path / "hidden-class.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _guard_state(page)
+        assert opened["layout"] == "dagre"
+        assert opened["dagre"] == 1
+        assert opened["notice"] is False
+
+        shown = page.evaluate(
+            """() => {
+                document.querySelector('input[data-kind="unresolved-reference"]').click();
+                const core = window.minotaurVisualizer;
+                return {
+                    layout: core.lastLayout(),
+                    dagre: core.dagreRuns(),
+                    notice: !document.getElementById('layout-notice').hidden,
+                };
+            }"""
+        )
+        assert shown["layout"] == "grid"
+        assert shown["dagre"] == 1
+        assert shown["notice"] is True
+
+        hidden = page.evaluate(
+            """() => {
+                document.querySelector('input[data-kind="unresolved-reference"]').click();
+                const core = window.minotaurVisualizer;
+                return {
+                    layout: core.lastLayout(),
+                    dagre: core.dagreRuns(),
+                    notice: !document.getElementById('layout-notice').hidden,
+                };
+            }"""
+        )
+        assert hidden["layout"] == "dagre"
+        assert hidden["dagre"] == 2
+        assert hidden["notice"] is False
+        browser.close()
+    assert not errors
+
+
+def test_guarded_layout_failure_keeps_quick_positions(tmp_path: Path) -> None:
+    """``AC-01``: dagre's overflow surfaces as a notice, never as a page error."""
+    presentation = _guard_chain(4002, file_every=10)
+    artifact = tmp_path / "overflow.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _guard_state(page)
+        assert opened["layout"] == "grid"
+        assert opened["noticeText"] == _QUICK_LAYOUT_NOTICE
+        quick_positions = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                node => [node.id(), node.position()]
+            ))"""
+        )
+        page.click("#layout-notice-button")
+        page.wait_for_timeout(400)
+        failed = _guard_state(page)
+        assert failed["layout"] == "grid"
+        assert failed["dagre"] == 1
+        assert failed["notice"] is True
+        assert failed["noticeText"] == _LAYOUT_FAILURE_NOTICE
+        assert failed["noticeText"] != _QUICK_LAYOUT_NOTICE
+        assert failed["noticeButton"] is False
+        kept = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                node => [node.id(), node.position()]
+            ))"""
+        )
+        assert kept == quick_positions
+
+        # The next filter change restores the quick notice and its button.
+        restored = page.evaluate(
+            """() => {
+                document.querySelector('input[data-kind="file"]').click();
+                const core = window.minotaurVisualizer;
+                return {
+                    layout: core.lastLayout(),
+                    dagre: core.dagreRuns(),
+                    notice: !document.getElementById('layout-notice').hidden,
+                    text: document.getElementById('layout-notice-text').textContent,
+                    button: !document.getElementById('layout-notice-button').hidden,
+                };
+            }"""
+        )
+        assert restored["layout"] == "grid"
+        assert restored["dagre"] == 1
+        assert restored["notice"] is True
+        assert restored["text"] == _QUICK_LAYOUT_NOTICE
+        assert restored["button"] is True
+        browser.close()
+    assert not errors
+
+
+@pytest.mark.slow
+def test_guarded_layout_meets_large_graph_budgets(tmp_path: Path) -> None:
+    """``AC-02``: the scale fixtures load and toggle inside their time budgets.
+
+    The waits are bounded Playwright calls, so a hung page fails the budget
+    instead of blocking the test, and the page still closes.
+    """
+    fixtures = {
+        "chain-4002": _guard_chain(4002),
+        "dag-5002": _guard_random_dag(5002, 10004),
+        "dag-2002": _guard_random_dag(2002, 4004),
+    }
+    artifacts: dict[str, Path] = {}
+    for name, presentation in fixtures.items():
+        artifact = tmp_path / f"{name}.html"
+        artifact.write_bytes(render_html(presentation))
+        artifacts[name] = artifact
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        for name, artifact in artifacts.items():
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            try:
+                started = time.monotonic()
+                page.goto(artifact.as_uri(), wait_until="commit")
+                page.wait_for_function(
+                    "() => typeof window.minotaurVisualizer !== 'undefined'",
+                    timeout=20000,
+                )
+                elapsed = time.monotonic() - started
+                state = _guard_state(page)
+                assert state["layout"] == "grid", name
+                assert state["dagre"] == 0, name
+                assert elapsed < 20, f"{name} defined the viewer after {elapsed:.1f}s"
+                if name != "dag-2002":
+                    continue
+                started = time.monotonic()
+                page.locator('input[data-kind="file"]').click(timeout=5000)
+                page.wait_for_function(
+                    "() => window.minotaurVisualizer.lastLayout() === 'grid'"
+                    " && window.minotaurVisualizer.cy.nodes(':visible').length < 1900",
+                    timeout=5000,
+                )
+                toggle_elapsed = time.monotonic() - started
+                toggled = _guard_state(page)
+                assert toggle_elapsed < 5, f"the toggle took {toggle_elapsed:.1f}s"
+                assert toggled["layout"] == "grid"
+                assert toggled["dagre"] == 0
+                visible_nodes = page.evaluate(
+                    "() => window.minotaurVisualizer.cy.nodes(':visible').length"
+                )
+                assert 1700 <= visible_nodes <= 1900
+            finally:
+                page.close()
+                assert page.is_closed()
+        browser.close()
+    assert not errors
+
+
+def test_guarded_direction_keeps_containers_on_an_ordinary_page(tmp_path: Path) -> None:
+    """``AC-07``: direction and a real double-click keep one container per group."""
+    presentation = _guard_boundary_graph()
+    artifact = tmp_path / "ordinary-boundary.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        page.select_option("#system-filter", "A")
+        page.check("#cross-system-connections")
+        _wait_for_settled_layout(page)
+        before = _guard_state(page)
+        assert before["layout"] == "dagre"
+        assert before["containers"] == [
+            "system-container:A",
+            "system-container:B",
+            "system-container:C",
+        ]
+        assert _container_membership_problems(page) == []
+
+        page.click("#btn-direction")
+        _wait_for_settled_layout(page)
+        after = _guard_state(page)
+        assert after["containers"] == before["containers"]
+        assert _container_membership_problems(page) == []
+
+        page.dblclick("#btn-direction")
+        _wait_for_settled_layout(page)
+        doubled = _guard_state(page)
+        assert doubled["containers"] == before["containers"]
+        assert _container_membership_problems(page) == []
+        browser.close()
+    assert not errors
+
+
+def test_guarded_direction_keeps_containers_on_a_comparison_page(tmp_path: Path) -> None:
+    """``AC-07``: the comparison page keeps its containers and their member geometry."""
+    presentation = _guard_boundary_comparison()
+    artifact = tmp_path / "comparison-boundary.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        page.select_option("#system-filter", "A")
+        page.check("#cross-system-connections")
+        _wait_for_settled_layout(page)
+        before = _guard_state(page)
+        assert before["layout"] == "dagre"
+        assert before["containers"] == [
+            "system-container:A",
+            "system-container:B",
+            "system-container:C",
+        ]
+        assert _container_membership_problems(page) == []
+
+        page.click("#btn-direction")
+        _wait_for_settled_layout(page)
+        after = _guard_state(page)
+        assert after["containers"] == before["containers"]
+        # Member geometry is recomputed: a stale box would leave a member outside.
+        assert _container_membership_problems(page) == []
+
+        page.dblclick("#btn-direction")
+        _wait_for_settled_layout(page)
+        doubled = _guard_state(page)
+        assert doubled["containers"] == before["containers"]
+        assert _container_membership_problems(page) == []
+        browser.close()
+    assert not errors
+
+
+def test_guarded_direction_keeps_containers_over_the_limit(tmp_path: Path) -> None:
+    """``AC-07``: the quick layout and the notice button keep the same grouping."""
+    ordinary = _guard_system_graph()
+    comparison = _comparison_dag(
+        1700, 2000, system_for=lambda index: "A" if index % 20 else "B", layered=20
+    )
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        for name, presentation, system in (
+            ("ordinary", ordinary, "big"),
+            ("comparison", comparison, "A"),
+        ):
+            artifact = tmp_path / f"{name}-over-limit.html"
+            artifact.write_bytes(render_html(presentation))
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            _open_guarded_page(page, artifact)
+            page.select_option("#system-filter", system)
+            page.check("#cross-system-connections")
+            _wait_for_settled_layout(page)
+            opened = _guard_state(page)
+            assert opened["layout"] == "grid", name
+            assert opened["notice"] is True, name
+            assert opened["containers"], name
+
+            page.click("#btn-direction")
+            page.wait_for_timeout(200)
+            direction = _guard_state(page)
+            assert direction["layout"] == "grid", name
+            assert direction["containers"] == opened["containers"], name
+
+            page.click("#layout-notice-button")
+            _wait_for_settled_layout(page)
+            full = _guard_state(page)
+            assert full["layout"] == "dagre", name
+            assert full["dagre"] == opened["dagre"] + 1, name
+            assert full["containers"] == opened["containers"], name
+            page.close()
+        browser.close()
+    assert not errors
+
+
+def test_guarded_focused_layout_counts_internal_elements(tmp_path: Path) -> None:
+    """``AC-08``: a focused view counts its internal elements, never its boundary."""
+    presentation = _guard_system_graph()
+    artifact = tmp_path / "systems.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+        opened = _guard_state(page)
+        assert opened["layout"] == "grid"
+        assert opened["notice"] is True
+
+        page.select_option("#system-filter", "small")
+        _wait_for_settled_layout(page)
+        small = _guard_state(page)
+        assert small["layout"] == "dagre"
+        assert small["notice"] is False
+
+        page.select_option("#system-filter", "big")
+        _wait_for_settled_layout(page)
+        big = _guard_state(page)
+        assert big["layout"] == "grid"
+        assert big["notice"] is True
+        assert big["dagre"] == small["dagre"]
+        page.click("#layout-notice-button")
+        _wait_for_settled_layout(page)
+        full = _guard_state(page)
+        assert full["layout"] == "dagre"
+        assert full["dagre"] == big["dagre"] + 1
+        assert full["notice"] is False
+
+        # 1,400 internal nodes stay on dagre with 101 visible boundary nodes,
+        # which only hold when the boundary is not counted.
+        page.select_option("#system-filter", "edge")
+        page.check("#cross-system-connections")
+        _wait_for_settled_layout(page)
+        boundary = _guard_state(page)
+        assert boundary["layout"] == "dagre"
+        assert boundary["notice"] is False
+        browser.close()
+    assert not errors
+
+
+def test_guarded_comparison_cache_hit_restores_positions(tmp_path: Path) -> None:
+    """``AC-08``: a comparison miss guards, the button caches, and a hit restores."""
+    presentation = _comparison_dag(
+        1600,
+        2000,
+        system_for=lambda index: "A" if index % 2 == 0 else "B",
+        file_every=20,
+        layered=20,
+    )
+    artifact = tmp_path / "comparison-cache.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _guard_state(page)
+        assert opened["layout"] == "grid"
+        assert opened["notice"] is True
+        assert opened["cache"] == 0
+        assert opened["runs"] == 1
+        assert opened["dagre"] == 0
+
+        page.click("#layout-notice-button")
+        _wait_for_settled_layout(page)
+        full = _guard_state(page)
+        assert full["layout"] == "dagre"
+        assert full["dagre"] == 1
+        assert full["cache"] == 1
+        assert full["notice"] is False
+        snapshot = _guard_snapshot(page)
+
+        # A toggle away misses and stays guarded; the cached view survives.
+        page.uncheck('input[data-kind="file"]')
+        _wait_for_settled_layout(page)
+        away = _guard_state(page)
+        assert away["layout"] == "grid"
+        assert away["notice"] is True
+        assert away["cache"] == 1
+        assert away["runs"] > full["runs"]
+
+        # The toggle back is a hit: no dagre run, no notice, same geometry.
+        page.check('input[data-kind="file"]')
+        _wait_for_settled_layout(page)
+        hit = _guard_state(page)
+        assert hit["layout"] == "dagre"
+        assert hit["dagre"] == 1
+        assert hit["cache"] == 1
+        assert hit["notice"] is False
+        assert hit["runs"] > away["runs"]
+        restored = _guard_snapshot(page)
+        assert restored["positions"] == snapshot["positions"]
+        assert restored["pan"] == snapshot["pan"]
+        assert restored["zoom"] == snapshot["zoom"]
+        # A node from the away view and one that stayed visible both return.
+        for node_id in ("n0", "n1"):
+            assert restored["positions"][node_id] == snapshot["positions"][node_id]
+        browser.close()
+    assert not errors
+
+
+def test_guarded_comparison_full_layout_failure_leaves_cache_empty(tmp_path: Path) -> None:
+    """``AC-08``: a failed comparison full layout stays guarded and caches nothing."""
+    count = 4002
+    nodes = [
+        _comparison_file_node(f"n{index}", "A" if index % 2 else "B")
+        if index % 10 == 0
+        else _comparison_node(
+            f"n{index}",
+            label=f"symbol_{index}",
+            before_system="A" if index % 2 else "B",
+            after_system="A" if index % 2 else "B",
+        )
+        for index in range(count)
+    ]
+    relationships = []
+    for index in range(count - 1):
+        systems = (
+            "A" if index % 2 else "B",
+            "A" if (index + 1) % 2 else "B",
+        )
+        relationships.append(
+            _comparison_edge(
+                f"e{index}",
+                f"n{index}",
+                f"n{index + 1}",
+                before_systems=systems,
+                after_systems=systems,
+            )
+        )
+    presentation = _comparison_presentation(nodes, relationships, changed=True)
+    artifact = tmp_path / "comparison-overflow.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _guard_state(page)
+        assert opened["layout"] == "grid"
+        assert opened["notice"] is True
+        quick_positions = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                node => [node.id(), node.position()]
+            ))"""
+        )
+        page.click("#layout-notice-button")
+        page.wait_for_timeout(500)
+        failed = _guard_state(page)
+        assert failed["layout"] == "grid"
+        assert failed["noticeText"] == _LAYOUT_FAILURE_NOTICE
+        assert failed["noticeButton"] is False
+        assert failed["cache"] == 0
+        kept = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                node => [node.id(), node.position()]
+            ))"""
+        )
+        assert kept == quick_positions
+
+        # The next toggle stays above the limit, so nothing is cached.
+        page.uncheck('input[data-kind="file"]')
+        page.wait_for_timeout(300)
+        after = _guard_state(page)
+        assert after["layout"] == "grid"
+        assert after["noticeText"] == _QUICK_LAYOUT_NOTICE
+        assert after["cache"] == 0
+        browser.close()
+    assert not errors
+
+
+def test_guarded_comparison_interrupted_toggle_and_fit_store_nothing(tmp_path: Path) -> None:
+    """``AC-08``: only a layout that completes animating itself fills the cache."""
+    presentation = _guard_fit_comparison()
+    artifact = tmp_path / "comparison-interrupted.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        page.select_option("#system-filter", "A")
+        page.check("#cross-system-connections")
+        _wait_for_settled_layout(page)
+        settled = _guard_state(page)
+        snapshot = _guard_snapshot(page)
+        assert settled["layout"] == "dagre"
+        assert settled["containers"] == [
+            "system-container:A",
+            "system-container:B",
+            "system-container:C",
+        ]
+        assert settled["cache"] >= 1
+
+        # Two toggles inside one evaluation: the first layout never grows a turn,
+        # so its mid-animation state is discarded and the second one hits.
+        interrupted = page.evaluate(
+            """() => {
+                const file = document.querySelector('input[data-kind="file"]');
+                file.click();
+                file.click();
+                const core = window.minotaurVisualizer;
+                return {layout: core.lastLayout(), dagre: core.dagreRuns()};
+            }"""
+        )
+        page.wait_for_timeout(500)
+        after_interrupt = _guard_state(page)
+        assert interrupted["dagre"] == settled["dagre"] + 1
+        assert after_interrupt["cache"] == settled["cache"]
+        assert after_interrupt["layout"] == "dagre"
+
+        # The superseded view was never cached: going there is a miss.
+        page.uncheck('input[data-kind="file"]')
+        _wait_for_settled_layout(page)
+        missed = _guard_state(page)
+        assert missed["dagre"] == settled["dagre"] + 2
+        assert missed["cache"] == settled["cache"] + 1
+
+        page.check('input[data-kind="file"]')
+        _wait_for_settled_layout(page)
+        restored = _guard_state(page)
+        assert restored["layout"] == "dagre"
+        assert restored["dagre"] == settled["dagre"] + 2
+        assert restored["notice"] is False
+        restored_snapshot = _guard_snapshot(page)
+        assert restored_snapshot["positions"] == snapshot["positions"]
+        assert restored_snapshot["pan"] == snapshot["pan"]
+        assert restored_snapshot["zoom"] == snapshot["zoom"]
+
+        # Fit during an animated layout stores no entry and keeps the containers.
+        cache_before_fit = restored["cache"]
+        page.evaluate(
+            """() => {
+                document.querySelector('input[data-kind="file"]').click();
+                document.getElementById('btn-fit').click();
+            }"""
+        )
+        page.wait_for_timeout(600)
+        after_fit = _guard_state(page)
+        assert after_fit["cache"] == cache_before_fit
+        assert after_fit["containers"] == settled["containers"]
+
+        page.check('input[data-kind="file"]')
+        _wait_for_settled_layout(page)
+        settled_again = _guard_state(page)
+        assert settled_again["layout"] == "dagre"
+        assert settled_again["containers"] == settled["containers"]
+        assert _guard_snapshot(page)["positions"] == snapshot["positions"]
+        browser.close()
+    assert not errors
+
+
+def test_guarded_focused_fit_keeps_the_ring_and_containers(tmp_path: Path) -> None:
+    """``AC-08``: a Fit-stopped focused layout still rebuilds its ring containers."""
+    presentation = _guard_boundary_graph()
+    artifact = tmp_path / "ordinary-fit.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        # Select, enable cross-system connections, and Fit inside one evaluation,
+        # so Fit stops the focused layout while it is still animating.
+        page.evaluate(
+            """() => {
+                const select = document.getElementById('system-filter');
+                select.value = 'A';
+                select.dispatchEvent(new Event('change'));
+                const cross = document.getElementById('cross-system-connections');
+                cross.checked = true;
+                cross.dispatchEvent(new Event('change'));
+                document.getElementById('btn-fit').click();
+            }"""
+        )
+        page.wait_for_timeout(600)
+        state = _guard_state(page)
+        assert state["containers"] == [
+            "system-container:A",
+            "system-container:B",
+            "system-container:C",
+        ]
+        outside = page.evaluate(
+            """() => {
+                const cy = window.minotaurVisualizer.cy;
+                const bounds = cy.getElementById('system-container:A')
+                    .boundingBox({includeLabels: true});
+                const boundary = cy.nodes().filter(node => !node.hasClass('system-container')
+                    && node.data('system') !== 'A' && node.visible());
+                return boundary.every(node => {
+                    const point = node.position();
+                    return point.x < bounds.x1 || point.x > bounds.x2
+                        || point.y < bounds.y1 || point.y > bounds.y2;
+                }) && boundary.length > 0;
+            }"""
+        )
+        assert outside is True
+        browser.close()
+    assert not errors
+
+
+def test_guarded_comparison_fit_during_full_layout_stores_nothing(tmp_path: Path) -> None:
+    """``AC-08``: a Fit-stopped full layout over the limit never reaches the cache."""
+    presentation = _comparison_dag(
+        1700, 2000, system_for=lambda index: "A" if index % 20 else "B", layered=20
+    )
+    artifact = tmp_path / "comparison-fit-full.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        page.select_option("#system-filter", "A")
+        page.check("#cross-system-connections")
+        _wait_for_settled_layout(page)
+        opened = _guard_state(page)
+        assert opened["layout"] == "grid"
+        assert opened["notice"] is True
+        assert opened["cache"] == 0
+        assert opened["containers"] == ["system-container:A", "system-container:B"]
+
+        # Start the full layout and stop it with Fit inside one evaluation, so
+        # the entry would be written from mid-animation positions.
+        page.evaluate(
+            """() => {
+                document.getElementById('layout-notice-button').click();
+                document.getElementById('btn-fit').click();
+            }"""
+        )
+        page.wait_for_timeout(600)
+        stopped = _guard_state(page)
+        assert stopped["cache"] == 0
+
+        page.uncheck('input[data-edgekind="calls"]')
+        _wait_for_settled_layout(page)
+        away = _guard_state(page)
+        assert away["layout"] == "grid"
+        assert away["notice"] is True
+        assert away["noticeButton"] is True
+        assert away["containers"] == ["system-container:A"]
+
+        page.check('input[data-edgekind="calls"]')
+        _wait_for_settled_layout(page)
+        back = _guard_state(page)
+        assert back["layout"] == "grid"
+        assert back["notice"] is True
+        assert back["noticeButton"] is True
+        assert back["cache"] == 0
+        assert back["containers"] == opened["containers"]
+        browser.close()
+    assert not errors
+
+
+def test_guarded_comparison_containers_follow_checked_edges(tmp_path: Path) -> None:
+    """``AC-08``: a comparison node joins only through a checked edge to the system."""
+    nodes = [
+        _comparison_node(f"a{index}", label=f"a{index}", before_system="A", after_system="A")
+        for index in range(1, 4)
+    ] + [
+        _comparison_node("b1", label="b1", before_system="B", after_system="B"),
+        _comparison_node("c1", label="c1", before_system="C", after_system="C"),
+    ]
+    relationships = [
+        _comparison_edge("a1-a2", "a1", "a2", before_systems=("A", "A"), after_systems=("A", "A")),
+        _comparison_edge("a2-a3", "a2", "a3", before_systems=("A", "A"), after_systems=("A", "A")),
+        _comparison_edge("a1-b1", "a1", "b1", before_systems=("A", "B"), after_systems=("A", "B")),
+        _comparison_edge(
+            "a3-c1",
+            "a3",
+            "c1",
+            kind="references",
+            before_systems=("A", "C"),
+            after_systems=("A", "C"),
+        ),
+    ]
+    presentation = _comparison_presentation(nodes, relationships, changed=True)
+    artifact = tmp_path / "comparison-membership.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        page.select_option("#system-filter", "A")
+        page.check("#cross-system-connections")
+        _wait_for_settled_layout(page)
+        joined = _guard_state(page)
+        assert joined["containers"] == [
+            "system-container:A",
+            "system-container:B",
+            "system-container:C",
+        ]
+
+        page.uncheck('input[data-edgekind="references"]')
+        _wait_for_settled_layout(page)
+        without = _guard_state(page)
+        assert without["containers"] == [
+            "system-container:A",
+            "system-container:B",
+        ]
+
+        page.check('input[data-edgekind="references"]')
+        _wait_for_settled_layout(page)
+        restored = _guard_state(page)
+        assert restored["containers"] == joined["containers"]
+        browser.close()
+    assert not errors
+
+
+def test_guarded_revision_switch_keeps_guard_state(tmp_path: Path) -> None:
+    """``AC-08``: the revision view hides facts without relayout or re-guarding."""
+    presentation = _comparison_dag(
+        1700,
+        2000,
+        system_for=lambda index: "small" if index < 20 else ("B" if index % 20 == 0 else "A"),
+        layered=20,
+    )
+    artifact = tmp_path / "comparison-revision.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _guard_state(page)
+        assert opened["layout"] == "grid"
+        assert opened["notice"] is True
+        positions = page.evaluate(
+            """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                node => [node.id(), node.position()]
+            ))"""
+        )
+        for view in ("before", "after", "combined"):
+            page.select_option("#revision-view", view)
+            page.wait_for_timeout(100)
+            state = _guard_state(page)
+            assert state["layout"] == opened["layout"], view
+            assert state["dagre"] == opened["dagre"], view
+            assert state["runs"] == opened["runs"], view
+            assert state["notice"] == opened["notice"], view
+            assert (
+                page.evaluate(
+                    """() => Object.fromEntries(window.minotaurVisualizer.cy.nodes().map(
+                        node => [node.id(), node.position()]
+                    ))"""
+                )
+                == positions
+            ), view
+
+        page.select_option("#system-filter", "small")
+        _wait_for_settled_layout(page)
+        selected = _guard_state(page)
+        assert selected["layout"] == "dagre"
+        assert selected["dagre"] == opened["dagre"] + 1
+        browser.close()
+    assert not errors
+
+
+@pytest.mark.slow
+def test_guarded_comparison_cross_system_settles_within_budget(tmp_path: Path) -> None:
+    """``AC-08``: the cross-system comparison view settles on grid within five seconds."""
+    presentation = _comparison_dag(
+        5002, 10004, system_for=lambda index: "A" if index % 2 == 0 else "B"
+    )
+    artifact = tmp_path / "comparison-scale.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact, timeout=20000)
+        page.select_option("#system-filter", "A")
+        _wait_for_settled_layout(page, timeout=20000)
+        started = time.monotonic()
+        page.check("#cross-system-connections", timeout=5000)
+        page.wait_for_function(
+            "() => !window.minotaurVisualizer.cy.nodes().some(node => node.animated())",
+            timeout=5000,
+        )
+        elapsed = time.monotonic() - started
+        state = _guard_state(page)
+        assert elapsed < 5, f"the cross-system view settled after {elapsed:.1f}s"
+        assert state["layout"] == "grid"
+        assert state["dagre"] == 0
+        assert state["notice"] is True
+        browser.close()
+    assert not errors
