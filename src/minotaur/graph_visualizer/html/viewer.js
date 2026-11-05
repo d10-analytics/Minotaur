@@ -16,9 +16,23 @@
   var byId = new Map(graph.nodes.map(function (n) { return [n.id, n]; }));
   var layoutDir = "TB";
   var activeLayout = null;
+  var activeLayoutState = null;
   var layoutRuns = 0;
   var comparisonLayoutCache = new Map();
   var comparisonContainerGeometry = new Map();
+  // Dagre is synchronous and its recursive ordering overflows the page thread
+  // on a large collection, so every path that would hand one to dagre reaches
+  // the limit comparison in runGuardedLayout first. A collection exactly at
+  // either limit still runs dagre.
+  var FULL_LAYOUT_NODE_LIMIT = 1500;
+  var FULL_LAYOUT_EDGE_LIMIT = 4000;
+  var QUICK_LAYOUT_NOTICE = "Large graph: quick layout applied; run full layout";
+  var LAYOUT_FAILURE_NOTICE = "Large graph: full layout failed; showing the quick layout";
+  var lastLayoutName = "";
+  var dagreRunCount = 0;
+  var layoutNoticeEl = document.getElementById("layout-notice");
+  var layoutNoticeTextEl = document.getElementById("layout-notice-text");
+  var layoutNoticeButtonEl = document.getElementById("layout-notice-button");
   // The emphasis control, the no-change message, and the detail panel are all
   // presentations of stored comparison facts. Nothing here recomputes status
   // from the two snapshots; the payload already classified every record.
@@ -571,14 +585,15 @@
     return placement[0] || "";
   }
 
-  function createSystemContainers(selectedSystem) {
+  function createSystemContainers(selectedSystem, containerNodes) {
     var groups = new Map();
-    var containerNodes = comparisonMode
-      ? checkedComparisonNodes().filter(function (node) {
-        return comparisonLayoutEligible(node, selectedSystem, true);
-      })
-      : cy.nodes(":visible").not(".system-container");
-    containerNodes.forEach(function (node) {
+    // The comparison caller passes the layout-eligible collection it just laid
+    // out, so the grouping uses the same one-pass eligibility instead of
+    // re-deriving it from every edge.
+    var members = containerNodes || (comparisonMode
+      ? comparisonLayoutNodes(selectedSystem, true)
+      : cy.nodes(":visible").not(".system-container"));
+    members.forEach(function (node) {
       var name = systemGroupingKey(node);
       if (!groups.has(name)) groups.set(name, cy.collection());
       groups.set(name, groups.get(name).union(node));
@@ -1756,7 +1771,13 @@
     dirIdx = (dirIdx + 1) % DIR_CYCLE.length;
     layoutDir = DIR_CYCLE[dirIdx];
     dirBtn.textContent = DIR_ARROWS[layoutDir];
+    resetSystemContainers();
     runLayout();
+  });
+
+  layoutNoticeButtonEl.addEventListener("click", function () {
+    resetSystemContainers();
+    runLayout(true, true);
   });
 
   document.getElementById("btn-fit").addEventListener("click", function () {
@@ -1769,40 +1790,143 @@
     if (renderer) renderer.wheelSensitivity = Number(zoomSlider.value) / 5;
   });
 
-  function stopLayout() {
-    if (activeLayout) activeLayout.stop();
+  function stopLayout(replaced) {
+    var state = activeLayoutState;
+    if (state && !state.completed) {
+      // Mark the layout before stopping it: layoutstop is emitted synchronously,
+      // and a superseded layout must neither record a cache entry nor rebuild
+      // the containers the layout replacing it is about to draw.
+      state.stopped = true;
+      state.replaced = replaced === true;
+      activeLayout.stop();
+    }
     cy.elements().stop(true, false);
     cy.stop(true, false);
   }
 
   function fitVisible() {
-    stopLayout();
+    // Fit is the one stop with no relayout behind it, so its callback still
+    // rebuilds the containers and the ring; it only loses the completion record.
+    stopLayout(false);
     var visible = cy.elements(":visible");
     if (visible.nodes().length) cy.fit(visible, 30);
   }
 
-  function runLayout(animate) {
-    stopLayout();
+  function resetSystemContainers() {
+    // A relayout owns the grouping from scratch, so a container left from the
+    // previous layout would collide on the next create. A filter change clears
+    // the same state before it relayouts.
+    clearSystemContainers();
+    if (comparisonMode) comparisonContainerGeometry.clear();
+  }
+
+  function showLayoutNotice(message, withButton) {
+    layoutNoticeTextEl.textContent = message;
+    layoutNoticeButtonEl.hidden = !withButton;
+    layoutNoticeEl.hidden = false;
+  }
+
+  function hideLayoutNotice() {
+    layoutNoticeEl.hidden = true;
+    layoutNoticeButtonEl.hidden = true;
+  }
+
+  // One owner for the guard every dagre call site shares: it compares the
+  // collection it was handed with the limits, chooses the vendored grid layout
+  // above either one, records the layout name and dagre attempts, and falls
+  // back to grid when dagre raises. Callers pass their own collection, fit,
+  // padding, and completion callback. Only a dagre layout that reaches its own
+  // natural completion lets that callback record a comparison cache entry.
+  function runGuardedLayout(elements, options) {
+    var nodes = elements.nodes();
+    var edges = elements.edges();
+    var state = {
+      dagre: options.full === true
+        || (nodes.length <= FULL_LAYOUT_NODE_LIMIT
+          && edges.length <= FULL_LAYOUT_EDGE_LIMIT),
+      stopped: false,
+      replaced: false,
+      completed: false,
+      layout: null
+    };
+    function finish() {
+      if (state.completed) return;
+      state.completed = true;
+      if (activeLayoutState === state) {
+        activeLayout = null;
+        activeLayoutState = null;
+      }
+      if (state.replaced) return;
+      if (options.completed) options.completed(state);
+    }
+    function start(name, animate) {
+      var layout = elements.layout(name === "dagre" ? {
+        name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15,
+        padding: options.padding, fit: options.fit === true, animate: animate,
+        animationDuration: 300
+      } : {
+        name: "grid", padding: options.padding, fit: options.fit === true, animate: false
+      });
+      state.layout = layout;
+      activeLayout = layout;
+      activeLayoutState = state;
+      layout.one("layoutstop", function () {
+        // A superseded layout can still emit layoutstop after this one starts;
+        // only the layout currently installed for the state may finish it.
+        if (layout !== state.layout) return;
+        finish();
+      });
+      layout.run();
+    }
+    if (state.dagre) {
+      dagreRunCount += 1;
+      lastLayoutName = "dagre";
+      hideLayoutNotice();
+      try {
+        start("dagre", options.animate !== false);
+      } catch (error) {
+        // A completion that already ran is not a layout failure: rethrow so a
+        // real defect cannot hide behind the failure notice.
+        if (state.completed) throw error;
+        // The recursive ordering inside dagre overflows the stack on a natural
+        // chain. Keep a usable view from the quick layout and say so; the
+        // failed attempt is marked like a stopped layout, so it records nothing.
+        state.dagre = false;
+        state.stopped = true;
+        lastLayoutName = "grid";
+        showLayoutNotice(LAYOUT_FAILURE_NOTICE, false);
+        start("grid", false);
+      }
+      return;
+    }
+    lastLayoutName = "grid";
+    showLayoutNotice(QUICK_LAYOUT_NOTICE, true);
+    start("grid", false);
+  }
+
+  function runLayout(animate, full) {
+    stopLayout(true);
     if (comparisonMode) {
-      runComparisonLayout(animate);
+      runComparisonLayout(animate, full);
       return;
     }
     var visible = cy.elements(":visible");
-    if (!visible.nodes().length) return;
+    if (!visible.nodes().length) {
+      hideLayoutNotice();
+      return;
+    }
     var selectedSystem = systemFilterEl.value;
     if (selectedSystem !== "") {
       runFocusedLayout(
-        visible, selectedSystem, crossSystemConnectionsEl.checked, animate
+        visible, selectedSystem, crossSystemConnectionsEl.checked, animate, full
       );
       return;
     }
-    // Passing the collection keeps hidden nodes and edges out of Dagre's ranks
+    // Passing the collection keeps hidden nodes and edges out of the layout
     // while preserving their identities and evidence for later restoration.
-    activeLayout = visible.layout({
-      name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15,
-      padding: 30, animate: animate !== false, animationDuration: 300
+    runGuardedLayout(visible, {
+      fit: true, padding: 30, animate: animate, full: full
     });
-    activeLayout.run();
   }
 
   function checkedComparisonNodes() {
@@ -1827,14 +1951,24 @@
     });
   }
 
-  function comparisonLayoutEligible(node, selectedSystem, showCross) {
-    if (selectedSystem === "") return true;
-    if (nodeBelongsTo(node, selectedSystem, "before")
-        || nodeBelongsTo(node, selectedSystem, "after")) return true;
-    if (!showCross) return false;
-    return checkedComparisonEdges().some(function (edge) {
-      return (edge.source().id() === node.id() || edge.target().id() === node.id())
-        && edgeTouchesSystemInView(edge, selectedSystem, "combined");
+  function comparisonLayoutNodes(selectedSystem, showCross) {
+    var nodes = checkedComparisonNodes();
+    if (selectedSystem === "") return nodes;
+    // Membership and cross-system membership come from one edge pass, so every
+    // node costs the same and the guard can count exactly the collection this
+    // layout hands to dagre.
+    var joined = new Set();
+    if (showCross) {
+      checkedComparisonEdges().forEach(function (edge) {
+        if (!edgeTouchesSystemInView(edge, selectedSystem, "combined")) return;
+        joined.add(edge.source().id());
+        joined.add(edge.target().id());
+      });
+    }
+    return nodes.filter(function (node) {
+      return nodeBelongsTo(node, selectedSystem, "before")
+        || nodeBelongsTo(node, selectedSystem, "after")
+        || joined.has(node.id());
     });
   }
 
@@ -1845,12 +1979,10 @@
     return edgeHasInternalInView(edge, selectedSystem, "combined");
   }
 
-  function runComparisonLayout(animate) {
+  function runComparisonLayout(animate, full) {
     var selectedSystem = systemFilterEl.value;
     var showCrossSystemConnections = selectedSystem !== "" && crossSystemConnectionsEl.checked;
-    var nodes = checkedComparisonNodes().filter(function (node) {
-      return comparisonLayoutEligible(node, selectedSystem, showCrossSystemConnections);
-    });
+    var nodes = comparisonLayoutNodes(selectedSystem, showCrossSystemConnections);
     var edges = checkedComparisonEdges().filter(function (edge) {
       return comparisonLayoutEdgeEligible(edge, selectedSystem, showCrossSystemConnections, nodes);
     });
@@ -1861,107 +1993,127 @@
       edges.map(function (edge) { return edge.id(); }).sort().join(",")].join("|");
     var cached = comparisonLayoutCache.get(cacheKey);
     if (cached) {
+      // Restore copies of the recorded values: the stored objects are not the
+      // live positions and camera, so writing them back really moves the view.
       nodes.forEach(function (node) {
         var position = cached.positions[node.id()];
-        if (position) node.position(position);
+        if (position) node.position({ x: position.x, y: position.y });
       });
       if (cached.zoom !== undefined) cy.zoom(cached.zoom);
-      if (cached.pan) cy.pan(cached.pan);
-      if (selectedSystem !== "" && showCrossSystemConnections) createSystemContainers(selectedSystem);
+      if (cached.pan) cy.pan({ x: cached.pan.x, y: cached.pan.y });
+      // A hit reproduces the full layout that filled the entry, so it reports
+      // that layout without counting another dagre run.
+      lastLayoutName = "dagre";
+      hideLayoutNotice();
+      if (selectedSystem !== "" && showCrossSystemConnections) {
+        createSystemContainers(selectedSystem, nodes);
+      }
       return;
     }
-    if (!nodes.length) return;
-    activeLayout = layoutElements.layout({
-      name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15,
-      padding: 30, fit: true, animate: animate !== false, animationDuration: 300
+    if (!nodes.length) {
+      hideLayoutNotice();
+      return;
+    }
+    runGuardedLayout(layoutElements, {
+      fit: true, padding: 30, animate: animate, full: full,
+      completed: function (state) {
+        if (state.dagre && !state.stopped) {
+          var positions = {};
+          nodes.forEach(function (node) {
+            positions[node.id()] = { x: node.position("x"), y: node.position("y") };
+          });
+          comparisonLayoutCache.set(cacheKey, {
+            positions: positions,
+            zoom: cy.zoom(),
+            pan: { x: cy.pan("x"), y: cy.pan("y") }
+          });
+        }
+        if (selectedSystem !== "" && showCrossSystemConnections) {
+          createSystemContainers(selectedSystem, nodes);
+        }
+      }
     });
-    activeLayout.one("layoutstop", function () {
-      var positions = {};
-      nodes.forEach(function (node) { positions[node.id()] = node.position(); });
-      comparisonLayoutCache.set(cacheKey, {
-        positions: positions, zoom: cy.zoom(), pan: cy.pan()
-      });
-      if (selectedSystem !== "" && showCrossSystemConnections) createSystemContainers(selectedSystem);
-    });
-    activeLayout.run();
   }
 
-  function runFocusedLayout(visible, selectedSystem, showCrossSystemConnections, animate) {
+  function runFocusedLayout(visible, selectedSystem, showCrossSystemConnections, animate, full) {
     var selectedNodes = visible.nodes().filter(function (node) {
       return node.data("system") === selectedSystem;
     });
-    if (!selectedNodes.length) return;
+    if (!selectedNodes.length) {
+      hideLayoutNotice();
+      return;
+    }
     var internalEdges = visible.edges().filter(function (edge) {
       return edge.source().data("system") === selectedSystem
         && edge.target().data("system") === selectedSystem;
     });
+    // Only the selected system's internal elements reach the guard; boundary
+    // nodes are placed on the ring below and never counted.
     var internal = selectedNodes.union(internalEdges);
-    activeLayout = internal.layout({
-      name: "dagre", rankDir: layoutDir, nodeSep: 40, rankSep: 60, edgeSep: 15,
-      padding: 30, fit: false, animate: animate !== false, animationDuration: 300
-    });
-    activeLayout.one("layoutstop", function () {
-      if (systemFilterEl.value !== selectedSystem
-          || crossSystemConnectionsEl.checked !== showCrossSystemConnections) return;
-      var boundaryNodes = visible.nodes().difference(selectedNodes);
-      var selectedBox = selectedNodes.boundingBox({ includeLabels: true });
-      var centerX = (selectedBox.x1 + selectedBox.x2) / 2;
-      var centerY = (selectedBox.y1 + selectedBox.y2) / 2;
-      if (!showCrossSystemConnections) {
-        cy.fit(selectedNodes, 30);
-        var selectedZoom = cy.zoom();
-        cy.pan({
-          x: cy.width() / 2 - centerX * selectedZoom,
-          y: cy.height() / 2 - centerY * selectedZoom
+    runGuardedLayout(internal, {
+      fit: false, padding: 30, animate: animate, full: full,
+      completed: function () {
+        if (systemFilterEl.value !== selectedSystem
+            || crossSystemConnectionsEl.checked !== showCrossSystemConnections) return;
+        var boundaryNodes = visible.nodes().difference(selectedNodes);
+        var selectedBox = selectedNodes.boundingBox({ includeLabels: true });
+        var centerX = (selectedBox.x1 + selectedBox.x2) / 2;
+        var centerY = (selectedBox.y1 + selectedBox.y2) / 2;
+        if (!showCrossSystemConnections) {
+          cy.fit(selectedNodes, 30);
+          var selectedZoom = cy.zoom();
+          cy.pan({
+            x: cy.width() / 2 - centerX * selectedZoom,
+            y: cy.height() / 2 - centerY * selectedZoom
+          });
+          return;
+        }
+        var boundaryGroups = new Map();
+        boundaryNodes.forEach(function (node) {
+          var name = systemGroupingKey(node);
+          if (!boundaryGroups.has(name)) boundaryGroups.set(name, []);
+          boundaryGroups.get(name).push(node);
         });
-        return;
-      }
-      var boundaryGroups = new Map();
-      boundaryNodes.forEach(function (node) {
-        var name = systemGroupingKey(node);
-        if (!boundaryGroups.has(name)) boundaryGroups.set(name, []);
-        boundaryGroups.get(name).push(node);
-      });
-      var groupNames = Array.from(boundaryGroups.keys()).sort();
-      var largestGroupSide = Math.max(1, ...groupNames.map(function (name) {
-        return Math.ceil(Math.sqrt(boundaryGroups.get(name).length));
-      }));
-      var horizontal = layoutDir === "LR" || layoutDir === "RL";
-      var radius = (horizontal ? selectedBox.w : selectedBox.h) / 2
-        + Math.max(240, largestGroupSide * 90 + groupNames.length * 25);
-      var startAngle = layoutDir === "LR" ? 0
-        : layoutDir === "RL" ? Math.PI
-        : layoutDir === "BT" ? Math.PI / 2
-        : -Math.PI / 2;
-      groupNames.forEach(function (name, groupIndex) {
-        var nodes = boundaryGroups.get(name).sort(function (left, right) {
-          return left.id().localeCompare(right.id());
-        });
-        var columns = Math.ceil(Math.sqrt(nodes.length));
-        var rows = Math.ceil(nodes.length / columns);
-        var angle = startAngle + (2 * Math.PI * groupIndex / groupNames.length);
-        var groupCenterX = centerX + radius * Math.cos(angle);
-        var groupCenterY = centerY + radius * Math.sin(angle);
-        nodes.forEach(function (node, nodeIndex) {
-          var column = nodeIndex % columns;
-          var row = Math.floor(nodeIndex / columns);
-          node.position({
-            x: groupCenterX + (column - (columns - 1) / 2) * 160,
-            y: groupCenterY + (row - (rows - 1) / 2) * 90
+        var groupNames = Array.from(boundaryGroups.keys()).sort();
+        var largestGroupSide = Math.max(1, ...groupNames.map(function (name) {
+          return Math.ceil(Math.sqrt(boundaryGroups.get(name).length));
+        }));
+        var horizontal = layoutDir === "LR" || layoutDir === "RL";
+        var radius = (horizontal ? selectedBox.w : selectedBox.h) / 2
+          + Math.max(240, largestGroupSide * 90 + groupNames.length * 25);
+        var startAngle = layoutDir === "LR" ? 0
+          : layoutDir === "RL" ? Math.PI
+          : layoutDir === "BT" ? Math.PI / 2
+          : -Math.PI / 2;
+        groupNames.forEach(function (name, groupIndex) {
+          var nodes = boundaryGroups.get(name).sort(function (left, right) {
+            return left.id().localeCompare(right.id());
+          });
+          var columns = Math.ceil(Math.sqrt(nodes.length));
+          var rows = Math.ceil(nodes.length / columns);
+          var angle = startAngle + (2 * Math.PI * groupIndex / groupNames.length);
+          var groupCenterX = centerX + radius * Math.cos(angle);
+          var groupCenterY = centerY + radius * Math.sin(angle);
+          nodes.forEach(function (node, nodeIndex) {
+            var column = nodeIndex % columns;
+            var row = Math.floor(nodeIndex / columns);
+            node.position({
+              x: groupCenterX + (column - (columns - 1) / 2) * 160,
+              y: groupCenterY + (row - (rows - 1) / 2) * 90
+            });
           });
         });
-      });
-      createSystemContainers(selectedSystem);
-      var focusedVisible = cy.elements(":visible");
-      cy.fit(focusedVisible, 30);
-      var selectedContainer = cy.getElementById("system-container:" + selectedSystem);
-      var selectedContainerBox = selectedContainer.boundingBox({ includeLabels: true });
-      centerX = (selectedContainerBox.x1 + selectedContainerBox.x2) / 2;
-      centerY = (selectedContainerBox.y1 + selectedContainerBox.y2) / 2;
-      var zoom = cy.zoom();
-      cy.pan({ x: cy.width() / 2 - centerX * zoom, y: cy.height() / 2 - centerY * zoom });
+        createSystemContainers(selectedSystem);
+        var focusedVisible = cy.elements(":visible");
+        cy.fit(focusedVisible, 30);
+        var selectedContainer = cy.getElementById("system-container:" + selectedSystem);
+        var selectedContainerBox = selectedContainer.boundingBox({ includeLabels: true });
+        centerX = (selectedContainerBox.x1 + selectedContainerBox.x2) / 2;
+        centerY = (selectedContainerBox.y1 + selectedContainerBox.y2) / 2;
+        var zoom = cy.zoom();
+        cy.pan({ x: cy.width() / 2 - centerX * zoom, y: cy.height() / 2 - centerY * zoom });
+      }
     });
-    activeLayout.run();
   }
 
   // --- Keyboard shortcuts ---
@@ -1987,6 +2139,8 @@
     comparison: comparisonMode,
     revisionView: function () { return revisionView; },
     layoutRuns: function () { return layoutRuns; },
-    layoutCacheSize: function () { return comparisonLayoutCache.size; }
+    layoutCacheSize: function () { return comparisonLayoutCache.size; },
+    lastLayout: function () { return lastLayoutName; },
+    dagreRuns: function () { return dagreRunCount; }
   };
 }());
