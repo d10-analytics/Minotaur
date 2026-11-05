@@ -1668,10 +1668,12 @@
         lines.push(pair[1] + " " + titleCase(change.kind) + ": " + changeSubject(change));
       });
     });
-    (comparisonPayload.nodes || []).forEach(function (node) {
+    // The summary walks the drawn records. The payload stores each comparison
+    // fact once, in ``graph``; a separate summary copy would only duplicate it.
+    graph.nodes.forEach(function (node) {
       if (recordChanged(node)) lines.push("node " + titleCase(node.status) + ": " + node.id);
     });
-    (comparisonPayload.relationships || []).forEach(function (relationship) {
+    graph.relationships.forEach(function (relationship) {
       if (recordChanged(relationship)) {
         lines.push("relationship " + titleCase(relationship.status) + ": " + relationship.id);
       }
