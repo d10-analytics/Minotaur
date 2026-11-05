@@ -16,6 +16,10 @@ import pytest
 from comparator_builders import _comparison_edge, _comparison_location, _comparison_node
 
 from minotaur import cli
+from minotaur.graph_model.identity import IdentityBasis, NodeIdentity, compute_node_id
+from minotaur.graph_model.location import Location
+from minotaur.graph_model.node import Node
+from minotaur.graph_model.provenance import NodeClass
 from minotaur.graph_visualizer.html.render import render_html
 from minotaur.graph_visualizer.presentation import (
     build_comparison_presentation,
@@ -4140,5 +4144,189 @@ def test_guarded_comparison_fit_during_animated_dagre_stores_nothing(tmp_path: P
         revisited = _guard_state(page)
         assert revisited["dagre"] == hit["dagre"] + 1
         assert revisited["cache"] == settled["cache"] + 1
+        browser.close()
+    assert not errors
+
+
+# --- Unresolved-reference badge ---
+
+
+def _badge_unresolved_node(label: str) -> dict[str, object]:
+    """One production-shaped unresolved-reference node record with a real id."""
+    identity = NodeIdentity(
+        IdentityBasis.UNRESOLVED_REFERENCE,
+        "minotaur-browser-test",
+        # The payload only needs a node-ID-shaped origin, not a record from the
+        # same fixture graph.
+        originating_node="node:sha256:" + "0" * 64,
+    )
+    location = Location.from_dict(_comparison_location("callers.py", 1))
+    return Node(
+        id=compute_node_id(
+            identity,
+            node_class=NodeClass.UNRESOLVED_REFERENCE.value,
+            location=location,
+            reference_text=label,
+        ),
+        identity=identity,
+        node_class=NodeClass.UNRESOLVED_REFERENCE,
+        label=label,
+        reference_text=label,
+        language="python",
+        location=location,
+    ).to_dict()
+
+
+def _badge_graph() -> dict[str, object]:
+    """15 ordinary nodes across two systems plus one unresolved reference."""
+    unresolved = _badge_unresolved_node("missing_call")
+    unresolved_id = str(unresolved["id"])
+    nodes = [*[_guard_node(index) for index in range(15)], unresolved]
+    systems = {f"n{index}": "alpha" if index < 10 else "beta" for index in range(15)}
+    systems[unresolved_id] = "alpha"
+    relationships = [
+        _guard_relationship(index, f"n{index}", f"n{index + 1}") for index in range(14)
+    ] + [_guard_relationship(14, "n0", unresolved_id, "references")]
+    presentation = build_presentation({"nodes": nodes, "relationships": relationships})
+    presentation["systems"] = ["alpha", "beta"]
+    presentation["node_systems"] = systems
+    return presentation
+
+
+def _badge_comparison() -> dict[str, object]:
+    """A comparison whose one unresolved-reference record stays hidden."""
+    unresolved = _badge_unresolved_node("missing_call")
+    unresolved_id = str(unresolved["id"])
+    side = {"node": unresolved, "system": "A"}
+    nodes = [
+        _comparison_node("a1", label="a1", before_system="A", after_system="A"),
+        _comparison_node("a2", label="a2", before_system="A", after_system="A"),
+        GraphNodeChange(unresolved_id, "unchanged", (), ("A",), side, side),
+    ]
+    relationships = [
+        _comparison_edge(
+            f"a1-{unresolved_id}",
+            "a1",
+            unresolved_id,
+            kind="references",
+            before_systems=("A", "A"),
+            after_systems=("A", "A"),
+        )
+    ]
+    return _comparison_presentation(nodes, relationships, changed=True)
+
+
+def _badge_state(page: object) -> dict[str, object]:
+    """Read the badge and the visible node count on the open page."""
+    return page.evaluate(
+        """() => {
+            const badge = document.getElementById('unresolved-hidden-badge');
+            return {
+                hidden: badge.hidden,
+                text: badge.textContent,
+                visible: window.minotaurVisualizer.cy.nodes(':visible').length,
+                boxes: document.querySelectorAll(
+                    'input[data-kind="unresolved-reference"]'
+                ).length,
+            };
+        }"""
+    )
+
+
+def test_unresolved_badge_counts_hidden_references_until_the_filter_shows_them(
+    tmp_path: Path,
+) -> None:
+    """``AC-03``: the badge follows real filter clicks and ignores the system view."""
+    presentation = _badge_graph()
+    artifact = tmp_path / "badge.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _badge_state(page)
+        assert opened["hidden"] is False
+        assert opened["text"] == "1 unresolved hidden"
+        assert opened["visible"] == 15
+        assert opened["boxes"] == 1
+
+        page.locator('input[data-kind="unresolved-reference"]').check()
+        shown = _badge_state(page)
+        assert shown["hidden"] is True
+        assert shown["text"] == ""
+        assert shown["visible"] == 16
+
+        page.locator('input[data-kind="unresolved-reference"]').uncheck()
+        restored = _badge_state(page)
+        assert restored["hidden"] is False
+        assert restored["text"] == "1 unresolved hidden"
+        assert restored["visible"] == 15
+
+        # A selected system narrows the view to ten records; the page still
+        # holds one hidden unresolved reference, so the badge text cannot change.
+        page.select_option("#system-filter", "alpha")
+        page.wait_for_timeout(200)
+        focused = _badge_state(page)
+        assert focused["hidden"] is False
+        assert focused["text"] == "1 unresolved hidden"
+        assert focused["visible"] == 10
+        browser.close()
+    assert not errors
+
+
+def test_unresolved_badge_appears_on_a_comparison_page(tmp_path: Path) -> None:
+    """``AC-03``: a comparison page reports its hidden unresolved record too."""
+    presentation = _badge_comparison()
+    artifact = tmp_path / "badge-comparison.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _badge_state(page)
+        assert opened["hidden"] is False
+        assert opened["text"] == "1 unresolved hidden"
+        assert opened["visible"] == 2
+
+        page.locator('input[data-kind="unresolved-reference"]').check()
+        shown = _badge_state(page)
+        assert shown["hidden"] is True
+        assert shown["text"] == ""
+        assert shown["visible"] == 3
+        browser.close()
+    assert not errors
+
+
+def test_unresolved_badge_absent_without_unresolved_references(tmp_path: Path) -> None:
+    """``AC-03``: a graph with no unresolved record shows neither badge nor filter."""
+    presentation = build_presentation(
+        {
+            "nodes": [_guard_node(index) for index in range(3)],
+            "relationships": [
+                _guard_relationship(0, "n0", "n1"),
+                _guard_relationship(1, "n1", "n2"),
+            ],
+        }
+    )
+    artifact = tmp_path / "badge-absent.html"
+    artifact.write_bytes(render_html(presentation))
+    errors: list[str] = []
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _open_guarded_page(page, artifact)
+
+        opened = _badge_state(page)
+        assert opened["hidden"] is True
+        assert opened["text"] == ""
+        assert opened["boxes"] == 0
+        assert opened["visible"] == 3
         browser.close()
     assert not errors

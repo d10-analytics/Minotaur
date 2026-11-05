@@ -1296,3 +1296,30 @@ def test_source_path_readers_link_the_containment_invariant() -> None:
     before_interactions = acquisition[: acquisition.index("## Expected interactions")]
     assert PROJECT_ACQUISITION_SOURCE_PATH_POINTER in before_interactions
     assert "points to" not in before_interactions, "the pointer must not read as a claim"
+
+
+# ---------------------------------------------------------------------------
+# AC-03: README.md
+# ---------------------------------------------------------------------------
+
+
+UNRESOLVED_HIDDEN_SENTENCE = (
+    "The HTML explorer hides unresolved references by default; its Nodes filter group "
+    "counts the hidden ones, and checking the `unresolved-reference` filter shows them."
+)
+CALLERS_UNRESOLVED_SENTENCE = (
+    "`callers` also includes explicitly marked unresolved name matches as leads to "
+    "inspect, not confirmed calls to the requested target."
+)
+
+
+def test_readme_documents_the_hidden_unresolved_default_and_its_filter() -> None:
+    """The README describes the explorer's hidden default instead of visible records."""
+    text = _collapsed(README)
+    lowered = text.lower()
+    # The two sites that used to send readers looking for drawn unresolved nodes.
+    assert "unresolved references remain visible" not in lowered
+    assert "references that cannot be resolved remain visible" not in lowered
+    assert UNRESOLVED_HIDDEN_SENTENCE in text
+    # The query answer keeps its own claim: hidden in the explorer, listed as leads.
+    assert CALLERS_UNRESOLVED_SENTENCE in text
