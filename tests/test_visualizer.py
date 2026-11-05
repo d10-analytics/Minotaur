@@ -265,6 +265,98 @@ def test_call_site_associations_keep_all_provenance_at_one_physical_location(
     assert all(site["caller_start"] == 2 for site in sites)
 
 
+def test_excerpt_windows_are_prepared_only_for_call_relationships(tmp_path: Path) -> None:
+    """``R-05``: the artifact discloses source only where the viewer shows it.
+
+    The interpreter's own records are the natural input. A root whose
+    relationships are imports, references, and contains prepares no path at
+    all, so its page renders no excerpted line, while a call keeps its window,
+    caller-prefix span, and call site.
+    """
+
+    def analyzed(name: str, files: dict[str, str]) -> tuple[Path, dict[str, object], set[str]]:
+        root = tmp_path / name
+        root.mkdir()
+        for relative, content in files.items():
+            (root / relative).write_text(content, encoding="utf-8")
+        graph_path = tmp_path / f"{name}.json"
+        assert (
+            cli.main(["analyze", "--root", str(root), "--output", str(graph_path), str(root)]) == 0
+        )
+        loaded = load_graph_bytes(graph_path.read_bytes())
+        return root, loaded.canonical, {item.kind for item in loaded.document.relationships}
+
+    non_call_root, non_call, non_call_kinds = analyzed(
+        "non-call",
+        {
+            "helper.py": "def run():\n    return 1\n",
+            "app.py": "import helper\n\ndef app():\n    return helper.run\n",
+        },
+    )
+    assert non_call_kinds == {"contains", "imports", "references"}
+    assert prepare_excerpts(non_call, non_call_root) == {"paths": {}, "call_sites": {}}
+    assert prepare_excerpts(non_call, None) == {"paths": {}, "call_sites": {}}
+    non_call_page = render_html(
+        build_presentation(non_call, prepare_excerpts(non_call, non_call_root))
+    ).decode("utf-8")
+    assert "def app" not in non_call_page
+
+    call_root, call, call_kinds = analyzed(
+        "call",
+        {"app.py": "def app():\n    return 1\n\ndef run():\n    return app()\n"},
+    )
+    assert call_kinds == {"calls", "contains"}
+    excerpts = prepare_excerpts(call, call_root)
+    assert excerpts["paths"]["app.py"] == {
+        "status": "available",
+        "spans": [
+            {
+                "start": 0,
+                "lines": ["def app():", "    return 1", "", "def run():", "    return app()"],
+            }
+        ],
+    }
+    (sites,) = excerpts["call_sites"].values()
+    assert [site["caller_start"] for site in sites] == [3]
+    call_page = render_html(build_presentation(call, prepare_excerpts(call, call_root))).decode(
+        "utf-8"
+    )
+    assert "def app" in call_page
+
+
+def test_a_distant_non_call_location_adds_no_window_to_a_call_excerpt(tmp_path: Path) -> None:
+    """``R-05``: a file holding both keeps only the call's own window lines."""
+    root = tmp_path / "root"
+    root.mkdir()
+    lines = [
+        "def target():",
+        "    return 1",
+        "",
+        "def caller():",
+        "    return target()",
+    ]
+    lines += [f"# filler {index}" for index in range(100)]
+    lines += [
+        "def distant_reader():",
+        "    return target",
+    ]
+    (root / "app.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    graph_path = tmp_path / "graph.json"
+    assert cli.main(["analyze", "--root", str(root), "--output", str(graph_path), str(root)]) == 0
+    loaded = load_graph_bytes(graph_path.read_bytes())
+
+    excerpts = prepare_excerpts(loaded.canonical, root)
+
+    rendered = excerpts["paths"]["app.py"]
+    # The call on line 5 keeps only its own 50-line window; the reference more
+    # than 100 lines below it would add a second, unrendered span.
+    assert [span["start"] for span in rendered["spans"]] == [0]
+    excerpt = "\n".join(line for span in rendered["spans"] for line in span["lines"])
+    assert "def caller():" in excerpt
+    assert "return target()" in excerpt
+    assert "distant_reader" not in excerpt
+
+
 def test_renderer_is_self_contained_and_json_safe() -> None:
     loaded = load_graph_bytes(json.dumps(_graph()).encode())
     presentation = build_presentation(loaded.canonical, {"<unsafe>": {"status": "unavailable"}})
@@ -403,13 +495,34 @@ def test_presentation_preserves_all_provenance_records_on_one_relationship() -> 
     relationships[0]["evidence"].append({"provenance": "curated-rule", "rule": {"id": "test-rule"}})
     loaded = load_graph_bytes(json.dumps(raw).encode())
     presentation = build_presentation(loaded.canonical)
-    assert presentation["provenance"] == ["curated-rule", "imported-graph", "static-analysis"]
+    # The drawn records are the artifact's single copy of the evidence set, so
+    # every provenance stays readable there and nowhere else.
     graph = presentation["graph"]
     assert isinstance(graph, dict)
     relationships = graph["relationships"]
     assert isinstance(relationships, list)
     assert len(relationships) == 1
-    assert len(relationships[0]["evidence"]) == 3
+    assert [evidence["provenance"] for evidence in relationships[0]["evidence"]] == [
+        "imported-graph",
+        "static-analysis",
+        "curated-rule",
+    ]
+
+
+def test_presentation_emits_only_the_fields_its_renderer_reads() -> None:
+    """``AC-04``: the ordinary payload carries each graph fact once.
+
+    The drawn records already supply every node class, relationship kind, and
+    provenance the filter panel and the details view derive, so a second copy
+    under its own payload key would only inflate the artifact.
+    """
+    loaded = load_graph_bytes(json.dumps(_graph()).encode())
+
+    presentation = build_presentation(loaded.canonical)
+
+    assert set(presentation) == {"graph", "systems", "node_systems", "excerpts"}
+    assert isinstance(presentation["graph"], dict)
+    assert presentation["graph"] == loaded.canonical
 
 
 def test_presentation_assigns_exact_system_membership_to_every_located_node() -> None:
@@ -624,7 +737,7 @@ def test_renderer_keeps_resolved_reference_edges_from_analyzed_source(tmp_path: 
     presentation = build_presentation(
         loaded.canonical, prepare_excerpts(loaded.canonical, tmp_path)
     )
-    assert "references" in presentation["relationship_kinds"]
+    assert "references" in {item["kind"] for item in presentation["graph"]["relationships"]}
     html = render_html(presentation).decode("utf-8")
     assert html.startswith("<!doctype html>")
 
@@ -764,7 +877,9 @@ def test_checked_in_viewer_artifacts_stay_offline_single_graph_explorers() -> No
     The shared template carries historical-comparison chrome, so a reviewed
     single-graph artifact must embed every asset and keep that chrome
     statically hidden. Nothing else keeps a leaked comparison control inert
-    when the embedded payload has no ``comparison`` block.
+    when the embedded payload has no ``comparison`` block. The payload also
+    carries every graph fact once: the drawn records alone supply the classes,
+    kinds, and provenances the explorer derives its filters and details from.
     """
     for artifact in (EXAMPLE / "minotaur-graph.html", SYSTEM_EXAMPLE / "minotaur-graph.html"):
         html = artifact.read_text(encoding="utf-8")
@@ -775,6 +890,7 @@ def test_checked_in_viewer_artifacts_stay_offline_single_graph_explorers() -> No
         assert "cytoscape-dagre" in html
         prefix = '<script id="minotaur-presentation" type="application/json">'
         presentation = json.loads(html.split(prefix, 1)[1].split("</script>", 1)[0])
+        assert set(presentation) == {"graph", "systems", "node_systems", "excerpts"}
         assert "comparison" not in presentation
         assert presentation["systems"]
         assert presentation["node_systems"]
@@ -785,6 +901,34 @@ def test_checked_in_viewer_artifacts_stay_offline_single_graph_explorers() -> No
         assert '<select id="system-filter"' in html
         assert '<input type="checkbox" id="cross-system-connections" disabled>' in html
         assert '<div id="cy" ' in html
+
+
+# The comparison page's embedded presentation was 236,577 bytes while each
+# graph fact was stored twice; the payload now stores it once.
+_RECORDED_COMPARISON_PAYLOAD_BYTES = 236_577
+
+
+def test_checked_in_comparison_payload_stores_each_graph_fact_once() -> None:
+    """``AC-04``: the reviewable comparison page shrinks and keeps its summary.
+
+    The drawn records are the payload's single copy of the comparison's nodes
+    and relationships, and ``comparison.calls`` remains beside them for the
+    call list the summary and the call-site panel read.
+    """
+    html = (SYSTEM_EXAMPLE / "minotaur-comparison.html").read_text(encoding="utf-8")
+    prefix = '<script id="minotaur-presentation" type="application/json">'
+    embedded = html.split(prefix, 1)[1].split("</script>", 1)[0]
+    payload = json.loads(embedded)
+
+    assert set(payload) == {"graph", "comparison", "systems", "node_systems", "excerpts"}
+    assert set(payload["comparison"]).isdisjoint(
+        {"graph", "nodes", "relationships", "call_changes"}
+    )
+    assert set(payload["graph"]) == {"nodes", "relationships"}
+    assert payload["graph"]["nodes"] and payload["graph"]["relationships"]
+    assert payload["comparison"]["calls"]
+    assert payload["comparison"]["changed"] is True
+    assert len(embedded.encode("utf-8")) <= _RECORDED_COMPARISON_PAYLOAD_BYTES * 3 // 5
 
 
 def test_regenerating_checked_in_examples_is_reproducible(tmp_path: Path) -> None:

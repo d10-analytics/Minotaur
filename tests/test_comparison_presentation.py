@@ -179,6 +179,49 @@ def test_comparison_payload_retains_stable_records_and_side_defaults() -> None:
     assert call["default_side"] == "after"
 
 
+def test_comparison_presentation_emits_each_graph_fact_once() -> None:
+    """``AC-04``: the comparison payload is a summary beside the drawn records.
+
+    The renderer draws ``graph`` and reads ``comparison.calls``; a copy of the
+    complete result's node, relationship, and call-change lists under
+    ``comparison`` would be the same facts a second time, and no consumer reads
+    them there.
+    """
+    payload = build_comparison_presentation(_comparison())
+
+    assert set(payload) == {"graph", "comparison", "systems", "node_systems", "excerpts"}
+    assert set(payload["comparison"]) == {
+        "query",
+        "changed",
+        "exit_code",
+        "old_system_names",
+        "new_system_names",
+        "added_systems",
+        "removed_systems",
+        "membership_changes",
+        "surface_changes",
+        "consumer_changes",
+        "dependency_changes",
+        "boundary_changes",
+        "coverage",
+        "selection",
+        "limitations",
+        "revisions",
+        "calls",
+    }
+    assert set(payload["graph"]) == {"nodes", "relationships"}
+    # The records the summary renders stay available exactly once each, so the
+    # parity proof compares the drawn records rather than a deleted copy.
+    assert [item["id"] for item in payload["graph"]["nodes"]] == [
+        "node:comparison:stable",
+        "node:comparison:removed",
+    ]
+    assert payload["graph"]["relationships"]
+    assert [item["relationship_id"] for item in payload["comparison"]["calls"]] == [
+        "relationship:call"
+    ]
+
+
 def test_production_comparison_payload_retains_per_side_membership_and_eligibility() -> None:
     """C-05/C-07: the serialized payload keeps side membership, never a union."""
     payload = build_comparison_presentation(_comparison())

@@ -2988,7 +2988,13 @@ def test_visualize_input_defaults_and_excerpts_follow_config_root_existence(
 ) -> None:
     """AC-08: config input default; source-root default only when root exists."""
     root = _config_repo(tmp_path)
-    _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+    # A call keeps the ``def app`` line in a call excerpt; a graph of only
+    # references and contains no longer discloses source text.
+    _write(
+        root,
+        "src/app.py",
+        "value = 1\n\ndef app():\n    return value\n\ndef run():\n    return app()\n",
+    )
     explicit_graph = tmp_path / "explicit.json"
     primed = _run_in(root, "analyze", "--root", str(root), "--output", str(explicit_graph), "src")
     assert primed.returncode == 0, primed.stderr
@@ -3118,7 +3124,12 @@ def test_visualize_without_input_renders_content_from_the_config_graph(
     default that pointed at a different, existing graph would fail here.
     """
     root = _config_repo(tmp_path)
-    _write(root, "src/app.py", "value = 1\n\ndef app():\n    return value\n")
+    # The asserted ``def app`` line reaches the page through the call excerpt.
+    _write(
+        root,
+        "src/app.py",
+        "value = 1\n\ndef app():\n    return value\n\ndef run():\n    return app()\n",
+    )
     _write_config(root, _MINOTAUR_CONFIG + 'root = "."\ngraph = "g.json"\ntargets = ["src"]\n')
     primed = _run_in(root, "analyze")
     assert primed.returncode == 0, primed.stderr

@@ -1795,6 +1795,71 @@ def test_comparison_call_only_change_prevents_no_change_state(tmp_path: Path) ->
         browser.close()
 
 
+def test_comparison_summary_and_filters_read_the_drawn_records(tmp_path: Path) -> None:
+    """``AC-04``: the opened page still filters and summarizes after the trim.
+
+    A comparison page stores each graph fact once, in its drawn records, so the
+    filter panel and the change summary must derive from those. Only the opened
+    page can show both the panel controls and the rendered summary lines.
+    """
+    nodes = [
+        _comparison_node(
+            "changed",
+            status="changed",
+            label="changed node",
+            before_system="A",
+            after_system="B",
+        ),
+        _comparison_node("kept", label="kept node"),
+        _comparison_file_node("docs", "A"),
+    ]
+    relationships = [
+        _comparison_edge(
+            "edge:changed",
+            "changed",
+            "kept",
+            status="changed",
+            before_systems=("A", "A"),
+            after_systems=("B", "A"),
+        ),
+        _comparison_edge("edge:imports", "docs", "kept", kind="imports"),
+    ]
+    calls = [
+        {
+            "id": "edge:changed",
+            "relationship_id": "edge:changed",
+            "status": "changed",
+            "reasons": ["expression_changed"],
+            "involved_systems": ["A", "B"],
+        }
+    ]
+    presentation = _comparison_presentation(nodes, relationships, changed=True, calls=calls)
+    assert set(presentation["comparison"]).isdisjoint(
+        {"graph", "nodes", "relationships", "call_changes"}
+    )
+
+    with sync_playwright() as runner:
+        browser = runner.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _open_comparison(page, tmp_path, presentation, "trimmed-comparison.html")
+
+        assert page.evaluate(
+            "() => Array.from(document.querySelectorAll('#kind-filters input'))"
+            ".map(control => control.dataset.kind)"
+        ) == ["file", "symbol"]
+        assert page.evaluate(
+            "() => Array.from(document.querySelectorAll('#edge-filters input'))"
+            ".map(control => control.dataset.edgekind)"
+        ) == ["calls", "imports"]
+
+        page.locator("#comparison-summary summary").click()
+        body = page.locator("#comparison-summary-body").inner_text()
+        assert "node Changed: changed" in body
+        assert "relationship Changed: edge:changed" in body
+        assert "call Changed: edge:changed" in body
+        browser.close()
+
+
 def test_comparison_summary_lists_change_without_drawable_node(tmp_path: Path) -> None:
     """An added empty system stays discoverable through the category summary."""
     presentation = _comparison_presentation([], [], changed=True, added_systems=["empty-system"])
