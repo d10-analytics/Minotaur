@@ -727,6 +727,32 @@ def test_readme_documents_historical_comparison_and_offline_report() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Call-only excerpt windows and the guarded layout for large graphs.
+# ---------------------------------------------------------------------------
+
+CALL_ONLY_EXCERPT_SENTENCE = (
+    "the artifact embeds excerpt windows only for `calls` relationships, the only kind whose "
+    "excerpt the viewer shows, not for every relationship"
+)
+GUARDED_LAYOUT_SENTENCE = (
+    "A view that lays out more than 1,500 nodes or more than 4,000 edges uses a quick grid "
+    "layout instead of the full layered one and shows a notice with a **Run full layout** "
+    "button, which runs the full layout once for the current view."
+)
+
+
+def test_customize_html_documents_call_only_excerpts_and_the_layout_guard() -> None:
+    """Excerpt windows are call-only, and an oversized view starts in the quick layout."""
+    text = _collapsed(CUSTOMIZE)
+    assert CALL_ONLY_EXCERPT_SENTENCE in text
+    # The claim it replaces offered evidence spans for every relationship, which
+    # would make the call-only qualifier above meaningless. Compare without case
+    # so the same claim re-added at a sentence start still fails.
+    assert "the artifact embeds only the merged evidence spans" not in text.lower()
+    assert GUARDED_LAYOUT_SENTENCE in text
+
+
+# ---------------------------------------------------------------------------
 # Markdown link checker, walkthrough kind lists, freshness first-read list,
 # query-reference systems example and empty-tree behavior, format-reference
 # expected_symbol_kind, and invalid fixture enumeration.
