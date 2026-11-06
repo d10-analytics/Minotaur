@@ -25,13 +25,16 @@ def build_presentation(
     relationship rather than a display-selected representative: collapsing
     evidence for a compact graph view must not silently discard provenance or
     locations that an inspector needs to audit the displayed connection.
+
+    Every fact stays in ``graph`` alone: the filter panel and the change
+    summary are derived from those drawn records, so a second copy of the same
+    classes, kinds, or provenances would only inflate the artifact.
     """
     if not isinstance(canonical, Mapping):
         if comparison_sources is not None or hasattr(canonical, "call_changes"):
             return build_comparison_presentation(canonical, comparison_sources, excerpts=excerpts)
         raise TypeError("graph presentation requires a canonical mapping")
     nodes = cast(list[dict[str, Any]], canonical["nodes"])
-    relationships = cast(list[dict[str, Any]], canonical["relationships"])
     if systems and {node.id for node in document_nodes} != {node["id"] for node in nodes}:
         raise ValueError("system presentation requires every canonical node")
     system_membership = SystemMembership(systems)
@@ -41,20 +44,8 @@ def build_presentation(
         if (membership := system_membership.classify(node)).kind is EndpointKind.SYSTEM
         and membership.system is not None
     }
-    node_classes = sorted({node["node_class"] for node in nodes})
-    provenance = sorted(
-        {
-            evidence["provenance"]
-            for relationship in relationships
-            for evidence in cast(list[dict[str, Any]], relationship["evidence"])
-        }
-    )
-    relationship_kinds = sorted({rel["kind"] for rel in relationships})
     return {
         "graph": dict(canonical),
-        "node_classes": node_classes,
-        "relationship_kinds": relationship_kinds,
-        "provenance": provenance,
         "systems": [system.name for system in systems],
         "node_systems": node_systems,
         # Give the self-contained viewer a stable empty shape when callers do
@@ -76,6 +67,12 @@ def build_comparison_presentation(
     source tree.  Stable IDs, statuses, memberships, and full side-local
     payloads come directly from the immutable result; source excerpts come
     only from the optional captured byte maps.
+
+    Each fact is embedded once: ``graph`` holds the drawn node and relationship
+    records, and ``comparison`` holds the comparison's own change and summary
+    records plus ``calls``.  The complete result's duplicate ``nodes``,
+    ``relationships``, and ``call_changes`` lists are deliberately not copied
+    into the presentation, which the renderer derives from those two places.
     """
     result_dict = _result_dict(complete_result)
     nodes = tuple(getattr(complete_result, "nodes", ()))
@@ -106,17 +103,19 @@ def build_comparison_presentation(
         if excerpts is not None
         else prepare_comparison_excerpts(complete_result, captured_sources)
     )
+    # The comparison summary keeps the comparison's own records; the drawn node
+    # and relationship lists would be a second copy of ``graph`` and are the
+    # only place the renderer reads them from.
+    summary = {
+        key: value
+        for key, value in result_dict.items()
+        if key not in ("nodes", "relationships", "call_changes")
+    }
     return {
         # ``graph`` retains the renderer's existing top-level entry point while
         # its comparison records carry the complete before/after evidence.
         "graph": graph,
-        "comparison": {
-            **result_dict,
-            "graph": graph,
-            "nodes": node_payloads,
-            "relationships": relationship_payloads,
-            "calls": call_payloads,
-        },
+        "comparison": {**summary, "calls": call_payloads},
         "systems": system_names,
         # Membership is per side: a node that moved between systems belongs to
         # different names on Before and After, so a flat union would let the

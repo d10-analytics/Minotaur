@@ -11,8 +11,8 @@ another service. At a given source snapshot, Minotaur applies stable ordering
 and produces repeatable graph and query results. Use focused CLI queries when
 you need a direct answer, or open the same graph as an interactive HTML page.
 Results retain source locations for inspection, and references that cannot be
-resolved remain visible instead of being silently treated as confirmed
-connections.
+resolved are recorded as their own nodes instead of being silently treated as
+confirmed connections.
 
 [![Python workflow explorer preview](docs/assets/python-workflow-demo.png)](https://d10-analytics.github.io/Minotaur/)
 
@@ -184,9 +184,11 @@ and resolution limits.
 
 A source connection does not prove that a call runs in a particular scenario,
 what target dynamic dispatch chooses, or whether an operation succeeds.
-Minotaur does not execute the project or observe runtime behavior. Unresolved
-references remain visible; `callers` also includes explicitly marked unresolved
-name matches as leads to inspect, not confirmed calls to the requested target.
+Minotaur does not execute the project or observe runtime behavior. The HTML
+explorer hides unresolved references by default; its Nodes filter group counts
+the hidden ones, and checking the `unresolved-reference` filter shows them.
+`callers` also includes explicitly marked unresolved name matches as leads to
+inspect, not confirmed calls to the requested target.
 
 The module form `python -m minotaur` removes the working directory from the
 import path before it loads Minotaur, but CPython loads a few modules before

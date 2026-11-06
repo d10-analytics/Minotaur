@@ -31,6 +31,10 @@ def prepare_excerpts(
     not include whole files merely because a location occurs in one. This keeps
     a portable artifact useful for inspection without turning graph export into
     an implicit source-tree export.
+
+    A window is prepared only for a ``calls`` relationship, because that is the
+    only kind whose excerpt the renderer shows. Any other kind would disclose
+    source text that no view can display.
     """
     needed: dict[str, list[tuple[int, int]]] = defaultdict(list)
     # Keep these associations beside, rather than inside, canonical graph data:
@@ -41,35 +45,32 @@ def prepare_excerpts(
     node_by_id = {node["id"]: node for node in nodes}
     relationships = cast(list[dict[str, Any]], canonical["relationships"])
     for relationship_index, relationship in enumerate(relationships):
+        if relationship["kind"] != "calls":
+            continue
         source = node_by_id.get(relationship["source"])
         caller_start = _node_start(source)
         for evidence in cast(list[dict[str, Any]], relationship["evidence"]):
             for location in cast(Iterable[dict[str, Any]], evidence.get("locations", [])):
                 path, start, end = _location_lines(location)
-                # Evidence is often a one-line reference. A bounded surrounding
+                # Evidence is often a one-line call site. A bounded surrounding
                 # window preserves enough context to understand it while making
                 # artifact size and source disclosure proportional to the graph.
                 needed[path].append((max(0, start - _MAX_CONTEXT), end + _MAX_CONTEXT))
-                if (
-                    relationship["kind"] == "calls"
-                    and caller_start is not None
-                    and _node_path(source) == path
-                ):
+                if caller_start is not None and _node_path(source) == path:
                     needed[path].append((caller_start, end))
-                if relationship["kind"] == "calls":
-                    # This is visualization-only metadata.  Its relationship
-                    # index refers to the canonical relationship order in the
-                    # accompanying presentation payload, never the graph JSON.
-                    site: dict[str, object] = {
-                        "location": dict(location),
-                        "provenance": str(evidence["provenance"]),
-                    }
-                    # A same-file function/method start makes the prefix mode
-                    # meaningful. Cross-file callers and unknown symbols would
-                    # create a misleading excerpt, so deliberately omit it.
-                    if caller_start is not None and _node_path(source) == path:
-                        site["caller_start"] = caller_start
-                    call_sites[str(relationship_index)].append(site)
+                # This is visualization-only metadata.  Its relationship
+                # index refers to the canonical relationship order in the
+                # accompanying presentation payload, never the graph JSON.
+                site: dict[str, object] = {
+                    "location": dict(location),
+                    "provenance": str(evidence["provenance"]),
+                }
+                # A same-file function/method start makes the prefix mode
+                # meaningful. Cross-file callers and unknown symbols would
+                # create a misleading excerpt, so deliberately omit it.
+                if caller_start is not None and _node_path(source) == path:
+                    site["caller_start"] = caller_start
+                call_sites[str(relationship_index)].append(site)
     if source_root is None:
         # Preserve the site list even when no bytes can be read. The viewer can
         # still identify the graph fact and explain why context is unavailable.

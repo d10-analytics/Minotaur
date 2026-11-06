@@ -153,6 +153,20 @@ body {
   white-space: nowrap;
 }
 
+/* The node filter group counts the unresolved references the default view
+   hides, so a filtered graph never reads as one with no such records. The
+   global [hidden] rule takes the badge out of the row while the count is zero. */
+#unresolved-hidden-badge {
+  padding: 1px 7px;
+  border-radius: 8px;
+  border: 1px solid var(--control-border);
+  background: var(--button-bg);
+  color: var(--control-text);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 #controls label {
   display: flex;
   align-items: center;
@@ -262,6 +276,30 @@ body {
   background: var(--bg);
   min-height: 0;
 }
+
+/* The layout notice floats over one canvas corner, so a graph click anywhere
+   else still reaches the canvas; the global [hidden] rule hides it between
+   layouts. */
+.layout-notice {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(460px, calc(100% - 32px));
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.layout-notice .btn { flex-shrink: 0; }
 
 #detail {
   width: 300px;

@@ -1732,6 +1732,28 @@ def _embedded_comparison_payload(html: str) -> dict[str, object]:
     return comparison
 
 
+def _page_parity_records(html: str) -> dict[str, object]:
+    """Return the page's retained records for the three JSON/HTML parity keys.
+
+    The payload stores each comparison fact once: the drawn node and
+    relationship records live under ``graph`` and the call changes under
+    ``comparison.calls``. A page that regained a duplicate list would pass a
+    weaker proof, so the absence of those keys is asserted here.
+    """
+    prefix = '<script id="minotaur-presentation" type="application/json">'
+    payload = json.loads(html.split(prefix, 1)[1].split("</script>", 1)[0])
+    graph = payload["graph"]
+    comparison = payload["comparison"]
+    assert isinstance(graph, dict)
+    assert isinstance(comparison, dict)
+    assert set(comparison).isdisjoint({"graph", "nodes", "relationships", "call_changes"})
+    return {
+        "nodes": graph["nodes"],
+        "relationships": graph["relationships"],
+        "call_changes": comparison["calls"],
+    }
+
+
 def _record_identity(record: dict[str, object]) -> object:
     return record.get("id") or record.get("relationship_id")
 
@@ -1884,7 +1906,9 @@ def test_systems_json_and_html_describe_the_same_comparison(
     )
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    embedded = _embedded_comparison_payload(report.read_text(encoding="utf-8"))
+    report_text = report.read_text(encoding="utf-8")
+    embedded = _embedded_comparison_payload(report_text)
+    retained = _page_parity_records(report_text)
     context = payload["comparison"]
 
     assert status == 1
@@ -1894,8 +1918,10 @@ def test_systems_json_and_html_describe_the_same_comparison(
     assert context["changed"] is True
     assert embedded["changed"] is True
     assert context["revisions"] == embedded["revisions"]
+    # The page's retained records carry the drawn nodes and relationships and
+    # its call list; the complete JSON context keeps all three lists.
     for key in ("nodes", "relationships", "call_changes"):
-        assert _comparison_fingerprint(context[key]) == _comparison_fingerprint(embedded[key])
+        assert _comparison_fingerprint(context[key]) == _comparison_fingerprint(retained[key])
     assert context["limitations"] == embedded["limitations"]
     assert any(
         record["status"] != "unchanged"
@@ -2553,10 +2579,9 @@ def test_systems_json_and_html_agree_under_a_configured_source_root(
     assert context["after"]["kind"] == "working-tree"
     assert context["after"]["commit"] is None
     assert context["before"]["source_digest"] != context["after"]["source_digest"]
+    retained = _page_parity_records(report.read_text(encoding="utf-8"))
     for key in ("nodes", "relationships", "call_changes"):
-        assert _comparison_fingerprint(context[key]) == _comparison_fingerprint(
-            presentation["comparison"][key]
-        )
+        assert _comparison_fingerprint(context[key]) == _comparison_fingerprint(retained[key])
     excerpts = presentation["excerpts"]
     assert isinstance(excerpts, dict)
     for side in ("before", "after"):

@@ -23,6 +23,11 @@ assets. Use the controls to filter node classes and relationship kinds,
 search labels/paths/references, fit the canvas, and switch between top-down
 and left-to-right layout.
 
+A view that lays out more than 1,500 nodes or more than 4,000 edges uses a
+quick grid layout instead of the full layered one and shows a notice with a
+**Run full layout** button, which runs the full layout once for the current
+view.
+
 ## Explore configured systems
 
 To include named systems, run the command inside a configured project or point
@@ -146,10 +151,12 @@ The named modes use the published [Catppuccin palette](https://catppuccin.com/pa
 [Nord palette](https://www.nordtheme.com/docs/colors-and-palettes/), and
 [Solarized palette](https://ethanschoonover.com/solarized/) as design sources.
 
-When a source root is available, the artifact embeds only the merged evidence
-spans plus up to 50 lines of surrounding context; `calls` edges also retain
-their call-site associations and, when known, the caller start for the
-viewer’s two context modes. Omit `--source-root` when
+When a source root is available, the artifact embeds excerpt windows only for
+`calls` relationships, the only kind whose excerpt the viewer shows, not for
+every relationship; each window holds the merged evidence spans plus up to 50
+lines of surrounding context, and `calls` edges also retain their call-site
+associations and, when known, the caller start for the viewer’s two context
+modes. Omit `--source-root` when
 the downloaded file must contain no source text, and ensure no project
 configuration supplies a source root (run from outside that configured tree
 with explicit graph/output paths if necessary). Python files are excerpted
