@@ -3724,6 +3724,20 @@ def test_guarded_comparison_cache_hit_restores_positions(tmp_path: Path) -> None
         assert full["notice"] is False
         snapshot = _guard_snapshot(page)
 
+        # A real background drag moves the live camera, so the hit below only
+        # restores the layout camera when the cached entry holds a copy of it
+        # rather than the live pan object.
+        canvas = page.locator("#cy").bounding_box()
+        page.mouse.move(canvas["x"] + 12, canvas["y"] + 12)
+        page.mouse.down()
+        page.mouse.move(canvas["x"] + 172, canvas["y"] + 132, steps=2)
+        page.mouse.up()
+        dragged = _guard_snapshot(page)
+        assert round(dragged["pan"]["x"] - snapshot["pan"]["x"]) == 160
+        assert round(dragged["pan"]["y"] - snapshot["pan"]["y"]) == 120
+        assert dragged["positions"] == snapshot["positions"]
+        assert page.evaluate("window.minotaurVisualizer.cy.elements(':selected').length") == 0
+
         # A toggle away misses and stays guarded; the cached view survives.
         page.uncheck('input[data-kind="file"]')
         _wait_for_settled_layout(page)
