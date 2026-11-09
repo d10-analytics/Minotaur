@@ -1866,7 +1866,9 @@ def _class_import_targets_after_statement(
 
     A name the class declares ``global`` or ``nonlocal`` is written through the
     directive, so an import of it installs no class route: the directive, not a
-    class binding, decides the name.
+    class binding, decides the name. The class body's later use is unresolved
+    through ``_class_conditional_import_names`` either way; skipping the route
+    keeps the class's route table free of a binding the class never holds.
     """
     directive_names = frozenset(global_names)
     deleted_names = frozenset(collector.deleted_names) - directive_names
@@ -3393,16 +3395,14 @@ def _resolve_header_use(
     import_shadow_names: frozenset[str] = frozenset()
     authoritative_import_names = snapshot.authoritative_import_names
     # A class defined inside a function keeps its own namespace in a frame the
-    # snapshot carries. Its body and the headers it evaluates consult the
-    # routes that frame contributes on top of the enclosing function and
-    # module ones.
+    # snapshot carries while that namespace is visible: in its body, the
+    # headers it evaluates and a ``type`` alias it defines, but not in a
+    # nested scope, which the walk runs without the frame. Those positions
+    # consult the routes the frame contributes on top of the enclosing
+    # function and module ones.
     class_own_targets: dict[str, str] = {}
     class_own_roots: frozenset[str] = frozenset()
-    if (
-        not has_enclosing_class_context
-        and snapshot.owner_import_targets is not None
-        and class_scope_visible
-    ):
+    if not has_enclosing_class_context and snapshot.owner_import_targets is not None:
         class_own_targets = {
             name: target
             for name, target in snapshot.import_targets.items()
@@ -3460,6 +3460,9 @@ def _resolve_header_use(
         class_local_bound = context.class_scope_bound_names - context.class_scope_type_param_names
         import_targets = _without_import_roots(import_targets, class_local_bound)
         authoritative_import_names = authoritative_import_names - class_local_bound
+        # A blocked name with an import route is already in ``import_bound``;
+        # shadowing every blocked name keeps the module-alias fallback from
+        # re-resolving one regardless of how that set is assembled.
         import_shadow_names = import_shadow_names | class_local_bound
     if in_class_header:
         uncertain.update(
