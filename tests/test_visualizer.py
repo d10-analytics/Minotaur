@@ -904,7 +904,7 @@ def test_checked_in_viewer_artifacts_stay_offline_single_graph_explorers() -> No
 
 
 def test_checked_in_comparison_payload_stores_each_graph_fact_once() -> None:
-    """``AC-08``: the reviewable comparison page stores each graph fact once.
+    """The reviewable comparison page stores each graph fact once.
 
     The drawn records are the payload's single copy of the comparison's nodes
     and relationships: those records are pairwise distinct, and no value under
