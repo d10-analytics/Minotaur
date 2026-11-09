@@ -106,11 +106,14 @@ consumer removed: billing <- shop/checkout.py
 consumer removed: orders <- shop/checkout.py
 dependency changed: orders -> billing
 boundary added: billing.shop.billing.refund -> no_system.shop.ledger.record (calls)
+boundary added: orders.shop.order_ops -> billing.shop.billing (imports)
 boundary added: orders.shop.order_ops -> billing.shop.billing.charge (imports)
 boundary added: orders.shop.order_ops.complete_order -> billing.shop.billing.charge (calls)
 boundary added: orders.shop.orders -> billing.shop.billing.refund (imports)
 boundary added: orders.shop.orders.cancel_order -> billing.shop.billing.refund (calls)
+boundary removed: no_system.shop.checkout -> billing.shop.billing (imports)
 boundary removed: no_system.shop.checkout -> billing.shop.billing.charge (imports)
+boundary removed: no_system.shop.checkout -> orders.shop.orders (imports)
 boundary removed: no_system.shop.checkout -> orders.shop.orders.create_order (imports)
 boundary removed: no_system.shop.checkout.checkout -> billing.shop.billing.charge (calls)
 boundary removed: no_system.shop.checkout.checkout -> orders.shop.orders.create_order (calls)
@@ -127,6 +130,7 @@ node removed: shop.orders.complete_order (shop/orders.py, function)
 node removed: shop/checkout.py (shop/checkout.py, file)
 relationship added: shop.billing -> shop.billing.refund (contains)
 relationship added: shop.billing.refund -> shop.ledger.record (calls)
+relationship added: shop.order_ops -> shop.billing (imports)
 relationship added: shop.order_ops -> shop.billing.charge (imports)
 relationship added: shop.order_ops -> shop.order_ops.complete_order (contains)
 relationship added: shop.order_ops.complete_order -> shop.billing.charge (calls)
@@ -134,8 +138,10 @@ relationship added: shop.orders -> shop.billing.refund (imports)
 relationship added: shop.orders -> shop.orders.cancel_order (contains)
 relationship added: shop.orders.cancel_order -> shop.billing.refund (calls)
 relationship added: shop/order_ops.py -> shop.order_ops (contains)
+relationship removed: shop.checkout -> shop.billing (imports)
 relationship removed: shop.checkout -> shop.billing.charge (imports)
 relationship removed: shop.checkout -> shop.checkout.checkout (contains)
+relationship removed: shop.checkout -> shop.orders (imports)
 relationship removed: shop.checkout -> shop.orders.create_order (imports)
 relationship removed: shop.checkout.checkout -> shop.billing.charge (calls)
 relationship removed: shop.checkout.checkout -> shop.orders.create_order (calls)
@@ -173,7 +179,7 @@ $ minotaur query diff --systems v1.0 v2.0
 ```
 
 Its standard output is byte-for-byte the same as the working-tree report above —
-the same 53 change rows followed by the old and new coverage and selection
+the same 59 change rows followed by the old and new coverage and selection
 lines — because the same source difference is analyzed on both sides. The
 command line prints no revision header.
 
