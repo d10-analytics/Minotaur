@@ -9528,6 +9528,14 @@ _CLASS_BODY_CASES: dict[str, dict] = {
         "uses": _LAMBDA_USES,
         "targets": {"body-call": None, "default-call": "other.helper"},
     },
+    "lambda-after-a-class-local-assignment": {
+        "class_prelude": "helper = 1\n\n",
+        "uses": _LAMBDA_USES,
+        "targets": {"body-call": "lib.helper", "default-call": None},
+        "targets_by_placement": {
+            "function": {"body-call": "lib.helper", "default-call": _NO_USE},
+        },
+    },
     "method-annotations": {
         "class_prelude": _CLASS_BODY_IMPORT,
         "uses": (
