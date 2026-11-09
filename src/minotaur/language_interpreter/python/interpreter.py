@@ -1540,9 +1540,14 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         for later uses and headers, and a direct import or a deletion replaces
         that uncertainty. These bindings belong only to the class frame and are
         therefore hidden while a method body executes.
+
+        An import of a name this class declares ``global`` or ``nonlocal``
+        writes the owning binding instead of a class local, so the enclosing
+        frame must treat it like the directive writes an assignment performs.
         """
         collector = _BindingCollector(self._module_name, self._is_package)
         collector.visit(statement)
+        self._propagate_class_directive_names(frozenset(collector.import_names))
         frame = self._scope_frames[-1]
         directive_names = frame.global_names | frame.nonlocal_names
         frame.bound_names = _class_dynamic_names_after_statement(
@@ -1570,7 +1575,10 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             targets=_class_import_targets_after_statement(
                 import_state.targets, collector, directive_names
             ),
-            uncertain_names=uncertain_names - frozenset(collector.deleted_names),
+            # A deletion clears the uncertainty an earlier conditional import
+            # left, but a directive deletion is itself a directive write.
+            uncertain_names=uncertain_names
+            - (frozenset(collector.deleted_names) - directive_names),
         )
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -1882,20 +1890,21 @@ def _class_conditional_import_names(
     collector: _BindingCollector,
     directive_names: Iterable[str] = (),
 ) -> frozenset[str]:
-    """Return the names one class statement imports without a definite route.
+    """Return the names one class statement leaves without a definite route.
 
     A direct ``import`` or ``from ... import`` statement runs as the class body
     reaches it, so its binding is definite. An import inside ``if``, ``for``,
     ``while``, ``try``, ``with`` or ``match`` may never run, and the class walk
     cannot tell which suite executed, so a later class-body use of such a name
-    has neither the class route nor a definite enclosing one. An import of a
-    name the class declares ``global`` or ``nonlocal`` is a directive write,
-    which decides the name instead of the class body, so it is uncertain too.
+    has neither the class route nor a definite enclosing one. A statement that
+    writes a name the class declares ``global`` or ``nonlocal`` writes it
+    through the directive, whichever form it uses, so the class body's later
+    use of that name has no definite route either.
     """
-    directive_imports = frozenset(collector.import_names) & frozenset(directive_names)
+    directive_writes = _collector_touched_names(collector) & frozenset(directive_names)
     if isinstance(statement, (ast.Import, ast.ImportFrom)):
-        return directive_imports
-    return frozenset(collector.import_names)
+        return directive_writes
+    return frozenset(collector.import_names) | directive_writes
 
 
 def _type_param_names(node: ast.AST) -> set[str]:
@@ -2262,7 +2271,10 @@ def _class_context_after_statement(
         frozenset(collector.import_names) - conditional_import_names
     )
     uncertain_import_names.update(conditional_import_names)
-    uncertain_import_names.difference_update(collector.deleted_names)
+    # A deletion clears the uncertainty an earlier conditional import left, but
+    # a deletion of a ``global``/``nonlocal`` name is itself a directive write,
+    # so it leaves the name without a definite route.
+    uncertain_import_names.difference_update(collector.deleted_names - directives)
     deleted_plain_names = (
         context.class_scope_deleted_plain_names
         | (frozenset(collector.deleted_names) & context.plain_import_names)
