@@ -7557,6 +7557,224 @@ def test_inner_if_in_loop_resolves_prewrite_use_but_freezes_post_loop_route(
     assert ("app.run", "other.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
 
 
+_GLOBAL_WRITE_SUITE_SHAPES = (
+    pytest.param("    for _ in xs:\n        {write}\n", False, id="for"),
+    pytest.param("    async for _ in xs:\n        {write}\n", True, id="async-for"),
+    pytest.param("    while c:\n        {write}\n", False, id="while"),
+    pytest.param(
+        "    while c:\n        pass\n    else:\n        {write}\n",
+        False,
+        id="while-else",
+    ),
+    pytest.param(
+        "    try:\n        {write}\n    except Exception:\n        pass\n",
+        False,
+        id="try-body",
+    ),
+    pytest.param(
+        "    try:\n        pass\n    except Exception:\n        {write}\n",
+        False,
+        id="except-handler",
+    ),
+    pytest.param(
+        "    try:\n        pass\n    except Exception:\n        pass\n    else:\n        {write}\n",
+        False,
+        id="try-else",
+    ),
+    pytest.param(
+        "    try:\n        pass\n    finally:\n        {write}\n",
+        False,
+        id="finally",
+    ),
+    pytest.param(
+        "    try:\n        pass\n    except* Exception:\n        {write}\n",
+        False,
+        id="except-star-handler",
+    ),
+    pytest.param("    with cm:\n        {write}\n", False, id="with"),
+    pytest.param("    async with cm:\n        {write}\n", True, id="async-with"),
+    pytest.param("    match x:\n        case 1:\n            {write}\n", False, id="match"),
+)
+
+_GLOBAL_WRITE_STATEMENTS = (
+    pytest.param("f = other", id="assignment"),
+    pytest.param("f += 1", id="augmented-assignment"),
+    pytest.param("(f := other)", id="walrus"),
+    pytest.param("from lib import f", id="import"),
+    pytest.param("del f", id="delete"),
+)
+
+_GLOBAL_WRITE_NESTED_SHAPES = (
+    pytest.param(
+        "    while c:\n        for f in xs:\n            pass\n",
+        id="for-target-in-loop",
+    ),
+    pytest.param(
+        "    try:\n        with cm as f:\n            pass\n    except Exception:\n        pass\n",
+        id="with-target-in-try",
+    ),
+    pytest.param(
+        "    while c:\n        if c:\n            f += 1\n",
+        id="augmented-write-in-if",
+    ),
+)
+
+_GLOBAL_READ_ONLY_SUITES = (
+    "    for _ in xs:\n        pass\n"
+    "    while c:\n        pass\n"
+    "    try:\n        pass\n"
+    "    except Exception:\n        pass\n"
+    "    with cm:\n        pass\n"
+    "    match x:\n        case 1:\n            pass\n"
+)
+
+
+def _global_write_source(suite: str, target: str, *, is_async: bool = False) -> str:
+    """Return app.py with ``f`` declared global ahead of the given ``suite``."""
+    prelude = "from lib import f\n" if target == "imported" else "def f():\n    pass\n"
+    definition = "async def" if is_async else "def"
+    return (
+        prelude
+        + "\n\n"
+        + f"{definition} mutate(xs, other, c, cm, x):\n"
+        + "    global f\n"
+        + suite
+        + "    f()\n"
+        + "    return f\n"
+    )
+
+
+def _write_global_write_workspace(tmp_path: Path, source: str, target: str) -> None:
+    """Write app.py and, for an imported name, the module that defines it."""
+    _write(tmp_path, "app.py", source)
+    if target == "imported":
+        _write(tmp_path, "lib.py", "def f():\n    pass\n")
+
+
+def _mutate_use_lines(source: str) -> tuple[int, int]:
+    """Return the line numbers of ``mutate``'s later call and load of ``f``."""
+    lines = source.splitlines()
+    return lines.index("    f()") + 1, lines.index("    return f") + 1
+
+
+def _global_target_label(target: str) -> str:
+    return "lib.f" if target == "imported" else "app.f"
+
+
+def _resolved_use_lines(result: AnalysisResult, owner: str, target: str) -> set[int]:
+    """Return the evidence lines of resolved call and reference edges."""
+    labels = {node.id: node.label for node in result.document.nodes}
+    return {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if labels[relationship.source] == owner
+        and labels[relationship.target] == target
+        and relationship.kind in (RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value)
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+
+def _assert_later_global_uses_unresolved(result: AnalysisResult, source: str, target: str) -> None:
+    call_line, load_line = _mutate_use_lines(source)
+    target_label = _global_target_label(target)
+    assert _unresolved_sites(result) >= {
+        ("app.mutate", "f", call_line),
+        ("app.mutate", "f", load_line),
+    }
+    assert not _calls_between(result, "app.mutate", target_label)
+    # The write rebinds ``f``, so only a read that precedes it, such as the
+    # one an augmented assignment makes, may keep the earlier route.
+    assert _resolved_use_lines(result, "app.mutate", target_label) <= set(range(1, call_line))
+
+
+@pytest.mark.parametrize(("body", "is_async"), _GLOBAL_WRITE_SUITE_SHAPES)
+@pytest.mark.parametrize("statement", _GLOBAL_WRITE_STATEMENTS)
+@pytest.mark.parametrize("target", ["declared", "imported"])
+def test_a_global_write_in_a_compound_suite_makes_later_uses_unresolved(
+    tmp_path: Path, body: str, is_async: bool, statement: str, target: str
+) -> None:
+    source = _global_write_source(body.format(write=statement), target, is_async=is_async)
+    _write_global_write_workspace(tmp_path, source, target)
+
+    result = analyze_python_workspace(tmp_path)
+
+    _assert_later_global_uses_unresolved(result, source, target)
+
+
+@pytest.mark.parametrize("body", _GLOBAL_WRITE_NESTED_SHAPES)
+@pytest.mark.parametrize("target", ["declared", "imported"])
+def test_a_global_write_nested_in_a_compound_suite_makes_later_uses_unresolved(
+    tmp_path: Path, body: str, target: str
+) -> None:
+    source = _global_write_source(body, target)
+    _write_global_write_workspace(tmp_path, source, target)
+
+    result = analyze_python_workspace(tmp_path)
+
+    _assert_later_global_uses_unresolved(result, source, target)
+
+
+@pytest.mark.parametrize("target", ["declared", "imported"])
+def test_a_global_declaration_without_a_compound_write_keeps_the_resolved_route(
+    tmp_path: Path, target: str
+) -> None:
+    source = _global_write_source(_GLOBAL_READ_ONLY_SUITES, target)
+    _write_global_write_workspace(tmp_path, source, target)
+
+    result = analyze_python_workspace(tmp_path)
+
+    call_line, load_line = _mutate_use_lines(source)
+    assert _resolved_use_lines(result, "app.mutate", _global_target_label(target)) == {
+        call_line,
+        load_line,
+    }
+    assert "f" not in _unresolved_texts(result, "app.mutate")
+
+
+@pytest.mark.parametrize(
+    "suite",
+    ["    f = other\n", "    if c:\n        f = other\n"],
+    ids=["plain-write", "if-suite"],
+)
+@pytest.mark.parametrize("target", ["declared", "imported"])
+def test_a_plain_or_conditional_global_write_stays_unresolved(
+    tmp_path: Path, suite: str, target: str
+) -> None:
+    source = _global_write_source(suite, target)
+    _write_global_write_workspace(tmp_path, source, target)
+
+    result = analyze_python_workspace(tmp_path)
+
+    _assert_later_global_uses_unresolved(result, source, target)
+
+
+def test_a_sibling_without_a_global_declaration_keeps_the_resolved_route(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\n\n"
+        "def mutate(xs, other):\n"
+        "    global f\n"
+        "    for _ in xs:\n"
+        "        f = other\n"
+        "    f()\n"
+        "    return f\n\n\n"
+        "def reader(xs):\n"
+        "    for _ in xs:\n"
+        "        f()\n"
+        "    return f\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_sites(result) >= {("app.mutate", "f", 9), ("app.mutate", "f", 10)}
+    assert _resolved_use_lines(result, "app.reader", "app.f") == {15, 16}
+    assert "f" not in _unresolved_texts(result, "app.reader")
+
+
 _REBOUND_DECLARATIONS = (
     "import sys\n\n"  # 1-2
     "def open_file():\n    pass\n\n"  # 3-5
