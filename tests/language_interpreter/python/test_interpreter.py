@@ -10381,22 +10381,35 @@ def test_a_class_body_import_governs_the_uses_that_body_evaluates(
     )
 
 
+_TYPE_ALIAS_CASES: dict[str, tuple[str, dict[str, object]]] = {
+    "class-import": (_CLASS_BODY_IMPORT, {"module": "other.helper", "function": "other.helper"}),
+    # A class-local assignment hides the module import from the alias; a
+    # module class leaves the use unresolved and a function class treats the
+    # name as an ordinary dynamic local.
+    "class-local-assignment": ("helper = 1\n\n", {"module": None, "function": _NO_USE}),
+}
+
+
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
 @pytest.mark.parametrize("placement", _PLACEMENTS)
-def test_a_class_body_type_alias_sees_the_class_import(tmp_path: Path, placement: str) -> None:
+@pytest.mark.parametrize("case", sorted(_TYPE_ALIAS_CASES))
+def test_a_class_body_type_alias_sees_the_class_namespace(
+    tmp_path: Path, placement: str, case: str
+) -> None:
     # A ``type`` alias value is an annotation scope, which can see the names
     # of the class that defines it, unlike a function or lambda body.
+    class_prelude, targets = _TYPE_ALIAS_CASES[case]
     source, owner = _class_body_source(
         placement,
         prelude="from lib import helper\n\n\n",
-        class_prelude=_CLASS_BODY_IMPORT,
+        class_prelude=class_prelude,
         uses="type Alias = helper  # alias-load\n",
     )
 
     sites = _analyze_six_use_source(tmp_path, source)
 
     assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
-        source, owner, "helper", {"alias-load": "other.helper"}
+        source, owner, "helper", {"alias-load": targets[placement]}
     )
 
 
