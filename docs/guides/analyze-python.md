@@ -321,10 +321,11 @@ the name — a `from` import or an `import` of one module name — decides a use
 Python evaluates directly in the class body, in a module-level class and in a
 class defined inside a function alike; an outer import of the same local name
 never decides it, and the answer does not depend on whether such an outer
-binding exists. Method defaults, decorators,
-and a nested class statement's decorators, bases, and keywords are evaluated in
-the class body, so they follow the same answer. A class-local assignment leaves
-the later use unresolved, a later class import restores the class route, and a
+binding exists. Method defaults, decorators, and a nested class statement's
+decorators, bases, and keywords are evaluated in the class body, so they follow
+the same answer. A class-local assignment of the name stops that route, leaving
+the later use unresolved — or suppressed as an ordinary dynamic local in a
+class inside a function — a later class import restores the class route, and a
 deletion reveals the enclosing one. An import inside a compound statement in
 the class body — `if`, `for`, `while`, `try`, `with`, or `match` — is uncertain
 for every later use directly in that body and for later headers. A name the
