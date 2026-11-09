@@ -2260,9 +2260,9 @@ def _class_context_after_statement(
     )
     plain_import_names = set(context.plain_import_names)
     plain_import_names.difference_update(collector.import_names)
-    # Class-local dotted imports retain the established conservative class
-    # behavior: they can refine an already-visible plain package route, while
-    # a class-only route remains syntactic evidence.
+    # A class-local dotted import of a package the module already imports
+    # keeps that package's dotted-prefix resolution; a class-only dotted
+    # import resolves through the routes it installs.
     plain_import_names.update(collector.plain_import_names & context.plain_import_names)
     conditional_import_names = _class_conditional_import_names(statement, collector, directives)
     uncertain_import_names = set(context.uncertain_import_names)
@@ -3260,12 +3260,6 @@ def _calls(
         child for header in visitor.definition_header_expressions for child in ast.walk(header)
     }
     outer_targets = context.class_scope_outer_import_targets or {}
-    class_local_plain_names = frozenset(
-        name
-        for name, target in context.import_targets.items()
-        if (target == name or target.startswith(f"{name}."))
-        and context.import_targets.get(name) != outer_targets.get(name)
-    )
     enclosing_class_target_names = frozenset(
         name
         for name, target in context.import_targets.items()
@@ -3282,7 +3276,6 @@ def _calls(
             class_header_nodes,
             definition_header_nodes,
             enclosing_class_target_names,
-            class_local_plain_names,
         )
         _emit_expression_facts(
             expression_context,
@@ -3303,7 +3296,6 @@ def _calls(
             class_header_nodes,
             definition_header_nodes,
             enclosing_class_target_names,
-            class_local_plain_names,
         )
         _emit_expression_facts(
             expression_context,
@@ -3362,7 +3354,6 @@ def _resolve_header_use(
     class_header_nodes: set[ast.AST],
     definition_header_nodes: set[ast.AST],
     enclosing_class_target_names: frozenset[str],
-    class_local_plain_names: frozenset[str],
 ) -> tuple[_ScopeContext, Mapping[str, str] | None]:
     """Narrow the analysis context to the bindings Python consults for one use.
 
@@ -3452,7 +3443,7 @@ def _resolve_header_use(
             )
     plain_import_names = snapshot.plain_import_names
     if has_enclosing_class_context:
-        blocked_plain_names = frozenset(plain_import_names | class_local_plain_names)
+        blocked_plain_names = plain_import_names
         plain_import_names = frozenset(plain_import_names & context.plain_import_names)
         import_targets = _without_import_roots(import_targets, blocked_plain_names)
     if has_enclosing_class_context and not inside_nested_class and class_scope_visible:
