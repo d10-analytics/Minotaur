@@ -9858,6 +9858,69 @@ _HEADER_NESTED_SCOPE_TARGETS: dict[str, str | None] = {
     "nested-keyword-comprehension-call": "lib.helper",
 }
 
+# A function body defined anywhere in the class body skips the class namespace,
+# whichever compound statement holds the definition, while that definition's
+# decorators and defaults run in the class body.
+_NESTED_FUNCTION_USES = (
+    "if flag:\n"
+    "    def in_if():\n"
+    "        return helper()  # if-call\n"
+    "else:\n"
+    "    def in_else():\n"
+    "        return helper()  # else-call\n"
+    "try:\n"
+    "    def in_try():\n"
+    "        return helper()  # try-call\n"
+    "except Exception:\n"
+    "    def in_except():\n"
+    "        return helper()  # except-call\n"
+    "finally:\n"
+    "    def in_finally():\n"
+    "        return helper()  # finally-call\n"
+    "with context:\n"
+    "    def in_with():\n"
+    "        return helper()  # with-call\n"
+    "for _ in ():\n"
+    "    def in_for():\n"
+    "        return helper()  # for-call\n"
+    "while flag:\n"
+    "    async def in_while():\n"
+    "        return helper()  # async-while-call\n"
+    "match flag:\n"
+    "    case _:\n"
+    "        def in_match():\n"
+    "            return helper()  # match-call\n"
+    "if flag:\n"
+    "    def outer_function():\n"
+    "        def inner_function():\n"
+    "            return helper()  # function-in-function-call\n"
+    "        return inner_function\n"
+    "class Nested:\n"
+    "    if flag:\n"
+    "        def in_nested_class():\n"
+    "            return helper()  # nested-class-function-call\n"
+    "if flag:\n"
+    "    @helper  # header-decorator\n"
+    "    def decorated(\n"
+    "        value=helper(),  # header-default-call\n"
+    "    ):\n"
+    "        pass\n"
+)
+
+_NESTED_FUNCTION_BODY_ROLES = (
+    "if-call",
+    "else-call",
+    "try-call",
+    "except-call",
+    "finally-call",
+    "with-call",
+    "for-call",
+    "async-while-call",
+    "match-call",
+    "function-in-function-call",
+    "nested-class-function-call",
+)
+
 _PLAIN_IMPORT_OVER_AN_ALIAS = "import lib as other\n\n\n"
 
 _PLAIN_IMPORT_BODY_USES = (
@@ -10155,6 +10218,25 @@ _CLASS_BODY_CASES: dict[str, dict] = {
         "class_prelude": "helper = 1\n\n",
         "uses": "if True:\n    def f():\n        return helper()  # nested-function-call\n",
         "targets": {"nested-function-call": "lib.helper"},
+    },
+    "nested-function-bodies-keep-the-enclosing-route": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _NESTED_FUNCTION_USES,
+        "targets": {
+            **dict.fromkeys(_NESTED_FUNCTION_BODY_ROLES, "lib.helper"),
+            "header-decorator": "other.helper",
+            "header-default-call": "other.helper",
+        },
+    },
+    "nested-function-bodies-without-an-outer-binding": {
+        "prelude": "",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _NESTED_FUNCTION_USES,
+        "targets": {
+            **dict.fromkeys(_NESTED_FUNCTION_BODY_ROLES, None),
+            "header-decorator": "other.helper",
+            "header-default-call": "other.helper",
+        },
     },
     "plain-import-over-an-outer-alias": {
         "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
