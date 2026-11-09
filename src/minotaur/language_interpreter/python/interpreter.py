@@ -3388,7 +3388,6 @@ def _resolve_header_use(
     in_definition_header = node in definition_header_nodes
     in_class_header = node in class_header_nodes
     has_enclosing_class_context = context.class_scope_outer_import_targets is not None
-    class_scope_visible = snapshot.in_class_body or in_class_header or in_definition_header
     expression_context = context
     import_targets = snapshot.import_targets
     import_bound = snapshot.import_bound - snapshot.bound_names
@@ -3456,7 +3455,7 @@ def _resolve_header_use(
         blocked_plain_names = plain_import_names
         plain_import_names = frozenset(plain_import_names & context.plain_import_names)
         import_targets = _without_import_roots(import_targets, blocked_plain_names)
-    if has_enclosing_class_context and not inside_nested_class and class_scope_visible:
+    if has_enclosing_class_context and not inside_nested_class:
         # A class-local dynamic binding hides the class-body route: the name is
         # neither the class import nor the enclosing import at this position.
         class_local_bound = context.class_scope_bound_names - context.class_scope_type_param_names
