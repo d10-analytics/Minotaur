@@ -118,7 +118,12 @@ It also records method nodes for methods declared directly in those classes.
 
 The resulting graph records containment between these declarations, resolvable
 imports within the workspace, and direct calls whose static targets it can
-resolve. Calls and resolvable non-call name loads found inside nested functions,
+resolve. A module-level `from M import NAME` also records an `imports` edge from
+the importing module to `M` itself when `M` is analyzed, beside the per-name
+fact: a declaration keeps its edge to the declaration, while a name that is not
+a declaration stays a single unresolved `M.NAME` reference (proof:
+`test_module_level_named_import_records_the_module_edge`). Calls and resolvable
+non-call name loads found inside nested functions,
 lambdas, and comprehensions are attributed to the enclosing top-level function,
 method, or module. A class body executes at definition time, so calls and loads
 in its non-method statements — a dataclass `field(default_factory=make_config)`,
@@ -311,9 +316,34 @@ Class headers run in the enclosing scope, while the class body has a separate
 sequential namespace. Earlier class assignments or imports can affect later
 headers, and deletion can reveal an enclosing route. Ordinary class locals and
 class imports are hidden from method bodies; methods use their own imports and
-enclosing function or module routes. Existing class behavior may refine an
-already-visible plain package route, while a class-only plain import remains
-syntactic evidence. The analyzer does not provide direct class-import support.
+enclosing function or module routes. A class body's own unconditional import of
+the name — a `from` import or an `import` of one module name — decides a use
+Python evaluates directly in the class body, in a module-level class and in a
+class defined inside a function alike; an outer import of the same local name
+never decides it, and the answer does not depend on whether such an outer
+binding exists. Method defaults, decorators,
+and a nested class statement's decorators, bases, and keywords are evaluated in
+the class body, so they follow the same answer. A class-local assignment leaves
+the later use unresolved, a later class import restores the class route, and a
+deletion reveals the enclosing one. An import inside a compound statement in
+the class body — `if`, `for`, `while`, `try`, `with`, or `match` — is uncertain
+for every later use directly in that body and for later headers. A name the
+class declares `global` or `nonlocal` is not class-local: the directive decides
+it, and a write under the directive — an import, assignment, augmented
+assignment, walrus, `for` or `with ... as` target, or deletion — installs no
+class route, leaves the class body's own later use unresolved, and in a class
+inside a function also invalidates the name on the owning frame. A use before
+any write keeps the owning binding. The plain dotted form is the exception: it
+may refine an already-visible plain package route, while a class-only one
+remains syntactic evidence. Proofs, in `tests/language_interpreter/python/test_interpreter.py`:
+`test_a_class_body_import_governs_the_uses_that_body_evaluates`,
+`test_conditional_class_import_leaves_later_class_body_uses_unresolved`,
+`test_conditional_class_import_leaves_later_class_headers_unresolved`,
+`test_direct_class_import_keeps_its_class_body_use_results`,
+`test_later_direct_class_import_replaces_a_conditional_one`,
+`test_deleting_a_conditional_class_import_reveals_the_module_route`,
+`test_directive_write_forms_leave_the_class_body_own_use_unresolved`, and
+`test_directive_import_in_a_class_body_invalidates_the_owning_frame`.
 
 Assignment effects follow expression order: ordinary assignment reads its
 right-hand side before writing targets, augmented assignment reads its target
@@ -334,6 +364,17 @@ while untouched routes retain their state. On a successful `try` path, `else`
 sees the body state, and a handler type is read before its `as` target. A
 match-guard write affects later guards and continuation. Direct imports in a
 function body outside these containers remain supported.
+
+A `global` write of a name inside any of these suites — a `for`, `async for`,
+`while`, `try` (body, handler, `else`, `finally`, or `except*`), `with`,
+`async with`, or `match` — leaves uses of that name after the suite unresolved,
+the same answer as a plain or `if`-guarded write. A read that precedes the
+write, such as an augmented assignment's, keeps its route. Proofs:
+`test_a_global_write_in_a_compound_suite_makes_later_uses_unresolved`,
+`test_a_global_write_nested_in_a_compound_suite_makes_later_uses_unresolved`,
+`test_a_plain_or_conditional_global_write_stays_unresolved`, and
+`test_a_global_declaration_without_a_compound_write_keeps_the_resolved_route`
+in `tests/language_interpreter/python/test_interpreter.py`.
 
 The first iterable of a comprehension is evaluated in the enclosing scope;
 later iterables, filters, and result expressions see comprehension-local
@@ -427,12 +468,11 @@ import helper` inside `def outer()` makes every use of `helper` in a nested
 `test_imported_name_resolves_in_every_nested_use`,
 `test_enclosing_class_import_does_not_reach_nested_class_uses`,
 `test_function_local_import_governs_every_use_in_a_function_nested_class`, and
-`test_calls_and_loads_resolve_through_the_one_header_helper`. An import
-written in a class's own body is still not a route for later uses in that
-same body (see [binding timing and class boundaries](#binding-timing-and-class-boundaries)):
-in a module-level class those uses stay unresolved, but in a class defined
-inside a function they can resolve to the function or module binding that
-the class import shadows.
+`test_calls_and_loads_resolve_through_the_one_header_helper`. An import written
+in a class's own body governs the uses that body evaluates in both placements
+(see [binding timing and class boundaries](#binding-timing-and-class-boundaries)),
+while method bodies, nested class bodies, comprehension results and later
+iterables, and lambda bodies resolve through the enclosing route.
 
 ### Query consequences
 
