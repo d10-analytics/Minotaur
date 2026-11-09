@@ -1177,7 +1177,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # bindings even where the first iterable, which runs in the class body,
         # consulted the class-body routes.
         class_scopes = None
-        if self._scope_frames and self._scope_frames[-1].is_class:
+        if any(frame.is_class for frame in self._scope_frames):
             class_scopes = self._remove_class_scopes()
         owner_state = self._flow_state()
         helper_targets = (
@@ -3177,8 +3177,17 @@ def _calls(
         context.plain_import_names,
         context.authoritative_import_names,
     )
+    outer_import_targets = context.class_scope_outer_import_targets
+    if outer_import_targets is not None and prefix_nodes:
+        # Method signatures run in the class namespace, whose bindings the
+        # context already supplies. An empty class frame marks that position
+        # so a lambda or comprehension inside it drops the namespace, as it
+        # does in the class body.
+        visitor._push_scope(frozenset(), frozenset(), frozenset(), class_scope=True)
     for node in prefix_nodes:
         visitor.visit(node)
+    if outer_import_targets is not None and prefix_nodes:
+        visitor._pop_scope()
     if function_scope is not None:
         visitor.visit_function_body(
             function_scope,
@@ -3190,7 +3199,6 @@ def _calls(
         # lets an import install a route before its first use and lets a later
         # direct write remove that route, while deferred function bodies keep
         # their dedicated final-state handling below.
-        outer_import_targets = context.class_scope_outer_import_targets
         if outer_import_targets is not None:
             # A class body runs on top of the module state it was entered
             # with. Its own bindings live in a class frame that nested class
