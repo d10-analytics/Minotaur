@@ -5194,8 +5194,9 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
     source = (
-        "import lib\nfrom lib import helper\n\n"
+        "import lib\nfrom other import helper\n\n"
         "def outer():\n"
         "    helper = object()\n"
         "    local = object()\n"
@@ -5216,17 +5217,21 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     assert visitor._scope_frames == []
 
     result = analyze_python_workspace(tmp_path)
-    outer = _node_id(result, "app.outer")
-    helper = _node_id(result, "lib.helper")
-    relationships = _edge_labels(result)
-    assert ("app.outer", "lib.helper", RelationshipKind.CALLS.value) in relationships
-    assert _unresolved_by_source(result).get("app.outer", set()) == set()
-    assert any(
-        relationship.source == outer
-        and relationship.target == helper
-        and relationship.kind == RelationshipKind.CALLS.value
+    labels = {node.id: node.label for node in result.document.nodes}
+    call_lines = {
+        (labels[relationship.target], location.range.start.line + 1)
         for relationship in result.document.relationships
-    )
+        if labels[relationship.source] == "app.outer"
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+    # The enclosing function binds its own ``helper``, so only the directive
+    # can route the bare call to the module-level name; the receiver call and
+    # the ``nonlocal`` name reach ``lib.helper`` and the enclosing local.
+    assert call_lines == {("lib.helper", 13), ("other.helper", 13)}
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
 
 
 def test_class_scope_restoration_inserts_before_surviving_lexical_frame() -> None:
