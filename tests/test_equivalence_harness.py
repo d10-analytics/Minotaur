@@ -28,7 +28,7 @@ SQL_ROOT = ROOT / "tests" / "fixtures" / "analyzer_semantics" / "sql"
 PYTHON_ROOT_KEYS = ("equivalence_root", "src", "Onyx")
 # Compare against the final source behavior, including analyzer version stamps
 # and the declaration roles recorded on accessor and overload symbol nodes.
-BASELINE_COMMIT = "7c48d9d156c00d1117ec2a089b8935ce224d9b13"
+BASELINE_COMMIT = "b2d7eff8272af7d57c679284f2c415202f3f55f0"
 # Freeze the source validated by the historical viewer and navigation comparisons.
 PRE_STAMP_COMMIT = "c43c45d60605e75ee9013580ba7a59fbf5af88dd"
 VIEWER_ADVANCE_COMMIT = "52a8b29d376e99c582d686dbead579acc438de37"
