@@ -3036,9 +3036,11 @@ def _imports(
     aliases: dict[str, str] = {}
     # This traversal intentionally differs from _BindingCollector's
     # scope-bounded walk: _imports records graph edges and tally counts for
-    # every syntactically unambiguous import, regardless of execution scope.
-    # Conditional definitions have a separate declaration-grain concern, but
-    # imports remain unambiguous at every nesting depth (O-03/M-4).
+    # every syntactically unambiguous import, regardless of execution scope,
+    # so a named import records its module edge at module level and at every
+    # nesting depth alike. Conditional definitions have a separate
+    # declaration-grain concern, but imports remain unambiguous at every
+    # nesting depth (O-03/M-4).
     # Keep the returned alias table module-scoped: the source-ordered scope
     # visitor supplies nested bindings at each expression, so exposing them
     # here would leak a function or class import into unrelated scopes.
@@ -3076,14 +3078,13 @@ def _imports(
             )
             root_escape = statement.level > 0 and base is None
             target_module = modules.get(base) if not root_escape and base is not None else None
-            if (
-                statement not in module_statements
-                and target_module is not None
-                and not any(alias.name == "*" for alias in statement.names)
+            if target_module is not None and not any(
+                alias.name == "*" for alias in statement.names
             ):
-                # A nested named import depends on its containing module as
-                # well as the selected declaration; emit that module edge
-                # once, before the per-name symbol edges below.
+                # A named import depends on its containing module as well as
+                # the selected declaration, so the module edge is emitted
+                # once per statement before the per-name symbol edges below,
+                # wherever the statement appears.
                 relationships.add(
                     module.module_id,
                     target_module.module_id,
