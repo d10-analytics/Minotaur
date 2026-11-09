@@ -6621,8 +6621,10 @@ def test_nested_plain_dotted_imports_are_syntactic_only_in_each_container(
         ]
         assert len(imports) == 1
         return
-    if owner == "app.run":
-        assert ("app.run", "pkg.sub.go", RelationshipKind.CALLS.value) in _edge_labels(result)
+    if owner in ("app.run", "app.Runner"):
+        # A function body and a class body each run their own definite
+        # import before the uses that follow it.
+        assert (owner, "pkg.sub.go", RelationshipKind.CALLS.value) in _edge_labels(result)
         assert "pkg.sub.go" not in _unresolved_by_source(result).get(owner, set())
         return
     assert "pkg.sub.go" in _unresolved_by_source(result).get(owner, set())
@@ -9736,6 +9738,12 @@ _CLASS_BODY_USE_OWNERS: dict[str, dict[str, str]] = {
         "return-annotation": "app.O.m",
         "quoted-annotation": "app.O.m",
         "method-call": "app.O.m",
+        "default-comprehension-call": "app.O.m",
+        "default-first-iterable-call": "app.O.m",
+        "default-lambda-call": "app.O.m",
+        "default-lambda-default-call": "app.O.m",
+        "decorator-comprehension-call": "app.O.decorated",
+        "decorator-lambda-call": "app.O.decorated",
     },
     "function": {},
 }
@@ -9810,6 +9818,79 @@ _PLAIN_IMPORT_COMPREHENSION_USES = (
 
 _LAMBDA_USES = (
     "first = lambda: helper()  # body-call\nsecond = lambda value=helper(): value  # default-call\n"
+)
+
+# A lambda body and a comprehension's result inside a header the class body
+# evaluates are nested scopes, so they skip the class namespace; the
+# comprehension's first iterable and a lambda default run with the header.
+_HEADER_NESTED_SCOPE_USES = (
+    "def m(\n"
+    "    self,\n"
+    "    a=[helper() for _ in ()],  # default-comprehension-call\n"
+    "    b=[item for item in helper()],  # default-first-iterable-call\n"
+    "    c=lambda: helper(),  # default-lambda-call\n"
+    "    d=lambda value=helper(): value,  # default-lambda-default-call\n"
+    "):\n"
+    "    pass\n\n\n"
+    "@deco([helper() for _ in ()])  # decorator-comprehension-call\n"
+    "@deco(lambda: helper())  # decorator-lambda-call\n"
+    "def decorated(self):\n"
+    "    pass\n\n\n"
+    "@deco([helper() for _ in ()])  # nested-decorator-comprehension-call\n"
+    "class Inner(\n"
+    "    *[helper() for _ in ()],  # nested-base-comprehension-call\n"
+    "    metaclass=lambda *args: helper(),  # nested-keyword-lambda-call\n"
+    "    option=[helper() for _ in ()],  # nested-keyword-comprehension-call\n"
+    "):\n"
+    "    pass\n"
+)
+
+_HEADER_NESTED_SCOPE_TARGETS: dict[str, str | None] = {
+    "default-comprehension-call": "lib.helper",
+    "default-first-iterable-call": "other.helper",
+    "default-lambda-call": "lib.helper",
+    "default-lambda-default-call": "other.helper",
+    "decorator-comprehension-call": "lib.helper",
+    "decorator-lambda-call": "lib.helper",
+    "nested-decorator-comprehension-call": "lib.helper",
+    "nested-base-comprehension-call": "lib.helper",
+    "nested-keyword-lambda-call": "lib.helper",
+    "nested-keyword-comprehension-call": "lib.helper",
+}
+
+_PLAIN_IMPORT_OVER_AN_ALIAS = "import lib as other\n\n\n"
+
+_PLAIN_IMPORT_BODY_USES = (
+    "first = other.helper()  # body-call\nsecond = other.helper  # body-load\n"
+)
+
+_PLAIN_IMPORT_HEADER_USES = (
+    "def m(\n"
+    "    self,\n"
+    "    a=other.helper(),  # method-default-call\n"
+    "):\n"
+    "    pass\n\n\n"
+    "@other.helper  # method-decorator\n"
+    "def decorated(self):\n"
+    "    pass\n\n\n"
+    "@other.helper  # nested-decorator\n"
+    "class Inner(\n"
+    "    other.helper,  # nested-base\n"
+    "    metaclass=other.helper,  # nested-keyword\n"
+    "):\n"
+    "    pass\n"
+)
+
+_PLAIN_IMPORT_NESTED_SCOPE_USES = (
+    "class Inner:\n"
+    "    nested = other.helper()  # nested-call\n\n"
+    "def m(self):\n"
+    "    return other.helper()  # method-call\n\n"
+    "values = [\n"
+    "    other.helper()  # element-call\n"
+    "    for first in other.helper()  # first-iterable-call\n"
+    "]\n"
+    "later = lambda: other.helper()  # lambda-body-call\n"
 )
 
 _COMPREHENSION_TARGETS: dict[str, str | None] = {
@@ -10038,6 +10119,118 @@ _CLASS_BODY_CASES: dict[str, dict] = {
         "uses": "first = helper()  # body-call\n",
         "targets": {"body-call": "other.helper"},
     },
+    "header-nested-scopes-keep-the-enclosing-route": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _HEADER_NESTED_SCOPE_USES,
+        "targets": _HEADER_NESTED_SCOPE_TARGETS,
+    },
+    "header-nested-scopes-without-an-outer-binding": {
+        "prelude": "",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _HEADER_NESTED_SCOPE_USES,
+        "targets": {
+            role: None if target == "lib.helper" else target
+            for role, target in _HEADER_NESTED_SCOPE_TARGETS.items()
+        },
+    },
+    "class-import-before-a-later-module-import": {
+        # The class body and its headers run before the module rebinds the
+        # name, so only the class import can decide them.
+        "prelude": "",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": (
+            "def m(\n"
+            "    self,\n"
+            "    a=helper(),  # method-default-call\n"
+            "):\n"
+            "    pass\n\n"
+            "first = helper()  # body-call\n"
+        ),
+        "postlude": "\n\nfrom lib import helper\n",
+        "targets": {"method-default-call": "other.helper", "body-call": "other.helper"},
+    },
+    "nested-function-in-a-compound-statement-after-an-assignment": {
+        # A function body never sees the class namespace, so the class-local
+        # assignment does not hide the module import from it.
+        "class_prelude": "helper = 1\n\n",
+        "uses": "if True:\n    def f():\n        return helper()  # nested-function-call\n",
+        "targets": {"nested-function-call": "lib.helper"},
+    },
+    "plain-import-over-an-outer-alias": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other\n\n",
+        "uses": _PLAIN_IMPORT_BODY_USES,
+        "targets": {"body-call": "other.helper", "body-load": "other.helper"},
+    },
+    "plain-import-as-itself-over-an-outer-alias": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other as other\n\n",
+        "uses": _PLAIN_IMPORT_BODY_USES,
+        "targets": {"body-call": "other.helper", "body-load": "other.helper"},
+    },
+    "plain-import-without-an-outer-binding": {
+        "prelude": "",
+        "class_prelude": "import other\n\n",
+        "uses": _PLAIN_IMPORT_BODY_USES,
+        "targets": {"body-call": "other.helper", "body-load": "other.helper"},
+    },
+    "plain-import-headers": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other\n\n",
+        "uses": _PLAIN_IMPORT_HEADER_USES,
+        "targets": dict.fromkeys(_HEADER_ROLES, "other.helper"),
+    },
+    "plain-import-nested-scopes-keep-the-enclosing-route": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other\n\n",
+        "uses": _PLAIN_IMPORT_NESTED_SCOPE_USES,
+        "targets": {
+            "nested-call": "lib.helper",
+            "method-call": "lib.helper",
+            "element-call": "lib.helper",
+            "first-iterable-call": "other.helper",
+            "lambda-body-call": "lib.helper",
+        },
+    },
+    "plain-import-then-assignment-and-deletion": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other\n\n",
+        "uses": (
+            "other = 1\n\n"
+            "first = other.helper()  # assigned-call\n"
+            "import other\n\n"
+            "second = other.helper()  # restored-call\n"
+            "del other\n\n"
+            "third = other.helper()  # deleted-call\n"
+        ),
+        "targets": {
+            "assigned-call": None,
+            "restored-call": "other.helper",
+            "deleted-call": "lib.helper",
+        },
+        "targets_by_placement": {
+            "function": {
+                "assigned-call": _NO_USE,
+                "restored-call": "other.helper",
+                "deleted-call": "lib.helper",
+            },
+        },
+        "unresolved": {"assigned-call": "other.helper"},
+    },
+    "conditional-plain-import": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "if flag:\n    import other\n\n",
+        "uses": "first = other.helper()  # body-call\n",
+        "targets": {"body-call": None},
+        "unresolved": {"body-call": "other.helper"},
+    },
+    "directive-plain-import-installs-no-class-route": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "global other\n\nimport other\n\n",
+        "uses": "first = other.helper()  # body-call\n",
+        "targets": {"body-call": None},
+        "unresolved": {"body-call": "other.helper"},
+    },
 }
 
 
@@ -10048,17 +10241,20 @@ def _class_body_source(
     class_prelude: str,
     uses: str,
     function_prelude: str = "",
+    postlude: str = "",
 ) -> tuple[str, str]:
     """Return the module source and owning node for one class-body placement.
 
     The ``module`` placement defines ``class O`` at module level; the
     ``function`` placement defines ``class K`` inside ``def outer()``, where
-    ``function_prelude`` runs before the class statement.
+    ``function_prelude`` runs before the class statement. ``postlude`` follows
+    the class or function statement at module level.
     """
     if placement == "module":
-        return prelude + "class O:\n" + _indent(class_prelude + uses, "    "), "app.O"
+        return prelude + "class O:\n" + _indent(class_prelude + uses, "    ") + postlude, "app.O"
     class_body = "class K:\n" + _indent(class_prelude + uses, "    ")
-    return prelude + "def outer():\n" + _indent(function_prelude + class_body, "    "), "app.outer"
+    function = "def outer():\n" + _indent(function_prelude + class_body, "    ")
+    return prelude + function + postlude, "app.outer"
 
 
 @pytest.mark.parametrize("placement", _PLACEMENTS)
@@ -10085,6 +10281,7 @@ def test_a_class_body_import_governs_the_uses_that_body_evaluates(
         class_prelude=class_prelude,
         uses=spec["uses"],
         function_prelude=spec.get("function_prelude", ""),
+        postlude=spec.get("postlude", ""),
     )
     name = spec.get("name", "helper")
 
@@ -10099,6 +10296,25 @@ def test_a_class_body_import_governs_the_uses_that_body_evaluates(
         targets,
         _CLASS_BODY_USE_OWNERS[placement],
         spec.get("unresolved"),
+    )
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_a_class_body_type_alias_sees_the_class_import(tmp_path: Path, placement: str) -> None:
+    # A ``type`` alias value is an annotation scope, which can see the names
+    # of the class that defines it, unlike a function or lambda body.
+    source, owner = _class_body_source(
+        placement,
+        prelude="from lib import helper\n\n\n",
+        class_prelude=_CLASS_BODY_IMPORT,
+        uses="type Alias = helper  # alias-load\n",
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source, owner, "helper", {"alias-load": "other.helper"}
     )
 
 
