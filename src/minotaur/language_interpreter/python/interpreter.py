@@ -760,7 +760,10 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         state = self._flow_state()
         if state is None or state.flow_frozen or not names:
             return
-        names = _touched_tracked_names(state, names)
+        # A ``global`` write rebinds a name the frame does not own, so the
+        # tracked-name filter never keeps it; the sequential write path adds
+        # the same names back for the same reason.
+        names = _touched_tracked_names(state, names) | (names & self._scope_frames[-1].global_names)
         if not names:
             return
         self._set_flow_state(
