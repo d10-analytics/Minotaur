@@ -9189,6 +9189,49 @@ def test_conditional_class_import_leaves_later_class_headers_unresolved(
     )
 
 
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_conditional_class_import_leaves_neighbouring_uses_on_their_routes(
+    tmp_path: Path, placement: str
+) -> None:
+    # The conditional import makes only its own name uncertain, and only for the
+    # class body that holds it: a nested class body and a method body keep the
+    # enclosing route (class namespaces are not lexical), a name the class never
+    # imports keeps its route, and the use after the class is unaffected.
+    class_body = (
+        "if flag:\n"
+        "    from other import helper\n"
+        "class Inner:\n"
+        "    a = helper()  # nested-body\n"
+        "def m(self):\n"
+        "    helper()  # method\n"
+        "z = f()  # other-name\n"
+    )
+    if placement == "module":
+        source = "from lib import f, helper\n\n\nclass O:\n" + _indent(class_body, "    ")
+        source += "\n\nhelper()  # after\n"
+        owners = {"nested-body": "app.O", "method": "app.O.m", "other-name": "app.O"}
+        owners["after"] = "app"
+    else:
+        source = "from lib import f, helper\n\n\ndef outer():\n    class O:\n"
+        source += _indent(class_body, "        ") + "    helper()  # after\n"
+        owners = dict.fromkeys(("nested-body", "method", "other-name", "after"), "app.outer")
+    targets = {
+        "nested-body": "lib.helper",
+        "method": "lib.helper",
+        "other-name": "lib.f",
+        "after": "lib.helper",
+    }
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    expected = set()
+    for number, text in enumerate(source.splitlines(), start=1):
+        if "# " in text:
+            role = text.split("# ")[-1]
+            expected.add((owners[role], RelationshipKind.CALLS.value, targets[role], number))
+    assert {site for site in sites if site[2] != "?flag"} == expected
+
+
 def _located_nodes(result: AnalysisResult, path: str) -> list:
     return [
         node
