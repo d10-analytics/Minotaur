@@ -17,21 +17,22 @@ rejects any source file that is not valid UTF-8.
 
 `workflow/binding_lifecycle.py`, the binding-lifecycle sample, defines
 top-level functions that a later statement rebinds (an assignment, a `del`, a
-conditional assignment, a `try` import, and a star import) and then calls, a
+conditional assignment, a `try` import, and a star import); the module calls
+them wherever the rebinding leaves the name bound. It also has a
 `from workflow.helper import fixture_helper` import beside a same-module `def
 helper()`, a class body with an annotation-only name, a function with an
 annotation-only local, a nested class whose header and body call and load a
 module name, string annotations beside `Literal[...]` and `Annotated[...]`
 arguments, a quoted annotation whose name the module imports again after the
 function, and a nested class whose body uses a function-local import that
-differs from the module's import of the same name. It also carries one case per
-analyzer edge rule: a function that writes `Holder` through `global` inside a
-loop before using it, a class whose `if`-guarded import precedes the class-body
-use, a function-nested class whose import shadows the module-level `Forward`
-import, a function-nested class that imports a name it declares `global`, and a
-module-level import of the `workflow.declared_encoding.banner` constant, whose
-name stays unresolved while the import links the analyzed module. It defines no
-`main` and calls neither `workflow.util.unused_helper`
+differs from the module's import of the same name. The sample also carries one
+case for each binding behavior: a function that writes `Holder` through `global`
+inside a loop before using it, a class whose `if`-guarded import precedes the
+class-body use, a function-nested class whose import shadows the module-level
+`Forward` import, a function-nested class that imports a name it declares
+`global`, and a module-level import of the `workflow.declared_encoding.banner`
+constant, whose name stays unresolved while the import links the analyzed
+module. It defines no `main` and calls neither `workflow.util.unused_helper`
 nor `workflow.service.Service.run`; its star import carries inline `# noqa`
 codes for Ruff.
 
