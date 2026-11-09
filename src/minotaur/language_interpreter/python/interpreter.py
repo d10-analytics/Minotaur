@@ -766,7 +766,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             return
 
     def _block_flow_imports(self, names: frozenset[str]) -> None:
-        """Block routes introduced only on a conditional execution path."""
+        """Block the import routes a conditional path may replace or leave uncertain."""
         state = self._flow_state()
         if state is None or state.flow_frozen or not names:
             return
@@ -1531,14 +1531,15 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         self._record_dynamic_names(frozenset((node.name,)))
 
     def _record_class_bindings(self, statement: ast.stmt) -> None:
-        """Add one class statement's bindings for later headers.
+        """Add one class statement's bindings for later body uses and headers.
 
         Class locals are sequential: a preceding assignment suppresses an
         outer name in a later decorator/default, a preceding import supplies
         the nearest import binding, and deleting either reveals the enclosing
         name again. An import the statement may skip leaves its name uncertain
         for later uses and headers, and a direct import or a deletion replaces
-        that uncertainty. These bindings belong only to the class frame and are
+        that uncertainty unless the name is one the class declares ``global``
+        or ``nonlocal``. These bindings belong only to the class frame and are
         therefore hidden while a method body executes.
 
         An import of a name this class declares ``global`` or ``nonlocal``
@@ -2235,17 +2236,17 @@ def _class_context_after_statement(
     is_package: bool,
     directive_names: frozenset[str] = frozenset(),
 ) -> _ScopeContext:
-    """Add one class-body statement's bindings for later method headers.
+    """Add one class-body statement's bindings for later uses and method headers.
 
     Class locals are sequential. A preceding assignment suppresses an
-    enclosing name in a later method header, a preceding import supplies the
-    nearest import binding, and deleting either reveals the enclosing name
+    enclosing name in a later use or method header, a preceding import supplies
+    the nearest import binding, and deleting either reveals the enclosing name
     again. An import the statement may skip leaves its name uncertain for
     every later use in the body and headers. These bindings stay in this
     class-only context and are therefore never visible to method bodies.
 
     ``directive_names`` carries the class declaration's ``global`` and
-    ``nonlocal`` names: a statement's import of one of them is a directive
+    ``nonlocal`` names: a statement that writes one of them is a directive
     write, so it installs no class route and leaves the name uncertain.
     """
     collector = _BindingCollector(module_name, is_package)
@@ -3040,7 +3041,7 @@ def _imports(
     # so a named import records its module edge at module level and at every
     # nesting depth alike. Conditional definitions have a separate
     # declaration-grain concern, but imports remain unambiguous at every
-    # nesting depth (O-03/M-4).
+    # nesting depth.
     # Keep the returned alias table module-scoped: the source-ordered scope
     # visitor supplies nested bindings at each expression, so exposing them
     # here would leak a function or class import into unrelated scopes.
