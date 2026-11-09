@@ -971,6 +971,11 @@ CLASS_IMPORT_RETIRED_PHRASES = (
     "a class-only route remains syntactic",
     "a class-only one remains syntactic",
 )
+CLASS_FUNCTION_BODIES = (
+    "Ordinary class locals and class imports are hidden from method bodies and "
+    "from every other function body defined in the class body, such as one in an "
+    "`if` or `try` suite;"
+)
 CLASS_HEADER_NESTED_SCOPES = (
     "A lambda body and a comprehension's result, filters, and later iterables "
     "inside such a header are nested scopes and keep the enclosing route, while "
@@ -984,6 +989,9 @@ def test_class_import_rule_covers_every_import_form_and_header_nested_scopes() -
         text = _collapsed(document)
         assert CLASS_IMPORT_FORMS in text, (
             f"{document.name} must state the class-route rule for every import form"
+        )
+        assert CLASS_FUNCTION_BODIES in text, (
+            f"{document.name} must keep every class-body function body off the class route"
         )
         assert CLASS_HEADER_NESTED_SCOPES in text, (
             f"{document.name} must keep header nested scopes on the enclosing route"

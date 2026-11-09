@@ -315,8 +315,9 @@ lexical. This policy does not simulate invocation or callable side effects.
 Class headers run in the enclosing scope, while the class body has a separate
 sequential namespace. Earlier class assignments or imports can affect later
 headers, and deletion can reveal an enclosing route. Ordinary class locals and
-class imports are hidden from method bodies; methods use their own imports and
-enclosing function or module routes. A class body's own unconditional import of
+class imports are hidden from method bodies and from every other function body
+defined in the class body, such as one in an `if` or `try` suite; those bodies
+use their own imports and enclosing function or module routes. A class body's own unconditional import of
 the name — a `from` import (with or without `as`) or any plain `import` form, including
 `import M` and a dotted `import pkg.sub` — decides a use Python
 evaluates directly in the class body, in a module-level class and in a class
@@ -474,8 +475,9 @@ import helper` inside `def outer()` makes every use of `helper` in a nested
 `test_calls_and_loads_resolve_through_the_one_header_helper`. A class body's
 own import, a `from` import or a plain `import` alike, governs the uses that
 body evaluates in both placements (see [binding timing and class boundaries](#binding-timing-and-class-boundaries)),
-while method bodies, nested class bodies, comprehension results and later
-iterables, and lambda bodies resolve through the enclosing route.
+while method bodies, other function bodies defined in the class body, nested
+class bodies, comprehension results and later iterables, and lambda bodies
+resolve through the enclosing route.
 
 ### Query consequences
 
