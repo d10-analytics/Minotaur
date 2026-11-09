@@ -317,13 +317,15 @@ sequential namespace. Earlier class assignments or imports can affect later
 headers, and deletion can reveal an enclosing route. Ordinary class locals and
 class imports are hidden from method bodies; methods use their own imports and
 enclosing function or module routes. A class body's own unconditional import of
-the name — a `from` import or an `import` of one module name — decides a use
-Python evaluates directly in the class body, in a module-level class and in a
-class defined inside a function alike; an outer import of the same local name
-never decides it, and the answer does not depend on whether such an outer
-binding exists. Method defaults, decorators, and a nested class statement's
-decorators, bases, and keywords are evaluated in the class body, so they follow
-the same answer. A class-local assignment of the name stops that route, leaving
+the name decides a use Python evaluates directly in the class body, in a
+module-level class and in a class defined inside a function alike, for the
+proved shapes: a `from` import (with or without `as`) or an `import M as alias`
+whose alias differs from the module's own bound name. For those forms, an outer
+import of the same local name does not decide it, and the answer does not
+depend on whether such an outer binding exists. Method defaults, decorators,
+and a nested class statement's decorators, bases, and keywords are evaluated
+in the class body, so they follow the same answer. A class-local assignment of
+the name stops that route, leaving
 the later use unresolved — or suppressed as an ordinary dynamic local in a
 class inside a function — a later class import restores the class route, and a
 deletion reveals the enclosing one. An import inside a compound statement in
@@ -469,9 +471,10 @@ import helper` inside `def outer()` makes every use of `helper` in a nested
 `test_imported_name_resolves_in_every_nested_use`,
 `test_enclosing_class_import_does_not_reach_nested_class_uses`,
 `test_function_local_import_governs_every_use_in_a_function_nested_class`, and
-`test_calls_and_loads_resolve_through_the_one_header_helper`. An import written
-in a class's own body governs the uses that body evaluates in both placements
-(see [binding timing and class boundaries](#binding-timing-and-class-boundaries)),
+`test_calls_and_loads_resolve_through_the_one_header_helper`. A class body's
+own `from` import, or an `import M as alias` whose alias differs from the
+module's own bound name, governs the uses that body evaluates in both
+placements (see [binding timing and class boundaries](#binding-timing-and-class-boundaries)),
 while method bodies, nested class bodies, comprehension results and later
 iterables, and lambda bodies resolve through the enclosing route.
 

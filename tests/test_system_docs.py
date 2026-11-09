@@ -25,6 +25,7 @@ README = ROOT / "README.md"
 ANALYSIS_PYTHON_README = ROOT / "docs/systems/analysis-python/README.md"
 SYSTEM_WALKTHROUGH = ROOT / "examples/system-walkthrough/README.md"
 GRAPH_FORMAT_REFERENCE = ROOT / "docs/formats/minotaur-graph-v1.md"
+STRUCTURAL_ANALYSIS_CONTRACT = ROOT / "docs/concepts/structural-analysis-contract.md"
 
 
 def _collapsed(path: Path) -> str:
@@ -949,6 +950,41 @@ def test_source_error_recovery_states_the_interpreter_error_and_no_blame_outcome
         "no single selected file explains, and writes no graph"
     ) in text
     assert "writes the partial graph from the remaining files, and exits `1`" in text
+
+
+# ---------------------------------------------------------------------------
+# Class-body import rule: proved forms and the plain-import limit
+# ---------------------------------------------------------------------------
+
+# The class-route rule holds for these shapes only; a plain `import M` that
+# binds the module's own name behaves differently at module level, so the
+# documents must not generalize the rule to it.
+CLASS_IMPORT_PROVED_SHAPES = (
+    "a `from` import (with or without `as`) or an `import M as alias` whose "
+    "alias differs from the module's own bound name"
+)
+CLASS_IMPORT_RETIRED_PHRASE = "an `import` of one module name"
+CLASS_PLAIN_IMPORT_LIMIT = (
+    "A plain `import M` that binds the module's own name is not resolved by the "
+    "class-route rule at module level: with no outer binding the body's use "
+    "records only a reference rather than a call, and an outer import of the "
+    "same local name still decides it."
+)
+
+
+def test_class_import_rule_documents_only_the_proved_import_shapes() -> None:
+    for document in (ANALYZE_PYTHON_GUIDE, STRUCTURAL_ANALYSIS_CONTRACT):
+        text = _collapsed(document)
+        assert CLASS_IMPORT_PROVED_SHAPES in text, (
+            f"{document.name} must scope the class-route rule to the proved import shapes"
+        )
+        assert CLASS_IMPORT_RETIRED_PHRASE not in text, (
+            f"{document.name} must not keep the retired one-module-name claim"
+        )
+
+
+def test_contract_states_the_module_level_plain_import_limit() -> None:
+    assert CLASS_PLAIN_IMPORT_LIMIT in _collapsed(STRUCTURAL_ANALYSIS_CONTRACT)
 
 
 # ---------------------------------------------------------------------------
