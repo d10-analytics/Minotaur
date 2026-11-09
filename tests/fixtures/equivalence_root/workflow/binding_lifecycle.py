@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
+from workflow.declared_encoding import banner  # noqa: F401
 from workflow.helper import fixture_helper
 
 
@@ -59,6 +60,7 @@ except ImportError:
 guarded()
 
 helper()
+
 
 from workflow.util import *  # noqa: E402, F401, F403
 
@@ -128,3 +130,45 @@ def local_import_class() -> type[object]:
         loaded = Forward
 
     return Local
+
+
+def loop_global() -> None:
+    """Write a ``global`` inside a loop, leaving the later use uncertain."""
+
+    global Holder
+    for _ in range(0):
+        Holder = ConditionalImport
+    Holder()
+
+
+class ConditionalImport:
+    """Import a name in an ``if`` suite and use it in the class body."""
+
+    if fixture_helper:
+        from workflow.helper import fixture_helper as conditional_helper
+
+    value = conditional_helper()
+
+
+def nested_class_import() -> type[object]:
+    """Resolve a nested class body's import over the module's same-name import."""
+
+    class Shadowed:
+        from workflow.util import format_report as Forward
+
+        value = Forward([1])
+
+    return Shadowed
+
+
+def directive_class_import() -> int:
+    """Write a name through ``global`` in a nested class and use it there."""
+
+    class Directive:
+        global Holder
+
+        from workflow.helper import fixture_helper as Holder
+
+        value = Holder()
+
+    return Directive.value
