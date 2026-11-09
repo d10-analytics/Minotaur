@@ -206,12 +206,13 @@ class _ExpressionSnapshot:
     receiver_parameter: str | None
     excludes_enclosing_class: bool
     owner_import_targets: Mapping[str, str] | None = None
-    """Import routes of the non-class frames, for a use directly in a class body.
+    """Import routes of the non-class frames, for a use a class body evaluates.
 
     A class body consults the function and module bindings around it, but not
     the class frames the walk already drops. The routes here omit every name
-    the innermost class frame binds itself, so only bindings the use can see
-    through lexical scoping remain.
+    the nearest class frame binds itself, so only bindings the use can see
+    through lexical scoping remain. Comparing them with ``import_targets``
+    isolates the routes that class frame contributes.
     """
 
 
@@ -453,10 +454,19 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         )
 
     def _scope_owner_imports(self) -> Mapping[str, str] | None:
-        """Return the import routes a class body sees from its enclosing frames."""
-        if not self._scope_frames or not self._scope_frames[-1].is_class:
+        """Return the import routes a class body sees from its enclosing frames.
+
+        A use in a class body, or in a header that class body evaluates, is
+        resolved against the frames around the class rather than the class
+        namespace itself, so the nearest class frame supplies the names its own
+        bindings hide from those frames.
+        """
+        class_frame = next(
+            (frame for frame in reversed(self._scope_frames) if frame.is_class),
+            None,
+        )
+        if class_frame is None:
             return None
-        class_frame = self._scope_frames[-1]
         class_state = class_frame.import_state
         class_names = (
             _import_binding_roots(class_state.targets)
@@ -1110,6 +1120,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
 
     def _visit_lambda_body(self, node: ast.Lambda, owner_state: _ImportFlowState | None) -> None:
         bound_names = frozenset(_argument_names(node.args))
+        # A lambda body is a nested scope, and a class namespace is not
+        # lexical, so it resolves through the enclosing function or module
+        # bindings rather than the class-body routes its defaults saw.
+        class_scopes = None
+        if any(frame.is_class for frame in self._scope_frames):
+            class_scopes = self._remove_class_scopes()
         self._push_scope(
             bound_names,
             frozenset(),
@@ -1121,9 +1137,12 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 owner_state.uncertain_names if owner_state is not None else frozenset()
             ),
             import_flow_sensitive=owner_state is not None,
+            exclude_enclosing_class=class_scopes is not None,
         )
         self.visit(node.body)
         self._pop_scope()
+        if class_scopes is not None:
+            self._restore_class_scopes(class_scopes)
 
     def visit_ListComp(self, node: ast.ListComp) -> None:
         self._visit_comprehension(node.generators, (node.elt,))
@@ -1153,6 +1172,13 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         # targets, which are local to the comprehension.
         self.visit(generators[0].iter)
         first_target_names = _target_names(generators[0].target)
+        # A comprehension body is a nested scope, and a class namespace is not
+        # lexical, so its uses resolve through the enclosing function or module
+        # bindings even where the first iterable, which runs in the class body,
+        # consulted the class-body routes.
+        class_scopes = None
+        if self._scope_frames and self._scope_frames[-1].is_class:
+            class_scopes = self._remove_class_scopes()
         owner_state = self._flow_state()
         helper_targets = (
             _without_import_roots(owner_state.targets, first_target_names)
@@ -1189,6 +1215,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             local_import_names=helper_local_names,
             declared_names=helper_declared_names,
             import_flow_sensitive=owner_state is not None,
+            exclude_enclosing_class=class_scopes is not None,
             propagate_mutations=owner_state is not None and eager,
         )
         if lazy:
@@ -1220,6 +1247,8 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         for expression in result_expressions:
             self.visit(expression)
         mutations = self._pop_scope()
+        if class_scopes is not None:
+            self._restore_class_scopes(class_scopes)
         if owner_state is not None and eager and mutations:
             self._record_dynamic_names(mutations)
 
@@ -1515,20 +1544,22 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         collector = _BindingCollector(self._module_name, self._is_package)
         collector.visit(statement)
         frame = self._scope_frames[-1]
-        global_names = frame.global_names
+        directive_names = frame.global_names | frame.nonlocal_names
         frame.bound_names = _class_dynamic_names_after_statement(
             frame.bound_names,
             collector,
-            global_names,
+            frame.global_names,
             frame.type_param_names,
         )
         frame.shadow_names = _class_dynamic_names_after_statement(
             frame.shadow_names,
             collector,
-            global_names,
+            frame.global_names,
             frame.type_param_names,
         )
-        conditional_import_names = _class_conditional_import_names(statement, collector)
+        conditional_import_names = _class_conditional_import_names(
+            statement, collector, directive_names
+        )
         import_state = frame.import_state
         uncertain_names = import_state.uncertain_names.difference(
             frozenset(collector.import_names) - conditional_import_names
@@ -1537,7 +1568,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         frame.import_state = replace(
             import_state,
             targets=_class_import_targets_after_statement(
-                import_state.targets, collector, global_names
+                import_state.targets, collector, directive_names
             ),
             uncertain_names=uncertain_names - frozenset(collector.deleted_names),
         )
@@ -1822,8 +1853,14 @@ def _class_import_targets_after_statement(
     global_names: Iterable[str],
     outer_targets: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Apply one class statement's imports and deletions in source order."""
-    deleted_names = frozenset(collector.deleted_names) - frozenset(global_names)
+    """Apply one class statement's imports and deletions in source order.
+
+    A name the class declares ``global`` or ``nonlocal`` is written through the
+    directive, so an import of it installs no class route: the directive, not a
+    class binding, decides the name.
+    """
+    directive_names = frozenset(global_names)
+    deleted_names = frozenset(collector.deleted_names) - directive_names
     import_targets = _without_import_roots(current_targets, collector.import_names)
     import_targets = {
         name: target for name, target in import_targets.items() if name not in deleted_names
@@ -1835,24 +1872,29 @@ def _class_import_targets_after_statement(
     import_targets.update(
         (name, target)
         for name, target in collector.import_targets.items()
-        if name not in deleted_names
+        if name not in deleted_names and name not in directive_names
     )
     return import_targets
 
 
 def _class_conditional_import_names(
-    statement: ast.stmt, collector: _BindingCollector
+    statement: ast.stmt,
+    collector: _BindingCollector,
+    directive_names: Iterable[str] = (),
 ) -> frozenset[str]:
-    """Return the names one class statement imports inside a compound suite.
+    """Return the names one class statement imports without a definite route.
 
     A direct ``import`` or ``from ... import`` statement runs as the class body
     reaches it, so its binding is definite. An import inside ``if``, ``for``,
     ``while``, ``try``, ``with`` or ``match`` may never run, and the class walk
     cannot tell which suite executed, so a later class-body use of such a name
-    has neither the class route nor a definite enclosing one.
+    has neither the class route nor a definite enclosing one. An import of a
+    name the class declares ``global`` or ``nonlocal`` is a directive write,
+    which decides the name instead of the class body, so it is uncertain too.
     """
+    directive_imports = frozenset(collector.import_names) & frozenset(directive_names)
     if isinstance(statement, (ast.Import, ast.ImportFrom)):
-        return frozenset()
+        return directive_imports
     return frozenset(collector.import_names)
 
 
@@ -2182,6 +2224,7 @@ def _class_context_after_statement(
     statement: ast.stmt,
     module_name: str,
     is_package: bool,
+    directive_names: frozenset[str] = frozenset(),
 ) -> _ScopeContext:
     """Add one class-body statement's bindings for later method headers.
 
@@ -2191,13 +2234,18 @@ def _class_context_after_statement(
     again. An import the statement may skip leaves its name uncertain for
     every later use in the body and headers. These bindings stay in this
     class-only context and are therefore never visible to method bodies.
+
+    ``directive_names`` carries the class declaration's ``global`` and
+    ``nonlocal`` names: a statement's import of one of them is a directive
+    write, so it installs no class route and leaves the name uncertain.
     """
     collector = _BindingCollector(module_name, is_package)
     collector.visit(statement)
+    directives = collector.global_names | directive_names
     class_bound_names = _class_dynamic_names_after_statement(
         context.class_scope_bound_names,
         collector,
-        collector.global_names,
+        directives,
         context.class_scope_type_param_names,
     )
     plain_import_names = set(context.plain_import_names)
@@ -2206,29 +2254,44 @@ def _class_context_after_statement(
     # behavior: they can refine an already-visible plain package route, while
     # a class-only route remains syntactic evidence.
     plain_import_names.update(collector.plain_import_names & context.plain_import_names)
-    conditional_import_names = _class_conditional_import_names(statement, collector)
+    conditional_import_names = _class_conditional_import_names(statement, collector, directives)
     uncertain_import_names = set(context.uncertain_import_names)
-    if isinstance(statement, ast.ImportFrom) and statement.level == 0:
-        uncertain_import_names.update(collector.import_names)
+    # A direct import runs whenever the class body does, so it replaces the
+    # uncertainty an earlier conditional import of the same name left behind.
+    uncertain_import_names.difference_update(
+        frozenset(collector.import_names) - conditional_import_names
+    )
     uncertain_import_names.update(conditional_import_names)
     uncertain_import_names.difference_update(collector.deleted_names)
     deleted_plain_names = (
         context.class_scope_deleted_plain_names
         | (frozenset(collector.deleted_names) & context.plain_import_names)
     ) - frozenset(collector.import_names)
+    import_targets = _class_import_targets_after_statement(
+        context.import_targets,
+        collector,
+        directives,
+        context.class_scope_outer_import_targets,
+    )
+    # A class import this statement installs is definitive for the body uses
+    # and headers that follow it, so its name resolves here even where the
+    # enclosing module route for the same name points elsewhere.
+    installed_targets = {
+        name: target
+        for name, target in collector.import_targets.items()
+        if import_targets.get(name) == target
+    }
     return replace(
         context,
         bound_names=(context.bound_names - context.class_scope_bound_names) | class_bound_names,
-        import_targets=_class_import_targets_after_statement(
-            context.import_targets,
-            collector,
-            collector.global_names,
-            context.class_scope_outer_import_targets,
-        ),
+        import_targets=import_targets,
         plain_import_names=frozenset(plain_import_names),
         uncertain_import_names=frozenset(uncertain_import_names),
         class_scope_bound_names=class_bound_names,
         class_scope_deleted_plain_names=deleted_plain_names,
+        authoritative_import_names=(
+            context.authoritative_import_names | _import_binding_roots(installed_targets)
+        ),
     )
 
 
@@ -2858,7 +2921,7 @@ def _analyze_module(
                 )
                 class_context = replace(
                     _class_context_after_statement(
-                        class_context, member, module.name, module.is_package
+                        class_context, member, module.name, module.is_package, class_directives
                     ),
                     class_scope_outer_import_targets=outer_state.targets,
                     class_scope_outer_plain_import_names=outer_state.plain_roots,
@@ -3298,16 +3361,42 @@ def _resolve_header_use(
     Uncertainty the module flow state or an owning function frame carries
     stays visible. Calls and loads resolve through this one function so they
     cannot disagree.
+
+    A use the class body evaluates -- directly in the body or in a header it
+    runs -- resolves through the class body's own unconditional imports, in
+    either placement. Those routes are definitive for the use, and a name the
+    class binds dynamically instead blocks both the route and that authority.
     """
     inside_nested_class = snapshot.excludes_enclosing_class
     in_definition_header = node in definition_header_nodes
     in_class_header = node in class_header_nodes
     has_enclosing_class_context = context.class_scope_outer_import_targets is not None
+    class_scope_visible = snapshot.in_class_body or in_class_header or in_definition_header
     expression_context = context
     import_targets = snapshot.import_targets
     import_bound = snapshot.import_bound - snapshot.bound_names
     uncertain = set(snapshot.uncertain_import_names)
     blocked_plain_names: frozenset[str] = frozenset()
+    import_shadow_names: frozenset[str] = frozenset()
+    authoritative_import_names = snapshot.authoritative_import_names
+    # A class defined inside a function keeps its own namespace in a frame the
+    # snapshot carries. Its body and the headers it evaluates consult the
+    # routes that frame contributes on top of the enclosing function and
+    # module ones.
+    class_own_targets: dict[str, str] = {}
+    class_own_roots: frozenset[str] = frozenset()
+    if (
+        not has_enclosing_class_context
+        and snapshot.owner_import_targets is not None
+        and class_scope_visible
+    ):
+        class_own_targets = {
+            name: target
+            for name, target in snapshot.import_targets.items()
+            if (snapshot.owner_import_targets or {}).get(name) != target
+        }
+        class_own_roots = _import_binding_roots(class_own_targets)
+        authoritative_import_names = authoritative_import_names | class_own_roots
 
     if inside_nested_class:
         if has_enclosing_class_context:
@@ -3338,18 +3427,27 @@ def _resolve_header_use(
                     if context.import_targets.get(name) != target
                 }
             )
+            import_targets.update(class_own_targets)
             import_bound = import_bound - context.import_targets.keys()
         if not in_definition_header and not has_enclosing_class_context and in_class_header:
             uncertain.update(
                 name
                 for name in _import_binding_roots(snapshot.import_targets)
-                if context.import_targets.get(name) != snapshot.import_targets.get(name)
+                if name not in class_own_roots
+                and context.import_targets.get(name) != snapshot.import_targets.get(name)
             )
     plain_import_names = snapshot.plain_import_names
     if has_enclosing_class_context:
         blocked_plain_names = frozenset(plain_import_names | class_local_plain_names)
         plain_import_names = frozenset(plain_import_names & context.plain_import_names)
         import_targets = _without_import_roots(import_targets, blocked_plain_names)
+    if has_enclosing_class_context and not inside_nested_class and class_scope_visible:
+        # A class-local dynamic binding hides the class-body route: the name is
+        # neither the class import nor the enclosing import at this position.
+        class_local_bound = context.class_scope_bound_names - context.class_scope_type_param_names
+        import_targets = _without_import_roots(import_targets, class_local_bound)
+        authoritative_import_names = authoritative_import_names - class_local_bound
+        import_shadow_names = import_shadow_names | class_local_bound
     if in_class_header:
         uncertain.update(
             context.class_scope_deleted_plain_names & frozenset((_base_identifier(node),))
@@ -3367,8 +3465,8 @@ def _resolve_header_use(
         plain_import_names,
         import_bound - (context.class_scope_bound_names if in_class_header else frozenset()),
         frozenset(uncertain),
-        snapshot.authoritative_import_names,
-        snapshot.bound_names | import_bound | blocked_plain_names,
+        authoritative_import_names,
+        snapshot.bound_names | import_bound | blocked_plain_names | import_shadow_names,
     )
     return scoped, (None if inside_nested_class else class_declarations)
 
