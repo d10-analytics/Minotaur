@@ -548,19 +548,21 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             if receiver_parameter is not None:
                 shadow_names -= frozenset((receiver_parameter,))
 
-        # A method header is evaluated in the class namespace, but its body is
-        # not. Temporarily remove every class frame so class-local assignments
-        # and imports cannot leak into body resolution; enclosing function (or
-        # module) frames remain visible for the method body. Restore the frames
-        # after the walk so later class statements see the namespace built by
-        # earlier statements in source order.
+        # A header is evaluated where the definition appears, but a function
+        # body defined anywhere in a class body -- a method, or a function
+        # nested in a compound statement there -- never sees the class
+        # namespace. Temporarily remove every class frame so class-local
+        # assignments and imports cannot leak into body resolution; enclosing
+        # function (or module) frames remain visible for the body. Restore the
+        # frames after the walk so later class statements see the namespace
+        # built by earlier statements in source order.
         class_scopes = None
-        if nested_class_method:
-            # A method body cannot close over any class namespace, including
-            # classes that contain the class declaring the method. Function
-            # frames remain in place because they are legitimate lexical
-            # scopes. Save the original list so the enclosing class resumes
-            # with the same frames in the same order.
+        if any(frame.is_class for frame in self._scope_frames):
+            # A function body cannot close over any class namespace, including
+            # classes that contain the class declaring it. Function frames
+            # remain in place because they are legitimate lexical scopes. Save
+            # the original list so the enclosing class resumes with the same
+            # frames in the same order.
             class_scopes = self._remove_class_scopes()
         if deferred_type_param_names:
             self._push_scope(
@@ -584,7 +586,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             local_import_names=local_import_names,
             import_flow_sensitive=True,
             receiver_override=receiver_override,
-            exclude_enclosing_class=nested_class_method,
+            exclude_enclosing_class=class_scopes is not None,
         )
         self._defer_nested_bodies += 1
         self._visit_block(node.body)
