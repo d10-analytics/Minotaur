@@ -7415,13 +7415,17 @@ def test_conditional_class_directives_invalidate_owner_without_sibling_leak(
 
     result = analyze_python_workspace(tmp_path)
     edges = _edge_labels(result)
-    assert ("app.Global", "library.helper", RelationshipKind.CALLS.value) in edges
+    # A class body's own use after a write through ``global`` now stays
+    # unresolved, the same answer an import under the directive gives: the
+    # write replaces the binding the use would otherwise name.
+    assert ("app.Global", "library.helper", RelationshipKind.CALLS.value) not in edges
     assert ("app.Global.method", "library.helper", RelationshipKind.CALLS.value) not in edges
     assert ("app.sibling", "library.helper", RelationshipKind.CALLS.value) not in edges
     assert _unresolved_sites(result) >= {
         ("app.Global.method", "helper", 11),
         ("app.sibling", "helper", 14),
     }
+    _assert_unresolved_locations(result, "app.Global", "helper", {(8, 12)})
     assert _unresolved_by_source(result).get("app.Global.method", set()) == {"helper"}
     assert _unresolved_by_source(result).get("app.sibling", set()) == {"helper"}
 
@@ -7453,13 +7457,16 @@ def test_conditional_class_nonlocal_write_preserves_sibling_module_route(
 
     result = analyze_python_workspace(tmp_path)
     edges = _edge_labels(result)
-    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) in edges
+    # The class body's own use after a write through ``nonlocal`` now stays
+    # unresolved, the same answer an import under the directive gives: the
+    # write replaces the binding the use would otherwise name.
+    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) not in edges
     assert ("app.sibling", "library.helper", RelationshipKind.CALLS.value) in edges
     _assert_unresolved_locations(
         result,
         "app.outer",
         "helper",
-        {(11, 19), (12, 11)},
+        {(9, 16), (11, 19), (12, 11)},
     )
     assert _unresolved_by_source(result).get("app.outer", set()) == {"helper"}
     assert _unresolved_by_source(result).get("app.sibling", set()) == set()
@@ -9237,6 +9244,160 @@ def test_conditional_class_import_leaves_neighbouring_uses_on_their_routes(
             role = text.split("# ")[-1]
             expected.add((owners[role], RelationshipKind.CALLS.value, targets[role], number))
     assert {site for site in sites if site[2] != "?flag"} == expected
+
+
+# The write forms a class body can use for a name it declares global or
+# nonlocal: an import, an assignment, an augmented assignment, a walrus, a
+# ``for`` or ``with ... as`` target, and a deletion.
+_DIRECTIVE_WRITE_FORMS: dict[str, str] = {
+    "import": "from other import helper",
+    "assignment": "helper = object()",
+    "augmented-assignment": "helper += 1  # augmented-read",
+    "walrus": "value = (helper := object())",
+    "for-target": "for helper in ():\n    pass",
+    "with-target": "with manager() as helper:\n    pass",
+    "deletion": "del helper",
+}
+
+# ``nonlocal`` is valid only inside a function, so the module placement covers
+# the ``global`` form alone.
+_DIRECTIVE_PLACEMENTS = [
+    pytest.param("module", "global", id="module-global"),
+    pytest.param("function", "global", id="function-global"),
+    pytest.param("function", "nonlocal", id="function-nonlocal"),
+]
+
+_OWN_USE_BODY = (
+    "own = helper()  # own-call\n"
+    "from other import other_helper\n"
+    "kept = other_helper()  # kept-call\n"
+)
+
+_OWNING_FRAME_BODY = (
+    "own = helper()  # own-call\n"
+    "class Inner:\n"
+    "    inner = helper()  # nested-call\n"
+    "def method(self):\n"
+    "    return helper()  # method-call\n"
+    "def header(self, value=helper):  # header-load\n"
+    "    pass\n"
+)
+
+
+def _directive_write_source(
+    placement: str, directive: str, write: str, uses: str, *, conditional: bool
+) -> tuple[str, str]:
+    """Return the module source and the owner of a class body's own uses.
+
+    The body declares ``helper`` in ``directive``, uses it once before any
+    write, and then writes it by ``write`` -- wrapped in ``if flag:`` when
+    ``conditional`` -- before ``uses``. The function placement binds the name
+    in the enclosing function for ``nonlocal`` and relies on the module binding
+    for ``global``.
+    """
+    write_block = ("if flag:\n" + _indent(write, "    ")) if conditional else write + "\n"
+    body = "before = helper()  # before-call\n" + write_block + uses
+    prelude = "from lib import helper\nflag = True\ndef manager():\n    return None\n\n\n"
+    if placement == "module":
+        return prelude + "class K:\n" + _indent(f"{directive} helper\n" + body, "    "), "app.K"
+    owning = "    from lib import helper\n" if directive == "nonlocal" else ""
+    source = prelude + "def outer(flag):\n" + owning + "    class K:\n"
+    return source + _indent(f"{directive} helper\n" + body, "        "), "app.outer"
+
+
+def _analyze_directive_source(root: Path, source: str) -> set[tuple[str, str, str, int]]:
+    _write(root, "lib.py", "def helper():\n    pass\n")
+    _write(root, "other.py", "def helper():\n    pass\n\ndef other_helper():\n    pass\n")
+    _write(root, "app.py", source)
+    return _use_sites(analyze_python_workspace(root))
+
+
+def _tagged_sites(
+    source: str, sites: set[tuple[str, str, str, int]]
+) -> set[tuple[str, str, str, int]]:
+    """Keep only the use sites recorded on a ``# tag`` line."""
+    tagged = {number for number, text in enumerate(source.splitlines(), start=1) if "# " in text}
+    return {site for site in sites if site[3] in tagged}
+
+
+@pytest.mark.parametrize("placement,directive", _DIRECTIVE_PLACEMENTS)
+@pytest.mark.parametrize("write_form", sorted(_DIRECTIVE_WRITE_FORMS))
+@pytest.mark.parametrize("conditional", [False, True], ids=["definite", "conditional"])
+def test_directive_write_forms_leave_the_class_body_own_use_unresolved(
+    tmp_path: Path, placement: str, directive: str, write_form: str, conditional: bool
+) -> None:
+    # Every write form of a name the class declares global or nonlocal is a
+    # directive write, so the class body's own later use names no binding. A
+    # use before the write still resolves through the owning binding, the
+    # augmented read that precedes its own write keeps that binding, and a name
+    # the directive does not declare keeps its class import route.
+    source, owner = _directive_write_source(
+        placement,
+        directive,
+        _DIRECTIVE_WRITE_FORMS[write_form],
+        _OWN_USE_BODY,
+        conditional=conditional,
+    )
+    targets: dict[str, str | None] = {
+        "before-call": "lib.helper",
+        "own-call": None,
+        "kept-call": "other.other_helper",
+    }
+    if write_form == "augmented-assignment":
+        targets["augmented-read"] = "lib.helper"
+
+    sites = _analyze_directive_source(tmp_path, source)
+
+    assert _tagged_sites(source, sites) == _expected_by_role(source, owner, "helper", targets)
+
+
+@pytest.mark.parametrize("placement,directive", _DIRECTIVE_PLACEMENTS)
+@pytest.mark.parametrize("conditional", [False, True], ids=["definite", "conditional"])
+def test_directive_import_in_a_class_body_invalidates_the_owning_frame(
+    tmp_path: Path, placement: str, directive: str, conditional: bool
+) -> None:
+    # An import under the directive writes the owning binding instead of a
+    # class local, so the class body's own use, its nested class body, its
+    # methods and headers, and the use after the class in the owning function
+    # are all unresolved. A module-level class writes the module binding, so
+    # the module-level use and the sibling function are unresolved too, while a
+    # class inside a function leaves the module binding alone.
+    source, owner = _directive_write_source(
+        placement,
+        directive,
+        _DIRECTIVE_WRITE_FORMS["import"],
+        _OWNING_FRAME_BODY,
+        conditional=conditional,
+    )
+    targets: dict[str, str | None] = {
+        "before-call": "lib.helper",
+        "own-call": None,
+        "nested-call": None,
+        "method-call": None,
+        "header-load": None,
+        "after-call": None,
+    }
+    if placement == "module":
+        source += "\n\nafter = helper()  # after-call\n"
+        source += "\n\ndef sibling():\n    return helper()  # sibling-call\n"
+        role_owners = {
+            "method-call": "app.K.method",
+            "header-load": "app.K.header",
+            "after-call": "app",
+        }
+        targets["sibling-call"] = None
+    else:
+        source += "    return helper()  # after-call\n"
+        source += "\n\ndef sibling():\n    return helper()  # sibling-call\n"
+        role_owners = {"after-call": owner}
+        targets["sibling-call"] = "lib.helper"
+    role_owners["sibling-call"] = "app.sibling"
+
+    sites = _analyze_directive_source(tmp_path, source)
+
+    assert _tagged_sites(source, sites) == _expected_by_role(
+        source, owner, "helper", targets, role_owners
+    )
 
 
 _NO_USE = object()
