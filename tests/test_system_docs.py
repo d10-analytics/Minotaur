@@ -953,38 +953,43 @@ def test_source_error_recovery_states_the_interpreter_error_and_no_blame_outcome
 
 
 # ---------------------------------------------------------------------------
-# Class-body import rule: proved forms and the plain-import limit
+# Class-body import rule: every import form and header nested scopes
 # ---------------------------------------------------------------------------
 
-# The class-route rule holds for these shapes only; a plain `import M` that
-# binds the module's own name behaves differently at module level, so the
-# documents must not generalize the rule to it.
-CLASS_IMPORT_PROVED_SHAPES = (
-    "a `from` import (with or without `as`) or an `import M as alias` whose "
-    "alias differs from the module's own bound name"
+# A class body's own unconditional import decides the uses that body evaluates
+# whatever the import's form, so the documents state the rule for plain
+# imports too and carry no carve-out for them.
+CLASS_IMPORT_FORMS = (
+    "a `from` import (with or without `as`) or any plain `import` form, including "
+    "`import M` and a dotted `import pkg.sub`"
 )
-CLASS_IMPORT_RETIRED_PHRASE = "an `import` of one module name"
-CLASS_PLAIN_IMPORT_LIMIT = (
-    "A plain `import M` that binds the module's own name is not resolved by the "
-    "class-route rule at module level: with no outer binding the body's use "
-    "records only a reference rather than a call, and an outer import of the "
-    "same local name still decides it."
+CLASS_IMPORT_RETIRED_PHRASES = (
+    "an `import` of one module name",
+    "for the proved shapes",
+    "whose alias differs from the module's own bound name",
+    "is not resolved by the class-route rule at module level",
+    "a class-only route remains syntactic",
+    "a class-only one remains syntactic",
+)
+CLASS_HEADER_NESTED_SCOPES = (
+    "A lambda body and a comprehension's result, filters, and later iterables "
+    "inside such a header are nested scopes and keep the enclosing route, while "
+    "the comprehension's first iterable and a lambda default are evaluated with "
+    "the header."
 )
 
 
-def test_class_import_rule_documents_only_the_proved_import_shapes() -> None:
+def test_class_import_rule_covers_every_import_form_and_header_nested_scopes() -> None:
     for document in (ANALYZE_PYTHON_GUIDE, STRUCTURAL_ANALYSIS_CONTRACT):
         text = _collapsed(document)
-        assert CLASS_IMPORT_PROVED_SHAPES in text, (
-            f"{document.name} must scope the class-route rule to the proved import shapes"
+        assert CLASS_IMPORT_FORMS in text, (
+            f"{document.name} must state the class-route rule for every import form"
         )
-        assert CLASS_IMPORT_RETIRED_PHRASE not in text, (
-            f"{document.name} must not keep the retired one-module-name claim"
+        assert CLASS_HEADER_NESTED_SCOPES in text, (
+            f"{document.name} must keep header nested scopes on the enclosing route"
         )
-
-
-def test_contract_states_the_module_level_plain_import_limit() -> None:
-    assert CLASS_PLAIN_IMPORT_LIMIT in _collapsed(STRUCTURAL_ANALYSIS_CONTRACT)
+        for phrase in CLASS_IMPORT_RETIRED_PHRASES:
+            assert phrase not in text, f"{document.name} must not keep {phrase!r}"
 
 
 # ---------------------------------------------------------------------------

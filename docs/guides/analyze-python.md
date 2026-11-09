@@ -254,10 +254,10 @@ The resolver aggregates direct module bindings while expression resolution uses
 the source-position state. Competing module binders conservatively invalidate
 every use of an affected plain prefix. A later true alias can retain its real
 route, while a later plain dotted import cannot preserve an earlier corrupted
-alias route. Direct function-body imports install a callable-local route;
-Class-body plain imports retain conservative behavior: they may refine an
-already-visible plain package route, while a class-only route remains syntactic
-evidence. A direct `if` suite is the supported conditional container described
+alias route. Direct function-body imports install a callable-local route,
+and a class body's own unconditional plain import, dotted or not, installs a
+route for the uses that body evaluates, as described under [binding timing and
+class boundaries](#binding-timing-and-class-boundaries). A direct `if` suite is the supported conditional container described
 below. Imports in loops, `try`, `with`, and `match` suites remain syntactic
 evidence and do not establish a route for their contained or later
 continuation uses.
@@ -317,15 +317,17 @@ sequential namespace. Earlier class assignments or imports can affect later
 headers, and deletion can reveal an enclosing route. Ordinary class locals and
 class imports are hidden from method bodies; methods use their own imports and
 enclosing function or module routes. A class body's own unconditional import of
-the name decides a use Python evaluates directly in the class body, in a
-module-level class and in a class defined inside a function alike, for the
-proved shapes: a `from` import (with or without `as`) or an `import M as alias`
-whose alias differs from the module's own bound name. For those forms, an outer
-import of the same local name does not decide it, and the answer does not
-depend on whether such an outer binding exists. Method defaults, decorators,
-and a nested class statement's decorators, bases, and keywords are evaluated
-in the class body, so they follow the same answer. A class-local assignment of
-the name stops that route, leaving
+the name — a `from` import (with or without `as`) or any plain `import` form, including
+`import M` and a dotted `import pkg.sub` — decides a use Python
+evaluates directly in the class body, in a module-level class and in a class
+defined inside a function alike; an outer import of the same local name never
+decides it, and the answer does not depend on whether such an outer binding
+exists. Method defaults, decorators, and a nested class statement's
+decorators, bases, and keywords are evaluated in the class body, so they follow
+the same answer. A lambda body and a comprehension's result, filters, and later
+iterables inside such a header are nested scopes and keep the enclosing route,
+while the comprehension's first iterable and a lambda default are evaluated
+with the header. A class-local assignment of the name stops that route, leaving
 the later use unresolved — or suppressed as an ordinary dynamic local in a
 class inside a function — a later class import restores the class route, and a
 deletion reveals the enclosing one. An import inside a compound statement in
@@ -336,9 +338,7 @@ it, and a write under the directive — an import, assignment, augmented
 assignment, walrus, `for` or `with ... as` target, or deletion — installs no
 class route, leaves the class body's own later use unresolved, and in a class
 inside a function also invalidates the name on the owning frame. A use before
-any write keeps the owning binding. The plain dotted form is the exception: it
-may refine an already-visible plain package route, while a class-only one
-remains syntactic evidence. Proofs, in `tests/language_interpreter/python/test_interpreter.py`:
+any write keeps the owning binding. Proofs, in `tests/language_interpreter/python/test_interpreter.py`:
 `test_a_class_body_import_governs_the_uses_that_body_evaluates`,
 `test_conditional_class_import_leaves_later_class_body_uses_unresolved`,
 `test_conditional_class_import_leaves_later_class_headers_unresolved`,
@@ -472,9 +472,8 @@ import helper` inside `def outer()` makes every use of `helper` in a nested
 `test_enclosing_class_import_does_not_reach_nested_class_uses`,
 `test_function_local_import_governs_every_use_in_a_function_nested_class`, and
 `test_calls_and_loads_resolve_through_the_one_header_helper`. A class body's
-own `from` import, or an `import M as alias` whose alias differs from the
-module's own bound name, governs the uses that body evaluates in both
-placements (see [binding timing and class boundaries](#binding-timing-and-class-boundaries)),
+own import, a `from` import or a plain `import` alike, governs the uses that
+body evaluates in both placements (see [binding timing and class boundaries](#binding-timing-and-class-boundaries)),
 while method bodies, nested class bodies, comprehension results and later
 iterables, and lambda bodies resolve through the enclosing route.
 
