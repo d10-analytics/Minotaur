@@ -172,3 +172,38 @@ def directive_class_import() -> int:
         value = Holder()
 
     return Directive.value
+
+
+def header_comprehension() -> type[object]:
+    """Keep a comprehension in a nested class's method default off the class import."""
+
+    class Defaults:
+        from workflow.util import format_report as Forward
+
+        def run(self, reports: object = [Forward([1]) for _ in range(1)]) -> object:
+            return reports
+
+    return Defaults
+
+
+class NestedFunctionScope:
+    """Resolve a function defined in a class-body ``if`` without the class names."""
+
+    from workflow.helper import fixture_helper as class_only_helper
+    from workflow.util import format_report as Forward
+
+    if fixture_helper:
+
+        def run() -> object:
+            return class_only_helper, Forward([1])  # noqa: F405
+
+
+from workflow import util as workflow  # noqa: E402, F401
+
+
+class PlainImport:
+    """Resolve a class-body plain import over the module's import of the same name."""
+
+    import workflow
+
+    value = workflow.helper.fixture_helper()

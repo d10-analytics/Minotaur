@@ -32,7 +32,12 @@ class-body use, a function-nested class whose import shadows the module-level
 `Forward` import, a function-nested class that imports a name it declares
 `global`, and a module-level import of the `workflow.declared_encoding.banner`
 constant, whose name stays unresolved while the import links the analyzed
-module. It defines no `main` and calls neither `workflow.util.unused_helper`
+module. Three class-body cases follow: a function-nested class whose method
+default holds a comprehension that resolves `Forward` through the module rather
+than the class's own import, a class whose function defined in an `if` suite
+resolves its names without the class's imports, and, after a module-level
+import that binds `workflow` to `workflow.util`, a class whose own
+`import workflow` decides its body's use. It defines no `main` and calls neither `workflow.util.unused_helper`
 nor `workflow.service.Service.run`; its star import carries inline `# noqa`
 codes for Ruff.
 
@@ -41,7 +46,7 @@ The tree is small on purpose: every query class in
 definitions of `main`, a symbol with more than one caller, a symbol with no
 callers at all (`workflow.util.unused_helper`), an import graph for `impact`,
 and a stable line for `context`. `minotaur query unreferenced workflow` reports
-twenty-five symbols: the uncalled `workflow.util.unused_helper`, the other
+twenty-eight symbols: the uncalled `workflow.util.unused_helper`, the other
 fixture-only definitions (`workflow.package_scope_probe`, `workflow.cli.main`,
 `workflow.service.main`, `workflow.service.Service.total`,
 `workflow.declarations.Gauge`, `workflow.declarations.scale`, and the
@@ -50,7 +55,8 @@ fixture-only definitions (`workflow.package_scope_probe`, `workflow.cli.main`,
 from the binding-lifecycle sample `replaced`, `deleted`, `conditional`,
 `guarded`, `starred`, `Holder.label_text`, `local_annotation`,
 `string_annotations`, `forward_reference`, `local_import_class`,
-`loop_global`, `nested_class_import`, and `directive_class_import`. Under `--text-fallback` the five rebound declarations
+`loop_global`, `nested_class_import`, `directive_class_import`,
+`header_comprehension`, `NestedFunctionScope`, and `PlainImport`. Under `--text-fallback` the five rebound declarations
 (`replaced`, `deleted`, `conditional`, `guarded`, `starred`) and the older
 `workflow.cli.main`, `workflow.service.main`, and
 `workflow.service.Service.total` gain a `[text-mention]` marker, because their
