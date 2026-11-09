@@ -2189,9 +2189,8 @@ def _class_context_after_statement(
     enclosing name in a later method header, a preceding import supplies the
     nearest import binding, and deleting either reveals the enclosing name
     again. An import the statement may skip leaves its name uncertain for
-    every later use in the body and headers, while a direct import or a
-    deletion replaces that uncertainty. These bindings stay in this class-only
-    context and are therefore never visible to method bodies.
+    every later use in the body and headers. These bindings stay in this
+    class-only context and are therefore never visible to method bodies.
     """
     collector = _BindingCollector(module_name, is_package)
     collector.visit(statement)
@@ -2209,9 +2208,6 @@ def _class_context_after_statement(
     plain_import_names.update(collector.plain_import_names & context.plain_import_names)
     conditional_import_names = _class_conditional_import_names(statement, collector)
     uncertain_import_names = set(context.uncertain_import_names)
-    uncertain_import_names.difference_update(
-        frozenset(collector.import_names) - conditional_import_names
-    )
     if isinstance(statement, ast.ImportFrom) and statement.level == 0:
         uncertain_import_names.update(collector.import_names)
     uncertain_import_names.update(conditional_import_names)
