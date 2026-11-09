@@ -8558,19 +8558,32 @@ def _indent(text: str, prefix: str) -> str:
 
 
 def _six_use_source(
-    prelude: str, placement: str, name: str, class_prelude: str = ""
+    prelude: str,
+    placement: str,
+    name: str,
+    class_prelude: str = "",
+    *,
+    owning_class: bool = False,
+    uses: str | None = None,
 ) -> tuple[str, str]:
     """Return the module source and owner for one placement of the six uses.
 
     ``module`` nests ``class I`` in ``class O`` (every use owned by ``app.O``);
     ``function`` defines ``class K`` inside ``def outer()`` (owned by ``app.outer``).
+    ``class_prelude`` goes in the outermost class body. The function placement
+    keeps its uses in that class; the module placement keeps them in the class
+    nested in ``class O`` unless ``owning_class`` asks for them in ``class O``
+    itself, where a class-body binding reaches them. ``uses`` replaces the
+    six-role body.
     """
-    uses = _SIX_USES.format(n=name)
+    body = _SIX_USES.format(n=name) if uses is None else uses
     if placement == "module":
+        if owning_class:
+            return prelude + "class O:\n" + _indent(class_prelude + body, "    "), "app.O"
         shape = "class O:\n" + _indent(class_prelude, "    ")
-        shape += "    class I:\n" + _indent(uses, "        ")
+        shape += "    class I:\n" + _indent(body, "        ")
         return prelude + shape, "app.O"
-    shape = "def outer():\n    class K:\n" + _indent(uses, "        ")
+    shape = "def outer():\n    class K:\n" + _indent(class_prelude + body, "        ")
     return prelude + shape, "app.outer"
 
 
@@ -8825,9 +8838,17 @@ def _analyze_six_use_source(root: Path, source: str) -> set[tuple[str, str, str,
 
 
 def _expected_by_role(
-    source: str, owner: str, name: str, targets: dict[str, str | None]
+    source: str,
+    owner: str,
+    name: str,
+    targets: dict[str, str | None],
+    role_owners: dict[str, str] | None = None,
 ) -> set[tuple[str, str, str, int]]:
-    """Expect each tagged use to hit its role's target, or stay unresolved on ``None``."""
+    """Expect each tagged use to hit its role's target, or stay unresolved on ``None``.
+
+    ``role_owners`` names the node a role's use is recorded on where that differs
+    from ``owner``, as a class body's method headers and decorators do.
+    """
     expected = set()
     for number, text in enumerate(source.splitlines(), start=1):
         if "# " not in text:
@@ -8839,7 +8860,8 @@ def _expected_by_role(
             if role.endswith("call") and target is not None
             else RelationshipKind.REFERENCES.value
         )
-        expected.add((owner, kind, target or f"?{name}", number))
+        site_owner = owner if role_owners is None else role_owners.get(role, owner)
+        expected.add((site_owner, kind, target or f"?{name}", number))
     return expected
 
 
@@ -8982,6 +9004,189 @@ def test_global_directive_without_a_write_keeps_the_module_route(tmp_path: Path)
         source, owner, "helper", _roles("lib.helper", "lib.helper")
     )
     assert ("app", RelationshipKind.CALLS.value, "lib.helper") in {site[:3] for site in sites}
+
+
+_CLASS_IMPORT_PRELUDE = "from lib import helper\n\n\n"
+
+_COMPOUND_CLASS_IMPORTS = [
+    "if flag:\n    from other import helper\n\n",
+    "for _ in ():\n    from other import helper\n\n",
+    "while flag:\n    from other import helper\n\n",
+    "try:\n    from other import helper\nexcept ImportError:\n    pass\n\n",
+    "with manager():\n    from other import helper\n\n",
+    "match subject:\n    case _:\n        from other import helper\n\n",
+]
+
+# A class body evaluates its own statements into the class node and each
+# method's decorators and defaults into that method, so the six-use roles split
+# across two nodes for a module-level class.
+_CLASS_BODY_ROLE_OWNERS: dict[str, dict[str, str]] = {
+    "module": {
+        "header-call": "app.O.m",
+        "header-load": "app.O.m",
+        "method-call": "app.O.m",
+        "method-load": "app.O.m",
+    },
+    "function": {},
+}
+
+# The direct-import answers each placement gives today, kept pinned until a
+# direct class import itself is the subject of a change.
+_CLASS_IMPORT_ROLES: dict[str, dict[str, str | None]] = {
+    "module": _roles(None, "lib.helper"),
+    "function": {
+        "body-call": "lib.helper",
+        "body-load": "lib.helper",
+        "header-call": None,
+        "header-load": None,
+        "method-call": "lib.helper",
+        "method-load": "lib.helper",
+    },
+}
+
+_CLASS_HEADER_USES = (
+    "@helper  # method-decorator\n"
+    "def decorated(self):\n"
+    "    pass\n\n\n"
+    "@helper  # nested-decorator\n"
+    "class Inner(\n"
+    "    helper,  # nested-base\n"
+    "    metaclass=helper,  # nested-keyword\n"
+    "):\n"
+    "    pass\n"
+)
+
+_CLASS_HEADER_ROLE_OWNERS: dict[str, dict[str, str]] = {
+    "module": {"method-decorator": "app.O.decorated"},
+    "function": {},
+}
+
+_CLASS_HEADER_TARGETS: dict[str, str | None] = {
+    "method-decorator": None,
+    "nested-decorator": None,
+    "nested-base": None,
+    "nested-keyword": None,
+}
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+@pytest.mark.parametrize(
+    "class_prelude",
+    _COMPOUND_CLASS_IMPORTS,
+    ids=["if", "for", "while", "try", "with", "match"],
+)
+def test_conditional_class_import_leaves_later_class_body_uses_unresolved(
+    tmp_path: Path, placement: str, class_prelude: str
+) -> None:
+    # A class-body import inside any suite may not have run by the time a later
+    # class-body use sees the name, so that use names no definite binding. The
+    # method body runs outside the class namespace and keeps the module route.
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE, placement, "helper", class_prelude, owning_class=True
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _roles(None, "lib.helper"),
+        _CLASS_BODY_ROLE_OWNERS[placement],
+    )
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_direct_class_import_keeps_its_class_body_use_results(
+    tmp_path: Path, placement: str
+) -> None:
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE,
+        placement,
+        "helper",
+        "from other import helper\n\n",
+        owning_class=True,
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _CLASS_IMPORT_ROLES[placement],
+        _CLASS_BODY_ROLE_OWNERS[placement],
+    )
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_later_direct_class_import_replaces_a_conditional_one(
+    tmp_path: Path, placement: str
+) -> None:
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE,
+        placement,
+        "helper",
+        "if flag:\n    from other import helper\n\nfrom other import helper\n\n",
+        owning_class=True,
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _CLASS_IMPORT_ROLES[placement],
+        _CLASS_BODY_ROLE_OWNERS[placement],
+    )
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_deleting_a_conditional_class_import_reveals_the_module_route(
+    tmp_path: Path, placement: str
+) -> None:
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE,
+        placement,
+        "helper",
+        "if flag:\n    from other import helper\n\ndel helper\n\n",
+        owning_class=True,
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _roles("lib.helper", "lib.helper"),
+        _CLASS_BODY_ROLE_OWNERS[placement],
+    )
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_conditional_class_import_leaves_later_class_headers_unresolved(
+    tmp_path: Path, placement: str
+) -> None:
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE,
+        placement,
+        "helper",
+        "if flag:\n    from other import helper\n\n",
+        owning_class=True,
+        uses=_CLASS_HEADER_USES,
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _CLASS_HEADER_TARGETS,
+        _CLASS_HEADER_ROLE_OWNERS[placement],
+    )
 
 
 def _located_nodes(result: AnalysisResult, path: str) -> list:
