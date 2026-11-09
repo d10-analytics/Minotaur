@@ -22,6 +22,7 @@ FORMAT_REFERENCE = ROOT / "docs/formats/system-definition-v1.md"
 PURPOSE = ROOT / "docs/concepts/purpose.md"
 QUERY_REFERENCE = ROOT / "docs/guides/query-reference.md"
 README = ROOT / "README.md"
+ANALYSIS_PYTHON_README = ROOT / "docs/systems/analysis-python/README.md"
 SYSTEM_WALKTHROUGH = ROOT / "examples/system-walkthrough/README.md"
 GRAPH_FORMAT_REFERENCE = ROOT / "docs/formats/minotaur-graph-v1.md"
 
@@ -134,10 +135,21 @@ def test_query_guide_documents_strict_loading_and_absent_file_warnings() -> None
 
 
 REEXPORT_BOUNDARY = (
-    "Re-exports are not resolved: `from pkg import f` records an unresolved "
-    "`pkg.f` reference with no module-layer `imports` consumer, so "
-    "`pkg/__init__.py` never links a name that another module actually defines."
+    "Re-exports resolve only to the module: `from pkg import f` records an "
+    "`imports` edge from the importing file to `pkg`, so `query consumers` for "
+    "`pkg/__init__.py` lists the importer while `f` itself stays a single "
+    "unresolved `pkg.f` reference."
 )
+
+# The claim the three documents must not keep beside the reworded sentence: a
+# re-export links the package module, so a description that reports the name
+# alone as the whole fact is wrong. Each document wraps the old clause across a
+# line break, so the absence check reads the collapsed text, not raw bytes.
+REEXPORT_RETIRED_CLAUSE = (
+    "records an unresolved `pkg.f` reference with no module-layer `imports` consumer"
+)
+
+REEXPORT_READERS = (QUERY_GUIDE, QUERY_REFERENCE, ANALYSIS_PYTHON_README)
 
 
 def test_system_guide_documents_the_reexport_boundary_statement() -> None:
@@ -159,9 +171,18 @@ def test_reexport_boundary_statement_does_not_use_the_readme_connection_phrase()
 def test_analysis_python_readme_documents_the_reexport_boundary_statement() -> None:
     # Checks only that the pinned sentence is present in the README, not its
     # position, and must never require the phrase "points to".
-    readme = ROOT / "docs/systems/analysis-python/README.md"
-    text = _collapsed(readme)
+    text = _collapsed(ANALYSIS_PYTHON_README)
     assert REEXPORT_BOUNDARY in text
+
+
+def test_reexport_readers_do_not_keep_the_retired_unresolved_only_claim() -> None:
+    # Every document wraps the retired clause across a line break, so only the
+    # collapsed text can prove that a reader replaced it instead of keeping it
+    # beside the reworded sentence.
+    for document in REEXPORT_READERS:
+        assert REEXPORT_RETIRED_CLAUSE not in _collapsed(document), (
+            f"{document.name} must not keep the retired re-export claim"
+        )
 
 
 def test_system_guide_names_text_fallback_exactly_once() -> None:
