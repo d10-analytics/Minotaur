@@ -512,7 +512,14 @@ def test_systems_details_json_routes_named_boundary_connections(
     assert connections[0]["source_category"] == "no_system"
     assert connections[0]["target_category"] == "system: orders"
     assert connections[0]["kinds"] == ["calls", "imports"]
-    assert len(connections[0]["relationships"]) == 2
+    assert sorted(
+        (item["kind"], item["source"]["label"], item["target"]["label"])
+        for item in connections[0]["relationships"]
+    ) == [
+        ("calls", "use.caller", "orders.mod.order"),
+        ("imports", "use", "orders.mod"),
+        ("imports", "use", "orders.mod.order"),
+    ]
     assert {
         "source",
         "target",
