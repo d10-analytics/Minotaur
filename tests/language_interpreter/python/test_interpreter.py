@@ -946,6 +946,318 @@ def test_calls_in_nested_functions_are_attributed_to_the_outer_function(tmp_path
     }
 
 
+_MODULE_CONSTANTS = "LIMIT = 3\nAlias = int\n\ndef f():\n    return 1\n"
+_LAZY_FACADE = "def __getattr__(name):\n    raise AttributeError(name)\n"
+
+
+def _edge_locations(
+    result: AnalysisResult, source_label: str, target_label: str, kind: str
+) -> list[tuple[str, int, int]]:
+    """List every evidence start of one relationship, sorted for stable assertions."""
+    relationship = _relationship_map(result)[
+        (_node_id(result, source_label), _node_id(result, target_label), kind)
+    ]
+    return sorted(
+        (location.path, location.range.start.line, location.range.start.character)
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    )
+
+
+@pytest.mark.parametrize(
+    ("files", "source", "module_label", "unresolved_text"),
+    [
+        pytest.param(
+            {"lib.py": _MODULE_CONSTANTS},
+            "from lib import LIMIT\n",
+            "lib",
+            "lib.LIMIT",
+            id="module-constant",
+        ),
+        pytest.param(
+            {"lib.py": _MODULE_CONSTANTS},
+            "from lib import Alias as A\n",
+            "lib",
+            "lib.Alias",
+            id="type-alias",
+        ),
+        pytest.param(
+            {"lib.py": _MODULE_CONSTANTS},
+            "from lib import MISSING\n",
+            "lib",
+            "lib.MISSING",
+            id="missing-name",
+        ),
+        pytest.param(
+            {"pkg/__init__.py": _LAZY_FACADE},
+            "from pkg import validate\n",
+            "pkg",
+            "pkg.validate",
+            id="lazy-facade",
+        ),
+    ],
+)
+def test_module_level_named_import_records_the_module_edge(
+    tmp_path: Path,
+    files: dict[str, str],
+    source: str,
+    module_label: str,
+    unresolved_text: str,
+) -> None:
+    for path, content in files.items():
+        _write(tmp_path, path, content)
+    _write(tmp_path, "app.py", source)
+
+    result = analyze_python_workspace(tmp_path)
+    app = _node_id(result, "app")
+    relationships = _relationship_map(result)
+
+    assert _edge_locations(result, "app", module_label, RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    assert (app, _node_id(result, unresolved_text), RelationshipKind.IMPORTS.value) not in (
+        relationships
+    )
+    assert _unresolved_sites(result) == {("app", unresolved_text, 1)}
+    assert result.document.extensions["minotaur-python"] == {
+        "imports_resolved": 0,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("source", "unresolved_text"),
+    [
+        pytest.param("from lib import f\n", None, id="declaration-only"),
+        pytest.param("from lib import LIMIT, f\n", "lib.LIMIT", id="constant-and-declaration"),
+    ],
+)
+def test_module_level_named_import_of_a_declaration_keeps_both_edges(
+    tmp_path: Path, source: str, unresolved_text: str | None
+) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(tmp_path, "app.py", source)
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "app", "lib", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    assert _edge_locations(result, "app", "lib.f", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    if unresolved_text is None:
+        assert _unresolved_sites(result) == set()
+    else:
+        assert _unresolved_sites(result) == {("app", unresolved_text, 1)}
+    assert result.document.extensions["minotaur-python"] == {
+        "imports_resolved": 1,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 0 if unresolved_text is None else 1,
+    }
+
+
+def test_module_level_import_of_a_submodule_records_the_package_module_too(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", _LAZY_FACADE)
+    _write(tmp_path, "pkg/submodule.py", "def go():\n    return 1\n")
+    _write(tmp_path, "app.py", "from pkg import submodule\n")
+
+    result = analyze_python_workspace(tmp_path)
+    app_imports = {
+        (source_label, target_label)
+        for source_label, target_label, kind in _edge_labels(result)
+        if source_label == "app" and kind == RelationshipKind.IMPORTS.value
+    }
+
+    assert app_imports == {("app", "pkg"), ("app", "pkg.submodule")}
+    assert _edge_locations(result, "app", "pkg", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    assert _unresolved_sites(result) == set()
+
+
+def test_relative_named_import_records_the_containing_module_edge(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/submodule.py", "def X():\n    return 1\n")
+    _write(tmp_path, "pkg/mod.py", "from .submodule import X\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "pkg.mod", "pkg.submodule", RelationshipKind.IMPORTS.value) == [
+        ("pkg/mod.py", 0, 0)
+    ]
+    assert _unresolved_sites(result) == set()
+
+
+def test_relative_module_import_records_the_package_and_submodule_edges(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/submodule.py", "def X():\n    return 1\n")
+    _write(tmp_path, "pkg/mod.py", "from . import submodule\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "pkg.mod", "pkg", RelationshipKind.IMPORTS.value) == [
+        ("pkg/mod.py", 0, 0)
+    ]
+    assert _edge_locations(result, "pkg.mod", "pkg.submodule", RelationshipKind.IMPORTS.value) == [
+        ("pkg/mod.py", 0, 0)
+    ]
+    assert _unresolved_sites(result) == set()
+
+
+def test_package_init_relative_import_records_the_package_self_loop(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "from . import submodule\n")
+    _write(tmp_path, "pkg/submodule.py", "def X():\n    return 1\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "pkg", "pkg.submodule", RelationshipKind.IMPORTS.value) == [
+        ("pkg/__init__.py", 0, 0)
+    ]
+    assert _edge_locations(result, "pkg", "pkg", RelationshipKind.IMPORTS.value) == [
+        ("pkg/__init__.py", 0, 0)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("files", "path", "source", "importer", "unresolved_text"),
+    [
+        pytest.param(
+            {},
+            "app.py",
+            "from missing import X\n",
+            "app",
+            "missing.X",
+            id="missing-module",
+        ),
+        pytest.param(
+            {},
+            "app.py",
+            "from requests import get\n",
+            "app",
+            "requests.get",
+            id="third-party-module",
+        ),
+        pytest.param(
+            {"pkg/__init__.py": ""},
+            "pkg/mod.py",
+            "from .. import thing\n",
+            "pkg.mod",
+            "..thing",
+            id="root-escaping-relative",
+        ),
+    ],
+)
+def test_unanalyzed_modules_record_no_module_edge(
+    tmp_path: Path,
+    files: dict[str, str],
+    path: str,
+    source: str,
+    importer: str,
+    unresolved_text: str,
+) -> None:
+    for extra_path, content in files.items():
+        _write(tmp_path, extra_path, content)
+    _write(tmp_path, path, source)
+
+    result = analyze_python_workspace(tmp_path)
+    importer_imports = {
+        (source_label, target_label)
+        for source_label, target_label, kind in _edge_labels(result)
+        if source_label == importer and kind == RelationshipKind.IMPORTS.value
+    }
+
+    assert importer_imports == set()
+    assert _unresolved_sites(result) == {(importer, unresolved_text, 1)}
+    assert result.document.extensions["minotaur-python"] == {
+        "imports_resolved": 0,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 1,
+    }
+
+
+def test_nested_named_imports_record_one_module_edge_per_statement(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(
+        tmp_path,
+        "app.py",
+        "def run():\n"
+        "    from lib import LIMIT\n"
+        "\n"
+        "class Holder:\n"
+        "    from lib import f\n"
+        "\n"
+        "if True:\n"
+        "    from lib import LIMIT\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "app", "lib", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 1, 4),
+        ("app.py", 4, 4),
+        ("app.py", 7, 4),
+    ]
+
+
+def test_two_module_level_imports_record_the_module_edge_at_each_statement(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(tmp_path, "app.py", "from lib import LIMIT\nfrom lib import f\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "app", "lib", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0),
+        ("app.py", 1, 0),
+    ]
+
+
+def test_star_import_keeps_only_its_module_edge(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(tmp_path, "app.py", "from lib import *\n")
+
+    result = analyze_python_workspace(tmp_path)
+    app_edges = {
+        (source_label, target_label, kind)
+        for source_label, target_label, kind in _edge_labels(result)
+        if source_label == "app" and kind == RelationshipKind.IMPORTS.value
+    }
+
+    assert app_edges == {("app", "lib", RelationshipKind.IMPORTS.value)}
+    assert _edge_locations(result, "app", "lib", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    assert _unresolved_sites(result) == set()
+    assert result.document.extensions["minotaur-python"] == {
+        "imports_resolved": 1,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 0,
+    }
+
+
+def test_module_consumers_reading_sees_a_module_level_named_importer(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(tmp_path, "app.py", "from lib import LIMIT\n")
+
+    result = analyze_python_workspace(tmp_path)
+    library = _node_id(result, "lib")
+    labels = {node.id: node.label for node in result.document.nodes}
+    consumers = {
+        labels[relationship.source]
+        for relationship in result.document.relationships
+        if relationship.target == library and relationship.kind == RelationshipKind.IMPORTS.value
+    }
+
+    assert consumers == {"app"}
+
+
 def test_module_alias_and_module_level_calls_resolve_to_known_workspace_function(
     tmp_path: Path,
 ) -> None:
