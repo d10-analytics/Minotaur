@@ -1507,7 +1507,9 @@ class _ScopeCallVisitor(ast.NodeVisitor):
         Class locals are sequential: a preceding assignment suppresses an
         outer name in a later decorator/default, a preceding import supplies
         the nearest import binding, and deleting either reveals the enclosing
-        name again. These bindings belong only to the class frame and are
+        name again. An import the statement may skip leaves its name uncertain
+        for later uses and headers, and a direct import or a deletion replaces
+        that uncertainty. These bindings belong only to the class frame and are
         therefore hidden while a method body executes.
         """
         collector = _BindingCollector(self._module_name, self._is_package)
@@ -1526,12 +1528,18 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             global_names,
             frame.type_param_names,
         )
+        conditional_import_names = _class_conditional_import_names(statement, collector)
         import_state = frame.import_state
+        uncertain_names = import_state.uncertain_names.difference(
+            frozenset(collector.import_names) - conditional_import_names
+        )
+        uncertain_names = uncertain_names | conditional_import_names
         frame.import_state = replace(
             import_state,
             targets=_class_import_targets_after_statement(
                 import_state.targets, collector, global_names
             ),
+            uncertain_names=uncertain_names - frozenset(collector.deleted_names),
         )
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -1830,6 +1838,22 @@ def _class_import_targets_after_statement(
         if name not in deleted_names
     )
     return import_targets
+
+
+def _class_conditional_import_names(
+    statement: ast.stmt, collector: _BindingCollector
+) -> frozenset[str]:
+    """Return the names one class statement imports inside a compound suite.
+
+    A direct ``import`` or ``from ... import`` statement runs as the class body
+    reaches it, so its binding is definite. An import inside ``if``, ``for``,
+    ``while``, ``try``, ``with`` or ``match`` may never run, and the class walk
+    cannot tell which suite executed, so a later class-body use of such a name
+    has neither the class route nor a definite enclosing one.
+    """
+    if isinstance(statement, (ast.Import, ast.ImportFrom)):
+        return frozenset()
+    return frozenset(collector.import_names)
 
 
 def _type_param_names(node: ast.AST) -> set[str]:
@@ -2164,8 +2188,10 @@ def _class_context_after_statement(
     Class locals are sequential. A preceding assignment suppresses an
     enclosing name in a later method header, a preceding import supplies the
     nearest import binding, and deleting either reveals the enclosing name
-    again. These bindings stay in this class-only context and are therefore
-    never visible to method bodies.
+    again. An import the statement may skip leaves its name uncertain for
+    every later use in the body and headers, while a direct import or a
+    deletion replaces that uncertainty. These bindings stay in this class-only
+    context and are therefore never visible to method bodies.
     """
     collector = _BindingCollector(module_name, is_package)
     collector.visit(statement)
@@ -2181,9 +2207,14 @@ def _class_context_after_statement(
     # behavior: they can refine an already-visible plain package route, while
     # a class-only route remains syntactic evidence.
     plain_import_names.update(collector.plain_import_names & context.plain_import_names)
+    conditional_import_names = _class_conditional_import_names(statement, collector)
     uncertain_import_names = set(context.uncertain_import_names)
+    uncertain_import_names.difference_update(
+        frozenset(collector.import_names) - conditional_import_names
+    )
     if isinstance(statement, ast.ImportFrom) and statement.level == 0:
         uncertain_import_names.update(collector.import_names)
+    uncertain_import_names.update(conditional_import_names)
     uncertain_import_names.difference_update(collector.deleted_names)
     deleted_plain_names = (
         context.class_scope_deleted_plain_names
