@@ -214,6 +214,14 @@ class _ExpressionSnapshot:
     through lexical scoping remain. Comparing them with ``import_targets``
     isolates the routes that class frame contributes.
     """
+    class_uncertain_names: frozenset[str] = frozenset()
+    """Names the class body's own imports cannot decide for this use.
+
+    These are names the nearest class frame's own flow leaves without a
+    definite import, plus a name a quoted annotation defers to a later
+    evaluation. An enclosing frame's uncertainty for any other name the class
+    imports unconditionally does not apply to the uses the body evaluates.
+    """
 
 
 @dataclass
@@ -451,7 +459,16 @@ class _ScopeCallVisitor(ast.NodeVisitor):
                 frame.excludes_enclosing_class for frame in self._scope_frames
             ),
             owner_import_targets=self._scope_owner_imports(),
+            class_uncertain_names=self._scope_class_uncertain_names(),
         )
+
+    def _scope_class_uncertain_names(self) -> frozenset[str]:
+        """Return the names the nearest class frame's own imports leave uncertain."""
+        class_frame = next(
+            (frame for frame in reversed(self._scope_frames) if frame.is_class),
+            None,
+        )
+        return class_frame.import_state.uncertain_names if class_frame else frozenset()
 
     def _scope_owner_imports(self) -> Mapping[str, str] | None:
         """Return the import routes a class body sees from its enclosing frames.
@@ -586,7 +603,7 @@ class _ScopeCallVisitor(ast.NodeVisitor):
             local_import_names=local_import_names,
             import_flow_sensitive=True,
             receiver_override=receiver_override,
-            exclude_enclosing_class=class_scopes is not None,
+            exclude_enclosing_class=nested_class_method or class_scopes is not None,
         )
         self._defer_nested_bodies += 1
         self._visit_block(node.body)
@@ -3351,6 +3368,7 @@ def _forward_reference_snapshot(
     return replace(
         snapshot,
         uncertain_import_names=snapshot.uncertain_import_names | frozenset((root,)),
+        class_uncertain_names=snapshot.class_uncertain_names | frozenset((root,)),
     )
 
 
@@ -3411,6 +3429,10 @@ def _resolve_header_use(
         }
         class_own_roots = _import_binding_roots(class_own_targets)
         authoritative_import_names = authoritative_import_names | class_own_roots
+        # The class body's own unconditional import decides the uses it
+        # evaluates, so it overrides uncertainty an enclosing frame carries
+        # for the same name, unless the class's own flow made it uncertain.
+        uncertain.difference_update(class_own_roots - snapshot.class_uncertain_names)
 
     if inside_nested_class:
         if has_enclosing_class_context:
