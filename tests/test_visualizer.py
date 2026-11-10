@@ -903,17 +903,15 @@ def test_checked_in_viewer_artifacts_stay_offline_single_graph_explorers() -> No
         assert '<div id="cy" ' in html
 
 
-# The comparison page's embedded presentation was 236,577 bytes while each
-# graph fact was stored twice; the payload now stores it once.
-_RECORDED_COMPARISON_PAYLOAD_BYTES = 236_577
-
-
 def test_checked_in_comparison_payload_stores_each_graph_fact_once() -> None:
-    """``AC-04``: the reviewable comparison page shrinks and keeps its summary.
+    """The reviewable comparison page stores each graph fact once.
 
     The drawn records are the payload's single copy of the comparison's nodes
-    and relationships, and ``comparison.calls`` remains beside them for the
-    call list the summary and the call-site panel read.
+    and relationships: those records are pairwise distinct, and no value under
+    any other top-level key, at any depth, repeats one of them. A graph record
+    copied into ``comparison`` fails this assertion, while a
+    ``comparison.calls`` row that shares only a relationship's ``id`` is a
+    different record and is allowed.
     """
     html = (SYSTEM_EXAMPLE / "minotaur-comparison.html").read_text(encoding="utf-8")
     prefix = '<script id="minotaur-presentation" type="application/json">'
@@ -928,7 +926,31 @@ def test_checked_in_comparison_payload_stores_each_graph_fact_once() -> None:
     assert payload["graph"]["nodes"] and payload["graph"]["relationships"]
     assert payload["comparison"]["calls"]
     assert payload["comparison"]["changed"] is True
-    assert len(embedded.encode("utf-8")) <= _RECORDED_COMPARISON_PAYLOAD_BYTES * 3 // 5
+
+    def record(value: object) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+    def nested_values(value: object):
+        yield value
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from nested_values(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from nested_values(item)
+
+    records = [
+        *(record(node) for node in payload["graph"]["nodes"]),
+        *(record(relationship) for relationship in payload["graph"]["relationships"]),
+    ]
+    assert len(records) == len(set(records)), "graph records must be pairwise distinct"
+    elsewhere = {
+        record(value)
+        for key, other in payload.items()
+        if key != "graph"
+        for value in nested_values(other)
+    }
+    assert not set(records) & elsewhere, "a graph record is stored under another top-level key"
 
 
 def test_regenerating_checked_in_examples_is_reproducible(tmp_path: Path) -> None:

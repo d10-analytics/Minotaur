@@ -17,14 +17,31 @@ rejects any source file that is not valid UTF-8.
 
 `workflow/binding_lifecycle.py`, the binding-lifecycle sample, defines
 top-level functions that a later statement rebinds (an assignment, a `del`, a
-conditional assignment, a `try` import, and a star import) and then calls, a
+conditional assignment, a `try` import, and a star import); the module calls
+them wherever the rebinding leaves the name bound. It also has a
 `from workflow.helper import fixture_helper` import beside a same-module `def
 helper()`, a class body with an annotation-only name, a function with an
 annotation-only local, a nested class whose header and body call and load a
 module name, string annotations beside `Literal[...]` and `Annotated[...]`
 arguments, a quoted annotation whose name the module imports again after the
 function, and a nested class whose body uses a function-local import that
-differs from the module's import of the same name. It defines no `main` and calls neither `workflow.util.unused_helper`
+differs from the module's import of the same name. The sample also carries one
+case for each binding behavior: a function that writes `Holder` through `global`
+inside a loop before using it, a class whose `if`-guarded import precedes the
+class-body use, a function-nested class whose import shadows the module-level
+`Forward` import, a function-nested class that imports a name it declares
+`global`, and a module-level import of the `workflow.declared_encoding.banner`
+constant, whose name stays unresolved while the import links the analyzed
+module. Three class-body cases follow: a function-nested class whose method
+default holds a comprehension that resolves `Forward` through the module rather
+than the class's own import, a class whose function defined in an `if` suite
+resolves its names without the class's imports, and, after a module-level
+import that binds `workflow` to `workflow.util`, a class whose own
+`import workflow` decides its body's use. Two more cases follow: a function-nested
+class whose own import decides its body's call although the function rebinds the
+same name conditionally, and a class whose method builds a class with a method
+calling `self.declared()`, which stays unresolved rather than reaching the outer
+class's `declared`. It defines no `main` and calls neither `workflow.util.unused_helper`
 nor `workflow.service.Service.run`; its star import carries inline `# noqa`
 codes for Ruff.
 
@@ -33,7 +50,7 @@ The tree is small on purpose: every query class in
 definitions of `main`, a symbol with more than one caller, a symbol with no
 callers at all (`workflow.util.unused_helper`), an import graph for `impact`,
 and a stable line for `context`. `minotaur query unreferenced workflow` reports
-twenty-two symbols: the uncalled `workflow.util.unused_helper`, the other
+thirty-two symbols: the uncalled `workflow.util.unused_helper`, the other
 fixture-only definitions (`workflow.package_scope_probe`, `workflow.cli.main`,
 `workflow.service.main`, `workflow.service.Service.total`,
 `workflow.declarations.Gauge`, `workflow.declarations.scale`, and the
@@ -41,11 +58,15 @@ fixture-only definitions (`workflow.package_scope_probe`, `workflow.cli.main`,
 `generic_scope_probe`, `DeletedBindingScope`, and `ImportedOuterScope`), and
 from the binding-lifecycle sample `replaced`, `deleted`, `conditional`,
 `guarded`, `starred`, `Holder.label_text`, `local_annotation`,
-`string_annotations`, `forward_reference`, and `local_import_class`. Under `--text-fallback` the five rebound declarations
-(`replaced`, `deleted`, `conditional`, `guarded`, `starred`) and the older
-`workflow.cli.main`, `workflow.service.main`, and
-`workflow.service.Service.total` gain a `[text-mention]` marker, because their
-names still appear as text.
+`string_annotations`, `forward_reference`, `local_import_class`,
+`loop_global`, `nested_class_import`, `directive_class_import`,
+`header_comprehension`, `NestedFunctionScope`, `PlainImport`,
+`import_over_uncertain_binding`, `DeferredOwner`, `DeferredOwner.declared`, and
+`DeferredOwner.build`. Under `--text-fallback` ten symbols gain a `[text-mention]` marker, because
+their names still appear as text: the five rebound declarations (`replaced`,
+`deleted`, `conditional`, `guarded`, `starred`), `DeferredOwner.declared` and
+`DeferredOwner.build`, and the older `workflow.cli.main`,
+`workflow.service.main`, and `workflow.service.Service.total`.
 
 `naming/`, the module-naming sample, holds `dotted.name.py` (a dotted
 component), `Upper.PY` (a non-exact suffix), and `shadow.py` beside

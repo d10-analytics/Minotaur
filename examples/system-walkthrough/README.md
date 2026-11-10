@@ -320,7 +320,7 @@ $ minotaur query consumers orders \
     --graph minotaur-graph.json \
     --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
-shop/checkout.py (no_system)  calls: shop.orders.create_order (shop/orders.py); imports: shop.orders.create_order (shop/orders.py)
+shop/checkout.py (no_system)  calls: shop.orders.create_order (shop/orders.py); imports: shop.orders (shop/orders.py), shop.orders.create_order (shop/orders.py)
 ```
 
 `checkout.py` is a `no_system` consumer: it imports `create_order` (module
@@ -332,7 +332,7 @@ because linking against the system's module is itself a consumer fact.
 $ minotaur query consumers orders \
     --graph minotaur-graph.json \
     --root . --no-refresh --json
-{"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"consumers","refreshed":false,"results":[{"category":"no_system","file":"shop/checkout.py","kinds":["calls","imports"],"targets":[{"kind":"calls","label":"shop.orders.create_order","path":"shop/orders.py"},{"kind":"imports","label":"shop.orders.create_order","path":"shop/orders.py"}]}],"stale":[],"stale_analyzer":null}
+{"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"consumers","refreshed":false,"results":[{"category":"no_system","file":"shop/checkout.py","kinds":["calls","imports"],"targets":[{"kind":"calls","label":"shop.orders.create_order","path":"shop/orders.py"},{"kind":"imports","label":"shop.orders","path":"shop/orders.py"},{"kind":"imports","label":"shop.orders.create_order","path":"shop/orders.py"}]}],"stale":[],"stale_analyzer":null}
 ```
 
 Consumers of the billing system show both categories of consumer file: the
@@ -344,8 +344,8 @@ $ minotaur query consumers billing \
     --graph minotaur-graph.json \
     --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
-shop/checkout.py (no_system)  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
-shop/orders.py (system: orders)  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
+shop/checkout.py (no_system)  calls: shop.billing.charge (shop/billing.py); imports: shop.billing (shop/billing.py), shop.billing.charge (shop/billing.py)
+shop/orders.py (system: orders)  calls: shop.billing.charge (shop/billing.py); imports: shop.billing (shop/billing.py), shop.billing.charge (shop/billing.py)
 ```
 
 ### `system-deps`: what the system itself reaches
@@ -362,15 +362,15 @@ $ minotaur query system-deps orders \
     --graph minotaur-graph.json \
     --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
-no_system  calls: shop.ledger.record (shop/ledger.py); imports: shop.ledger.record (shop/ledger.py)
-system: billing  calls: shop.billing.charge (shop/billing.py); imports: shop.billing.charge (shop/billing.py)
+no_system  calls: shop.ledger.record (shop/ledger.py); imports: shop.ledger (shop/ledger.py), shop.ledger.record (shop/ledger.py)
+system: billing  calls: shop.billing.charge (shop/billing.py); imports: shop.billing (shop/billing.py), shop.billing.charge (shop/billing.py)
 ```
 
 ```console
 $ minotaur query system-deps orders \
     --graph minotaur-graph.json \
     --root . --no-refresh --json
-{"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"system-deps","refreshed":false,"results":[{"category":"no_system","targets":[{"kind":"calls","label":"shop.ledger.record","path":"shop/ledger.py"},{"kind":"imports","label":"shop.ledger.record","path":"shop/ledger.py"}]},{"category":"system: billing","targets":[{"kind":"calls","label":"shop.billing.charge","path":"shop/billing.py"},{"kind":"imports","label":"shop.billing.charge","path":"shop/billing.py"}]}],"stale":[],"stale_analyzer":null}
+{"coverage":{"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}},"query":"system-deps","refreshed":false,"results":[{"category":"no_system","targets":[{"kind":"calls","label":"shop.ledger.record","path":"shop/ledger.py"},{"kind":"imports","label":"shop.ledger","path":"shop/ledger.py"},{"kind":"imports","label":"shop.ledger.record","path":"shop/ledger.py"}]},{"category":"system: billing","targets":[{"kind":"calls","label":"shop.billing.charge","path":"shop/billing.py"},{"kind":"imports","label":"shop.billing","path":"shop/billing.py"},{"kind":"imports","label":"shop.billing.charge","path":"shop/billing.py"}]}],"stale":[],"stale_analyzer":null}
 ```
 
 No target is silently attributed to a system: an unlisted path-carrying target
@@ -383,7 +383,7 @@ $ minotaur query system-deps billing \
     --graph minotaur-graph.json \
     --root . --no-refresh
 coverage {"declared_files":{"absent":0,"represented":1,"scope":"selected_system_declared_files","total":1},"graph_files":{"count":5,"scope":"final_graph_file_nodes"},"recorded_unresolved_references":{"count":0,"scope":"selected_system_declared_files"},"selection":{"status":"recorded","targets":["shop"]},"source_diagnostics":{"status":"unavailable"}}
-no_system  calls: shop.ledger.record (shop/ledger.py); imports: shop.ledger.record (shop/ledger.py)
+no_system  calls: shop.ledger.record (shop/ledger.py); imports: shop.ledger (shop/ledger.py), shop.ledger.record (shop/ledger.py)
 ```
 
 ```console

@@ -62,6 +62,8 @@ through composition rather than a direct static edge.
 - `query-and-system-reporting` points to `source-presentation` for source
   excerpts, presentation payloads, and containment-checked source path
   resolution.
+- `query-and-system-reporting` points to `command-interface` for the
+  `minotaur` package module its named imports come from.
 
 System membership remains an exact TOML scope, not a desired dependency,
 allow/deny rule, architectural grade, or runtime requirement. These

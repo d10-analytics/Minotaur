@@ -946,6 +946,318 @@ def test_calls_in_nested_functions_are_attributed_to_the_outer_function(tmp_path
     }
 
 
+_MODULE_CONSTANTS = "LIMIT = 3\nAlias = int\n\ndef f():\n    return 1\n"
+_LAZY_FACADE = "def __getattr__(name):\n    raise AttributeError(name)\n"
+
+
+def _edge_locations(
+    result: AnalysisResult, source_label: str, target_label: str, kind: str
+) -> list[tuple[str, int, int]]:
+    """List every evidence start of one relationship, sorted for stable assertions."""
+    relationship = _relationship_map(result)[
+        (_node_id(result, source_label), _node_id(result, target_label), kind)
+    ]
+    return sorted(
+        (location.path, location.range.start.line, location.range.start.character)
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    )
+
+
+@pytest.mark.parametrize(
+    ("files", "source", "module_label", "unresolved_text"),
+    [
+        pytest.param(
+            {"lib.py": _MODULE_CONSTANTS},
+            "from lib import LIMIT\n",
+            "lib",
+            "lib.LIMIT",
+            id="module-constant",
+        ),
+        pytest.param(
+            {"lib.py": _MODULE_CONSTANTS},
+            "from lib import Alias as A\n",
+            "lib",
+            "lib.Alias",
+            id="type-alias",
+        ),
+        pytest.param(
+            {"lib.py": _MODULE_CONSTANTS},
+            "from lib import MISSING\n",
+            "lib",
+            "lib.MISSING",
+            id="missing-name",
+        ),
+        pytest.param(
+            {"pkg/__init__.py": _LAZY_FACADE},
+            "from pkg import validate\n",
+            "pkg",
+            "pkg.validate",
+            id="lazy-facade",
+        ),
+    ],
+)
+def test_module_level_named_import_records_the_module_edge(
+    tmp_path: Path,
+    files: dict[str, str],
+    source: str,
+    module_label: str,
+    unresolved_text: str,
+) -> None:
+    for path, content in files.items():
+        _write(tmp_path, path, content)
+    _write(tmp_path, "app.py", source)
+
+    result = analyze_python_workspace(tmp_path)
+    app = _node_id(result, "app")
+    relationships = _relationship_map(result)
+
+    assert _edge_locations(result, "app", module_label, RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    assert (app, _node_id(result, unresolved_text), RelationshipKind.IMPORTS.value) not in (
+        relationships
+    )
+    assert _unresolved_sites(result) == {("app", unresolved_text, 1)}
+    assert result.document.extensions["minotaur-python"] == {
+        "imports_resolved": 0,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("source", "unresolved_text"),
+    [
+        pytest.param("from lib import f\n", None, id="declaration-only"),
+        pytest.param("from lib import LIMIT, f\n", "lib.LIMIT", id="constant-and-declaration"),
+    ],
+)
+def test_module_level_named_import_of_a_declaration_keeps_both_edges(
+    tmp_path: Path, source: str, unresolved_text: str | None
+) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(tmp_path, "app.py", source)
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "app", "lib", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    assert _edge_locations(result, "app", "lib.f", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    if unresolved_text is None:
+        assert _unresolved_sites(result) == set()
+    else:
+        assert _unresolved_sites(result) == {("app", unresolved_text, 1)}
+    assert result.document.extensions["minotaur-python"] == {
+        "imports_resolved": 1,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 0 if unresolved_text is None else 1,
+    }
+
+
+def test_module_level_import_of_a_submodule_records_the_package_module_too(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", _LAZY_FACADE)
+    _write(tmp_path, "pkg/submodule.py", "def go():\n    return 1\n")
+    _write(tmp_path, "app.py", "from pkg import submodule\n")
+
+    result = analyze_python_workspace(tmp_path)
+    app_imports = {
+        (source_label, target_label)
+        for source_label, target_label, kind in _edge_labels(result)
+        if source_label == "app" and kind == RelationshipKind.IMPORTS.value
+    }
+
+    assert app_imports == {("app", "pkg"), ("app", "pkg.submodule")}
+    assert _edge_locations(result, "app", "pkg", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    assert _unresolved_sites(result) == set()
+
+
+def test_relative_named_import_records_the_containing_module_edge(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/submodule.py", "def X():\n    return 1\n")
+    _write(tmp_path, "pkg/mod.py", "from .submodule import X\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "pkg.mod", "pkg.submodule", RelationshipKind.IMPORTS.value) == [
+        ("pkg/mod.py", 0, 0)
+    ]
+    assert _unresolved_sites(result) == set()
+
+
+def test_relative_module_import_records_the_package_and_submodule_edges(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/submodule.py", "def X():\n    return 1\n")
+    _write(tmp_path, "pkg/mod.py", "from . import submodule\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "pkg.mod", "pkg", RelationshipKind.IMPORTS.value) == [
+        ("pkg/mod.py", 0, 0)
+    ]
+    assert _edge_locations(result, "pkg.mod", "pkg.submodule", RelationshipKind.IMPORTS.value) == [
+        ("pkg/mod.py", 0, 0)
+    ]
+    assert _unresolved_sites(result) == set()
+
+
+def test_package_init_relative_import_records_the_package_self_loop(tmp_path: Path) -> None:
+    _write(tmp_path, "pkg/__init__.py", "from . import submodule\n")
+    _write(tmp_path, "pkg/submodule.py", "def X():\n    return 1\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "pkg", "pkg.submodule", RelationshipKind.IMPORTS.value) == [
+        ("pkg/__init__.py", 0, 0)
+    ]
+    assert _edge_locations(result, "pkg", "pkg", RelationshipKind.IMPORTS.value) == [
+        ("pkg/__init__.py", 0, 0)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("files", "path", "source", "importer", "unresolved_text"),
+    [
+        pytest.param(
+            {},
+            "app.py",
+            "from missing import X\n",
+            "app",
+            "missing.X",
+            id="missing-module",
+        ),
+        pytest.param(
+            {},
+            "app.py",
+            "from requests import get\n",
+            "app",
+            "requests.get",
+            id="third-party-module",
+        ),
+        pytest.param(
+            {"pkg/__init__.py": ""},
+            "pkg/mod.py",
+            "from .. import thing\n",
+            "pkg.mod",
+            "..thing",
+            id="root-escaping-relative",
+        ),
+    ],
+)
+def test_unanalyzed_modules_record_no_module_edge(
+    tmp_path: Path,
+    files: dict[str, str],
+    path: str,
+    source: str,
+    importer: str,
+    unresolved_text: str,
+) -> None:
+    for extra_path, content in files.items():
+        _write(tmp_path, extra_path, content)
+    _write(tmp_path, path, source)
+
+    result = analyze_python_workspace(tmp_path)
+    importer_imports = {
+        (source_label, target_label)
+        for source_label, target_label, kind in _edge_labels(result)
+        if source_label == importer and kind == RelationshipKind.IMPORTS.value
+    }
+
+    assert importer_imports == set()
+    assert _unresolved_sites(result) == {(importer, unresolved_text, 1)}
+    assert result.document.extensions["minotaur-python"] == {
+        "imports_resolved": 0,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 1,
+    }
+
+
+def test_nested_named_imports_record_one_module_edge_per_statement(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(
+        tmp_path,
+        "app.py",
+        "def run():\n"
+        "    from lib import LIMIT\n"
+        "\n"
+        "class Holder:\n"
+        "    from lib import f\n"
+        "\n"
+        "if True:\n"
+        "    from lib import LIMIT\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "app", "lib", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 1, 4),
+        ("app.py", 4, 4),
+        ("app.py", 7, 4),
+    ]
+
+
+def test_two_module_level_imports_record_the_module_edge_at_each_statement(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(tmp_path, "app.py", "from lib import LIMIT\nfrom lib import f\n")
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _edge_locations(result, "app", "lib", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0),
+        ("app.py", 1, 0),
+    ]
+
+
+def test_star_import_keeps_only_its_module_edge(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(tmp_path, "app.py", "from lib import *\n")
+
+    result = analyze_python_workspace(tmp_path)
+    app_edges = {
+        (source_label, target_label, kind)
+        for source_label, target_label, kind in _edge_labels(result)
+        if source_label == "app" and kind == RelationshipKind.IMPORTS.value
+    }
+
+    assert app_edges == {("app", "lib", RelationshipKind.IMPORTS.value)}
+    assert _edge_locations(result, "app", "lib", RelationshipKind.IMPORTS.value) == [
+        ("app.py", 0, 0)
+    ]
+    assert _unresolved_sites(result) == set()
+    assert result.document.extensions["minotaur-python"] == {
+        "imports_resolved": 1,
+        "imports_root_mismatched": 0,
+        "imports_unresolved": 0,
+    }
+
+
+def test_module_consumers_reading_sees_a_module_level_named_importer(tmp_path: Path) -> None:
+    _write(tmp_path, "lib.py", _MODULE_CONSTANTS)
+    _write(tmp_path, "app.py", "from lib import LIMIT\n")
+
+    result = analyze_python_workspace(tmp_path)
+    library = _node_id(result, "lib")
+    labels = {node.id: node.label for node in result.document.nodes}
+    consumers = {
+        labels[relationship.source]
+        for relationship in result.document.relationships
+        if relationship.target == library and relationship.kind == RelationshipKind.IMPORTS.value
+    }
+
+    assert consumers == {"app"}
+
+
 def test_module_alias_and_module_level_calls_resolve_to_known_workspace_function(
     tmp_path: Path,
 ) -> None:
@@ -4085,6 +4397,7 @@ def test_nested_class_method_headers_use_class_imports_in_source_order(
     result = analyze_python_workspace(tmp_path)
     outer = _node_id(result, "app.outer")
     helper = _node_id(result, "library.helper")
+    class_helper = _node_id(result, "other.helper")
     relationships = [
         relationship
         for relationship in result.document.relationships
@@ -4092,8 +4405,8 @@ def test_nested_class_method_headers_use_class_imports_in_source_order(
     ]
 
     # The first header executes before the class-local import and sees the
-    # module import. The later header sees the new local import and must not
-    # retain that outer dependency.
+    # module import. The class-local import runs whenever the class body does,
+    # so the later header takes that import instead of staying unresolved.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in relationships
@@ -4102,7 +4415,14 @@ def test_nested_class_method_headers_use_class_imports_in_source_order(
     } == {
         (RelationshipKind.REFERENCES.value, 5),
     }
-    assert _unresolved_by_source(result)["app.outer"] == {"helper"}
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == class_helper
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {(RelationshipKind.REFERENCES.value, 9)}
+    assert _unresolved_by_source(result) == {}
 
 
 def test_nested_class_import_replaces_preceding_dynamic_header_binding(
@@ -4130,6 +4450,7 @@ def test_nested_class_import_replaces_preceding_dynamic_header_binding(
     result = analyze_python_workspace(tmp_path)
     outer = _node_id(result, "app.outer")
     module_helper = _node_id(result, "library.helper")
+    class_helper = _node_id(result, "other.helper")
     resolved_helper_uses = [
         relationship
         for relationship in result.document.relationships
@@ -4138,28 +4459,22 @@ def test_nested_class_import_replaces_preceding_dynamic_header_binding(
 
     # The dynamic class assignment suppresses the earlier decorator. The
     # subsequent class import replaces that assignment for the later header,
-    # so it is reported as an unresolved local import instead of being
-    # suppressed or attributed to the module import. The method body remains
-    # isolated from both class bindings and resolves through the module.
+    # which takes the class import target. The method body remains isolated
+    # from both class bindings and resolves through the module.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in resolved_helper_uses
         for evidence in relationship.evidence
         for location in evidence.locations
     } == {(RelationshipKind.CALLS.value, 12)}
-    assert _unresolved_by_source(result) == {"app.outer": {"helper"}}
-    unresolved_ids = {
-        node.id
-        for node in result.document.nodes
-        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "helper"
-    }
     assert {
-        location.range.start.line + 1
+        (relationship.kind, location.range.start.line + 1)
         for relationship in result.document.relationships
-        if relationship.source == outer and relationship.target in unresolved_ids
+        if relationship.source == outer and relationship.target == class_helper
         for evidence in relationship.evidence
         for location in evidence.locations
-    } == {10}
+    } == {(RelationshipKind.REFERENCES.value, 10)}
+    assert _unresolved_by_source(result) == {}
 
 
 def test_nested_class_delete_restores_enclosing_import_for_later_header(
@@ -4226,6 +4541,7 @@ def test_nested_class_method_header_sees_preceding_import_but_body_does_not(
 
     result = analyze_python_workspace(tmp_path)
     helper = _node_id(result, "library.helper")
+    class_helper = _node_id(result, "other.helper")
     outer = _node_id(result, "app.outer")
     relationships = [
         relationship
@@ -4234,14 +4550,21 @@ def test_nested_class_method_header_sees_preceding_import_but_body_does_not(
     ]
 
     # The class-local import prevents the decorator from being attributed to
-    # the outer import. The method body remains isolated from the class import
-    # and therefore still resolves the enclosing module binding.
+    # the outer import and supplies its target instead. The method body remains
+    # isolated from the class import and therefore still resolves the enclosing
+    # module binding.
     assert [
         (relationship.kind, location.range.start.line)
         for relationship in relationships
         for location in relationship.evidence[0].locations
     ] == [(RelationshipKind.CALLS.value, 7)]
-    assert _unresolved_by_source(result)["app.outer"] == {"helper"}
+    assert {
+        (relationship.kind, location.range.start.line)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == class_helper
+        for location in relationship.evidence[0].locations
+    } == {(RelationshipKind.REFERENCES.value, 5)}
+    assert _unresolved_by_source(result) == {}
 
 
 def test_nested_methods_skip_every_enclosing_class_namespace(
@@ -4271,6 +4594,7 @@ def test_nested_methods_skip_every_enclosing_class_namespace(
     result = analyze_python_workspace(tmp_path)
     outer = _node_id(result, "app.outer")
     helper = _node_id(result, "library.helper")
+    class_helper = _node_id(result, "other.helper")
     relationships = [
         relationship
         for relationship in result.document.relationships
@@ -4279,8 +4603,8 @@ def test_nested_methods_skip_every_enclosing_class_namespace(
 
     # Class namespaces are not lexical enclosures: the first nested decorator
     # skips Outer.helper and sees the module import. Both method bodies also
-    # see the module import; the second nested class's own import suppresses
-    # only its decorator and leaves that header unresolved.
+    # see the module import. The second nested class's own import is definitive
+    # for its body, so its decorator takes that target.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in relationships
@@ -4291,7 +4615,14 @@ def test_nested_methods_skip_every_enclosing_class_namespace(
         (RelationshipKind.CALLS.value, 9),
         (RelationshipKind.CALLS.value, 14),
     }
-    assert _unresolved_by_source(result) == {"app.outer": {"helper"}}
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == outer and relationship.target == class_helper
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {(RelationshipKind.REFERENCES.value, 12)}
+    assert _unresolved_by_source(result) == {}
 
 
 def test_direct_nested_methods_skip_the_enclosing_class_namespace(
@@ -4406,11 +4737,10 @@ def test_function_nested_class_header_uses_enclosing_class_import(
     module_helper = _node_id(result, "library.helper")
     class_helper = _node_id(result, "other.helper")
 
-    # Inner's base sees the import in the immediately enclosing class body;
-    # local imports are conservatively unresolved rather than attributed to a
-    # different module binding. Inner's ordinary body expression, method
-    # decorator, and method body cannot close over Outer, so they independently
-    # resolve through the module import.
+    # Inner's base runs in the enclosing class body, so it takes Outer's
+    # import. Inner's ordinary body expression, method decorator, and method
+    # body cannot close over Outer, so they independently resolve through the
+    # module import.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in result.document.relationships
@@ -4422,23 +4752,14 @@ def test_function_nested_class_header_uses_enclosing_class_import(
         (RelationshipKind.REFERENCES.value, 8),
         (RelationshipKind.CALLS.value, 10),
     }
-    assert all(
-        relationship.source != factory or relationship.target != class_helper
-        for relationship in result.document.relationships
-    )
-    assert _unresolved_by_source(result) == {"app.factory": {"helper"}}
-    unresolved_ids = {
-        node.id
-        for node in result.document.nodes
-        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "helper"
-    }
     assert {
-        location.range.start.line + 1
+        (relationship.kind, location.range.start.line + 1)
         for relationship in result.document.relationships
-        if relationship.source == factory and relationship.target in unresolved_ids
+        if relationship.source == factory and relationship.target == class_helper
         for evidence in relationship.evidence
         for location in evidence.locations
-    } == {6}
+    } == {(RelationshipKind.REFERENCES.value, 6)}
+    assert _unresolved_by_source(result) == {}
 
 
 def test_direct_nested_class_header_uses_enclosing_class_import(
@@ -4470,15 +4791,14 @@ def test_direct_nested_class_header_uses_enclosing_class_import(
     outer = _node_id(result, "app.Outer")
     library_base = _node_id(result, "library.Base")
     library_helper = _node_id(result, "library.helper")
-    other_targets = {
-        _node_id(result, "other.Base"),
-        _node_id(result, "other.helper"),
-    }
+    other_base = _node_id(result, "other.Base")
+    other_helper = _node_id(result, "other.helper")
 
-    # The nested class statement's base uses Outer's import rather than the
-    # module import; local imports remain conservatively unresolved. Inner's
-    # method header and body do not close over Outer and therefore resolve
-    # through the module import beneath that namespace.
+    # The class body's own import is definitive for the header expressions that
+    # body evaluates, so the nested class statement's base takes that target
+    # instead of staying unresolved. Inner's method decorator and body are
+    # evaluated in Inner's body, which cannot close over Outer, and still
+    # resolve through the module import beneath that namespace.
     assert {
         (relationship.target, relationship.kind, location.range.start.line + 1)
         for relationship in result.document.relationships
@@ -4489,23 +4809,16 @@ def test_direct_nested_class_header_uses_enclosing_class_import(
         (library_helper, RelationshipKind.REFERENCES.value, 6),
         (library_helper, RelationshipKind.CALLS.value, 8),
     }
-    assert all(
-        relationship.source != outer or relationship.target not in other_targets
-        for relationship in result.document.relationships
-    )
-    assert _unresolved_by_source(result) == {"app.Outer": {"Base"}}
-    unresolved_ids = {
-        node.id
-        for node in result.document.nodes
-        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "Base"
-    }
     assert {
-        location.range.start.line + 1
+        (relationship.target, relationship.kind, location.range.start.line + 1)
         for relationship in result.document.relationships
-        if relationship.source == outer and relationship.target in unresolved_ids
+        if relationship.source == outer and relationship.target in {other_base, other_helper}
         for evidence in relationship.evidence
         for location in evidence.locations
-    } == {5}
+    } == {
+        (other_base, RelationshipKind.REFERENCES.value, 5),
+    }
+    assert _unresolved_by_source(result) == {}
 
 
 def test_direct_nested_class_after_delete_uses_restored_enclosing_imports(
@@ -4672,6 +4985,7 @@ def test_direct_class_method_headers_use_import_source_order_and_body_scope(
 
     result = analyze_python_workspace(tmp_path)
     helper = _node_id(result, "library.helper")
+    class_helper = _node_id(result, "other.helper")
     before = _node_id(result, "app.Runner.before")
     after = _node_id(result, "app.Runner.after")
     relationships = [
@@ -4681,7 +4995,8 @@ def test_direct_class_method_headers_use_import_source_order_and_body_scope(
     ]
 
     # The first header sees the enclosing import. The class-local import
-    # shadows it for the later header, but not for the method body.
+    # shadows it for the later header, which takes that definite target, but
+    # not for the method body.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in relationships
@@ -4691,7 +5006,14 @@ def test_direct_class_method_headers_use_import_source_order_and_body_scope(
         (RelationshipKind.REFERENCES.value, 4),
         (RelationshipKind.CALLS.value, 10),
     }
-    assert _unresolved_by_source(result) == {"app.Runner.after": {"helper"}}
+    assert {
+        (relationship.kind, location.range.start.line + 1)
+        for relationship in result.document.relationships
+        if relationship.source == after and relationship.target == class_helper
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    } == {(RelationshipKind.REFERENCES.value, 8)}
+    assert _unresolved_by_source(result) == {}
 
 
 def test_direct_class_import_replaces_preceding_dynamic_header_binding(
@@ -4718,31 +5040,30 @@ def test_direct_class_import_replaces_preceding_dynamic_header_binding(
     before = _node_id(result, "app.Runner.before")
     after = _node_id(result, "app.Runner.after")
     module_helper = _node_id(result, "library.helper")
+    class_helper = _node_id(result, "other.helper")
     resolved_helper_uses = [
         relationship
         for relationship in result.document.relationships
         if relationship.source in {before, after} and relationship.target == module_helper
     ]
 
+    # The class-local import replaces the preceding dynamic binding for the
+    # later header and is definite for it, so that header takes the class
+    # import target. The method body keeps the module route.
     assert {
         (relationship.kind, location.range.start.line + 1)
         for relationship in resolved_helper_uses
         for evidence in relationship.evidence
         for location in evidence.locations
     } == {(RelationshipKind.CALLS.value, 11)}
-    assert _unresolved_by_source(result) == {"app.Runner.after": {"helper"}}
-    unresolved_ids = {
-        node.id
-        for node in result.document.nodes
-        if node.node_class == NodeClass.UNRESOLVED_REFERENCE and node.reference_text == "helper"
-    }
     assert {
-        location.range.start.line + 1
+        (relationship.kind, location.range.start.line + 1)
         for relationship in result.document.relationships
-        if relationship.source == after and relationship.target in unresolved_ids
+        if relationship.source == after and relationship.target == class_helper
         for evidence in relationship.evidence
         for location in evidence.locations
-    } == {9}
+    } == {(RelationshipKind.REFERENCES.value, 9)}
+    assert _unresolved_by_source(result) == {}
 
 
 def test_direct_class_delete_restores_enclosing_import_for_later_header(
@@ -4869,12 +5190,35 @@ def test_nested_class_method_receiver_does_not_use_outer_class_declarations(
     )
 
 
+@pytest.mark.parametrize("enclosing", ["class-method", "module-function"])
+def test_deferred_method_of_a_class_in_a_function_does_not_use_outer_class_declarations(
+    tmp_path: Path, enclosing: str
+) -> None:
+    inner = "class D:\n    def n(self):\n        self.x()\n        return self.x\nreturn D\n"
+    if enclosing == "class-method":
+        source = "class C:\n    def x(self):\n        pass\n    def m(self):\n" + _indent(
+            inner, "        "
+        )
+        owner, outer_member = "app.C.m", "app.C.x"
+    else:
+        source = "def x():\n    pass\n\n\ndef m():\n" + _indent(inner, "    ")
+        owner, outer_member = "app.m", "app.x"
+    _write(tmp_path, "app.py", source)
+
+    result = analyze_python_workspace(tmp_path)
+
+    labels = _edge_labels(result)
+    for kind in (RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value):
+        assert (owner, outer_member, kind) not in labels
+
+
 def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "lib.py", "def helper():\n    return 1\n")
+    _write(tmp_path, "other.py", "def helper():\n    return 2\n")
     source = (
-        "import lib\nfrom lib import helper\n\n"
+        "import lib\nfrom other import helper\n\n"
         "def outer():\n"
         "    helper = object()\n"
         "    local = object()\n"
@@ -4895,17 +5239,21 @@ def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     assert visitor._scope_frames == []
 
     result = analyze_python_workspace(tmp_path)
-    outer = _node_id(result, "app.outer")
-    helper = _node_id(result, "lib.helper")
-    relationships = _edge_labels(result)
-    assert ("app.outer", "lib.helper", RelationshipKind.CALLS.value) in relationships
-    assert _unresolved_by_source(result).get("app.outer", set()) == set()
-    assert any(
-        relationship.source == outer
-        and relationship.target == helper
-        and relationship.kind == RelationshipKind.CALLS.value
+    labels = {node.id: node.label for node in result.document.nodes}
+    call_lines = {
+        (labels[relationship.target], location.range.start.line + 1)
         for relationship in result.document.relationships
-    )
+        if labels[relationship.source] == "app.outer"
+        and relationship.kind == RelationshipKind.CALLS.value
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+    # The enclosing function binds its own ``helper``, so only the directive
+    # can route the bare call to the module-level name; the receiver call and
+    # the ``nonlocal`` name reach ``lib.helper`` and the enclosing local.
+    assert call_lines == {("lib.helper", 13), ("other.helper", 13)}
+    assert _unresolved_by_source(result).get("app.outer", set()) == set()
 
 
 def test_class_scope_restoration_inserts_before_surviving_lexical_frame() -> None:
@@ -6295,8 +6643,10 @@ def test_nested_plain_dotted_imports_are_syntactic_only_in_each_container(
         ]
         assert len(imports) == 1
         return
-    if owner == "app.run":
-        assert ("app.run", "pkg.sub.go", RelationshipKind.CALLS.value) in _edge_labels(result)
+    if owner in ("app.run", "app.Runner"):
+        # A function body and a class body each run their own definite
+        # import before the uses that follow it.
+        assert (owner, "pkg.sub.go", RelationshipKind.CALLS.value) in _edge_labels(result)
         assert "pkg.sub.go" not in _unresolved_by_source(result).get(owner, set())
         return
     assert "pkg.sub.go" in _unresolved_by_source(result).get(owner, set())
@@ -7406,13 +7756,17 @@ def test_conditional_class_directives_invalidate_owner_without_sibling_leak(
 
     result = analyze_python_workspace(tmp_path)
     edges = _edge_labels(result)
-    assert ("app.Global", "library.helper", RelationshipKind.CALLS.value) in edges
+    # A class body's own use after a write through ``global`` now stays
+    # unresolved, the same answer an import under the directive gives: the
+    # write replaces the binding the use would otherwise name.
+    assert ("app.Global", "library.helper", RelationshipKind.CALLS.value) not in edges
     assert ("app.Global.method", "library.helper", RelationshipKind.CALLS.value) not in edges
     assert ("app.sibling", "library.helper", RelationshipKind.CALLS.value) not in edges
     assert _unresolved_sites(result) >= {
         ("app.Global.method", "helper", 11),
         ("app.sibling", "helper", 14),
     }
+    _assert_unresolved_locations(result, "app.Global", "helper", {(8, 12)})
     assert _unresolved_by_source(result).get("app.Global.method", set()) == {"helper"}
     assert _unresolved_by_source(result).get("app.sibling", set()) == {"helper"}
 
@@ -7444,13 +7798,16 @@ def test_conditional_class_nonlocal_write_preserves_sibling_module_route(
 
     result = analyze_python_workspace(tmp_path)
     edges = _edge_labels(result)
-    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) in edges
+    # The class body's own use after a write through ``nonlocal`` now stays
+    # unresolved, the same answer an import under the directive gives: the
+    # write replaces the binding the use would otherwise name.
+    assert ("app.outer", "library.helper", RelationshipKind.CALLS.value) not in edges
     assert ("app.sibling", "library.helper", RelationshipKind.CALLS.value) in edges
     _assert_unresolved_locations(
         result,
         "app.outer",
         "helper",
-        {(11, 19), (12, 11)},
+        {(9, 16), (11, 19), (12, 11)},
     )
     assert _unresolved_by_source(result).get("app.outer", set()) == {"helper"}
     assert _unresolved_by_source(result).get("app.sibling", set()) == set()
@@ -7555,6 +7912,224 @@ def test_inner_if_in_loop_resolves_prewrite_use_but_freezes_post_loop_route(
     assert references == {6}
     assert _unresolved_sites(result) == {("app.run", "helper", 8)}
     assert ("app.run", "other.helper", RelationshipKind.CALLS.value) not in _edge_labels(result)
+
+
+_GLOBAL_WRITE_SUITE_SHAPES = (
+    pytest.param("    for _ in xs:\n        {write}\n", False, id="for"),
+    pytest.param("    async for _ in xs:\n        {write}\n", True, id="async-for"),
+    pytest.param("    while c:\n        {write}\n", False, id="while"),
+    pytest.param(
+        "    while c:\n        pass\n    else:\n        {write}\n",
+        False,
+        id="while-else",
+    ),
+    pytest.param(
+        "    try:\n        {write}\n    except Exception:\n        pass\n",
+        False,
+        id="try-body",
+    ),
+    pytest.param(
+        "    try:\n        pass\n    except Exception:\n        {write}\n",
+        False,
+        id="except-handler",
+    ),
+    pytest.param(
+        "    try:\n        pass\n    except Exception:\n        pass\n    else:\n        {write}\n",
+        False,
+        id="try-else",
+    ),
+    pytest.param(
+        "    try:\n        pass\n    finally:\n        {write}\n",
+        False,
+        id="finally",
+    ),
+    pytest.param(
+        "    try:\n        pass\n    except* Exception:\n        {write}\n",
+        False,
+        id="except-star-handler",
+    ),
+    pytest.param("    with cm:\n        {write}\n", False, id="with"),
+    pytest.param("    async with cm:\n        {write}\n", True, id="async-with"),
+    pytest.param("    match x:\n        case 1:\n            {write}\n", False, id="match"),
+)
+
+_GLOBAL_WRITE_STATEMENTS = (
+    pytest.param("f = other", id="assignment"),
+    pytest.param("f += 1", id="augmented-assignment"),
+    pytest.param("(f := other)", id="walrus"),
+    pytest.param("from lib import f", id="import"),
+    pytest.param("del f", id="delete"),
+)
+
+_GLOBAL_WRITE_NESTED_SHAPES = (
+    pytest.param(
+        "    while c:\n        for f in xs:\n            pass\n",
+        id="for-target-in-loop",
+    ),
+    pytest.param(
+        "    try:\n        with cm as f:\n            pass\n    except Exception:\n        pass\n",
+        id="with-target-in-try",
+    ),
+    pytest.param(
+        "    while c:\n        if c:\n            f += 1\n",
+        id="augmented-write-in-if",
+    ),
+)
+
+_GLOBAL_READ_ONLY_SUITES = (
+    "    for _ in xs:\n        pass\n"
+    "    while c:\n        pass\n"
+    "    try:\n        pass\n"
+    "    except Exception:\n        pass\n"
+    "    with cm:\n        pass\n"
+    "    match x:\n        case 1:\n            pass\n"
+)
+
+
+def _global_write_source(suite: str, target: str, *, is_async: bool = False) -> str:
+    """Return app.py with ``f`` declared global ahead of the given ``suite``."""
+    prelude = "from lib import f\n" if target == "imported" else "def f():\n    pass\n"
+    definition = "async def" if is_async else "def"
+    return (
+        prelude
+        + "\n\n"
+        + f"{definition} mutate(xs, other, c, cm, x):\n"
+        + "    global f\n"
+        + suite
+        + "    f()\n"
+        + "    return f\n"
+    )
+
+
+def _write_global_write_workspace(tmp_path: Path, source: str, target: str) -> None:
+    """Write app.py and, for an imported name, the module that defines it."""
+    _write(tmp_path, "app.py", source)
+    if target == "imported":
+        _write(tmp_path, "lib.py", "def f():\n    pass\n")
+
+
+def _mutate_use_lines(source: str) -> tuple[int, int]:
+    """Return the line numbers of ``mutate``'s later call and load of ``f``."""
+    lines = source.splitlines()
+    return lines.index("    f()") + 1, lines.index("    return f") + 1
+
+
+def _global_target_label(target: str) -> str:
+    return "lib.f" if target == "imported" else "app.f"
+
+
+def _resolved_use_lines(result: AnalysisResult, owner: str, target: str) -> set[int]:
+    """Return the evidence lines of resolved call and reference edges."""
+    labels = {node.id: node.label for node in result.document.nodes}
+    return {
+        location.range.start.line + 1
+        for relationship in result.document.relationships
+        if labels[relationship.source] == owner
+        and labels[relationship.target] == target
+        and relationship.kind in (RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value)
+        for evidence in relationship.evidence
+        for location in evidence.locations
+    }
+
+
+def _assert_later_global_uses_unresolved(result: AnalysisResult, source: str, target: str) -> None:
+    call_line, load_line = _mutate_use_lines(source)
+    target_label = _global_target_label(target)
+    assert _unresolved_sites(result) >= {
+        ("app.mutate", "f", call_line),
+        ("app.mutate", "f", load_line),
+    }
+    assert not _calls_between(result, "app.mutate", target_label)
+    # The write rebinds ``f``, so only a read that precedes it, such as the
+    # one an augmented assignment makes, may keep the earlier route.
+    assert _resolved_use_lines(result, "app.mutate", target_label) <= set(range(1, call_line))
+
+
+@pytest.mark.parametrize(("body", "is_async"), _GLOBAL_WRITE_SUITE_SHAPES)
+@pytest.mark.parametrize("statement", _GLOBAL_WRITE_STATEMENTS)
+@pytest.mark.parametrize("target", ["declared", "imported"])
+def test_a_global_write_in_a_compound_suite_makes_later_uses_unresolved(
+    tmp_path: Path, body: str, is_async: bool, statement: str, target: str
+) -> None:
+    source = _global_write_source(body.format(write=statement), target, is_async=is_async)
+    _write_global_write_workspace(tmp_path, source, target)
+
+    result = analyze_python_workspace(tmp_path)
+
+    _assert_later_global_uses_unresolved(result, source, target)
+
+
+@pytest.mark.parametrize("body", _GLOBAL_WRITE_NESTED_SHAPES)
+@pytest.mark.parametrize("target", ["declared", "imported"])
+def test_a_global_write_nested_in_a_compound_suite_makes_later_uses_unresolved(
+    tmp_path: Path, body: str, target: str
+) -> None:
+    source = _global_write_source(body, target)
+    _write_global_write_workspace(tmp_path, source, target)
+
+    result = analyze_python_workspace(tmp_path)
+
+    _assert_later_global_uses_unresolved(result, source, target)
+
+
+@pytest.mark.parametrize("target", ["declared", "imported"])
+def test_a_global_declaration_without_a_compound_write_keeps_the_resolved_route(
+    tmp_path: Path, target: str
+) -> None:
+    source = _global_write_source(_GLOBAL_READ_ONLY_SUITES, target)
+    _write_global_write_workspace(tmp_path, source, target)
+
+    result = analyze_python_workspace(tmp_path)
+
+    call_line, load_line = _mutate_use_lines(source)
+    assert _resolved_use_lines(result, "app.mutate", _global_target_label(target)) == {
+        call_line,
+        load_line,
+    }
+    assert "f" not in _unresolved_texts(result, "app.mutate")
+
+
+@pytest.mark.parametrize(
+    "suite",
+    ["    f = other\n", "    if c:\n        f = other\n"],
+    ids=["plain-write", "if-suite"],
+)
+@pytest.mark.parametrize("target", ["declared", "imported"])
+def test_a_plain_or_conditional_global_write_stays_unresolved(
+    tmp_path: Path, suite: str, target: str
+) -> None:
+    source = _global_write_source(suite, target)
+    _write_global_write_workspace(tmp_path, source, target)
+
+    result = analyze_python_workspace(tmp_path)
+
+    _assert_later_global_uses_unresolved(result, source, target)
+
+
+def test_a_sibling_without_a_global_declaration_keeps_the_resolved_route(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "app.py",
+        "def f():\n    pass\n\n\n"
+        "def mutate(xs, other):\n"
+        "    global f\n"
+        "    for _ in xs:\n"
+        "        f = other\n"
+        "    f()\n"
+        "    return f\n\n\n"
+        "def reader(xs):\n"
+        "    for _ in xs:\n"
+        "        f()\n"
+        "    return f\n",
+    )
+
+    result = analyze_python_workspace(tmp_path)
+
+    assert _unresolved_sites(result) >= {("app.mutate", "f", 9), ("app.mutate", "f", 10)}
+    assert _resolved_use_lines(result, "app.reader", "app.f") == {15, 16}
+    assert "f" not in _unresolved_texts(result, "app.reader")
 
 
 _REBOUND_DECLARATIONS = (
@@ -8340,19 +8915,32 @@ def _indent(text: str, prefix: str) -> str:
 
 
 def _six_use_source(
-    prelude: str, placement: str, name: str, class_prelude: str = ""
+    prelude: str,
+    placement: str,
+    name: str,
+    class_prelude: str = "",
+    *,
+    owning_class: bool = False,
+    uses: str | None = None,
 ) -> tuple[str, str]:
     """Return the module source and owner for one placement of the six uses.
 
     ``module`` nests ``class I`` in ``class O`` (every use owned by ``app.O``);
     ``function`` defines ``class K`` inside ``def outer()`` (owned by ``app.outer``).
+    ``class_prelude`` goes in the outermost class body. The function placement
+    keeps its uses in that class; the module placement keeps them in the class
+    nested in ``class O`` unless ``owning_class`` asks for them in ``class O``
+    itself, where a class-body binding reaches them. ``uses`` replaces the
+    six-role body.
     """
-    uses = _SIX_USES.format(n=name)
+    body = _SIX_USES.format(n=name) if uses is None else uses
     if placement == "module":
+        if owning_class:
+            return prelude + "class O:\n" + _indent(class_prelude + body, "    "), "app.O"
         shape = "class O:\n" + _indent(class_prelude, "    ")
-        shape += "    class I:\n" + _indent(uses, "        ")
+        shape += "    class I:\n" + _indent(body, "        ")
         return prelude + shape, "app.O"
-    shape = "def outer():\n    class K:\n" + _indent(uses, "        ")
+    shape = "def outer():\n    class K:\n" + _indent(class_prelude + body, "        ")
     return prelude + shape, "app.outer"
 
 
@@ -8600,28 +9188,44 @@ def test_calls_and_loads_resolve_through_the_one_header_helper(
 
 
 def _analyze_six_use_source(root: Path, source: str) -> set[tuple[str, str, str, int]]:
-    _write(root, "lib.py", "def f():\n    pass\n\n\ndef helper():\n    pass\n")
-    _write(root, "other.py", "def f():\n    pass\n\n\ndef helper():\n    pass\n")
+    modules = "def f():\n    pass\n\n\ndef helper():\n    pass\n\n\ndef k():\n    pass\n"
+    _write(root, "lib.py", modules)
+    _write(root, "other.py", modules)
     _write(root, "app.py", source)
     return _use_sites(analyze_python_workspace(root))
 
 
 def _expected_by_role(
-    source: str, owner: str, name: str, targets: dict[str, str | None]
+    source: str,
+    owner: str,
+    name: str,
+    targets: dict[str, str | None | object],
+    role_owners: dict[str, str] | None = None,
+    unresolved: dict[str, str] | None = None,
 ) -> set[tuple[str, str, str, int]]:
-    """Expect each tagged use to hit its role's target, or stay unresolved on ``None``."""
+    """Expect each tagged use to hit its role's target, or stay unresolved on ``None``.
+
+    ``role_owners`` names the node a role's use is recorded on where that differs
+    from ``owner``, as a class body's method headers and decorators do.
+    ``unresolved`` overrides the unresolved text for a role whose expression is
+    not the bare name, and a role whose target is ``_NO_USE`` records nothing.
+    """
     expected = set()
     for number, text in enumerate(source.splitlines(), start=1):
         if "# " not in text:
             continue
         role = text.split("# ", 1)[1]
         target = targets[role]
+        if target is _NO_USE:
+            continue
         kind = (
             RelationshipKind.CALLS.value
             if role.endswith("call") and target is not None
             else RelationshipKind.REFERENCES.value
         )
-        expected.add((owner, kind, target or f"?{name}", number))
+        site_owner = owner if role_owners is None else role_owners.get(role, owner)
+        label = target if target is not None else f"?{(unresolved or {}).get(role, name)}"
+        expected.add((site_owner, kind, label, number))
     return expected
 
 
@@ -8764,6 +9368,1118 @@ def test_global_directive_without_a_write_keeps_the_module_route(tmp_path: Path)
         source, owner, "helper", _roles("lib.helper", "lib.helper")
     )
     assert ("app", RelationshipKind.CALLS.value, "lib.helper") in {site[:3] for site in sites}
+
+
+_CLASS_IMPORT_PRELUDE = "from lib import helper\n\n\n"
+
+_COMPOUND_CLASS_IMPORTS = [
+    "if flag:\n    from other import helper\n\n",
+    "for _ in ():\n    from other import helper\n\n",
+    "while flag:\n    from other import helper\n\n",
+    "try:\n    from other import helper\nexcept ImportError:\n    pass\n\n",
+    "with manager():\n    from other import helper\n\n",
+    "match subject:\n    case _:\n        from other import helper\n\n",
+]
+
+# A class body evaluates its own statements into the class node and each
+# method's decorators and defaults into that method, so the six-use roles split
+# across two nodes for a module-level class.
+_CLASS_BODY_ROLE_OWNERS: dict[str, dict[str, str]] = {
+    "module": {
+        "header-call": "app.O.m",
+        "header-load": "app.O.m",
+        "method-call": "app.O.m",
+        "method-load": "app.O.m",
+    },
+    "function": {},
+}
+
+# A class body's own unconditional import governs its body uses and the
+# headers that body evaluates, in either placement; a method body still
+# resolves through the enclosing module route.
+_CLASS_IMPORT_ROLES: dict[str, str | None] = _roles("other.helper", "lib.helper")
+
+_CLASS_HEADER_USES = (
+    "@helper  # method-decorator\n"
+    "def decorated(self):\n"
+    "    pass\n\n\n"
+    "@helper  # nested-decorator\n"
+    "class Inner(\n"
+    "    helper,  # nested-base\n"
+    "    metaclass=helper,  # nested-keyword\n"
+    "):\n"
+    "    pass\n"
+)
+
+_CLASS_HEADER_ROLE_OWNERS: dict[str, dict[str, str]] = {
+    "module": {"method-decorator": "app.O.decorated"},
+    "function": {},
+}
+
+_CLASS_HEADER_TARGETS: dict[str, str | None] = {
+    "method-decorator": None,
+    "nested-decorator": None,
+    "nested-base": None,
+    "nested-keyword": None,
+}
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+@pytest.mark.parametrize(
+    "class_prelude",
+    _COMPOUND_CLASS_IMPORTS,
+    ids=["if", "for", "while", "try", "with", "match"],
+)
+def test_conditional_class_import_leaves_later_class_body_uses_unresolved(
+    tmp_path: Path, placement: str, class_prelude: str
+) -> None:
+    # A class-body import inside any suite may not have run by the time a later
+    # class-body use sees the name, so that use names no definite binding. The
+    # method body runs outside the class namespace and keeps the module route.
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE, placement, "helper", class_prelude, owning_class=True
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _roles(None, "lib.helper"),
+        _CLASS_BODY_ROLE_OWNERS[placement],
+    )
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_direct_class_import_keeps_its_class_body_use_results(
+    tmp_path: Path, placement: str
+) -> None:
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE,
+        placement,
+        "helper",
+        "from other import helper\n\n",
+        owning_class=True,
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _CLASS_IMPORT_ROLES,
+        _CLASS_BODY_ROLE_OWNERS[placement],
+    )
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_later_direct_class_import_replaces_a_conditional_one(
+    tmp_path: Path, placement: str
+) -> None:
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE,
+        placement,
+        "helper",
+        "if flag:\n    from other import helper\n\nfrom other import helper\n\n",
+        owning_class=True,
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _CLASS_IMPORT_ROLES,
+        _CLASS_BODY_ROLE_OWNERS[placement],
+    )
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_deleting_a_conditional_class_import_reveals_the_module_route(
+    tmp_path: Path, placement: str
+) -> None:
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE,
+        placement,
+        "helper",
+        "if flag:\n    from other import helper\n\ndel helper\n\n",
+        owning_class=True,
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _roles("lib.helper", "lib.helper"),
+        _CLASS_BODY_ROLE_OWNERS[placement],
+    )
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_conditional_class_import_leaves_later_class_headers_unresolved(
+    tmp_path: Path, placement: str
+) -> None:
+    source, owner = _six_use_source(
+        _CLASS_IMPORT_PRELUDE,
+        placement,
+        "helper",
+        "if flag:\n    from other import helper\n\n",
+        owning_class=True,
+        uses=_CLASS_HEADER_USES,
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source,
+        owner,
+        "helper",
+        _CLASS_HEADER_TARGETS,
+        _CLASS_HEADER_ROLE_OWNERS[placement],
+    )
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+def test_conditional_class_import_leaves_neighbouring_uses_on_their_routes(
+    tmp_path: Path, placement: str
+) -> None:
+    # The conditional import makes only its own name uncertain, and only for the
+    # class body that holds it: a nested class body and a method body keep the
+    # enclosing route (class namespaces are not lexical), a name the class never
+    # imports keeps its route, and the use after the class is unaffected.
+    class_body = (
+        "if flag:\n"
+        "    from other import helper\n"
+        "class Inner:\n"
+        "    a = helper()  # nested-body\n"
+        "def m(self):\n"
+        "    helper()  # method\n"
+        "z = f()  # other-name\n"
+    )
+    if placement == "module":
+        source = "from lib import f, helper\n\n\nclass O:\n" + _indent(class_body, "    ")
+        source += "\n\nhelper()  # after\n"
+        owners = {"nested-body": "app.O", "method": "app.O.m", "other-name": "app.O"}
+        owners["after"] = "app"
+    else:
+        source = "from lib import f, helper\n\n\ndef outer():\n    class O:\n"
+        source += _indent(class_body, "        ") + "    helper()  # after\n"
+        owners = dict.fromkeys(("nested-body", "method", "other-name", "after"), "app.outer")
+    targets = {
+        "nested-body": "lib.helper",
+        "method": "lib.helper",
+        "other-name": "lib.f",
+        "after": "lib.helper",
+    }
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    expected = set()
+    for number, text in enumerate(source.splitlines(), start=1):
+        if "# " in text:
+            role = text.split("# ")[-1]
+            expected.add((owners[role], RelationshipKind.CALLS.value, targets[role], number))
+    assert {site for site in sites if site[2] != "?flag"} == expected
+
+
+# The write forms a class body can use for a name it declares global or
+# nonlocal: an import, an assignment, an augmented assignment, a walrus, a
+# ``for`` or ``with ... as`` target, and a deletion.
+_DIRECTIVE_WRITE_FORMS: dict[str, str] = {
+    "import": "from other import helper",
+    "assignment": "helper = object()",
+    "augmented-assignment": "helper += 1  # augmented-read",
+    "walrus": "value = (helper := object())",
+    "for-target": "for helper in ():\n    pass",
+    "with-target": "with manager() as helper:\n    pass",
+    "deletion": "del helper",
+}
+
+# ``nonlocal`` is valid only inside a function, so the module placement covers
+# the ``global`` form alone.
+_DIRECTIVE_PLACEMENTS = [
+    pytest.param("module", "global", id="module-global"),
+    pytest.param("function", "global", id="function-global"),
+    pytest.param("function", "nonlocal", id="function-nonlocal"),
+]
+
+_OWN_USE_BODY = (
+    "own = helper()  # own-call\n"
+    "from other import other_helper\n"
+    "kept = other_helper()  # kept-call\n"
+)
+
+_OWNING_FRAME_BODY = (
+    "own = helper()  # own-call\n"
+    "class Inner:\n"
+    "    inner = helper()  # nested-call\n"
+    "def method(self):\n"
+    "    return helper()  # method-call\n"
+    "def header(self, value=helper):  # header-load\n"
+    "    pass\n"
+)
+
+
+def _directive_write_source(
+    placement: str, directive: str, write: str, uses: str, *, conditional: bool
+) -> tuple[str, str]:
+    """Return the module source and the owner of a class body's own uses.
+
+    The body declares ``helper`` in ``directive``, uses it once before any
+    write, and then writes it by ``write`` -- wrapped in ``if flag:`` when
+    ``conditional`` -- before ``uses``. The function placement binds the name
+    in the enclosing function for ``nonlocal`` and relies on the module binding
+    for ``global``.
+    """
+    write_block = ("if flag:\n" + _indent(write, "    ")) if conditional else write + "\n"
+    body = "before = helper()  # before-call\n" + write_block + uses
+    prelude = "from lib import helper\nflag = True\ndef manager():\n    return None\n\n\n"
+    if placement == "module":
+        return prelude + "class K:\n" + _indent(f"{directive} helper\n" + body, "    "), "app.K"
+    owning = "    from lib import helper\n" if directive == "nonlocal" else ""
+    source = prelude + "def outer(flag):\n" + owning + "    class K:\n"
+    return source + _indent(f"{directive} helper\n" + body, "        "), "app.outer"
+
+
+def _analyze_directive_source(root: Path, source: str) -> set[tuple[str, str, str, int]]:
+    _write(root, "lib.py", "def helper():\n    pass\n")
+    _write(root, "other.py", "def helper():\n    pass\n\ndef other_helper():\n    pass\n")
+    _write(root, "app.py", source)
+    return _use_sites(analyze_python_workspace(root))
+
+
+def _tagged_sites(
+    source: str, sites: set[tuple[str, str, str, int]]
+) -> set[tuple[str, str, str, int]]:
+    """Keep only the use sites recorded on a ``# tag`` line."""
+    tagged = {number for number, text in enumerate(source.splitlines(), start=1) if "# " in text}
+    return {site for site in sites if site[3] in tagged}
+
+
+@pytest.mark.parametrize("placement,directive", _DIRECTIVE_PLACEMENTS)
+@pytest.mark.parametrize("write_form", sorted(_DIRECTIVE_WRITE_FORMS))
+@pytest.mark.parametrize("conditional", [False, True], ids=["definite", "conditional"])
+def test_directive_write_forms_leave_the_class_body_own_use_unresolved(
+    tmp_path: Path, placement: str, directive: str, write_form: str, conditional: bool
+) -> None:
+    # Every write form of a name the class declares global or nonlocal is a
+    # directive write, so the class body's own later use names no binding. A
+    # use before the write still resolves through the owning binding, the
+    # augmented read that precedes its own write keeps that binding, and a name
+    # the directive does not declare keeps its class import route.
+    source, owner = _directive_write_source(
+        placement,
+        directive,
+        _DIRECTIVE_WRITE_FORMS[write_form],
+        _OWN_USE_BODY,
+        conditional=conditional,
+    )
+    targets: dict[str, str | None] = {
+        "before-call": "lib.helper",
+        "own-call": None,
+        "kept-call": "other.other_helper",
+    }
+    if write_form == "augmented-assignment":
+        targets["augmented-read"] = "lib.helper"
+
+    sites = _analyze_directive_source(tmp_path, source)
+
+    assert _tagged_sites(source, sites) == _expected_by_role(source, owner, "helper", targets)
+
+
+@pytest.mark.parametrize("placement,directive", _DIRECTIVE_PLACEMENTS)
+@pytest.mark.parametrize("conditional", [False, True], ids=["definite", "conditional"])
+def test_directive_import_in_a_class_body_invalidates_the_owning_frame(
+    tmp_path: Path, placement: str, directive: str, conditional: bool
+) -> None:
+    # An import under the directive writes the owning binding instead of a
+    # class local, so the class body's own use, its nested class body, its
+    # methods and headers, and the use after the class in the owning function
+    # are all unresolved. A module-level class writes the module binding, so
+    # the module-level use and the sibling function are unresolved too, while a
+    # class inside a function leaves the module binding alone.
+    source, owner = _directive_write_source(
+        placement,
+        directive,
+        _DIRECTIVE_WRITE_FORMS["import"],
+        _OWNING_FRAME_BODY,
+        conditional=conditional,
+    )
+    targets: dict[str, str | None] = {
+        "before-call": "lib.helper",
+        "own-call": None,
+        "nested-call": None,
+        "method-call": None,
+        "header-load": None,
+        "after-call": None,
+    }
+    if placement == "module":
+        source += "\n\nafter = helper()  # after-call\n"
+        source += "\n\ndef sibling():\n    return helper()  # sibling-call\n"
+        role_owners = {
+            "method-call": "app.K.method",
+            "header-load": "app.K.header",
+            "after-call": "app",
+        }
+        targets["sibling-call"] = None
+    else:
+        source += "    return helper()  # after-call\n"
+        source += "\n\ndef sibling():\n    return helper()  # sibling-call\n"
+        role_owners = {"after-call": owner}
+        targets["sibling-call"] = "lib.helper"
+    role_owners["sibling-call"] = "app.sibling"
+
+    sites = _analyze_directive_source(tmp_path, source)
+
+    assert _tagged_sites(source, sites) == _expected_by_role(
+        source, owner, "helper", targets, role_owners
+    )
+
+
+_NO_USE = object()
+"""Marks a tagged use that a placement does not record at all.
+
+A name the class binds dynamically is an ordinary local at that position, so
+the use is suppressed rather than reported as unresolved.
+"""
+
+_CLASS_BODY_IMPORT = "from other import helper\n\n"
+
+_CLASS_BODY_USE_OWNERS: dict[str, dict[str, str]] = {
+    # A module class body evaluates its method headers and annotations into the
+    # method node, and the rest of the body into the class node.
+    "module": {
+        "method-default-call": "app.O.m",
+        "method-decorator": "app.O.decorated",
+        "parameter-annotation": "app.O.m",
+        "return-annotation": "app.O.m",
+        "quoted-annotation": "app.O.m",
+        "method-call": "app.O.m",
+        "default-comprehension-call": "app.O.m",
+        "default-first-iterable-call": "app.O.m",
+        "default-lambda-call": "app.O.m",
+        "default-lambda-default-call": "app.O.m",
+        "decorator-comprehension-call": "app.O.decorated",
+        "decorator-lambda-call": "app.O.decorated",
+    },
+    "function": {},
+}
+
+_HEADER_USES = (
+    "def m(\n"
+    "    self,\n"
+    "    a=helper(),  # method-default-call\n"
+    "):\n"
+    "    pass\n\n\n"
+    "@helper  # method-decorator\n"
+    "def decorated(self):\n"
+    "    pass\n\n\n"
+    "@helper  # nested-decorator\n"
+    "class Inner(\n"
+    "    helper,  # nested-base\n"
+    "    metaclass=helper,  # nested-keyword\n"
+    "):\n"
+    "    pass\n"
+)
+
+_HEADER_ROLES = (
+    "method-default-call",
+    "method-decorator",
+    "nested-decorator",
+    "nested-base",
+    "nested-keyword",
+)
+
+_LIST_COMPREHENSION_USES = (
+    "values = [\n"
+    "    helper()  # element-call\n"
+    "    for first in helper()  # first-iterable-call\n"
+    "    if helper()  # filter-call\n"
+    "    for second in helper()  # later-iterable-call\n"
+    "]\n"
+)
+
+_SET_COMPREHENSION_USES = (
+    "values = {\n"
+    "    helper()  # element-call\n"
+    "    for first in helper()  # first-iterable-call\n"
+    "    if helper()  # filter-call\n"
+    "    for second in helper()  # later-iterable-call\n"
+    "}\n"
+)
+
+_DICT_COMPREHENSION_USES = (
+    "values = {\n"
+    "    helper(): helper()  # element-call\n"
+    "    for first in helper()  # first-iterable-call\n"
+    "    if helper()  # filter-call\n"
+    "    for second in helper()  # later-iterable-call\n"
+    "}\n"
+)
+
+_GENERATOR_USES = (
+    "values = (\n"
+    "    helper()  # element-call\n"
+    "    for first in helper()  # first-iterable-call\n"
+    "    if helper()  # filter-call\n"
+    "    for second in helper()  # later-iterable-call\n"
+    ")\n"
+)
+
+_PLAIN_IMPORT_COMPREHENSION_USES = (
+    "values = [\n"
+    "    lib.helper()  # element-call\n"
+    "    for first in lib.helper()  # first-iterable-call\n"
+    "]\n"
+)
+
+_LAMBDA_USES = (
+    "first = lambda: helper()  # body-call\nsecond = lambda value=helper(): value  # default-call\n"
+)
+
+# A lambda body and a comprehension's result inside a header the class body
+# evaluates are nested scopes, so they skip the class namespace; the
+# comprehension's first iterable and a lambda default run with the header.
+_HEADER_NESTED_SCOPE_USES = (
+    "def m(\n"
+    "    self,\n"
+    "    a=[helper() for _ in ()],  # default-comprehension-call\n"
+    "    b=[item for item in helper()],  # default-first-iterable-call\n"
+    "    c=lambda: helper(),  # default-lambda-call\n"
+    "    d=lambda value=helper(): value,  # default-lambda-default-call\n"
+    "):\n"
+    "    pass\n\n\n"
+    "@deco([helper() for _ in ()])  # decorator-comprehension-call\n"
+    "@deco(lambda: helper())  # decorator-lambda-call\n"
+    "def decorated(self):\n"
+    "    pass\n\n\n"
+    "@deco([helper() for _ in ()])  # nested-decorator-comprehension-call\n"
+    "class Inner(\n"
+    "    *[helper() for _ in ()],  # nested-base-comprehension-call\n"
+    "    metaclass=lambda *args: helper(),  # nested-keyword-lambda-call\n"
+    "    option=[helper() for _ in ()],  # nested-keyword-comprehension-call\n"
+    "):\n"
+    "    pass\n"
+)
+
+_HEADER_NESTED_SCOPE_TARGETS: dict[str, str | None] = {
+    "default-comprehension-call": "lib.helper",
+    "default-first-iterable-call": "other.helper",
+    "default-lambda-call": "lib.helper",
+    "default-lambda-default-call": "other.helper",
+    "decorator-comprehension-call": "lib.helper",
+    "decorator-lambda-call": "lib.helper",
+    "nested-decorator-comprehension-call": "lib.helper",
+    "nested-base-comprehension-call": "lib.helper",
+    "nested-keyword-lambda-call": "lib.helper",
+    "nested-keyword-comprehension-call": "lib.helper",
+}
+
+# A function body defined anywhere in the class body skips the class namespace,
+# whichever compound statement holds the definition, while that definition's
+# decorators and defaults run in the class body.
+_NESTED_FUNCTION_USES = (
+    "if flag:\n"
+    "    def in_if():\n"
+    "        return helper()  # if-call\n"
+    "else:\n"
+    "    def in_else():\n"
+    "        return helper()  # else-call\n"
+    "try:\n"
+    "    def in_try():\n"
+    "        return helper()  # try-call\n"
+    "except Exception:\n"
+    "    def in_except():\n"
+    "        return helper()  # except-call\n"
+    "finally:\n"
+    "    def in_finally():\n"
+    "        return helper()  # finally-call\n"
+    "with context:\n"
+    "    def in_with():\n"
+    "        return helper()  # with-call\n"
+    "for _ in ():\n"
+    "    def in_for():\n"
+    "        return helper()  # for-call\n"
+    "while flag:\n"
+    "    async def in_while():\n"
+    "        return helper()  # async-while-call\n"
+    "match flag:\n"
+    "    case _:\n"
+    "        def in_match():\n"
+    "            return helper()  # match-call\n"
+    "if flag:\n"
+    "    def outer_function():\n"
+    "        def inner_function():\n"
+    "            return helper()  # function-in-function-call\n"
+    "        return inner_function\n"
+    "class Nested:\n"
+    "    if flag:\n"
+    "        def in_nested_class():\n"
+    "            return helper()  # nested-class-function-call\n"
+    "if flag:\n"
+    "    @helper  # header-decorator\n"
+    "    def decorated(\n"
+    "        value=helper(),  # header-default-call\n"
+    "    ):\n"
+    "        pass\n"
+)
+
+_NESTED_FUNCTION_BODY_ROLES = (
+    "if-call",
+    "else-call",
+    "try-call",
+    "except-call",
+    "finally-call",
+    "with-call",
+    "for-call",
+    "async-while-call",
+    "match-call",
+    "function-in-function-call",
+    "nested-class-function-call",
+)
+
+_PLAIN_IMPORT_OVER_AN_ALIAS = "import lib as other\n\n\n"
+
+_PLAIN_IMPORT_BODY_USES = (
+    "first = other.helper()  # body-call\nsecond = other.helper  # body-load\n"
+)
+
+_PLAIN_IMPORT_HEADER_USES = (
+    "def m(\n"
+    "    self,\n"
+    "    a=other.helper(),  # method-default-call\n"
+    "):\n"
+    "    pass\n\n\n"
+    "@other.helper  # method-decorator\n"
+    "def decorated(self):\n"
+    "    pass\n\n\n"
+    "@other.helper  # nested-decorator\n"
+    "class Inner(\n"
+    "    other.helper,  # nested-base\n"
+    "    metaclass=other.helper,  # nested-keyword\n"
+    "):\n"
+    "    pass\n"
+)
+
+_PLAIN_IMPORT_NESTED_SCOPE_USES = (
+    "class Inner:\n"
+    "    nested = other.helper()  # nested-call\n\n"
+    "def m(self):\n"
+    "    return other.helper()  # method-call\n\n"
+    "values = [\n"
+    "    other.helper()  # element-call\n"
+    "    for first in other.helper()  # first-iterable-call\n"
+    "]\n"
+    "later = lambda: other.helper()  # lambda-body-call\n"
+)
+
+_COMPREHENSION_TARGETS: dict[str, str | None] = {
+    "element-call": "lib.helper",
+    "first-iterable-call": "other.helper",
+    "filter-call": "lib.helper",
+    "later-iterable-call": "lib.helper",
+}
+
+_CONDITIONAL_COMPREHENSION_TARGETS: dict[str, str | None] = {
+    "element-call": "lib.helper",
+    "first-iterable-call": None,
+    "filter-call": "lib.helper",
+    "later-iterable-call": "lib.helper",
+}
+
+# Each case names the class-body statements that precede the tagged uses and
+# the answer every tagged use gets in a module-level class and in a class
+# defined inside a function. ``targets_by_placement`` overrides the shared
+# answer where the two placements legitimately differ, and ``_NO_USE`` marks a
+# use a class-local binding suppresses entirely.
+_CLASS_BODY_CASES: dict[str, dict] = {
+    "body-uses-class-import": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": "first = helper()  # body-call\nsecond = helper  # body-load\n",
+        "targets": {"body-call": "other.helper", "body-load": "other.helper"},
+    },
+    "body-uses-class-import-without-outer-binding": {
+        "prelude": "",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": "first = helper()  # body-call\nsecond = helper  # body-load\n",
+        "targets": {"body-call": "other.helper", "body-load": "other.helper"},
+    },
+    "aliased-class-import": {
+        "name": "k",
+        "labels": ("k", "h"),
+        "prelude": "from lib import k as h\n\n\n",
+        "class_prelude": "from other import k as h\n\n",
+        "uses": "first = h()  # body-call\nsecond = h  # body-load\n",
+        "targets": {"body-call": "other.k", "body-load": "other.k"},
+    },
+    "headers-use-class-import": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _HEADER_USES,
+        "targets": dict.fromkeys(_HEADER_ROLES, "other.helper"),
+    },
+    "headers-keep-the-enclosing-route": {
+        "class_prelude": "",
+        "uses": _HEADER_USES,
+        "targets": dict.fromkeys(_HEADER_ROLES, "lib.helper"),
+    },
+    "assignment-before-a-class-import": {
+        "class_prelude": "helper = 1\n\n",
+        "uses": (
+            "first = helper()  # assigned-call\n"
+            "from other import helper\n\n"
+            "second = helper()  # imported-call\n"
+        ),
+        "targets": {"assigned-call": None, "imported-call": "other.helper"},
+        "targets_by_placement": {
+            "function": {"assigned-call": _NO_USE, "imported-call": "other.helper"},
+        },
+    },
+    "assignment-after-a-class-import": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": (
+            "helper = 1\n\n"
+            "first = helper()  # assigned-call\n"
+            "from other import helper\n\n"
+            "second = helper()  # restored-call\n"
+            "del helper\n\n"
+            "third = helper()  # deleted-call\n"
+        ),
+        "targets": {
+            "assigned-call": None,
+            "restored-call": "other.helper",
+            "deleted-call": "lib.helper",
+        },
+        "targets_by_placement": {
+            "function": {
+                "assigned-call": _NO_USE,
+                "restored-call": "other.helper",
+                "deleted-call": "lib.helper",
+            },
+        },
+    },
+    "for-target-blocks-the-class-import": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": "for helper in ():\n    pass\n\nfirst = helper()  # assigned-call\n",
+        "targets": {"assigned-call": None},
+        "targets_by_placement": {"function": {"assigned-call": _NO_USE}},
+    },
+    "walrus-target-blocks-the-class-import": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": "first = (helper := 1)\n\nsecond = helper()  # assigned-call\n",
+        "targets": {"assigned-call": None},
+        "targets_by_placement": {"function": {"assigned-call": _NO_USE}},
+    },
+    "with-target-blocks-the-class-import": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": "with open('file') as helper:\n    pass\n\nfirst = helper()  # assigned-call\n",
+        "targets": {"assigned-call": None},
+        "targets_by_placement": {"function": {"assigned-call": _NO_USE}},
+    },
+    "augmented-assignment-keeps-the-class-import-read": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": "helper += 1  # augmented-read\n\nfirst = helper()  # assigned-call\n",
+        "targets": {"augmented-read": "other.helper", "assigned-call": None},
+        "targets_by_placement": {
+            "function": {"augmented-read": "other.helper", "assigned-call": _NO_USE},
+        },
+    },
+    "deletion-reveals-the-enclosing-route": {
+        "class_prelude": _CLASS_BODY_IMPORT + "del helper\n\n",
+        "uses": "first = helper()  # body-call\n",
+        "targets": {"body-call": "lib.helper"},
+    },
+    "nested-class-body-and-method-body": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": (
+            "class Inner:\n"
+            "    nested = helper()  # nested-call\n\n"
+            "def m(self):\n"
+            "    return helper()  # method-call\n\n"
+            "first = helper()  # body-call\n"
+        ),
+        "targets": {
+            "nested-call": "lib.helper",
+            "method-call": "lib.helper",
+            "body-call": "other.helper",
+        },
+    },
+    "directive-import-installs-no-class-route": {
+        "class_prelude": {
+            "module": "global helper\n\nfrom other import helper\n\n",
+            "function": "nonlocal helper\n\nfrom other import helper\n\n",
+        },
+        "function_prelude": "from lib import helper\n\n",
+        "uses": "first = helper()  # body-call\n",
+        "targets": {"body-call": None},
+    },
+    "global-directive-import-in-a-class-inside-a-function": {
+        "class_prelude": "global helper\n\nfrom other import helper\n\n",
+        "uses": "first = helper()  # body-call\n",
+        "targets": {"body-call": None},
+    },
+    "list-comprehension": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _LIST_COMPREHENSION_USES,
+        "targets": _COMPREHENSION_TARGETS,
+    },
+    "set-comprehension": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _SET_COMPREHENSION_USES,
+        "targets": _COMPREHENSION_TARGETS,
+    },
+    "dict-comprehension": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _DICT_COMPREHENSION_USES,
+        "targets": _COMPREHENSION_TARGETS,
+    },
+    "generator-expression": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _GENERATOR_USES,
+        "targets": _COMPREHENSION_TARGETS,
+    },
+    "comprehension-after-a-conditional-class-import": {
+        "class_prelude": "if flag:\n    from other import helper\n\n",
+        "uses": _LIST_COMPREHENSION_USES,
+        "targets": _CONDITIONAL_COMPREHENSION_TARGETS,
+    },
+    "comprehension-after-a-class-local-assignment": {
+        "class_prelude": "helper = 1\n\n",
+        "uses": _LIST_COMPREHENSION_USES,
+        "targets": {**_COMPREHENSION_TARGETS, "first-iterable-call": None},
+        "targets_by_placement": {
+            "function": {**_COMPREHENSION_TARGETS, "first-iterable-call": _NO_USE},
+        },
+    },
+    "plain-import-comprehension": {
+        "class_prelude": "import other as lib\n\n",
+        "uses": _PLAIN_IMPORT_COMPREHENSION_USES,
+        "targets": {"element-call": None, "first-iterable-call": "other.helper"},
+        "unresolved": {"element-call": "lib.helper"},
+    },
+    "lambda-body-and-default": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _LAMBDA_USES,
+        "targets": {"body-call": "lib.helper", "default-call": "other.helper"},
+    },
+    "lambda-body-without-an-outer-binding": {
+        "prelude": "",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _LAMBDA_USES,
+        "targets": {"body-call": None, "default-call": "other.helper"},
+    },
+    "lambda-after-a-class-local-assignment": {
+        "class_prelude": "helper = 1\n\n",
+        "uses": _LAMBDA_USES,
+        "targets": {"body-call": "lib.helper", "default-call": None},
+        "targets_by_placement": {
+            "function": {"body-call": "lib.helper", "default-call": _NO_USE},
+        },
+    },
+    "method-annotations": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": (
+            "def m(\n"
+            "    self,\n"
+            "    value: helper,  # parameter-annotation\n"
+            ") -> helper:  # return-annotation\n"
+            "    pass\n"
+        ),
+        "targets": {
+            "parameter-annotation": "other.helper",
+            "return-annotation": "other.helper",
+        },
+    },
+    "quoted-method-annotation": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": "def m(self) -> 'helper':  # quoted-annotation\n    pass\n",
+        "targets": {"quoted-annotation": None},
+    },
+    "later-class-import-replaces-a-conditional-one": {
+        "class_prelude": "if flag:\n    from other import helper\n\nfrom other import helper\n\n",
+        "uses": "first = helper()  # body-call\n",
+        "targets": {"body-call": "other.helper"},
+    },
+    "header-nested-scopes-keep-the-enclosing-route": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _HEADER_NESTED_SCOPE_USES,
+        "targets": _HEADER_NESTED_SCOPE_TARGETS,
+    },
+    "header-nested-scopes-without-an-outer-binding": {
+        "prelude": "",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _HEADER_NESTED_SCOPE_USES,
+        "targets": {
+            role: None if target == "lib.helper" else target
+            for role, target in _HEADER_NESTED_SCOPE_TARGETS.items()
+        },
+    },
+    "class-import-over-an-outer-conditional-rebind": {
+        # A module that rebinds the name conditionally leaves it uncertain
+        # outside the class, but the class body's own import still decides the
+        # uses that body evaluates.
+        "prelude": "from lib import helper\nif flag:\n    helper = 1\n\n\n",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": (
+            "first = helper()  # body-call\n"
+            "second = helper  # body-load\n"
+            "def m(\n"
+            "    self,\n"
+            "    a=helper(),  # method-default-call\n"
+            "):\n"
+            "    pass\n"
+        ),
+        "targets": {
+            "body-call": "other.helper",
+            "body-load": "other.helper",
+            "method-default-call": "other.helper",
+        },
+    },
+    "class-import-over-an-outer-global-write": {
+        "prelude": (
+            "from lib import helper\n\n\nclass Writer:\n    global helper\n    helper = 1\n\n\n"
+        ),
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": (
+            "first = helper()  # body-call\n"
+            "second = helper  # body-load\n"
+            "def m(\n"
+            "    self,\n"
+            "    a=helper(),  # method-default-call\n"
+            "):\n"
+            "    pass\n"
+        ),
+        "targets": {
+            "body-call": "other.helper",
+            "body-load": "other.helper",
+            "method-default-call": "other.helper",
+        },
+    },
+    "conditional-class-import-over-an-outer-conditional-rebind": {
+        "prelude": "from lib import helper\nif flag:\n    helper = 1\n\n\n",
+        "class_prelude": "if flag:\n    from other import helper\n\n",
+        "uses": "first = helper()  # body-call\nsecond = helper  # body-load\n",
+        "targets": {"body-call": None, "body-load": None},
+    },
+    "class-import-before-a-later-module-import": {
+        # The class body and its headers run before the module rebinds the
+        # name, so only the class import can decide them.
+        "prelude": "",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": (
+            "def m(\n"
+            "    self,\n"
+            "    a=helper(),  # method-default-call\n"
+            "):\n"
+            "    pass\n\n"
+            "first = helper()  # body-call\n"
+        ),
+        "postlude": "\n\nfrom lib import helper\n",
+        "targets": {"method-default-call": "other.helper", "body-call": "other.helper"},
+    },
+    "nested-function-in-a-compound-statement-after-an-assignment": {
+        # A function body never sees the class namespace, so the class-local
+        # assignment does not hide the module import from it.
+        "class_prelude": "helper = 1\n\n",
+        "uses": "if True:\n    def f():\n        return helper()  # nested-function-call\n",
+        "targets": {"nested-function-call": "lib.helper"},
+    },
+    "nested-function-bodies-keep-the-enclosing-route": {
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _NESTED_FUNCTION_USES,
+        "targets": {
+            **dict.fromkeys(_NESTED_FUNCTION_BODY_ROLES, "lib.helper"),
+            "header-decorator": "other.helper",
+            "header-default-call": "other.helper",
+        },
+    },
+    "nested-function-bodies-without-an-outer-binding": {
+        "prelude": "",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": _NESTED_FUNCTION_USES,
+        "targets": {
+            **dict.fromkeys(_NESTED_FUNCTION_BODY_ROLES, None),
+            "header-decorator": "other.helper",
+            "header-default-call": "other.helper",
+        },
+    },
+    "plain-import-over-an-outer-alias": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other\n\n",
+        "uses": _PLAIN_IMPORT_BODY_USES,
+        "targets": {"body-call": "other.helper", "body-load": "other.helper"},
+    },
+    "plain-import-as-itself-over-an-outer-alias": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other as other\n\n",
+        "uses": _PLAIN_IMPORT_BODY_USES,
+        "targets": {"body-call": "other.helper", "body-load": "other.helper"},
+    },
+    "plain-import-without-an-outer-binding": {
+        "prelude": "",
+        "class_prelude": "import other\n\n",
+        "uses": _PLAIN_IMPORT_BODY_USES,
+        "targets": {"body-call": "other.helper", "body-load": "other.helper"},
+    },
+    "plain-import-headers": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other\n\n",
+        "uses": _PLAIN_IMPORT_HEADER_USES,
+        "targets": dict.fromkeys(_HEADER_ROLES, "other.helper"),
+    },
+    "plain-import-nested-scopes-keep-the-enclosing-route": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other\n\n",
+        "uses": _PLAIN_IMPORT_NESTED_SCOPE_USES,
+        "targets": {
+            "nested-call": "lib.helper",
+            "method-call": "lib.helper",
+            "element-call": "lib.helper",
+            "first-iterable-call": "other.helper",
+            "lambda-body-call": "lib.helper",
+        },
+    },
+    "plain-import-then-assignment-and-deletion": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "import other\n\n",
+        "uses": (
+            "other = 1\n\n"
+            "first = other.helper()  # assigned-call\n"
+            "import other\n\n"
+            "second = other.helper()  # restored-call\n"
+            "del other\n\n"
+            "third = other.helper()  # deleted-call\n"
+        ),
+        "targets": {
+            "assigned-call": None,
+            "restored-call": "other.helper",
+            "deleted-call": "lib.helper",
+        },
+        "targets_by_placement": {
+            "function": {
+                "assigned-call": _NO_USE,
+                "restored-call": "other.helper",
+                "deleted-call": "lib.helper",
+            },
+        },
+        "unresolved": {"assigned-call": "other.helper"},
+    },
+    "conditional-plain-import": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "if flag:\n    import other\n\n",
+        "uses": "first = other.helper()  # body-call\n",
+        "targets": {"body-call": None},
+        "unresolved": {"body-call": "other.helper"},
+    },
+    "directive-plain-import-installs-no-class-route": {
+        "prelude": _PLAIN_IMPORT_OVER_AN_ALIAS,
+        "class_prelude": "global other\n\nimport other\n\n",
+        "uses": "first = other.helper()  # body-call\n",
+        "targets": {"body-call": None},
+        "unresolved": {"body-call": "other.helper"},
+    },
+}
+
+
+def _class_body_source(
+    placement: str,
+    *,
+    prelude: str,
+    class_prelude: str,
+    uses: str,
+    function_prelude: str = "",
+    postlude: str = "",
+) -> tuple[str, str]:
+    """Return the module source and owning node for one class-body placement.
+
+    The ``module`` placement defines ``class O`` at module level; the
+    ``function`` placement defines ``class K`` inside ``def outer()``, where
+    ``function_prelude`` runs before the class statement. ``postlude`` follows
+    the class or function statement at module level.
+    """
+    if placement == "module":
+        return prelude + "class O:\n" + _indent(class_prelude + uses, "    ") + postlude, "app.O"
+    class_body = "class K:\n" + _indent(class_prelude + uses, "    ")
+    function = "def outer():\n" + _indent(function_prelude + class_body, "    ")
+    return prelude + function + postlude, "app.outer"
+
+
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+@pytest.mark.parametrize("case", sorted(_CLASS_BODY_CASES))
+def test_a_class_body_import_governs_the_uses_that_body_evaluates(
+    tmp_path: Path, placement: str, case: str
+) -> None:
+    # One rule covers both placements: only a use Python evaluates directly in
+    # the class body -- including the headers that body runs -- consults the
+    # class body's own unconditional import. Comprehension bodies, filters,
+    # later iterables, lambda bodies, method bodies and nested class bodies
+    # resolve through the enclosing route, a class-local dynamic binding leaves
+    # the use unresolved, and a directive keeps deciding its own names.
+    spec = _CLASS_BODY_CASES[case]
+    class_prelude = spec["class_prelude"]
+    if isinstance(class_prelude, dict):
+        class_prelude = class_prelude[placement]
+    targets = spec["targets"]
+    if "targets_by_placement" in spec:
+        targets = spec["targets_by_placement"].get(placement, targets)
+    source, owner = _class_body_source(
+        placement,
+        prelude=spec.get("prelude", "from lib import helper\n\n\n"),
+        class_prelude=class_prelude,
+        uses=spec["uses"],
+        function_prelude=spec.get("function_prelude", ""),
+        postlude=spec.get("postlude", ""),
+    )
+    name = spec.get("name", "helper")
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {
+        site for site in sites if site[2].endswith(spec.get("labels", (name,)))
+    } == _expected_by_role(
+        source,
+        owner,
+        name,
+        targets,
+        _CLASS_BODY_USE_OWNERS[placement],
+        spec.get("unresolved"),
+    )
+
+
+_TYPE_ALIAS_CASES: dict[str, tuple[str, dict[str, object]]] = {
+    "class-import": (_CLASS_BODY_IMPORT, {"module": "other.helper", "function": "other.helper"}),
+    # A class-local assignment hides the module import from the alias; a
+    # module class leaves the use unresolved and a function class treats the
+    # name as an ordinary dynamic local.
+    "class-local-assignment": ("helper = 1\n\n", {"module": None, "function": _NO_USE}),
+}
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax requires Python 3.12")
+@pytest.mark.parametrize("placement", _PLACEMENTS)
+@pytest.mark.parametrize("case", sorted(_TYPE_ALIAS_CASES))
+def test_a_class_body_type_alias_sees_the_class_namespace(
+    tmp_path: Path, placement: str, case: str
+) -> None:
+    # A ``type`` alias value is an annotation scope, which can see the names
+    # of the class that defines it, unlike a function or lambda body.
+    class_prelude, targets = _TYPE_ALIAS_CASES[case]
+    source, owner = _class_body_source(
+        placement,
+        prelude="from lib import helper\n\n\n",
+        class_prelude=class_prelude,
+        uses="type Alias = helper  # alias-load\n",
+    )
+
+    sites = _analyze_six_use_source(tmp_path, source)
+
+    assert {site for site in sites if site[2].endswith("helper")} == _expected_by_role(
+        source, owner, "helper", {"alias-load": targets[placement]}
+    )
 
 
 def _located_nodes(result: AnalysisResult, path: str) -> list:

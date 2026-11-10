@@ -35,6 +35,8 @@ through composition rather than a direct static edge.
   and reporting consumers.
 - `project-acquisition` points to `source-presentation` for the immutable
   captured source bytes a comparison returns.
+- `project-acquisition` points to `command-interface` for the `minotaur`
+  package module its named imports come from.
 
 These directions describe the selected proof universe, not required runtime
 dependencies or architectural policy.

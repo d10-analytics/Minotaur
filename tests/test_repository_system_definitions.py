@@ -210,6 +210,7 @@ _CONNECTIONS = [
         "system: analysis-platform",
         ("calls", "imports", "references"),
     ),
+    ("system: project-acquisition", "system: command-interface", ("imports",)),
     (
         "system: project-acquisition",
         "system: graph-contract",
@@ -226,6 +227,7 @@ _CONNECTIONS = [
         "system: analysis-platform",
         ("calls", "imports", "references"),
     ),
+    ("system: query-and-system-reporting", "system: command-interface", ("imports",)),
     (
         "system: query-and-system-reporting",
         "system: graph-contract",
@@ -333,7 +335,7 @@ def test_root_discovered_system_map_has_exact_manifest_and_observed_connections(
         "count": 0,
         "paths": [],
     }
-    assert len(payload["connections"]) == 28
+    assert len(payload["connections"]) == 30
     assert [
         (item["source_category"], item["target_category"], tuple(item["kinds"]))
         for item in payload["connections"]

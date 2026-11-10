@@ -728,9 +728,9 @@ def test_system_queries_escape_hostile_system_names_and_files(
         [
             consumers.splitlines()[0],
             "consumer.py (system: plain)  calls: app.api.offered (app/api.py); "
-            "imports: app.api.offered (app/api.py)",
+            "imports: app.api (app/api.py), app.api.offered (app/api.py)",
             "rtl\\u202eevil.py (no_system)  calls: app.api.offered (app/api.py); "
-            "imports: app.api.offered (app/api.py)",
+            "imports: app.api (app/api.py), app.api.offered (app/api.py)",
         ],
     )
 
@@ -742,7 +742,7 @@ def test_system_queries_escape_hostile_system_names_and_files(
         [
             plain_consumers.splitlines()[0],
             "app/c1\\x9bcsi.py (system: zone\\u202e)  calls: consumer.external (consumer.py); "
-            "imports: consumer.external (consumer.py)",
+            "imports: consumer (consumer.py), consumer.external (consumer.py)",
         ],
     )
 
@@ -754,7 +754,7 @@ def test_system_queries_escape_hostile_system_names_and_files(
         [
             deps_zone.splitlines()[0],
             "system: plain  calls: consumer.external (consumer.py); "
-            "imports: consumer.external (consumer.py)",
+            "imports: consumer (consumer.py), consumer.external (consumer.py)",
         ],
     )
 
@@ -764,7 +764,7 @@ def test_system_queries_escape_hostile_system_names_and_files(
         [
             deps_plain.splitlines()[0],
             "system: zone\\u202e  calls: app.api.offered (app/api.py); "
-            "imports: app.api.offered (app/api.py)",
+            "imports: app.api (app/api.py), app.api.offered (app/api.py)",
         ],
     )
 
@@ -854,9 +854,9 @@ def test_system_queries_select_only_fixed_kinds(
             "consumers",
             [
                 "consumer.py (system: plain)  calls: app.api.offered (app/api.py); "
-                "imports: app.api.offered (app/api.py)",
+                "imports: app.api (app/api.py), app.api.offered (app/api.py)",
                 "rtl\\u202eevil.py (no_system)  calls: app.api.offered (app/api.py); "
-                "imports: app.api.offered (app/api.py)",
+                "imports: app.api (app/api.py), app.api.offered (app/api.py)",
             ],
         ),
     ):
@@ -873,7 +873,7 @@ def test_system_queries_select_only_fixed_kinds(
         [
             out.splitlines()[0],
             "system: zone\\u202e  calls: app.api.offered (app/api.py); "
-            "imports: app.api.offered (app/api.py)",
+            "imports: app.api (app/api.py), app.api.offered (app/api.py)",
         ],
     )
 
@@ -896,9 +896,9 @@ def test_system_queries_escape_hand_edited_labels(
         [
             consumers.splitlines()[0],
             "consumer.py (system: plain)  calls: app.api.\\u202eviolet (app/c1\\x9bcsi.py); "
-            "imports: app.api.\\u202eviolet (app/c1\\x9bcsi.py)",
+            "imports: app.api (app/api.py), app.api.\\u202eviolet (app/c1\\x9bcsi.py)",
             "rtl\\u202eevil.py (no_system)  calls: app.api.\\u202eviolet (app/c1\\x9bcsi.py); "
-            "imports: app.api.\\u202eviolet (app/c1\\x9bcsi.py)",
+            "imports: app.api (app/api.py), app.api.\\u202eviolet (app/c1\\x9bcsi.py)",
         ],
     )
 
@@ -908,7 +908,7 @@ def test_system_queries_escape_hand_edited_labels(
         [
             deps_plain.splitlines()[0],
             "system: zone\\u202e  calls: app.api.\\u202eviolet (app/c1\\x9bcsi.py); "
-            "imports: app.api.\\u202eviolet (app/c1\\x9bcsi.py)",
+            "imports: app.api (app/api.py), app.api.\\u202eviolet (app/c1\\x9bcsi.py)",
         ],
     )
 

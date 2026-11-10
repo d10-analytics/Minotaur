@@ -22,8 +22,10 @@ FORMAT_REFERENCE = ROOT / "docs/formats/system-definition-v1.md"
 PURPOSE = ROOT / "docs/concepts/purpose.md"
 QUERY_REFERENCE = ROOT / "docs/guides/query-reference.md"
 README = ROOT / "README.md"
+ANALYSIS_PYTHON_README = ROOT / "docs/systems/analysis-python/README.md"
 SYSTEM_WALKTHROUGH = ROOT / "examples/system-walkthrough/README.md"
 GRAPH_FORMAT_REFERENCE = ROOT / "docs/formats/minotaur-graph-v1.md"
+STRUCTURAL_ANALYSIS_CONTRACT = ROOT / "docs/concepts/structural-analysis-contract.md"
 
 
 def _collapsed(path: Path) -> str:
@@ -134,10 +136,21 @@ def test_query_guide_documents_strict_loading_and_absent_file_warnings() -> None
 
 
 REEXPORT_BOUNDARY = (
-    "Re-exports are not resolved: `from pkg import f` records an unresolved "
-    "`pkg.f` reference with no module-layer `imports` consumer, so "
-    "`pkg/__init__.py` never links a name that another module actually defines."
+    "Re-exports resolve only to the module: `from pkg import f` records an "
+    "`imports` edge from the importing file to `pkg`, so `query consumers` for "
+    "`pkg/__init__.py` lists the importer while `f` itself stays a single "
+    "unresolved `pkg.f` reference."
 )
+
+# The claim the three documents must not keep beside the reworded sentence: a
+# re-export links the package module, so a description that reports the name
+# alone as the whole fact is wrong. Each document wraps the old clause across a
+# line break, so the absence check reads the collapsed text, not raw bytes.
+REEXPORT_RETIRED_CLAUSE = (
+    "records an unresolved `pkg.f` reference with no module-layer `imports` consumer"
+)
+
+REEXPORT_READERS = (QUERY_GUIDE, QUERY_REFERENCE, ANALYSIS_PYTHON_README)
 
 
 def test_system_guide_documents_the_reexport_boundary_statement() -> None:
@@ -159,9 +172,18 @@ def test_reexport_boundary_statement_does_not_use_the_readme_connection_phrase()
 def test_analysis_python_readme_documents_the_reexport_boundary_statement() -> None:
     # Checks only that the pinned sentence is present in the README, not its
     # position, and must never require the phrase "points to".
-    readme = ROOT / "docs/systems/analysis-python/README.md"
-    text = _collapsed(readme)
+    text = _collapsed(ANALYSIS_PYTHON_README)
     assert REEXPORT_BOUNDARY in text
+
+
+def test_reexport_readers_do_not_keep_the_retired_unresolved_only_claim() -> None:
+    # Every document wraps the retired clause across a line break, so only the
+    # collapsed text can prove that a reader replaced it instead of keeping it
+    # beside the reworded sentence.
+    for document in REEXPORT_READERS:
+        assert REEXPORT_RETIRED_CLAUSE not in _collapsed(document), (
+            f"{document.name} must not keep the retired re-export claim"
+        )
 
 
 def test_system_guide_names_text_fallback_exactly_once() -> None:
@@ -928,6 +950,54 @@ def test_source_error_recovery_states_the_interpreter_error_and_no_blame_outcome
         "no single selected file explains, and writes no graph"
     ) in text
     assert "writes the partial graph from the remaining files, and exits `1`" in text
+
+
+# ---------------------------------------------------------------------------
+# Class-body import rule: every import form and header nested scopes
+# ---------------------------------------------------------------------------
+
+# A class body's own unconditional import decides the uses that body evaluates
+# whatever the import's form, so the documents state the rule for plain
+# imports too and carry no carve-out for them.
+CLASS_IMPORT_FORMS = (
+    "a `from` import (with or without `as`) or any plain `import` form, including "
+    "`import M` and a dotted `import pkg.sub`"
+)
+CLASS_IMPORT_RETIRED_PHRASES = (
+    "an `import` of one module name",
+    "for the proved shapes",
+    "whose alias differs from the module's own bound name",
+    "is not resolved by the class-route rule at module level",
+    "a class-only route remains syntactic",
+    "a class-only one remains syntactic",
+)
+CLASS_FUNCTION_BODIES = (
+    "Ordinary class locals and class imports are hidden from method bodies and "
+    "from every other function body defined in the class body, such as one in an "
+    "`if` or `try` suite;"
+)
+CLASS_HEADER_NESTED_SCOPES = (
+    "A lambda body and a comprehension's result, filters, and later iterables "
+    "inside such a header are nested scopes and keep the enclosing route, while "
+    "the comprehension's first iterable and a lambda default are evaluated with "
+    "the header."
+)
+
+
+def test_class_import_rule_covers_every_import_form_and_header_nested_scopes() -> None:
+    for document in (ANALYZE_PYTHON_GUIDE, STRUCTURAL_ANALYSIS_CONTRACT):
+        text = _collapsed(document)
+        assert CLASS_IMPORT_FORMS in text, (
+            f"{document.name} must state the class-route rule for every import form"
+        )
+        assert CLASS_FUNCTION_BODIES in text, (
+            f"{document.name} must keep every class-body function body off the class route"
+        )
+        assert CLASS_HEADER_NESTED_SCOPES in text, (
+            f"{document.name} must keep header nested scopes on the enclosing route"
+        )
+        for phrase in CLASS_IMPORT_RETIRED_PHRASES:
+            assert phrase not in text, f"{document.name} must not keep {phrase!r}"
 
 
 # ---------------------------------------------------------------------------

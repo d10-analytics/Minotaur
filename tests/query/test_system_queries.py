@@ -332,9 +332,9 @@ def test_consumers_one_row_per_outside_file_with_distinct_kinds(
     _assert_system_text(
         out,
         "billing/svc.py (system: billing)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n"
+        "imports: orders.mod (orders/mod.py), orders.mod.order (orders/mod.py)\n"
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n",
+        "imports: orders.mod (orders/mod.py), orders.mod.order (orders/mod.py)\n",
     )
 
     status, out, _ = _query(capsys, graph, root, "consumers", "orders", "--json")
@@ -348,6 +348,7 @@ def test_consumers_one_row_per_outside_file_with_distinct_kinds(
             "kinds": ["calls", "imports"],
             "targets": [
                 {"kind": "calls", "label": "orders.mod.order", "path": "orders/mod.py"},
+                {"kind": "imports", "label": "orders.mod", "path": "orders/mod.py"},
                 {"kind": "imports", "label": "orders.mod.order", "path": "orders/mod.py"},
             ],
         },
@@ -357,6 +358,7 @@ def test_consumers_one_row_per_outside_file_with_distinct_kinds(
             "kinds": ["calls", "imports"],
             "targets": [
                 {"kind": "calls", "label": "orders.mod.order", "path": "orders/mod.py"},
+                {"kind": "imports", "label": "orders.mod", "path": "orders/mod.py"},
                 {"kind": "imports", "label": "orders.mod.order", "path": "orders/mod.py"},
             ],
         },
@@ -428,7 +430,7 @@ def test_system_deps_rows_per_category_with_sorted_nested_targets(
         out,
         "no_system  calls: lib.util.helper (lib/util.py); imports: lib.util (lib/util.py)\n"
         "system: billing  calls: billing.svc.ship (billing/svc.py); "
-        "imports: billing.svc.ship (billing/svc.py)\n",
+        "imports: billing.svc (billing/svc.py), billing.svc.ship (billing/svc.py)\n",
     )
 
     status, out, _ = _query(capsys, graph, root, "system-deps", "orders", "--json")
@@ -446,6 +448,7 @@ def test_system_deps_rows_per_category_with_sorted_nested_targets(
             "category": "system: billing",
             "targets": [
                 {"kind": "calls", "label": "billing.svc.ship", "path": "billing/svc.py"},
+                {"kind": "imports", "label": "billing.svc", "path": "billing/svc.py"},
                 {"kind": "imports", "label": "billing.svc.ship", "path": "billing/svc.py"},
             ],
         },
@@ -696,7 +699,7 @@ def test_listed_but_absent_files_warn_once_per_file_and_answer_fully(
     _assert_system_text(
         out,
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n",
+        "imports: orders.mod (orders/mod.py), orders.mod.order (orders/mod.py)\n",
     )
     assert err == (
         "minotaur: warning: orders/missing.py (listed by system orders)\n"
@@ -922,7 +925,7 @@ def test_config_tree_system_query_answers_from_nested_cwd_with_no_flags(
     _assert_system_text(
         captured.out,
         "mix.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n",
+        "imports: orders.mod (orders/mod.py), orders.mod.order (orders/mod.py)\n",
     )
     assert (root / "g.json").exists()
 
@@ -950,7 +953,7 @@ def test_config_less_explicit_graph_root_answers_from_default_docs_systems(
     _assert_system_text(
         out,
         "use.py (no_system)  calls: orders.mod.order (orders/mod.py); "
-        "imports: orders.mod.order (orders/mod.py)\n",
+        "imports: orders.mod (orders/mod.py), orders.mod.order (orders/mod.py)\n",
     )
 
 
@@ -1073,10 +1076,12 @@ def test_system_cli_composes_coverage_and_details_for_each_query(
         "surface": {("use.caller", "orders.mod.order", "calls")},
         "consumers": {
             ("use.caller", "orders.mod.order", "calls"),
+            ("use", "orders.mod", "imports"),
             ("use", "orders.mod.order", "imports"),
         },
         "system-deps": {
             ("orders.mod.order", "billing.mod.charge", "calls"),
+            ("orders.mod", "billing.mod", "imports"),
             ("orders.mod", "billing.mod.charge", "imports"),
         },
     }

@@ -24,9 +24,10 @@ through composition rather than a direct static edge.
 - `analysis-python` points to `graph-contract` for graph entities and
   serialization contracts.
 
-Re-exports are not resolved: `from pkg import f` records an unresolved
-`pkg.f` reference with no module-layer `imports` consumer, so
-`pkg/__init__.py` never links a name that another module actually defines.
+Re-exports resolve only to the module: `from pkg import f` records an
+`imports` edge from the importing file to `pkg`, so `query consumers` for
+`pkg/__init__.py` lists the importer while `f` itself stays a single
+unresolved `pkg.f` reference.
 
 These directions describe the selected proof universe, not required runtime
 dependencies or architectural policy.
