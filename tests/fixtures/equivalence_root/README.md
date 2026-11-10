@@ -62,11 +62,11 @@ from the binding-lifecycle sample `replaced`, `deleted`, `conditional`,
 `loop_global`, `nested_class_import`, `directive_class_import`,
 `header_comprehension`, `NestedFunctionScope`, `PlainImport`,
 `import_over_uncertain_binding`, `DeferredOwner`, `DeferredOwner.declared`, and
-`DeferredOwner.build`. Under `--text-fallback` the five rebound declarations
-(`replaced`, `deleted`, `conditional`, `guarded`, `starred`) and the older
-`workflow.cli.main`, `workflow.service.main`, and
-`workflow.service.Service.total` gain a `[text-mention]` marker, because their
-names still appear as text.
+`DeferredOwner.build`. Under `--text-fallback` ten symbols gain a `[text-mention]` marker, because
+their names still appear as text: the five rebound declarations (`replaced`,
+`deleted`, `conditional`, `guarded`, `starred`), `DeferredOwner.declared` and
+`DeferredOwner.build`, and the older `workflow.cli.main`,
+`workflow.service.main`, and `workflow.service.Service.total`.
 
 `naming/`, the module-naming sample, holds `dotted.name.py` (a dotted
 component), `Upper.PY` (a non-exact suffix), and `shadow.py` beside
