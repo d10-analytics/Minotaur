@@ -839,6 +839,34 @@ def test_same_repository_markdown_link_targets_and_anchors_resolve() -> None:
     assert problems == [], "broken same-repository .md links: " + "; ".join(problems)
 
 
+def test_markdown_link_checker_compares_in_page_anchors_to_the_linking_file(
+    tmp_path: Path,
+) -> None:
+    """A same-page anchor is checked against its own file; cross-file links still report."""
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    a.write_text(
+        "## Real heading: v2.0\n\n"
+        "[ok](#real-heading-v20)\n"
+        "[bad](#missing)\n"
+        "[other](#there)\n"
+        "[bare](#)\n"
+        "[ext](https://example.com/page#frag)\n"
+        "[x](b.md#there)\n"
+        "[y](b.md#gone)\n"
+        "[gone](missing.md)\n"
+        "[src](code.py)\n",
+        encoding="utf-8",
+    )
+    b.write_text("## There\n", encoding="utf-8")
+    assert _same_repository_md_link_problems([a, b]) == [
+        f"{a}: broken anchor #missing",
+        f"{a}: broken anchor #there",
+        f"{a}: broken anchor b.md#gone",
+        f"{a}: broken target missing.md",
+    ]
+
+
 def test_system_walkthrough_kind_lists_include_sql_calls_in_canonical_order() -> None:
     text = _collapsed(SYSTEM_WALKTHROUGH)
     # Canonical SQL dependency-kind order (CURRENT_SQL_DEPENDENCY_KINDS,
