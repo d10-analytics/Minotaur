@@ -5190,6 +5190,28 @@ def test_nested_class_method_receiver_does_not_use_outer_class_declarations(
     )
 
 
+@pytest.mark.parametrize("enclosing", ["class-method", "module-function"])
+def test_deferred_method_of_a_class_in_a_function_does_not_use_outer_class_declarations(
+    tmp_path: Path, enclosing: str
+) -> None:
+    inner = "class D:\n    def n(self):\n        self.x()\n        return self.x\nreturn D\n"
+    if enclosing == "class-method":
+        source = "class C:\n    def x(self):\n        pass\n    def m(self):\n" + _indent(
+            inner, "        "
+        )
+        owner, outer_member = "app.C.m", "app.C.x"
+    else:
+        source = "def x():\n    pass\n\n\ndef m():\n" + _indent(inner, "    ")
+        owner, outer_member = "app.m", "app.x"
+    _write(tmp_path, "app.py", source)
+
+    result = analyze_python_workspace(tmp_path)
+
+    labels = _edge_labels(result)
+    for kind in (RelationshipKind.CALLS.value, RelationshipKind.REFERENCES.value):
+        assert (owner, outer_member, kind) not in labels
+
+
 def test_nested_class_method_three_level_scope_stack_and_global_nonlocal(
     tmp_path: Path,
 ) -> None:
@@ -10195,6 +10217,53 @@ _CLASS_BODY_CASES: dict[str, dict] = {
             role: None if target == "lib.helper" else target
             for role, target in _HEADER_NESTED_SCOPE_TARGETS.items()
         },
+    },
+    "class-import-over-an-outer-conditional-rebind": {
+        # A module that rebinds the name conditionally leaves it uncertain
+        # outside the class, but the class body's own import still decides the
+        # uses that body evaluates.
+        "prelude": "from lib import helper\nif flag:\n    helper = 1\n\n\n",
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": (
+            "first = helper()  # body-call\n"
+            "second = helper  # body-load\n"
+            "def m(\n"
+            "    self,\n"
+            "    a=helper(),  # method-default-call\n"
+            "):\n"
+            "    pass\n"
+        ),
+        "targets": {
+            "body-call": "other.helper",
+            "body-load": "other.helper",
+            "method-default-call": "other.helper",
+        },
+    },
+    "class-import-over-an-outer-global-write": {
+        "prelude": (
+            "from lib import helper\n\n\nclass Writer:\n    global helper\n    helper = 1\n\n\n"
+        ),
+        "class_prelude": _CLASS_BODY_IMPORT,
+        "uses": (
+            "first = helper()  # body-call\n"
+            "second = helper  # body-load\n"
+            "def m(\n"
+            "    self,\n"
+            "    a=helper(),  # method-default-call\n"
+            "):\n"
+            "    pass\n"
+        ),
+        "targets": {
+            "body-call": "other.helper",
+            "body-load": "other.helper",
+            "method-default-call": "other.helper",
+        },
+    },
+    "conditional-class-import-over-an-outer-conditional-rebind": {
+        "prelude": "from lib import helper\nif flag:\n    helper = 1\n\n\n",
+        "class_prelude": "if flag:\n    from other import helper\n\n",
+        "uses": "first = helper()  # body-call\nsecond = helper  # body-load\n",
+        "targets": {"body-call": None, "body-load": None},
     },
     "class-import-before-a-later-module-import": {
         # The class body and its headers run before the module rebinds the
