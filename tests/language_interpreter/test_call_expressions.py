@@ -366,6 +366,71 @@ def test_unsupported_javascript_regex_or_value_has_no_fingerprint() -> None:
     assert javascript_call_fingerprint(_parse_javascript_call("f(g(h(a)));")) is not None
 
 
+_ESCAPED_PAIR = "\\uD83D\\uDE00"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        r'f("\uD800");',
+        r"f(`\uDC00`);",
+        r'f({"\uD800": 1});',
+        r'f({["\uD800"]: 1});',
+        r'f("\uD83Dx");',
+        r'f("\uDE00\uD83D");',
+        r'f("\uD83D" + "\uDE00");',
+        'f("\U0001f600\\uD800");',
+    ],
+)
+def test_javascript_call_with_unpaired_surrogate_has_no_fingerprint(source: str) -> None:
+    assert javascript_call_fingerprint(_parse_javascript_call(source)) is None
+
+
+@pytest.mark.parametrize(
+    ("escaped", "direct"),
+    [
+        (f'f("{_ESCAPED_PAIR}");', 'f("\U0001f600");'),
+        (f"f(`{_ESCAPED_PAIR}`);", "f(`\U0001f600`);"),
+        (f'f({{"{_ESCAPED_PAIR}": 1}});', 'f({"\U0001f600": 1});'),
+    ],
+)
+def test_javascript_escaped_surrogate_pair_fingerprints_as_the_character(
+    escaped: str, direct: str
+) -> None:
+    fingerprint = javascript_call_fingerprint(_parse_javascript_call(escaped))
+
+    assert fingerprint is not None
+    assert fingerprint == javascript_call_fingerprint(_parse_javascript_call(direct))
+    if escaped.startswith("f({"):
+        braced = 'f({"\\u{1F600}": 1});'
+    elif escaped.startswith("f(`"):
+        braced = "f(`\\u{1F600}`);"
+    else:
+        braced = 'f("\\u{1F600}");'
+    assert fingerprint == javascript_call_fingerprint(_parse_javascript_call(braced))
+
+
+def test_javascript_escaped_surrogate_pair_normalizes_to_the_character() -> None:
+    call = _parse_javascript_call(f'f("{_ESCAPED_PAIR}");')
+    expected = {
+        "arguments": [{"type": "Literal", "value": "\U0001f600"}],
+        "callee": {"name": "f", "type": "Identifier"},
+        "optional": False,
+        "type": "CallExpression",
+    }
+
+    assert _normalize_javascript(call) == expected
+    assert javascript_call_fingerprint(call) == _stdlib_javascript_digest(expected)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["abc", "\ud7ff", "\ue000", "\uffff", "\U00010000", "\U0010ffff", "caf\u00e9"],
+)
+def test_javascript_normalization_keeps_strings_without_surrogates(value: str) -> None:
+    assert _normalize_javascript(value) == value
+
+
 def _expected_value_under_raised_limit(compute: Any) -> Any:
     previous = sys.getrecursionlimit()
     sys.setrecursionlimit(_frame_depth() + _EXPECTED_VALUE_LIMIT)

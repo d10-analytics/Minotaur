@@ -2557,3 +2557,31 @@ def test_member_callee_text_follows_its_object_and_key_and_precedes_the_argument
             ]
         ],
     )
+
+
+def test_unpaired_surrogate_call_does_not_fail_file_analysis_and_pairs_fingerprint_alike(
+    tmp_path,
+):
+    escaped_pair = "\\uD83D\\uDE00"
+    result = _analyze(
+        tmp_path,
+        {
+            "a.js": "function f(v){ return v; }\n"
+            'export const x = f("\\uD800");\n'
+            f'export const y = f("{escaped_pair}");\n'
+            'export const z = f("\U0001f600");\n'
+        },
+    )
+
+    assert result.diagnostics == ()
+    module = _node(result, "a")
+    function = _node(result, "a.f")
+    assert any(
+        edge.source == module.id and edge.target == function.id
+        for edge in _edges(result, RelationshipKind.CALLS.value)
+    )
+    first, second, third = (item.fingerprint for item in result.call_expressions)
+    assert len(result.call_expressions) == 3
+    assert first is None
+    assert second is not None
+    assert second == third
