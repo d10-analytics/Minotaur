@@ -464,7 +464,8 @@ A call and a load of the same name in a nested-class header, a nested-class
 body, a nested-class method body, or a class defined inside a function resolve
 identically. Only uncertainty introduced by an enclosing class body is
 ignored, while uncertainty from the module flow state or the owning function
-is kept. A class body inside a function consults that function's imports
+is kept, except for a name the class body itself imports unconditionally (see
+below). A class body inside a function consults that function's imports
 before the module's: after module `from lib import helper`, a `from other
 import helper` inside `def outer()` makes every use of `helper` in a nested
 `class K` resolve to `other.helper`. Proofs:
@@ -475,8 +476,12 @@ import helper` inside `def outer()` makes every use of `helper` in a nested
 `test_calls_and_loads_resolve_through_the_one_header_helper`. A class body's
 own import, a `from` import or a plain `import` alike, governs the uses that
 body evaluates in both placements (see [binding timing and class boundaries](#binding-timing-and-class-boundaries)),
-while method bodies, other function bodies defined in the class body, nested
-class bodies, comprehension results and later iterables, and lambda bodies
+even where the module flow state or the owning function leaves that name
+uncertain (the `class-import-over-an-outer-conditional-rebind` and
+`class-import-over-an-outer-global-write` rows of
+`test_a_class_body_import_governs_the_uses_that_body_evaluates`), while
+method bodies, other function bodies defined in the class body, nested class
+bodies, comprehension results and later iterables, and lambda bodies
 resolve through the enclosing route.
 
 ### Query consequences
