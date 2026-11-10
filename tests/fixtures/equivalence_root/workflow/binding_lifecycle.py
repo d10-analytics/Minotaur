@@ -207,3 +207,33 @@ class PlainImport:
     import workflow
 
     value = workflow.helper.fixture_helper()
+
+
+def import_over_uncertain_binding() -> type[object]:
+    """Resolve a nested class body's import where the function rebinds the name."""
+
+    from workflow.util import format_report as Report
+
+    if fixture_helper:
+        Report = fixture_helper  # noqa: F841
+
+    class Own:
+        from workflow.helper import fixture_helper as Report  # noqa: F811
+
+        value = Report()
+
+    return Own
+
+
+class DeferredOwner:
+    """Keep a deferred method of a class nested in a method off the outer class."""
+
+    def declared(self) -> int:
+        return 1
+
+    def build(self) -> type[object]:
+        class Inner:
+            def run(self) -> object:
+                return self.declared()
+
+        return Inner
