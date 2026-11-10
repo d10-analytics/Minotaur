@@ -270,7 +270,7 @@ def test_json_text_matches_json_dumps_for_every_javascript_sample_call() -> None
         "expressions.js",
         "lib.js",
     ]
-    assert calls_by_file == {"app.js": 1, "expressions.js": 8}
+    assert calls_by_file == {"app.js": 1, "expressions.js": 9}
 
 
 def test_javascript_call_normalizes_to_written_structure() -> None:

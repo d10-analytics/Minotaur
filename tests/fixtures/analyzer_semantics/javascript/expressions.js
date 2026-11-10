@@ -33,3 +33,7 @@ function pick() {}
 function regather(values) {
     [pick, ledger[pick()], spare = pick()] = values;
 }
+
+function label() {
+    return helper("\uD83D\uDE00");
+}
