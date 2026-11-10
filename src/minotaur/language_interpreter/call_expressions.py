@@ -57,13 +57,16 @@ def javascript_call_fingerprint(node: Any) -> str | None:
     ESTree location, range, token, and comment metadata are observational
     rather than semantic and are omitted.  Literal values and regular-
     expression attributes remain in the canonical structure, which is
-    serialized as compact, key-sorted JSON.
+    serialized as compact, key-sorted JSON.  An escaped surrogate pair in a
+    string value is read as the character it encodes, so ``"\\uD83D\\uDE00"`` and
+    ``"\\u{1F600}"`` fingerprint alike; a structure that still holds an
+    unpaired surrogate has no fingerprint.
     """
     try:
         payload = _json_text(_normalize_javascript(node))
+        return _digest("javascript", payload)
     except (TypeError, ValueError, UnicodeError):
         return None
-    return _digest("javascript", payload)
 
 
 def _digest(language: str, structure: str) -> str:
@@ -141,8 +144,15 @@ def _normalize_javascript(value: Any) -> Any:
     return _evaluate(value, _javascript_steps)
 
 
+def _join_surrogate_pairs(value: str) -> str:
+    """Join well-formed UTF-16 surrogate pairs; leave unpaired surrogates as they are."""
+    return value.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+
+
 def _javascript_steps(value: Any) -> _Steps:
-    if value is None or isinstance(value, (str, bool, int)):
+    if isinstance(value, str):
+        return _join_surrogate_pairs(value)
+    if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, float):
         if not isfinite(value):
