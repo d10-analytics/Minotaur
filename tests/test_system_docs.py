@@ -796,28 +796,32 @@ def _markdown_files() -> list[Path]:
     return sorted(path for path in ROOT.rglob("*.md") if not (set(path.parts) & _SKIP_DIRECTORIES))
 
 
-def _same_repository_md_link_problems() -> list[str]:
-    """Every broken same-repository ``.md`` link, with target or anchor slug.
+def _same_repository_md_link_problems(sources: list[Path]) -> list[str]:
+    """Every broken same-repository link in ``sources``, with target or anchor slug.
 
-    Same-repository relative ``.md`` links only: each target is resolved from
-    the linking file's directory and must exist, and each ``#anchor`` slug is
-    compared against the target file's ``#`` headings with the GitHub-style
-    slugger. No network access; external links and pure-fragment links are out
-    of scope.
+    Same-page ``#anchor`` links are compared against the linking file's own
+    ``#`` headings. Relative ``.md`` links each resolve from the linking file's
+    directory, must exist, and compare their ``#anchor`` slug against the
+    target file's ``#`` headings. Both comparisons use the GitHub-style
+    slugger, and an empty anchor is skipped. No network access; external links
+    are out of scope.
     """
     problems: list[str] = []
-    for source in _markdown_files():
+    for source in sources:
         for match in LINK_PATTERN.finditer(source.read_text(encoding="utf-8")):
             target = match.group(1)
-            if "://" in target or target.startswith("#"):
+            if "://" in target:
                 continue
             path_part, _, anchor = target.partition("#")
-            if not path_part.endswith(".md"):
-                continue
-            resolved = (source.parent / path_part).resolve()
-            if not resolved.is_file():
-                problems.append(f"{source}: broken target {target}")
-                continue
+            if path_part:
+                if not path_part.endswith(".md"):
+                    continue
+                resolved = (source.parent / path_part).resolve()
+                if not resolved.is_file():
+                    problems.append(f"{source}: broken target {target}")
+                    continue
+            else:
+                resolved = source
             if not anchor:
                 continue
             headings = {
@@ -831,8 +835,36 @@ def _same_repository_md_link_problems() -> list[str]:
 
 
 def test_same_repository_markdown_link_targets_and_anchors_resolve() -> None:
-    problems = _same_repository_md_link_problems()
+    problems = _same_repository_md_link_problems(_markdown_files())
     assert problems == [], "broken same-repository .md links: " + "; ".join(problems)
+
+
+def test_markdown_link_checker_compares_in_page_anchors_to_the_linking_file(
+    tmp_path: Path,
+) -> None:
+    """A same-page anchor is checked against its own file; cross-file links still report."""
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    a.write_text(
+        "## Real heading: v2.0\n\n"
+        "[ok](#real-heading-v20)\n"
+        "[bad](#missing)\n"
+        "[other](#there)\n"
+        "[bare](#)\n"
+        "[ext](https://example.com/page#frag)\n"
+        "[x](b.md#there)\n"
+        "[y](b.md#gone)\n"
+        "[gone](missing.md)\n"
+        "[src](code.py)\n",
+        encoding="utf-8",
+    )
+    b.write_text("## There\n", encoding="utf-8")
+    assert _same_repository_md_link_problems([a, b]) == [
+        f"{a}: broken anchor #missing",
+        f"{a}: broken anchor #there",
+        f"{a}: broken anchor b.md#gone",
+        f"{a}: broken target missing.md",
+    ]
 
 
 def test_system_walkthrough_kind_lists_include_sql_calls_in_canonical_order() -> None:
