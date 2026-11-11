@@ -94,9 +94,9 @@ interpreter.
 
 A selection that names a directory or module instead of a file has no
 extension and no single language to expand, so it stays a whole-root workload
-analyzed with the default `.` target. The committed `Onyx` optional-root
-workload selects the `instrument_reader` package this way, and the documented
-`--optional-root` comparison is unchanged by the per-language split.
+analyzed with the default `.` target. An optional root keyed with
+`--workload` to a workload in the `--queries` file that selects a package this
+way is compared the same way, unchanged by the per-language split.
 
 ## Expectations and the seed cell
 

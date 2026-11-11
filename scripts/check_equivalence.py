@@ -28,8 +28,8 @@ Queries come from a per-root JSON file keyed by the root directory's name, so
 a root is never compared with a query list written for a different tree.
 When supplied, ``--workload KEY`` names the workload for each optional root in
 the same position; provide either no keys or exactly one key per optional root
-when a checkout's directory name differs from its committed key (the Onyx
-checkout, say).  A run fails when a root's queries do not actually produce
+when a checkout's directory name differs from its workload key in the
+``--queries`` file.  A run fails when a root's queries do not actually produce
 output: an empty comparison is not a passing comparison, and every root that
 is present must be compared -- a present root that cannot be is a failure,
 never a skip.  The final ``totals:`` line reports how many roots were compared
@@ -155,7 +155,7 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "workload key for each optional root in the same position; provide"
             " either none or exactly one per optional root when a checkout"
-            " directory is not named after its committed workload"
+            " directory is not named after its workload key in the queries file"
         ),
     )
     parser.add_argument(
@@ -445,9 +445,9 @@ def _language_files(root: Path, selection: str) -> tuple[Path, ...] | None:
 
     A selection that names a directory or module has no extension and therefore
     no single language to expand; it is a whole-root workload, so ``None`` keeps
-    the historical ``.`` analyze target.  The committed ``Onyx`` optional-root
-    workload selects the ``instrument_reader`` package this way, and the
-    documented ``--optional-root`` path must keep comparing it unchanged.
+    the historical ``.`` analyze target.  An optional root keyed with
+    ``--workload`` to a workload in the ``--queries`` file that selects a
+    package this way keeps comparing unchanged.
     """
 
     extension = Path(selection).suffix
