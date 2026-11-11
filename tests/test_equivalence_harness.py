@@ -25,7 +25,7 @@ JAVASCRIPT_ROOT = ROOT / "tests" / "fixtures" / "analyzer_semantics" / "javascri
 SQL_ROOT = ROOT / "tests" / "fixtures" / "analyzer_semantics" / "sql"
 # Workload keys whose roots are Python; language-specific workload rules are
 # asserted on these only.
-PYTHON_ROOT_KEYS = ("equivalence_root", "src", "Onyx")
+PYTHON_ROOT_KEYS = ("equivalence_root", "src")
 # Compare against the final source behavior, including analyzer version stamps
 # and the declaration roles recorded on accessor and overload symbol nodes.
 BASELINE_COMMIT = "73f024b1309eb4f972f86a18a56dfb99effe64d0"
@@ -804,7 +804,7 @@ def test_a_missing_optional_root_is_skipped_loudly(baseline_src: Path, tmp_path:
         "--root",
         str(present),
         "--optional-root",
-        str(tmp_path / "onyx"),
+        str(tmp_path / "optional-checkout"),
     )
     assert result.returncode == 0, result.stderr
     assert "SKIPPED optional root" in result.stderr
@@ -817,7 +817,7 @@ def test_a_present_optional_root_without_a_workload_fails_the_run(
     root abort the run, so D-06 root (3) was silently never compared."""
 
     present = _source_root(tmp_path)
-    onyx = _source_root(tmp_path, name="onyx-checkout")
+    optional = _source_root(tmp_path, name="optional-checkout")
     result = _run(
         "--baseline-src",
         str(baseline_src),
@@ -828,7 +828,7 @@ def test_a_present_optional_root_without_a_workload_fails_the_run(
         "--root",
         str(present),
         "--optional-root",
-        str(onyx),
+        str(optional),
     )
     assert result.returncode == 1
     assert "no query workload for root" in result.stderr
@@ -841,9 +841,9 @@ def test_workload_key_maps_an_optional_root_whose_directory_has_another_name(
     baseline_src: Path, tmp_path: Path
 ) -> None:
     present = _source_root(tmp_path)
-    onyx = _source_root(tmp_path, name="onyx-checkout")
+    optional = _source_root(tmp_path, name="optional-checkout")
     queries = json.loads(_workload_file(tmp_path, present.name).read_text(encoding="utf-8"))
-    queries["Onyx"] = queries[present.name]
+    queries["optional"] = queries[present.name]
     workload = tmp_path / "keyed.json"
     workload.write_text(json.dumps(queries), encoding="utf-8")
     result = _run(
@@ -856,12 +856,12 @@ def test_workload_key_maps_an_optional_root_whose_directory_has_another_name(
         "--root",
         str(present),
         "--optional-root",
-        str(onyx),
+        str(optional),
         "--workload",
-        "Onyx",
+        "optional",
     )
     assert result.returncode == 0, result.stderr
-    assert f"root={onyx.resolve()} summary:" in result.stdout
+    assert f"root={optional.resolve()} summary:" in result.stdout
     assert "roots_compared=2 roots_present=2 roots_requested=2" in result.stdout
 
 
@@ -879,7 +879,7 @@ def test_more_workload_keys_than_optional_roots_is_an_error(
         "--root",
         str(present),
         "--workload",
-        "Onyx",
+        "optional",
     )
     assert result.returncode == 1
     assert "1 --workload keys for 0 optional roots" in result.stderr
@@ -891,7 +891,7 @@ def test_language_files_treats_a_suffix_less_selection_as_a_whole_root(
     """A directory/module selection has no language to expand (``AUD-01``)."""
 
     (tmp_path / "app.py").write_text("def main():\n    return 1\n", encoding="utf-8")
-    assert harness._language_files(tmp_path, "instrument_reader") is None
+    assert harness._language_files(tmp_path, "sample_package") is None
     assert harness._language_files(tmp_path, ".") is None
     assert harness._language_files(tmp_path, "app.py") == (tmp_path / "app.py",)
 
@@ -899,15 +899,15 @@ def test_language_files_treats_a_suffix_less_selection_as_a_whole_root(
 def test_a_directory_selection_is_compared_as_a_whole_root(
     baseline_src: Path, tmp_path: Path
 ) -> None:
-    """The committed ``Onyx`` workload selects a package directory.
+    """A workload may select a package directory.
 
     Before the per-language split this was a normal comparison.  Reintroducing
     a suffix check that rejects the selection aborts with an unhandled
     traceback, so this cell would fail rather than report a comparison.
     """
 
-    root = _source_root(tmp_path, name="onyx-checkout")
-    package = root / "instrument_reader"
+    root = _source_root(tmp_path, name="optional-checkout")
+    package = root / "sample_package"
     package.mkdir()
     (package / "__init__.py").write_text("def main():\n    return 1\n", encoding="utf-8")
     result = _run(
@@ -916,7 +916,7 @@ def test_a_directory_selection_is_compared_as_a_whole_root(
         "--branch-src",
         str(ROOT / "src"),
         "--queries",
-        str(_workload_file(tmp_path, root.name, selection="instrument_reader")),
+        str(_workload_file(tmp_path, root.name, selection="sample_package")),
         "--root",
         str(root),
     )
@@ -924,48 +924,6 @@ def test_a_directory_selection_is_compared_as_a_whole_root(
     assert result.returncode == 0, result.stdout + result.stderr
     assert "roots_compared=1 roots_present=1 roots_requested=1" in result.stdout
     assert f"root={root.resolve()} summary:" in result.stdout
-
-
-def test_optional_root_with_a_directory_selection_compares(
-    baseline_src: Path, tmp_path: Path
-) -> None:
-    """A present optional root keyed to the committed Onyx workload compares."""
-
-    present = _source_root(tmp_path)
-    onyx = _source_root(tmp_path, name="onyx-checkout")
-    package = onyx / "instrument_reader"
-    package.mkdir()
-    (package / "__init__.py").write_text("def main():\n    return 1\n", encoding="utf-8")
-    queries = json.loads(_workload_file(tmp_path, present.name).read_text(encoding="utf-8"))
-    onyx_workload = json.loads(
-        (SCRIPT.with_name("equivalence_queries.json")).read_text(encoding="utf-8")
-    )["Onyx"]
-    # The committed selection is the suffix-less package directory.
-    assert onyx_workload["selection"] == "instrument_reader"
-    queries["Onyx"] = {
-        "selection": onyx_workload["selection"],
-        "queries": [item for item in onyx_workload["queries"] if item["command"] == "definitions"],
-    }
-    workload = tmp_path / "keyed-onyx.json"
-    workload.write_text(json.dumps(queries), encoding="utf-8")
-    result = _run(
-        "--baseline-src",
-        str(baseline_src),
-        "--branch-src",
-        str(ROOT / "src"),
-        "--queries",
-        str(workload),
-        "--root",
-        str(present),
-        "--optional-root",
-        str(onyx),
-        "--workload",
-        "Onyx",
-    )
-    assert "Traceback" not in result.stderr, result.stderr
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert f"root={onyx.resolve()} summary:" in result.stdout
-    assert "roots_compared=2 roots_present=2 roots_requested=2" in result.stdout
 
 
 def test_drift_row_survives_a_scratch_path_that_collides_with_the_old_placeholders(
@@ -1187,7 +1145,7 @@ def test_committed_workloads_cover_every_default_root_with_real_error_controls()
     their own answering query classes (``R-02``)."""
 
     data = json.loads((SCRIPT.with_name("equivalence_queries.json")).read_text(encoding="utf-8"))
-    assert set(data) == {"equivalence_root", "src", "Onyx", "javascript", "sql"}
+    assert set(data) == {"equivalence_root", "src", "javascript", "sql"}
     assert data["src"]["selection"] == "minotaur/cli.py"
     for key in PYTHON_ROOT_KEYS:
         workload = data[key]
@@ -1213,14 +1171,6 @@ def test_committed_workloads_cover_every_default_root_with_real_error_controls()
     sql_diff = next(item for item in data["sql"]["queries"] if item["command"] == "diff")
     assert sql_diff["expect"] == "empty"
 
-    onyx = data["Onyx"]["queries"]
-    callers_zero = next(item for item in onyx if item["name"] == "callers-zero")
-    assert callers_zero["args"] == ["analysis_io.resolve_analysis_h5_path"]
-    assert callers_zero["expect"] == "empty"
-    for name in ("unreferenced-graph", "unreferenced-text"):
-        item = next(item for item in onyx if item["name"] == name)
-        assert item["args"][0] == "admin_tool"
-
 
 def test_a_run_that_compares_nothing_fails(baseline_src: Path, tmp_path: Path) -> None:
     result = _run(
@@ -1231,9 +1181,9 @@ def test_a_run_that_compares_nothing_fails(baseline_src: Path, tmp_path: Path) -
         "--queries",
         str(_workload_file(tmp_path, "unused")),
         "--optional-root",
-        str(tmp_path / "onyx"),
+        str(tmp_path / "optional-checkout"),
         "--root",
-        str(tmp_path / "onyx"),
+        str(tmp_path / "optional-checkout"),
     )
     assert result.returncode == 1
     assert "no artifact comparisons were performed" in result.stderr
