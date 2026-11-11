@@ -1145,7 +1145,7 @@ def test_committed_workloads_cover_every_default_root_with_real_error_controls()
     their own answering query classes (``R-02``)."""
 
     data = json.loads((SCRIPT.with_name("equivalence_queries.json")).read_text(encoding="utf-8"))
-    assert set(data) == {"equivalence_root", "src", "Onyx", "javascript", "sql"}
+    assert set(data) == {"equivalence_root", "src", "javascript", "sql"}
     assert data["src"]["selection"] == "minotaur/cli.py"
     for key in PYTHON_ROOT_KEYS:
         workload = data[key]
